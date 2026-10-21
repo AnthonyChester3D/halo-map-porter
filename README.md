@@ -1,0 +1,52 @@
+# Halo Map Porter
+
+Halo Map Porter converts Halo: Combat Evolved maps between the **Master Chief Collection (MCC)**, **Halo Custom
+Edition** and the **original Xbox**, in any direction. It can also build one map for all three games straight
+from your H1A-EK tags, while you're still working on it.
+
+It's a Windows app with nothing to install. Under the hood it uses [Invader](https://github.com/SnowyMouse/invader),
+the free, open-source Halo map compiler, and it can download Invader for you.
+
+**Download:** the latest `HaloMapPorter.exe` is on the [Releases](../../releases) page.
+**Project page:** https://anthonychester3d.github.io/halo-map-porter.html
+
+## What it handles for you
+
+- **Fixes.** It repairs broken or out-of-range tag values automatically, and recovers scripts that need
+  functions the target game lacks.
+- **Xbox output.**
+  - It swaps the map's copies of stock weapons, vehicles and the player for the Xbox originals.
+  - It gives PC-only weapons Xbox stand-ins, or keeps them with PC animations.
+  - It converts Gearbox models, HUDs and sounds, and flattens layered shaders the Xbox can't draw.
+- **Fitting the Xbox.** It works within the Xbox's limits: the 47 MB map file, the 22 MB of tag memory, and a
+  texture memory target (22 / 20 / 18 MB) that the auto-shrinker halves your own textures to meet.
+- **Weapons & vehicles window.** It shows what each weapon and vehicle costs in tag memory and file size, and
+  lets you replace or drop them.
+- **Map folders and packs** for the Halo Universal and
+  [Halo 1 Unlimited](https://github.com/AnthonyChester3D/halo-1-unlimited) XBEs. These come with map cards
+  (preview picture, name, description, players, gametypes and genres), an `order.txt`, and series pictures for
+  packs.
+
+The full manual, with setup, every option and troubleshooting, is [README.txt](README.txt).
+
+## What you need
+
+- Windows 10 or 11.
+- Halo Custom Edition, for Custom Edition output, or Halo MCC, for MCC output.
+- For Xbox output, an Xbox tagset such as [haloxbox-revised](https://github.com/Aerocatia/haloxbox-revised), or
+  your own dumped Xbox stock maps.
+- The MCC mod tools (H1A-EK), only for the "Build from my tags" tab.
+
+## Building
+
+```sh
+./build.sh
+```
+
+This uses MinGW-w64: the `x86_64-w64-mingw32` cross compiler on Linux or WSL, or MSYS2's MINGW64 shell on
+Windows (`CXX=g++ CC=gcc WINDRES=windres ./build.sh`). `cli_test.cpp` is a command-line driver for the
+conversion engine, used for testing on Linux.
+
+## License
+
+MIT, see [LICENSE](LICENSE). The bundled stb and bcdec headers keep their own (MIT or public domain) licenses.
