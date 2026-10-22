@@ -18,6 +18,8 @@ struct Frame {
     bool what_it_loses = false;          // the converted picture dimmed, what dropping reflections loses lit up
     int highlight = -1;                  // a shader to tint
     bool portals = false;                // portals outlined, rooms tinted
+    bool fog_on = false;                 // the level fogged (and cut off past opaque fog), as the engine does
+    lshade::Fog fog;
 };
 
 class Renderer {

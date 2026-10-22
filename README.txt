@@ -423,7 +423,7 @@ Levels of detail (LODs)
   version of the map, with the Xbox's vehicles. Maps the Xbox never had
   (Gephyrophobia, Infinity, Ice Fields...) keep their vehicles.
 
-Portals ("Add portals to levels made without them", Xbox tab, on)
+Portals ("Portals", Xbox tab)
   The engine draws a level by clusters: it starts in the one the camera is
   in and goes on only into the clusters it can see through the portals
   (openings) between them, so what's behind a wall isn't drawn. A level
@@ -446,8 +446,18 @@ Portals ("Add portals to levels made without them", Xbox tab, on)
   rooms and draws 40% less, Longest 16 and draws a third as much.
   It only adds them when they'd cut what's drawn by 15% or more:
   open levels (Hang 'Em High, Spiral) are left as they are, and the log
-  says so. Levels with clusters of their own are never changed, and
-  neither are the Xbox's own levels. The [portals] line in the log says
+  says so. The Xbox's own levels are never changed.
+  "Also divide up the rooms of levels that have them" goes further: a level
+  with clusters of its own has each of them divided further, the same way
+  (each new cluster keeps its cluster's sky, fog, sound and weather, and
+  sees what its cluster saw), and a level the app just gave portals is
+  divided a second time. Either is kept only when it draws 15% less than
+  before: Prisoner goes from 11 rooms to 17 and from 538 triangles in a
+  typical view to 429; Deathtrap's own portals stay (dividing its rooms
+  would save under 5%). Portals only hide what's behind walls: open
+  outdoor areas draw everything in view however they're divided (the fog
+  is what limits how far is drawn, see "Fog" below). "Leave every level's
+  as they are" adds none. The [portals] line in the log says
   how many rooms and portals the level got and what it draws in a typical
   and a busy view, before and after (see "Performance" below). If Invader
   ever rejects the level with them, the app builds it as it was.
@@ -558,7 +568,7 @@ Weapons & vehicles window (Xbox)
   if it had been destroyed: a jet's pieces are never made, its health reads
   as gone. Try the map once to check its scripts still do what you want.
 
-Level reflections and the "Level shaders..." window (Xbox)
+Level reflections, fog and far scenery: the "Level..." window (Xbox)
   The Xbox draws every level surface at least twice: its lightmap, then
   its textures. A shader with a reflection (a cube map, and a perpendicular
   or parallel brightness above 0) draws it a third time, and a fourth when
@@ -578,9 +588,10 @@ Level reflections and the "Level shaders..." window (Xbox)
   Dropping a reflection sets its brightnesses to 0 and removes its cube map
   (freeing its memory too); the surface keeps its textures, bump map and
   lightmap. The log's [reflections] line lists the ones dropped.
-  The "Level shaders..." button on the Xbox tab shows this for the Convert
-  tab's map (or the Build tab's scenario). Measuring prepares the map as for
-  a conversion without building it (seconds to a minute).
+  The "Level..." button on the Xbox tab shows this for the Convert tab's map
+  (or the Build tab's scenario), with the level's fog and far scenery (see
+  "Fog" and "Far scenery" below). Measuring prepares the map as for a
+  conversion without building it (seconds to a minute).
   - When converting: keep every reflection (the default), drop the
     suggested ones (the ones that cost the most passes for how little they
     show, until the level costs about what Sidewinder does: cheaper, but
@@ -607,10 +618,41 @@ Level reflections and the "Level shaders..." window (Xbox)
     portals the level has (after the app's own, when it adds them).
   - The line under the picture: the level's triangle passes in a typical /
     busy view as made and with your choices, next to Sidewinder's.
+  - Fog: as the conversion leaves it (automatic, the default), as the map
+    has it, or fully opaque at its distance, three quarters of it or half
+    of it. The picture shows it (its sky is a plain gradient, not the
+    level's own sky).
+  - Far scenery: always drawn (the default), or not past 300, 200, 150,
+    100 or 60 units. The picture shows the level only, not its objects.
   Hover over the choices and checkboxes for what each does. Choices are
   saved per map and used every time you convert it for the Xbox.
   Measurements are kept between runs of the app until the map file
   changes (or the portals option); "Measure again" starts over.
+
+Fog (Xbox)
+  The engine draws nothing past a level's fog, but only when the fog is
+  fully opaque there (its sky's maximum density exactly 1): then it moves
+  the view's far end to the fog's opaque distance, and the level, objects
+  and effects past it aren't drawn. At 92% it still draws everything.
+  Deathtrap uses Precipice's sky: 92% at 110 units, so the airbase 200-300
+  units out and many of its trees were drawn behind the fog. By default a
+  conversion makes fog that's nearly opaque (90% or more) fully so, at its
+  own distance: what was 8% visible past it is gone, distant hills
+  included (the sky shows there instead). The log's [fog] line says what
+  changed. Per map, the "Level..." window can keep the fog as the map has
+  it, or make it fully opaque nearer (three quarters or half its distance:
+  less drawn, foggier). The map's own skies only; Bungie's levels keep
+  theirs.
+
+Far scenery (Xbox, "Level..." window)
+  Halo 1 has no draw distance for objects, but it draws nothing of a model
+  smaller on screen than its smallest switch distance ("super low", in
+  pixels across). With "Far scenery" set to a distance, each scenery and
+  device model the map places gets that set to its size on screen at the
+  distance (from the smallest object using it), so it vanishes about that
+  far away. Vehicles, characters, weapons and items are left alone. Big
+  ones pop out of view, so pick a distance past where they matter, or
+  behind the fog. The log's [scenery] line lists them. Off by default.
 
 Dynamic lights (Xbox)
   A dynamic light (a muzzle flash, an explosion, a map's lightning) lights
@@ -965,6 +1007,9 @@ The log lists every automatic change:
   [portals] A level made without portals got them (see "Portals" above).
   [reflections] Level reflections were dropped, as chosen in the Level
           shaders window (see "Level reflections" above).
+  [fog]   The level's fog was made fully opaque (see "Fog" above).
+  [scenery] Scenery and devices stop being drawn past a distance (see "Far
+          scenery" above).
   [lights] Dynamic lights that would have the Xbox draw most of the level
           again were turned off or shrunk (see "Dynamic lights" above).
 

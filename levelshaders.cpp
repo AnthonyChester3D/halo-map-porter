@@ -382,6 +382,62 @@ bool analyze(const fs::path &bsp_file, const fs::path &scenario, const Find &fin
             po.points.push_back({(float)vs[k].num("point", 0), (float)vs[k].num("point", 1), (float)vs[k].num("point", 2)});
         if (po.points.size() >= 3) p.portals.push_back(std::move(po));
     }
+    // The fog: the scenario's skies, each room's sky, and the tree that says which room a point is in.
+    {
+        auto fog_of = [](const tagfile::Elem &sky, const char *kind, Fog &f) {
+            std::string k = kind;
+            for (int c = 0; c < 3; c++) f.color[c] = (float)sky.num((k + " fog color").c_str(), c);
+            f.density = (float)sky.num((k + " fog maximum density").c_str());
+            f.start = (float)sky.num((k + " fog start distance").c_str());
+            f.opaque = (float)sky.num((k + " fog opaque distance").c_str());
+        };
+        tagfile::Tag st;
+        if (!scenario.empty() && st.load(scenario)) {
+            tagfile::Block skies = st.root().block("skies");
+            for (size_t i = 0; i < skies.size(); i++) {
+                Fog f;
+                std::string ref = skies[i].ref("sky");
+                fs::path file = ref.empty() ? fs::path() : find(ref);
+                tagfile::Tag sky;
+                if (!file.empty() && sky.load(file)) {
+                    fog_of(sky.root(), "outdoor", f);
+                    if (i == 0) fog_of(sky.root(), "indoor", p.indoor_fog);
+                }
+                p.sky_fog.push_back(f);
+            }
+        }
+        for (size_t c = 0; c < clusters.size(); c++) {
+            long long sky = clusters[c].integer("sky");
+            p.room_sky.push_back((int16_t)(sky >= 0 && sky < 65535 ? sky : -1));
+        }
+        tagfile::Block cbs = r.block("collision bsp"), leaves = r.block("leaves");
+        if (cbs.size()) {
+            tagfile::Block bn = cbs[0].block("bsp3d nodes"), bp = cbs[0].block("planes");
+            auto child = [](long long c) -> int32_t {
+                uint32_t u = (uint32_t)c;
+                if (u == 0xFFFFFFFFu) return -1;
+                if (u & 0x80000000u) return ~(int32_t)(u & 0x7FFFFFFFu) - 1;   // (leaf k: -2 - k)
+                return (int32_t)u;
+            };
+            for (size_t i = 0; i < bn.size(); i++) {
+                Preview::Node n;
+                size_t pl = (size_t)((uint32_t)bn[i].integer("plane") & 0x7FFFFFFFu);
+                if (pl < bp.size()) {
+                    double nx = bp[pl].num("plane", 0), ny = bp[pl].num("plane", 1), nz = bp[pl].num("plane", 2), d = bp[pl].num("plane", 3);
+                    double l = std::sqrt(nx * nx + ny * ny + nz * nz);
+                    if (l > 0) { nx /= l; ny /= l; nz /= l; d /= l; }
+                    n.n[0] = (float)nx; n.n[1] = (float)ny; n.n[2] = (float)nz; n.d = (float)d;
+                }
+                n.front = child(bn[i].integer("front child"));
+                n.back = child(bn[i].integer("back child"));
+                p.tree.push_back(n);
+            }
+            for (size_t i = 0; i < leaves.size(); i++) {
+                long long c = leaves[i].integer("cluster");
+                p.leaf_room.push_back((int16_t)(c >= 0 && c < (long long)clusters.size() ? c : -1));
+            }
+        }
+    }
 
     // What the engine draws from where players play.
     portals::PlayArea area = scenario.empty() ? portals::PlayArea() : portals::play_area(scenario);
@@ -439,6 +495,27 @@ bool analyze(const fs::path &bsp_file, const fs::path &scenario, const Find &fin
     return true;
 }
 
+int Preview::room_at(const std::array<double, 3> &q) const {
+    if (tree.empty()) return rooms == 1 ? 0 : -1;
+    int32_t id = 0;
+    for (size_t steps = 0; id >= 0 && steps <= tree.size(); steps++) {
+        const Node &n = tree[(size_t)id];
+        id = n.n[0] * q[0] + n.n[1] * q[1] + n.n[2] * q[2] - n.d >= 0 ? n.front : n.back;
+        if (id >= (int32_t)tree.size()) return -1;
+    }
+    if (id >= -1) return -1;   // (solid, or a loop in a broken tree)
+    size_t leaf = (size_t)(-2 - id);
+    return leaf < leaf_room.size() ? leaf_room[leaf] : -1;
+}
+
+Fog Preview::fog_at(const std::array<double, 3> &eye, bool *outdoor) const {
+    int r = room_at(eye);
+    int sky = r >= 0 && (size_t)r < room_sky.size() ? room_sky[(size_t)r] : (room_sky.empty() ? -1 : room_sky[0]);
+    if (outdoor) *outdoor = sky >= 0;
+    if (sky >= 0 && (size_t)sky < sky_fog.size()) return sky_fog[(size_t)sky];
+    return indoor_fog;
+}
+
 void suggest(Analysis &a) {
     const double kInvisible = 0.001;   // under 0.1% of what you see, all views together: nobody would miss it
     size_t S = a.shaders.size();
@@ -463,7 +540,11 @@ void suggest(Analysis &a) {
 }
 
 void draw(const Preview &p, const Camera &cam, const std::vector<char> &reflections, int highlight, int w, int h,
-          std::vector<uint32_t> &px, std::vector<Shown> *shown, double *total_out, bool show_portals) {
+          std::vector<uint32_t> &px, std::vector<Shown> *shown, double *total_out, const Extras *extras) {
+    const bool show_portals = extras && extras->portals;
+    const bool fogged = extras && extras->fog_on && extras->fog.any();
+    const Fog fog = fogged ? extras->fog : Fog();
+    const float far_z = fogged && fog.cuts() ? fog.opaque : 1e30f;
     px.assign((size_t)w * h, 0);
     size_t S = 0;
     for (auto &m : p.materials) S = std::max(S, (size_t)(m.shader + 1));
@@ -547,7 +628,7 @@ void draw(const Preview &p, const Camera &cam, const std::vector<char> &reflecti
         for (int x = 0; x < w; x++) {
             size_t o = (size_t)y * w + x;
             double col[3];
-            if (tid[o] < 0) {   // (the sky)
+            if (tid[o] < 0 || zb[o] > far_z) {   // (the sky; past opaque fog the engine draws nothing either)
                 double g = (double)y / h;
                 col[0] = 0.30 + 0.15 * g; col[1] = 0.36 + 0.14 * g; col[2] = 0.46 + 0.10 * g;
             } else {
@@ -588,6 +669,11 @@ void draw(const Preview &p, const Camera &cam, const std::vector<char> &reflecti
                     sh.pixels++;
                     sh.brightness += std::min(1.0, col[0]) * 0.299 + std::min(1.0, col[1]) * 0.587 + std::min(1.0, col[2]) * 0.114;
                 }
+                if (fogged) {   // (by distance in front of the camera, from start to opaque)
+                    double span = std::max(1e-3, (double)fog.opaque - fog.start);
+                    double f = fog.density * std::clamp((zb[o] - fog.start) / span, 0.0, 1.0);
+                    for (int k = 0; k < 3; k++) col[k] = std::min(1.0, col[k]) * (1 - f) + fog.color[k] * f;
+                }
                 if (highlight >= 0 && m.shader == highlight) {
                     col[0] = col[0] * 0.5 + 0.5; col[1] *= 0.5; col[2] = col[2] * 0.5 + 0.45;
                 }
@@ -607,7 +693,7 @@ void draw(const Preview &p, const Camera &cam, const std::vector<char> &reflecti
         const Material &m = p.materials[(size_t)t.material];
         raster(i, [&](int x, int y, float z, float l1, float l2) {
             size_t o = (size_t)y * w + x;
-            if (z >= zb[o]) return;
+            if (z >= zb[o] || z > far_z) return;
             double l0 = 1 - l1 - l2;
             float c[4] = {0.55f, 0.65f, 0.75f, 0.35f};
             if (m.base >= 0) {
@@ -637,7 +723,7 @@ void draw(const Preview &p, const Camera &cam, const std::vector<char> &reflecti
             for (size_t k = 1; k + 1 < po.points.size(); k++)
                 raster_corners(po.points[0].data(), po.points[k].data(), po.points[k + 1].data(), [&](int x, int y, float z, float, float) {
                     size_t o = (size_t)y * w + x;
-                    if (lit[o] == (int)pi || z >= zb[o] * 0.999f + 0.01f) return;
+                    if (lit[o] == (int)pi || z >= zb[o] * 0.999f + 0.01f || z > far_z) return;
                     lit[o] = (int)pi;
                     blend(o, glow, 0.28);
                 });
@@ -673,7 +759,7 @@ void draw(const Preview &p, const Camera &cam, const std::vector<char> &reflecti
 
 // The file: a magic, then each part as counts and raw values (this machine's byte order: the file is a cache).
 namespace {
-const char kMagic[8] = {'H', 'M', 'P', 'L', 'S', 'H', 'D', '3'};
+const char kMagic[8] = {'H', 'M', 'P', 'L', 'S', 'H', 'D', '4'};
 struct Out {
     std::ofstream f;
     template <class T> void raw(const T &v) { f.write((const char *)&v, sizeof v); }
@@ -729,6 +815,11 @@ bool save(const Analysis &a, const Preview &p, const fs::path &file) {
     o.vec(p.room);
     o.raw((uint32_t)p.portals.size());
     for (auto &po : p.portals) { o.raw(po.front); o.raw(po.back); o.vec(po.points); }
+    o.vec(p.sky_fog);
+    o.raw(p.indoor_fog);
+    o.vec(p.room_sky);
+    o.vec(p.tree);
+    o.vec(p.leaf_room);
     return (bool)o.f;
 }
 
@@ -771,6 +862,11 @@ bool load(Analysis &a, Preview &p, const fs::path &file) {
     if (!in.ok || n > 100000) return false;
     p.portals.resize(n);
     for (auto &po : p.portals) { in.raw(po.front); in.raw(po.back); in.vec(po.points); }
+    in.vec(p.sky_fog);
+    in.raw(p.indoor_fog);
+    in.vec(p.room_sky);
+    in.vec(p.tree);
+    in.vec(p.leaf_room);
     return in.ok && a.drawn.size() == (size_t)a.views * a.shaders.size();
 }
 

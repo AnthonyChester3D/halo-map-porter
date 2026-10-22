@@ -69,6 +69,15 @@ struct Vertex { float p[3], n[3], uv[2], luv[2]; };
 struct Triangle { Vertex v[3]; int material = -1, lightmap = -1; };   // lightmap: texture of its lightmap page
 // A portal between two of the level's rooms (clusters): the opening the engine looks through from one to the other.
 struct Portal { std::vector<std::array<float, 3>> points; int front = -1, back = -1; };
+
+// A sky's fog: from `start` to `opaque` units in front of the camera it thickens to `density` of `color`. At density
+// 1 (and only then) the engine draws nothing past `opaque`: it moves the view's far end there (render.c).
+struct Fog {
+    float color[3] = {0, 0, 0};
+    float density = 0, start = 0, opaque = 0;
+    bool any() const { return density > 0 && opaque > 0; }
+    bool cuts() const { return density >= 1.0f && opaque > 0; }
+};
 struct Preview {
     std::vector<Triangle> triangles;
     std::vector<Material> materials;
@@ -77,6 +86,18 @@ struct Preview {
     std::vector<Portal> portals;
     std::vector<int16_t> room;                // per triangle: its cluster (-1: none)
     int rooms = 0;                            // clusters
+    // Fog: each of the scenario's skies' outdoor fog, the first one's indoor fog (rooms with no sky), each room's sky.
+    std::vector<Fog> sky_fog;
+    Fog indoor_fog;
+    std::vector<int16_t> room_sky;
+    // Which room a point is in: the level's BSP tree (child: a node, ~leaf for a leaf (-2 and less), -1 solid).
+    struct Node { float n[3] = {0, 0, 0}; float d = 0; int32_t front = -1, back = -1; };
+    std::vector<Node> tree;
+    std::vector<int16_t> leaf_room;
+    int room_at(const std::array<double, 3> &p) const;   // -1: in a wall, or outside the level
+    // The fog the engine uses with the camera at `eye`: its room's sky's outdoor fog (`outdoor` true), else the
+    // indoor fog.
+    Fog fog_at(const std::array<double, 3> &eye, bool *outdoor = nullptr) const;
 };
 
 // Reads the level `bsp` (and the scenario, for where players play): its shaders, what's drawn of each from player
@@ -91,12 +112,15 @@ void suggest(Analysis &a);
 // Draws the level from a view (eye, yaw and pitch in radians, horizontal field of view 70 degrees) into `px`
 // (w x h, top row first, 0x00RRGGBB). `reflections`: per shader, whether its reflection is drawn. `highlight`: a
 // shader to tint (-1 none). `shown`: if given, per shader, its pixels, their brightness and its reflection's part of
-// it; `total` the whole picture's brightness. `portals`: the portals outlined (where nothing is in front of them) and
-// each room tinted a colour of its own.
+// it; `total` the whole picture's brightness. Extras: `portals` outlined (where nothing is in front of them) and each
+// room tinted a colour of its own; `fog` (by distance in front of the camera, as the engine fogs; nothing past its
+// opaque distance when it cuts).
 struct Camera { std::array<double, 3> eye{}; double yaw = 0, pitch = 0; };
 struct Shown { double reflection = 0, brightness = 0; int pixels = 0; };
+struct Extras { bool portals = false; bool fog_on = false; Fog fog; };
 void draw(const Preview &p, const Camera &c, const std::vector<char> &reflections, int highlight, int w, int h,
-          std::vector<uint32_t> &px, std::vector<Shown> *shown = nullptr, double *total = nullptr, bool portals = false);
+          std::vector<uint32_t> &px, std::vector<Shown> *shown = nullptr, double *total = nullptr,
+          const Extras *extras = nullptr);
 
 // The analysis and preview in a file (for the level shaders window), and back.
 bool save(const Analysis &a, const Preview &p, const std::filesystem::path &file);

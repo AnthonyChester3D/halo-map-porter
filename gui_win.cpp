@@ -75,6 +75,8 @@ enum {
     ID_X_PORTALS,
     // the level shaders window
     ID_X_SHADERS,
+    // portals: a choice of three (was a tick box)
+    ID_X_PORTALS_LBL,
 };
 
 #define WM_APP_LOG (WM_APP + 1)
@@ -157,7 +159,7 @@ static void save_settings() {
     ini_set(L"x_allveh", checked(ID_X_ALLVEH) ? L"1" : L"0");
     ini_set(L"x_lodstock", checked(ID_X_LODSTOCK) ? L"1" : L"0");
     ini_set(L"x_makelod", checked(ID_X_MAKELOD) ? L"1" : L"0");
-    ini_set(L"x_portals", checked(ID_X_PORTALS) ? L"1" : L"0");
+    ini_set(L"x_portals", std::to_wstring(std::max(0, sel(ID_X_PORTALS))));
     ini_set(L"x_tex2", std::to_wstring(sel(ID_X_TEX)));
     ini_set(L"x_lm", std::to_wstring(sel(ID_X_LM)));
     ini_set(L"x_w2", std::to_wstring(sel(ID_X_W2)));
@@ -407,7 +409,8 @@ static void apply_xbox_options(Config &cfg) {
     cfg.xbox_keep_all_vehicles = folder_mode() && checked(ID_X_ALLVEH);
     cfg.xbox_lod_stock_models = checked(ID_X_LODSTOCK);
     cfg.xbox_make_lods = checked(ID_X_MAKELOD);
-    cfg.xbox_add_portals = checked(ID_X_PORTALS);
+    cfg.xbox_add_portals = sel(ID_X_PORTALS) >= 1;
+    cfg.xbox_replan_portals = sel(ID_X_PORTALS) == 2;
     {
         static const int tex[4] = {512, 512, 1024, 0}, obj[4] = {256, 0, 0, 0}, lm[3] = {0, 512, 256};
         int t = sel(ID_X_TEX), l = sel(ID_X_LM);
@@ -923,21 +926,35 @@ static shadersui::Picks load_shader_picks(const fs::path &input) {
         std::string k = l.substr(0, tab), v = l.substr(tab + 1);
         if (k == "mode") picks.mode = std::clamp(atoi(v.c_str()), 0, 2);
         else if (k == "drop" && !v.empty()) picks.drops.insert(v);
+        else if (k == "fog") {
+            picks.fog = std::clamp(atoi(v.c_str()), 0, 2);
+            size_t t2 = v.find('\t');
+            if (t2 != std::string::npos) picks.fog_scale = std::clamp(atof(v.c_str() + t2 + 1), 0.1, 1.0);
+        } else if (k == "scenery") picks.scenery = std::max(0.0, atof(v.c_str()));
     }
     return picks;
 }
 static void save_shader_picks(const fs::path &input, const shadersui::Picks &picks) {
     fs::path p = shader_picks_file(input);
     std::error_code ec;
-    if (picks.mode == 2) { fs::remove(p, ec); return; }   // (the default: every reflection kept)
+    shadersui::Picks defaults;
+    if (picks.mode == defaults.mode && picks.fog == defaults.fog && picks.scenery == defaults.scenery) {   // (all as by default)
+        fs::remove(p, ec);
+        return;
+    }
     fs::create_directories(p.parent_path(), ec);
     std::ofstream f(p, std::ios::binary);
     f << "mode\t" << picks.mode << '\n';
     for (auto &t : picks.drops) f << "drop\t" << t << '\n';
+    f << "fog\t" << picks.fog << '\t' << picks.fog_scale << '\n';
+    f << "scenery\t" << picks.scenery << '\n';
 }
 static void apply_shader_picks(Config &cfg, const fs::path &input) {
     shadersui::Picks picks = load_shader_picks(input);
     cfg.xbox_drop_reflections = picks.mode == 0;
+    cfg.xbox_fog = picks.fog;
+    cfg.xbox_fog_scale = picks.fog_scale;
+    cfg.xbox_scenery_distance = picks.scenery;
     if (picks.mode == 1) {
         cfg.xbox_reflection_picks_set = true;
         cfg.xbox_reflection_picks = picks.drops;
@@ -949,7 +966,7 @@ static std::string shaders_key(const Config &cfg, const fs::path &in) {
     std::error_code ec;
     auto mt = fs::last_write_time(in, ec);
     return N(lower(in.wstring())) + "|" + std::to_string((long long)mt.time_since_epoch().count()) + "|" +
-           (cfg.xbox_add_portals ? "p" : "-");
+           (cfg.xbox_add_portals ? "p" : "-") + (cfg.xbox_replan_portals ? "r" : "-");
 }
 
 static void open_shaders() {
@@ -970,18 +987,26 @@ static void open_shaders() {
     std::string key = shaders_key(cfg, in);
     shadersui::Picks picks = load_shader_picks(in);
     bool ok = shadersui::edit(
-        g_wnd, L"Level shaders - " + in.filename().wstring(), key,
+        g_wnd, L"Level - " + in.filename().wstring(), key,
         [cfg, in, game](fs::path &file, std::string &error, const std::function<void(const std::string &)> &log) {
             return analyze_level_shaders(cfg, in, game, file, error, [log](const std::string &l) { log(l); });
         },
         picks);
     if (ok) {
         save_shader_picks(in, picks);
-        append_log(picks.mode == 0   ? L"Level shaders: the suggested reflections of " + in.filename().wstring() + L" go when you convert it for the Xbox."
-                   : picks.mode == 2 ? L"Level shaders: " + in.filename().wstring() + L" keeps every reflection when you convert it for the Xbox."
-                                     : L"Level shaders: " + std::to_wstring(picks.drops.size()) + L" reflection" +
-                                           (picks.drops.size() == 1 ? L"" : L"s") + L" of " + in.filename().wstring() +
-                                           L" go when you convert it for the Xbox (your picks).");
+        std::wstring refl = picks.mode == 0   ? L"the suggested reflections go"
+                            : picks.mode == 2 ? L"every reflection kept"
+                                              : std::to_wstring(picks.drops.size()) + L" reflection" + (picks.drops.size() == 1 ? L"" : L"s") +
+                                                    L" go (your picks)";
+        wchar_t fog[80];
+        if (picks.fog == 0) swprintf(fog, 80, L"automatic");
+        else if (picks.fog == 1) swprintf(fog, 80, L"as the map has it");
+        else swprintf(fog, 80, L"fully opaque at %.0f%% of its distance", picks.fog_scale * 100);
+        wchar_t far_[60];
+        if (picks.scenery > 0) swprintf(far_, 60, L"not past %.0f units", picks.scenery);
+        else swprintf(far_, 60, L"always drawn");
+        append_log(L"Level choices for " + in.filename().wstring() + L", used when you convert it for the Xbox: " + refl +
+                   L"; fog " + fog + L"; far scenery " + far_ + L".");
     }
 }
 
@@ -1769,9 +1794,11 @@ static void create_controls() {
     check(2, L"Also use the lower-detail versions of Bungie's own trees, rocks and plants at a distance (retail never did)",
           26, y, 708, ID_X_LODSTOCK);
     y += 24;
-    check(2, L"Add portals to levels made without them, so walls hide what's behind them",
-          26, y, 500, ID_X_PORTALS);
-    button(2, L"Level shaders...", 534, y - 4, 200, ID_X_SHADERS);
+    label(2, L"Portals:", 26, y - 2, 60, ID_X_PORTALS_LBL);
+    list_combo(2, 90, y - 2, 430, ID_X_PORTALS,
+               {L"Leave every level's as they are", L"Add them to levels made without any, so walls hide what's behind",
+                L"Also divide up the rooms of levels that have them, when that draws less"});
+    button(2, L"Level...", 534, y - 4, 200, ID_X_SHADERS);
 
     // Map packs page
     create_pack_page();
@@ -1856,7 +1883,7 @@ static void create_controls() {
     set_check(ID_X_ALLVEH, ini_get(L"x_allveh", L"1") == L"1");
     set_check(ID_X_LODSTOCK, ini_get(L"x_lodstock", L"0") == L"1");
     set_check(ID_X_MAKELOD, ini_get(L"x_makelod", L"1") == L"1");
-    set_check(ID_X_PORTALS, ini_get(L"x_portals", L"1") == L"1");
+    SendDlgItemMessageW(g_wnd, ID_X_PORTALS, CB_SETCURSEL, std::clamp(_wtoi(ini_get(L"x_portals", L"1").c_str()), 0, 2), 0);
     {
         std::wstring lib = ini_get(L"lod_library");
         set_text(ID_S_LOD, lib.empty() ? (appdata_dir(CSIDL_LOCAL_APPDATA) / L"lod_library").wstring() : lib);
@@ -1993,8 +2020,11 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case ID_X_ALLVEH:
             if (code == BN_CLICKED) { update_vehicle_texts(); save_settings(); }
             break;
-        case ID_X_LODSTOCK: case ID_X_MAKELOD: case ID_X_PORTALS:
+        case ID_X_LODSTOCK: case ID_X_MAKELOD:
             if (code == BN_CLICKED) save_settings();
+            break;
+        case ID_X_PORTALS:
+            if (code == CBN_SELCHANGE) save_settings();
             break;
         case ID_X_CONTENTS:
             if (code == BN_CLICKED) open_contents();

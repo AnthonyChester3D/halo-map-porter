@@ -1095,6 +1095,8 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps);
 void xbox_portals(Job &job);
 void xbox_lights(Job &job, const std::vector<std::string> &deps);
 void xbox_reflections(Job &job);
+void xbox_fog(Job &job);
+void xbox_scenery(Job &job, const std::vector<std::string> &deps);
 static std::string thousands(long long v);
 static std::vector<std::string> performance_lines(Job &job);
 static LodView make_lod_view(Job &job, const std::string &map_name);
@@ -3321,6 +3323,10 @@ void xbox_content_passes(Job &job) {
     xbox_lights(job, deps);
     xbox_portals(job);
     xbox_reflections(job);
+    if (!job.cfg.level_shaders_only) {   // (after the level is measured: the window shows the fog as the map has it)
+        xbox_fog(job);
+        xbox_scenery(job, deps);
+    }
 }
 
 // The level's reflections (levelshaders.hpp): the Xbox draws a reflecting surface once or twice more than any other,
@@ -3399,7 +3405,7 @@ void xbox_reflections(Job &job) {
         line += buf;
         if (dropped.empty() && reflective > 0 && (before.busy > stock.busy * 1.15 || before.typical > stock.typical * 1.15))
             line += " " + std::to_string(reflective) + " of its shaders reflect, which the Xbox draws again: the Xbox tab's "
-                    "\"Level shaders...\" window shows what dropping reflections would save and how it would look.";
+                    "\"Level...\" window shows what dropping reflections would save and how it would look.";
         job.shaders_line += (job.shaders_line.empty() ? "" : "\n") + line;
     }
 }
@@ -3559,9 +3565,12 @@ void xbox_portals(Job &job) {
         if (b.empty() || !done.insert(b).second) continue;
         fs::path own = job.owner(b);
         if (own.empty() || own == job.overlay) continue;
+        size_t own_clusters = 0;
         {
             tagfile::Tag t;
-            if (!t.load(own / from_u8(b)) || t.root().block("clusters").size() != 1) continue;
+            if (!t.load(own / from_u8(b))) continue;
+            own_clusters = t.root().block("clusters").size();
+            if (own_clusters == 0 || (own_clusters > 1 && !job.cfg.xbox_replan_portals)) continue;
         }
         std::string name = bsps.size() > 1 ? " (" + fs::path(from_u8(b)).stem().u8string() + ")" : "";
         job.log("Finding the level's rooms and doorways" + name + "...");
@@ -3585,16 +3594,35 @@ void xbox_portals(Job &job) {
             if (own.empty() || !st.load(own / from_u8(t))) return false;
             return ((long long)st.root().num("shader environment flags") & 1) != 0;   // alpha tested
         };
+        po.replan = job.cfg.xbox_replan_portals;
         portals::Result pr = portals::add_portals(file, po);
-        if (pr.changed) {
+        auto drawn = [&](const portals::Result &x) {
+            return "about " + thousands((long long)x.drawn_after) + " of its triangles drawn in a typical view (was " +
+                   thousands((long long)x.drawn_before) + "), " + thousands((long long)x.drawn_high_after) + " in a busy one (was " +
+                   thousands((long long)x.drawn_high_before) + ")";
+        };
+        if (pr.changed && own_clusters == 1) {
             job.portal_backups.push_back({file, before});
-            job.note("[portals] the level" + name + " had no portals, so the Xbox drew everything of it in view, walls or not. Its " +
-                     std::to_string(pr.clusters_after) + " rooms are now clusters with " + std::to_string(pr.portals_after) +
-                     " portals between them: about " + thousands((long long)pr.drawn_after) + " of its triangles drawn in a typical view (was " +
-                     thousands((long long)pr.drawn_before) + "), " + thousands((long long)pr.drawn_high_after) + " in a busy one (was " +
-                     thousands((long long)pr.drawn_high_before) + ")");
-        } else {
+            std::string note = "[portals] the level" + name + " had no portals, so the Xbox drew everything of it in view, walls or not. Its " +
+                               std::to_string(pr.clusters_after) + " rooms are now clusters with " + std::to_string(pr.portals_after) +
+                               " portals between them: " + drawn(pr);
+            // (and, re-planning, its new clusters divided further when that draws less again)
+            if (po.replan) {
+                portals::Result again = portals::add_portals(file, po);
+                if (again.changed)
+                    note += "; divided further into " + std::to_string(again.clusters_after) + " clusters with " +
+                            std::to_string(again.portals_after) + " portals: " + drawn(again);
+            }
+            job.note(note);
+        } else if (pr.changed) {
+            job.portal_backups.push_back({file, before});
+            job.note("[portals] divided the level" + name + "'s own " + std::to_string(pr.clusters_before) + " clusters further, into " +
+                     std::to_string(pr.clusters_after) + " (each keeps its cluster's sky, fog, sound and weather) with " +
+                     std::to_string(pr.portals_after) + " portals (it had " + std::to_string(pr.portals_before) + "): " + drawn(pr));
+        } else if (own_clusters == 1) {
             job.log("  [portals] the level" + name + " has no portals; none added: it " + pr.why);
+        } else {
+            job.log("  [portals] the level" + name + "'s own portals kept: it " + pr.why);
         }
     }
 }
@@ -3807,6 +3835,118 @@ static std::map<std::string, int> object_counts(Job &job, const tagfile::Elem &s
         for (auto &it : collections[ic]) placed[it]++;
     }
     return placed;
+}
+
+// The level's fog. The engine moves the view's far end to the fog's opaque distance only when the fog is fully
+// opaque there (maximum density exactly 1: render.c), and then draws nothing past it: the level, objects, effects.
+// Fog that's nearly so (90% or more) hides what's past it anyway, so by default it's made fully opaque (Deathtrap's,
+// Precipice's sky: 92% at 110 units, past which the airbase and many trees were still drawn). The map's own skies
+// only (Bungie's levels keep theirs); a sky's indoor fog too (rooms with no sky).
+void xbox_fog(Job &job) {
+    const Config &cfg = job.cfg;
+    if (cfg.xbox_fog == 1 || job.analysis) return;
+    std::string scen = job.scenario + ".scenario";
+    fs::path sdir = job.owner(scen);
+    tagfile::Tag stag;
+    if (sdir.empty() || !stag.load(sdir / from_u8(scen))) return;
+    tagfile::Block skies = stag.root().block("skies");
+    std::set<std::string> done;
+    std::vector<std::string> changed;
+    for (size_t i = 0; i < skies.size(); i++) {
+        std::string sky = skies[i].ref("sky");
+        if (sky.empty() || !done.insert(sky).second) continue;
+        fs::path own = job.owner(sky);
+        if (own.empty() || own == job.overlay) continue;
+        fs::path ed = editable_owner(job, sky);
+        if (ed.empty()) continue;
+        tagfile::EditTag et;
+        if (!et.load(ed / from_u8(sky))) continue;
+        tagfile::TagNode &r = et.root();
+        std::string what;
+        for (const char *kind : {"outdoor", "indoor"}) {
+            std::string k = kind;
+            std::string fd = k + " fog maximum density", fs_ = k + " fog start distance", fo = k + " fog opaque distance";
+            double density = tagfile::get_num(r, fd.c_str()), start = tagfile::get_num(r, fs_.c_str()),
+                   opaque = tagfile::get_num(r, fo.c_str());
+            if (opaque <= 0 || density <= 0) continue;
+            double nd = density, no = opaque;
+            if (cfg.xbox_fog == 2 && k == "outdoor") {
+                nd = 1.0;
+                no = std::max(opaque * std::clamp(cfg.xbox_fog_scale, 0.1, 1.0), start + 1.0);
+            } else if (density >= 0.9 && density < 1.0) {
+                nd = 1.0;
+            }
+            if (nd == density && no == opaque) continue;
+            tagfile::set_num(r, fd.c_str(), nd);
+            tagfile::set_num(r, fo.c_str(), no);
+            char buf[160];
+            snprintf(buf, sizeof buf, "%s fog fully opaque at %s units (%s m; it was %.0f%% at %s)", kind, fmt_num(no).c_str(),
+                     fmt_num(no * 3.048).c_str(), density * 100, fmt_num(opaque).c_str());
+            what += (what.empty() ? "" : ", ") + std::string(buf);
+        }
+        if (what.empty() || !et.save(ed / from_u8(sky))) continue;
+        changed.push_back(fs::path(from_u8(sky)).stem().u8string() + ": " + what);
+    }
+    if (!changed.empty()) {
+        std::string list;
+        for (auto &c : changed) list += (list.empty() ? "" : "; ") + c;
+        job.note("[fog] made the level's fog fully opaque, so the Xbox draws nothing past it (it moves the view's far end "
+                 "there only at full density): " + list);
+    }
+}
+
+// Scenery and devices not drawn past a distance (the level window's choice): the engine draws nothing of a model
+// smaller on screen than its smallest switch distance ("super low", in pixels across), so that's set to the size
+// the object is at that distance (its bounding sphere: 457 x its diameter / the distance, on the Xbox's 480 lines).
+// The smallest object of each model sets it, so none vanishes nearer. Vehicles, characters and weapons are left
+// alone (players need to see them).
+void xbox_scenery(Job &job, const std::vector<std::string> &deps) {
+    const double D = job.cfg.xbox_scenery_distance;
+    if (D <= 0 || job.analysis) return;
+    std::string scen = job.scenario + ".scenario";
+    fs::path sdir = job.owner(scen);
+    tagfile::Tag st;
+    if (sdir.empty() || !st.load(sdir / from_u8(scen))) return;
+    std::set<std::string> first_person;
+    std::map<std::string, std::string> names;
+    std::map<std::string, char> kinds = model_kinds(job, deps, first_person, names);
+    std::map<std::string, double> radius;   // model -> its smallest placed object's bounding radius
+    for (auto &[o, n] : object_counts(job, st.root())) {
+        if (!(has_suffix(o, ".scenery") || has_suffix(o, ".device_machine") || has_suffix(o, ".device_control") ||
+              has_suffix(o, ".device_light_fixture")))
+            continue;
+        fs::path own = job.owner(o);
+        tagfile::Tag ot;
+        if (own.empty() || !ot.load(own / from_u8(o))) continue;
+        std::string m = ot.root().ref("model");
+        double r = ot.root().num("bounding radius");
+        if (m.empty() || r < 0.05) continue;
+        auto it = radius.find(m);
+        radius[m] = it == radius.end() ? r : std::min(it->second, r);
+    }
+    std::vector<std::string> done;
+    for (auto &[m, r] : radius) {
+        if (!kinds.count(m) || kinds[m] != 's' || first_person.count(m)) continue;
+        double px = 457.0 * 2 * r / D;
+        if (px < 1) continue;
+        fs::path own = job.owner(m);
+        if (own.empty()) continue;
+        perf::ModelStats ms = perf::model_stats(own / from_u8(m));
+        if (!ms.ok || ms.cutoff[4] >= px) continue;
+        fs::path ed = editable_owner(job, m, own == job.overlay);
+        if (ed.empty()) continue;
+        bool ok = false;
+        edit_lines(job, ed, m, {"-S", "super_low_detail_cutoff", std::to_string(px)}, &ok);
+        if (ok) done.push_back((names.count(m) ? names[m] : fs::path(from_u8(m)).stem().u8string()));
+    }
+    if (!done.empty()) {
+        std::string list;
+        for (size_t i = 0; i < done.size() && i < 10; i++) list += (i ? ", " : "") + done[i];
+        if (done.size() > 10) list += " and " + std::to_string(done.size() - 10) + " more";
+        job.note("[scenery] scenery and devices stop being drawn about " + fmt_num(D) + " units (" + fmt_num(D * 3.048) +
+                 " m) away (" + std::to_string(done.size()) + (done.size() == 1 ? " model's" : " models'") +
+                 " smallest switch distance set): " + list);
+    }
 }
 
 // The LODs window's models (job.lod_changes): how many are on the map, their switch distances and size, and each

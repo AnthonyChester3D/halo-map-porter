@@ -83,6 +83,10 @@ struct Options {
     double refine_seconds = 20;   // time for that at most (the rest of the boundaries stay as they are)
     SeeThrough see_through;    // which level shaders can be seen through (none given: all but shader_environment)
     PlayArea area;             // where players play (play_area), for estimate()
+    // A level with clusters of its own too: each of them divided further (a new one keeps its cluster's sky, fog,
+    // sound and weather, and which clusters it can see), when that draws at least 15% less than its own portals.
+    bool replan = false;
+    double min_gain = 0.15;    // what they must cut from what's drawn (a typical view's and on average) to be added
 };
 
 // A portal between two clusters as Halo stores it: the "front" cluster is behind its plane (a collision BSP plane),

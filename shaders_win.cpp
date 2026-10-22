@@ -24,7 +24,8 @@ namespace {
 
 enum {
     IDC_MODE0 = 400, IDC_MODE1, IDC_MODE2, IDC_STATUS, IDC_LIST, IDC_VIEW, IDC_PREV, IDC_NEXT, IDC_BEFORE, IDC_AFTER,
-    IDC_CHANGES, IDC_HILITE, IDC_COST, IDC_REMEASURE, IDC_OKB, IDC_CANCELB, IDC_ABOUT, IDC_PORTALS,
+    IDC_CHANGES, IDC_HILITE, IDC_COST, IDC_REMEASURE, IDC_OKB, IDC_CANCELB, IDC_ABOUT, IDC_PORTALS, IDC_FOG_LBL, IDC_FOG,
+    IDC_FAR_LBL, IDC_FAR,
 };
 #define WM_LS_LOG (WM_APP + 60)
 #define WM_LS_DONE (WM_APP + 61)
@@ -146,6 +147,21 @@ std::vector<char> dropped_all() {
     return d;
 }
 
+// The fog the picture shows from `c`: the level's (its room's sky's, else the indoor fog), as the conversion leaves it
+// with the window's fog choice (xbox_fog in core.cpp).
+lshade::Fog fog_for(const lshade::Camera &c) {
+    bool outdoor = false;
+    lshade::Fog f = St->data->p.fog_at(c.eye, &outdoor);
+    if (!f.any() || St->picks.fog == 1) return f;
+    if (St->picks.fog == 2 && outdoor) {
+        f.density = 1;
+        f.opaque = std::max(f.opaque * (float)std::clamp(St->picks.fog_scale, 0.1, 1.0), f.start + 1.0f);
+    } else if (f.density >= 0.9f && f.density < 1.0f) {
+        f.density = 1;
+    }
+    return f;
+}
+
 // Draws the picture: on the graphics card when it can (fast enough to fly through), else here (`fast`: at half the
 // size, while the camera moves).
 void render(bool fast) {
@@ -162,6 +178,8 @@ void render(bool fast) {
         f.what_it_loses = St->show == 2;
         f.highlight = St->highlight ? St->selected : -1;
         f.portals = St->portals;
+        f.fog_on = true;
+        f.fog = fog_for(c);
         St->gl->draw(f);
         ValidateRect(St->view, nullptr);
         return;
@@ -170,11 +188,17 @@ void render(bool fast) {
     GetClientRect(St->view, &rc);
     int w = rc.right, h = rc.bottom;
     if (fast) { w /= 2; h /= 2; }
+    lshade::Extras ex;
+    ex.portals = St->portals;
+    ex.fog_on = true;
+    ex.fog = fog_for(c);
     if (St->show == 2) {
         // What changes: the converted picture dimmed, with what it loses (the dropped reflections) brightened on top.
+        lshade::Extras fog_only = ex;
+        fog_only.portals = false;
         std::vector<uint32_t> made;
-        lshade::draw(St->data->p, c, all, -1, w, h, made);
-        lshade::draw(St->data->p, c, refl, -1, w, h, St->px);
+        lshade::draw(St->data->p, c, all, -1, w, h, made, nullptr, nullptr, &fog_only);
+        lshade::draw(St->data->p, c, refl, -1, w, h, St->px, nullptr, nullptr, &fog_only);
         for (size_t i = 0; i < St->px.size() && i < made.size(); i++) {
             uint32_t a = made[i], b = St->px[i], o = 0;
             for (int sh = 0; sh < 24; sh += 8) {
@@ -185,7 +209,7 @@ void render(bool fast) {
             St->px[i] = o;
         }
     } else {
-        lshade::draw(St->data->p, c, refl, St->highlight ? St->selected : -1, w, h, St->px, nullptr, nullptr, St->portals);
+        lshade::draw(St->data->p, c, refl, St->highlight ? St->selected : -1, w, h, St->px, nullptr, nullptr, &ex);
     }
     St->pw = w;
     St->ph = h;
@@ -239,8 +263,7 @@ void update_cost() {
     if (going) t += L" \u2192 " + thousands((long long)after.typical) + L" / " + thousands((long long)after.busy) + L" with " +
                     std::to_wstring(going) + L" of its " + std::to_wstring(reflecting) + L" reflections dropped";
     t += L". Stock Xbox maps: Sidewinder " + thousands((long long)stock.typical) + L" / " + thousands((long long)stock.busy) +
-         L" (among the busiest).\r\nEvery level triangle is drawn at least twice (lightmap, textures); a reflection draws it once or "
-         L"twice more. Dropping one also frees its cube map's memory.";
+         L" (among the busiest).";
     SetWindowTextW(item(IDC_COST), t.c_str());
 }
 
@@ -252,6 +275,40 @@ void set_row(int row) {
     St->filling = false;
     std::wstring sug = sh.suggested ? L"Drop" : L"Keep";
     ListView_SetItemText(St->list, row, 5, (LPWSTR)sug.c_str());
+}
+
+// The fog and far scenery choices (Picks::fog, fog_scale, scenery): the fog's described with the level's own numbers.
+const double kFar[] = {0, 300, 200, 150, 100, 60};
+const double kFogScale[] = {1.0, 1.0, 1.0, 0.75, 0.5};   // (by item: automatic, as made, opaque at 1, 3/4, 1/2 of its distance)
+int fog_item() { return St->picks.fog == 0 ? 0 : St->picks.fog == 1 ? 1 : St->picks.fog_scale >= 0.875 ? 2 : St->picks.fog_scale >= 0.625 ? 3 : 4; }
+void fill_fog() {
+    HWND c = item(IDC_FOG);
+    SendMessageW(c, CB_RESETCONTENT, 0, 0);
+    lshade::Fog f;
+    if (St->data && !St->data->p.sky_fog.empty()) f = St->data->p.sky_fog[0];
+    if (St->data && !f.any()) f = St->data->p.indoor_fog;
+    if (!St->data || !f.any()) {
+        SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)L"The level has no fog");
+        SendMessageW(c, CB_SETCURSEL, 0, 0);
+        EnableWindow(c, FALSE);
+        return;
+    }
+    EnableWindow(c, TRUE);
+    auto units = [](double u) {
+        wchar_t b[48];
+        swprintf(b, 48, L"%.0f units (%.0f m)", u, u * 3.048);
+        return std::wstring(b);
+    };
+    wchar_t pc[16];
+    swprintf(pc, 16, L"%.0f%%", f.density * 100);
+    std::wstring a = f.density >= 1 ? L"Automatic: it's fully opaque at " + units(f.opaque)
+                     : f.density >= 0.9f ? L"Automatic: made fully opaque at " + units(f.opaque) + L" (it's " + pc + L")"
+                                         : L"Automatic: left as it is (" + std::wstring(pc) + L" at " + units(f.opaque) + L")";
+    std::wstring items[5] = {a, L"As the map has it (" + std::wstring(pc) + L" at " + units(f.opaque) + L")",
+                             L"Fully opaque at " + units(f.opaque), L"Fully opaque nearer, at " + units(f.opaque * 0.75),
+                             L"Fully opaque nearer still, at " + units(f.opaque * 0.5)};
+    for (auto &t : items) SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)t.c_str());
+    SendMessageW(c, CB_SETCURSEL, fog_item(), 0);
 }
 
 void fill_list() {
@@ -290,6 +347,7 @@ void fill_list() {
          std::to_wstring(pv.portals.size()) + (pv.portals.size() == 1 ? L" portal." : L" portals.");
     SetWindowTextW(item(IDC_STATUS), s.c_str());
     update_cost();
+    fill_fog();
     pick_views();
     go_to_view();
 }
@@ -533,7 +591,16 @@ void create_controls() {
     add(L"BUTTON", L"What it loses", BS_AUTORADIOBUTTON, 846, 524, 104, 22, IDC_CHANGES);
     add(L"BUTTON", L"Tint selected", BS_AUTOCHECKBOX | WS_GROUP | WS_TABSTOP, 960, 524, 100, 22, IDC_HILITE);
     add(L"BUTTON", L"Show portals", BS_AUTOCHECKBOX | WS_TABSTOP, 1066, 524, 102, 22, IDC_PORTALS);
-    add(L"STATIC", L"", 0, 572, 556, 596, 64, IDC_COST);
+    add(L"STATIC", L"", SS_NOTIFY, 572, 554, 596, 36, IDC_COST);
+    add(L"STATIC", L"Fog:", SS_NOTIFY, 572, 600, 34, 20, IDC_FOG_LBL);
+    add(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 608, 596, 300, 300, IDC_FOG);
+    add(L"STATIC", L"Far scenery:", SS_NOTIFY, 918, 600, 74, 20, IDC_FAR_LBL);
+    add(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 994, 596, 174, 300, IDC_FAR);
+    {
+        const wchar_t *far_items[] = {L"Always drawn", L"Not past 300 units (914 m)", L"Not past 200 units (610 m)",
+                                      L"Not past 150 units (457 m)", L"Not past 100 units (305 m)", L"Not past 60 units (183 m)"};
+        for (auto t : far_items) SendMessageW(item(IDC_FAR), CB_ADDSTRING, 0, (LPARAM)t);
+    }
     add(L"BUTTON", L"Measure again", BS_PUSHBUTTON | WS_TABSTOP, 12, 636, 120, 26, IDC_REMEASURE);
     add(L"STATIC", L"Shows: how much of what you see is its reflection. Covers: how much of the screen it is. Passes: triangles drawn again per view.",
         0, 140, 640, 740, 20, IDC_ABOUT);
@@ -542,6 +609,14 @@ void create_controls() {
     CheckRadioButton(St->wnd, IDC_MODE0, IDC_MODE2, IDC_MODE0 + St->picks.mode);
     CheckRadioButton(St->wnd, IDC_BEFORE, IDC_CHANGES, IDC_AFTER);
     CheckDlgButton(St->wnd, IDC_HILITE, BST_CHECKED);
+    {
+        int k = 0;   // (the nearest of the choices)
+        for (int i = 1; i < 6; i++)
+            if (St->picks.scenery > 0 && std::fabs(kFar[i] - St->picks.scenery) < std::fabs(kFar[k] - St->picks.scenery)) k = i;
+        if (St->picks.scenery > 0 && k == 0) k = 1;
+        SendMessageW(item(IDC_FAR), CB_SETCURSEL, k, 0);
+    }
+    fill_fog();
 
     // Tooltips.
     St->tips = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT,
@@ -569,6 +644,21 @@ void create_controls() {
     tip(IDC_PORTALS, L"Outlines each portal in yellow (the openings the engine looks through from one room to the next), "
                      L"glowing orange where you can see through it, and tints each room (cluster) a colour of its own. The engine draws the room you're in, then only the rooms "
                      L"it can see through portals, so walls between rooms hide what's behind them.");
+    tip(IDC_COST, L"Every level triangle is drawn at least twice (its lightmap, then its textures); a reflection draws it once "
+                  L"or twice more. Dropping one also frees its cube map's memory. Typical: half of the views from where "
+                  L"players stand draw more; busy: one in ten does.");
+    const wchar_t *fog_tip = L"The Xbox stops drawing anything (level, objects, effects) past the fog's opaque distance, but only "
+                             L"when the fog is fully opaque there: at 99% it still draws everything. Automatic makes fog that's "
+                             L"nearly opaque (90% or more) fully so. Nearer opaque fog draws less, but the level looks foggier. "
+                             L"The picture shows the fog as the conversion leaves it.";
+    tip(IDC_FOG, fog_tip);
+    tip(IDC_FOG_LBL, fog_tip);
+    const wchar_t *far_tip = L"Scenery and devices (trees, rocks, props, machines; not vehicles, characters or weapons) stop "
+                             L"being drawn about this far away: each model's smallest switch distance is set to its size on "
+                             L"screen there. They don't show in the picture. Big ones pop out of view, so pick a distance past "
+                             L"where they matter, or behind the fog.";
+    tip(IDC_FAR, far_tip);
+    tip(IDC_FAR_LBL, far_tip);
     tip(IDC_VIEW, L"Click here, then fly: drag with the mouse to look around, W A S D to move where you look, Q / E to go "
                   L"down and up (Shift faster, Ctrl slower), the mouse wheel to step forward and back.");
     tip(IDC_PREV, L"The previous view (the selected shader's, or the ones that see most of the level).");
@@ -648,6 +738,22 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case IDC_BEFORE: case IDC_AFTER: case IDC_CHANGES:
             St->show = id == IDC_BEFORE ? 0 : id == IDC_AFTER ? 1 : 2;
             render(false);
+            return 0;
+        case IDC_FOG:
+            if (HIWORD(wp) == CBN_SELCHANGE) {
+                int k = (int)SendMessageW(item(IDC_FOG), CB_GETCURSEL, 0, 0);
+                if (k >= 0 && k < 5) {
+                    St->picks.fog = k <= 1 ? k : 2;
+                    St->picks.fog_scale = kFogScale[k];
+                    render(false);
+                }
+            }
+            return 0;
+        case IDC_FAR:
+            if (HIWORD(wp) == CBN_SELCHANGE) {
+                int k = (int)SendMessageW(item(IDC_FAR), CB_GETCURSEL, 0, 0);
+                if (k >= 0 && k < 6) St->picks.scenery = kFar[k];
+            }
             return 0;
         case IDC_PORTALS:
             St->portals = IsDlgButtonChecked(h, IDC_PORTALS) == BST_CHECKED;

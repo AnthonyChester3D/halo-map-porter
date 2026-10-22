@@ -21,6 +21,10 @@ using Measure = std::function<bool(std::filesystem::path &file, std::string &err
 struct Picks {
     int mode = 2;
     std::set<std::string> drops;
+    // The level's fog and far scenery (Config::xbox_fog, xbox_fog_scale, xbox_scenery_distance).
+    int fog = 0;
+    double fog_scale = 1.0;
+    double scenery = 0;
 };
 
 // Modal. `key` identifies the map and what changes its level (a measurement is reused while it's the same).

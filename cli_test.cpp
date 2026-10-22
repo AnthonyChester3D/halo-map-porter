@@ -9,6 +9,7 @@
 #include <iterator>
 #include <iostream>
 #include <sstream>
+#include <cstring>
 using namespace porter;
 
 // XPREVIEW=<folder>: each item's model drawn to <folder>/<name>.ppm (two views side by side), for checking.
@@ -110,6 +111,12 @@ int main(int argc, char **argv) {
         }
     }
     if (getenv("XNOPORTALS")) cfg.xbox_add_portals = false;
+    if (getenv("XREPLAN")) cfg.xbox_replan_portals = true;
+    if (const char *x = getenv("XFOG")) {   // 0 automatic, 1 as made, 2[:scale] opaque at scale x its distance
+        cfg.xbox_fog = atoi(x);
+        if (const char *c = strchr(x, ':')) cfg.xbox_fog_scale = atof(c + 1);
+    }
+    if (getenv("XSCENERY")) cfg.xbox_scenery_distance = atof(getenv("XSCENERY"));
     if (const char *x = getenv("XREFL")) {   // keep | tag,tag,... (the level shaders window's picks)
         std::string w = x, item;
         if (w == "keep") cfg.xbox_drop_reflections = false;

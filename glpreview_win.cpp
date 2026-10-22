@@ -38,8 +38,10 @@ varying vec3 v_n;
 varying vec2 v_uv;
 varying vec2 v_luv;
 varying float v_room;
+varying float v_depth;
 void main() {
     v_pos = gl_Vertex.xyz;
+    v_depth = -(gl_ModelViewMatrix * gl_Vertex).z;
     v_n = gl_Normal;
     v_uv = gl_MultiTexCoord0.xy;
     v_luv = gl_MultiTexCoord1.xy;
@@ -60,11 +62,19 @@ uniform float u_has_base, u_has_detail, u_has_lm, u_has_cube;
 uniform float u_detail_scale, u_mask_alpha, u_lm_scale;
 uniform float u_made, u_converted, u_loses, u_highlight, u_rooms, u_see_through;
 uniform vec3 u_perp, u_para, u_eye;
+uniform vec3 u_fog_color;
+uniform float u_fog_density, u_fog_start, u_fog_opaque;
 varying vec3 v_pos;
 varying vec3 v_n;
 varying vec2 v_uv;
 varying vec2 v_luv;
 varying float v_room;
+varying float v_depth;
+vec3 fogged(vec3 c) {
+    if (u_fog_density <= 0.0) return c;
+    float f = u_fog_density * clamp((v_depth - u_fog_start) / max(0.001, u_fog_opaque - u_fog_start), 0.0, 1.0);
+    return mix(min(c, 1.0), u_fog_color, f);
+}
 vec3 room_colour(float r) {
     float h = fract(r * 0.618033988749895) * 6.0;
     float s = 0.75, v = 0.95, i = floor(h), f = h - i;
@@ -79,7 +89,7 @@ vec3 room_colour(float r) {
 void main() {
     vec4 b = u_has_base > 0.5 ? texture2D(u_base, v_uv) : vec4(0.6, 0.6, 0.6, 1.0);
     if (u_see_through > 0.5) {
-        gl_FragColor = vec4(u_has_base > 0.5 ? b.rgb : vec3(0.55, 0.65, 0.75), 0.35);
+        gl_FragColor = vec4(fogged(u_has_base > 0.5 ? b.rgb : vec3(0.55, 0.65, 0.75)), 0.35);
         return;
     }
     vec4 d = u_has_detail > 0.5 ? texture2D(u_detail, v_uv * u_detail_scale) : vec4(0.5);
@@ -97,10 +107,10 @@ void main() {
     }
     vec3 o;
     if (u_loses > 0.5) {
-        vec3 made = min(col + r * u_made, 1.0), conv = min(col + r * u_converted, 1.0);
+        vec3 made = fogged(col + r * u_made), conv = fogged(col + r * u_converted);
         o = conv * 0.3 + abs(made - conv) * 4.0;
     } else {
-        o = col + r * u_converted;
+        o = fogged(col + r * u_converted);
         if (u_highlight > 0.5) o = vec3(o.r * 0.5 + 0.5, o.g * 0.5, o.b * 0.5 + 0.45);
         if (u_rooms > 0.5 && v_room >= 0.0) o = min(o, 1.0) * 0.6 + room_colour(v_room) * 0.4;
     }
@@ -317,7 +327,9 @@ void Renderer::draw(const Frame &f) {
     const lshade::Preview *p = d->scene;
     if (p && d->vbo) {
         // The camera, as lshade::draw's: 70 degrees across.
-        const double tx = std::tan(35.0 * 3.14159265358979 / 180), ty = tx * h / w, n = 0.02, far_ = 5000;
+        const bool fog_on = f.fog_on && f.fog.any();
+        const double tx = std::tan(35.0 * 3.14159265358979 / 180), ty = tx * h / w, n = 0.02,
+                     far_ = fog_on && f.fog.cuts() ? std::max(0.1, (double)f.fog.opaque) : 5000;   // (opaque fog: nothing past it)
         glMatrixMode(GL_PROJECTION);
         glLoadIdentity();
         glFrustum(-tx * n, tx * n, -ty * n, ty * n, n, far_);
@@ -355,6 +367,10 @@ void Renderer::draw(const Frame &f) {
         gl.glUniform3f(d->u("u_eye"), (float)c.eye[0], (float)c.eye[1], (float)c.eye[2]);
         gl.glUniform1f(d->u("u_loses"), f.what_it_loses ? 1.0f : 0.0f);
         gl.glUniform1f(d->u("u_rooms"), f.portals && !f.what_it_loses ? 1.0f : 0.0f);
+        gl.glUniform3f(d->u("u_fog_color"), f.fog.color[0], f.fog.color[1], f.fog.color[2]);
+        gl.glUniform1f(d->u("u_fog_density"), fog_on ? f.fog.density : 0.0f);
+        gl.glUniform1f(d->u("u_fog_start"), f.fog.start);
+        gl.glUniform1f(d->u("u_fog_opaque"), f.fog.opaque);
         auto bind2d = [&](int unit, int tex, const char *has) {
             GLuint id = tex >= 0 && (size_t)tex < d->tex2d.size() ? d->tex2d[(size_t)tex] : 0;
             gl.glActiveTexture(GL_TEXTURE0 + unit);

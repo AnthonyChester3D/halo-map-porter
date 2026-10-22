@@ -919,15 +919,11 @@ bool plan(const fs::path &bsp_file, const Options &o, Leaves &L, std::vector<int
             per[(size_t)p.front]++;
             per[(size_t)p.back]++;
         }
-        auto mergeable = [&](int a, int c) {
-            if (!o.keep_clusters) return true;
-            // (both within one of the map's own clusters)
-            for (int i = 0; i < L.count; i++)
-                if (cl[(size_t)i] == a || cl[(size_t)i] == c)
-                    for (int j = 0; j < L.count; j++)
-                        if ((cl[(size_t)j] == a || cl[(size_t)j] == c) && L.cluster[(size_t)i] != L.cluster[(size_t)j]) return false;
-            return true;
-        };
+        // (both within one of the map's own clusters: each cluster here is within one, so its first leaf's says)
+        std::vector<int> own((size_t)clusters, -1);
+        for (int i = 0; i < L.count; i++)
+            if (cl[(size_t)i] >= 0 && own[(size_t)cl[(size_t)i]] < 0) own[(size_t)cl[(size_t)i]] = L.cluster[(size_t)i];
+        auto mergeable = [&](int a, int c) { return !o.keep_clusters || own[(size_t)a] == own[(size_t)c]; };
         std::vector<int> to((size_t)clusters);
         for (int c = 0; c < clusters; c++) to[(size_t)c] = c;
         std::function<int(int)> root = [&](int c) { return to[(size_t)c] == c ? c : to[(size_t)c] = root(to[(size_t)c]); };
@@ -941,7 +937,7 @@ bool plan(const fs::path &bsp_file, const Options &o, Leaves &L, std::vector<int
         if (!merged) {
             int most = 0;
             for (int c = 0; c < clusters; c++) most = std::max(most, per[(size_t)c]);
-            if (ps.size() <= 480 && most <= 120 && (o.keep_clusters || clusters <= 120)) break;
+            if (ps.size() <= 480 && most <= 120 && clusters <= 120) break;
             // Over a limit: the two clusters with the most portals between them join.
             std::pair<int, int> best{-1, -1};
             int bn = 0;
@@ -1619,8 +1615,8 @@ bool sample_views(const fs::path &bsp, const PlayArea &area, int count, std::vec
 Result add_portals(const fs::path &file, const Options &options) {
     using tagfile::TagNode;
     Result r;
-    // Only a level with one cluster: the map's own clusters (their sky, fog, sound and weather, and the portals its
-    // maker placed) are left as they are.
+    // A level with one cluster; or, with options.replan, one with clusters of its own: those are divided further
+    // (each new cluster keeps its own cluster's sky, fog, sound and weather), when that draws less than its portals.
     tagfile::EditTag et;
     if (!et.load(file)) { r.why = "couldn't be read"; return r; }
     TagNode &root = et.root();
@@ -1630,9 +1626,11 @@ Result add_portals(const fs::path &file, const Options &options) {
     if (!clusters || !cportals || !leaves || !leaf_surfaces || !markers) { r.why = "couldn't be read"; return r; }
     r.clusters_before = (int)clusters->size();
     r.portals_before = (int)cportals->size();
-    if (clusters->size() != 1) { r.why = clusters->empty() ? "has no clusters" : "already has portals"; return r; }
+    if (clusters->empty()) { r.why = "has no clusters"; return r; }
+    const bool replan = clusters->size() > 1;
+    if (replan && !options.replan) { r.why = "already has portals"; return r; }
     Options o = options;
-    o.keep_clusters = false;
+    o.keep_clusters = replan;
     Leaves L;
     std::vector<int> cl;
     std::string rep;
@@ -1640,6 +1638,12 @@ Result add_portals(const fs::path &file, const Options &options) {
     int nc = 0;
     for (int c : cl) nc = std::max(nc, c + 1);
     if (nc < 2) { r.why = "has no rooms worth keeping apart"; return r; }
+    if (replan && nc <= (int)clusters->size()) { r.why = "has no clusters worth dividing further"; return r; }
+    if (nc > 120) { r.why = "would need more clusters than the engine draws"; return r; }
+    // Each new cluster's own (the map's) cluster: its settings, and which clusters it can see.
+    std::vector<int> parent((size_t)nc, 0);
+    for (size_t i = 0; i < cl.size() && i < L.cluster.size(); i++)
+        if (cl[i] >= 0 && cl[i] < nc) parent[(size_t)cl[i]] = std::clamp(L.cluster[i], 0, (int)clusters->size() - 1);
 
     tagfile::Tag rt;
     Bsp b;
@@ -1666,9 +1670,9 @@ Result add_portals(const fs::path &file, const Options &options) {
         }
     }
 
-    // Worth it? What the engine would draw from where players are, without and with.
+    // Worth it? What the engine would draw from where players are, as it is and with.
     Drawn before, after;
-    if (!estimate(file, Arrangement::None, nullptr, nullptr, before, options.area) ||
+    if (!estimate(file, replan ? Arrangement::Own : Arrangement::None, nullptr, nullptr, before, options.area) ||
         !estimate(file, Arrangement::Given, &cl, &ps, after, options.area)) {
         r.why = "couldn't be measured";
         return r;
@@ -1677,8 +1681,8 @@ Result add_portals(const fs::path &file, const Options &options) {
     r.drawn_after = after.median;
     r.drawn_high_before = before.high;
     r.drawn_high_after = after.high;
-    if (after.median > before.median * 0.85 && after.mean > before.mean * 0.85) {
-        r.why = "is open enough that portals wouldn't save much";
+    if (after.median > before.median * (1 - options.min_gain) && after.mean > before.mean * (1 - options.min_gain)) {
+        r.why = replan ? "draws about as little with its own portals" : "is open enough that portals wouldn't save much";
         return r;
     }
 
@@ -1731,12 +1735,12 @@ Result add_portals(const fs::path &file, const Options &options) {
     std::vector<TagNode> new_markers;
     for (size_t i : marker_order) new_markers.push_back((*markers)[i]);
 
-    // The clusters: the one cluster's settings (sky, fog, sound, weather...) for each.
-    const TagNode tmpl = (*clusters)[0];
-    int sub_sid = tagfile::block_struct(tmpl, "subclusters");
+    // The clusters: their own (the map's) cluster's settings (sky, fog, sound, weather...) for each.
+    const std::vector<TagNode> old_clusters = *clusters;
+    int sub_sid = tagfile::block_struct(old_clusters[0], "subclusters");
     std::vector<TagNode> new_clusters;
     for (int c = 0; c < nc; c++) {
-        TagNode cn = tmpl;
+        TagNode cn = old_clusters[(size_t)parent[(size_t)c]];
         std::vector<TagNode> *subs = tagfile::block(cn, "subclusters");
         if (!subs) { r.why = "couldn't be read"; return r; }
         subs->clear();
@@ -1842,11 +1846,20 @@ Result add_portals(const fs::path &file, const Options &options) {
 
     // Leaves, visibility (every cluster may see every other: the portals do the work), and sound: how far apart
     // two clusters are through the portals (a byte each pair: 1/127 of 256 units a step; 0xFF can't be reached).
+    // (Divided clusters: a new one sees what its own cluster saw.)
     for (size_t i = 0; i < leaves->size() && i < cl.size(); i++) tagfile::set_num((*leaves)[i], "cluster", cl[i]);
+    std::string old_pvs = tagfile::data(root, "cluster data") ? *tagfile::data(root, "cluster data") : std::string();
+    size_t old_n = old_clusters.size(), old_row = (old_n + 31) / 32 * 4;
+    auto old_sees = [&](int a, int c) {
+        if (!replan || old_pvs.size() < old_n * old_row) return true;
+        return ((unsigned char)old_pvs[(size_t)a * old_row + (size_t)c / 8] >> (c % 8) & 1) != 0;
+    };
     size_t row = ((size_t)nc + 31) / 32 * 4;
     std::string pvs((size_t)nc * row, '\0');
     for (int a = 0; a < nc; a++)
-        for (int c = 0; c < nc; c++) pvs[(size_t)a * row + (size_t)c / 8] |= (char)(1 << (c % 8));   // (little-endian words)
+        for (int c = 0; c < nc; c++)
+            if (old_sees(parent[(size_t)a], parent[(size_t)c]))
+                pvs[(size_t)a * row + (size_t)c / 8] |= (char)(1 << (c % 8));   // (little-endian words)
     std::vector<std::vector<int>> of((size_t)nc);
     for (size_t k = 0; k < ps.size(); k++) { of[(size_t)ps[k].front].push_back((int)k); of[(size_t)ps[k].back].push_back((int)k); }
     std::vector<V3> pc;
