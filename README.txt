@@ -76,6 +76,11 @@ FIRST-TIME SETUP
        .zip, unzip it anywhere, then use Browse to pick the folder that
        contains invader-build.exe.
 
+   LOD library folder
+       Where the lower-detail versions of models the app makes for Xbox
+       maps are kept (see "Levels of detail" below). Filled in for you;
+       change it to share one library between PCs (a synced folder).
+
 3. Your settings are saved automatically.
 
 
@@ -349,6 +354,48 @@ Levels of detail (LODs)
   distances (also the multiplayer Scorpion). Faster on maps full of
   scenery, but those models then switch detail where they never did on
   retail.
+
+  Making lower-detail versions
+  Many custom models have only one version, so the Xbox draws all of
+  their triangles however far away they are. "Make lower-detail versions
+  (LODs) of the map's models that have none" (Xbox tab, on by default)
+  makes them for the map's own models with 1,000 triangles or more: a
+  medium version with about half the triangles (used from the "high"
+  switch distance down) and a low one with about a fifth (from "medium"
+  down). It takes out the vertices that change the shape least and keeps
+  every other vertex exactly as it was (position, texture coordinates,
+  normal, bones), the edges where one shader's part meets another (no
+  cracks), and the edges between pieces moved by different bones (a wheel
+  stays separate from the body). A version is only added when it has at
+  least a fifth fewer triangles than the one above it, and a model with
+  no switch distances gets the stock-style ones above.
+  Left alone: stock models, characters (bipeds), first-person models,
+  models whose shape needs most of their triangles, and the models listed
+  in skip.txt (below). The [lod] lines in the log name each model with its
+  triangles, most detailed > medium > low.
+  The versions cost memory: on the Xbox, a model's vertices and triangles
+  are part of the 22 MB of tag memory (and of the map file), and the
+  [lod] line says how much they add (about 0.5 MB for three big models).
+  If the map then needs more tag memory than the Xbox has, or is over the
+  size limit by less than the versions take, the app takes them out again
+  and rebuilds, and the log says so. The weapons & vehicles window
+  measures maps without them.
+
+  The LOD library
+  Every version the app makes is kept in the LOD library folder (Settings
+  tab; %LOCALAPPDATA%\HaloMapPorter\lod_library unless you change it), so
+  the same model in another map, or the same map converted again, reuses
+  them instead of making them again. In the folder:
+    *.lod       The versions of one model's geometry, named after it (an
+                edited model gets new ones).
+    index.txt   One line per model added: date, tag path, triangles (most
+                detailed > medium > low) and its .lod files.
+    skip.txt    Models to leave alone, one per line: a tag path
+                (vehicles\jet\jet.model) or a name (jet: the model's or
+                its object's). Lines starting with # are ignored. Make
+                this file yourself when a model's lower-detail versions
+                look wrong in game.
+  Deleting .lod files (or the whole folder) has them made again next time.
   Stock maps are the exception: converting Custom Edition's Blood Gulch,
   Sidewinder and the other maps the Xbox also has gives you the Xbox's own
   version of the map, with the Xbox's vehicles. Maps the Xbox never had
@@ -476,9 +523,9 @@ Custom weapons, vehicles and player model
   every swap as [xbox-mp] lines.
   "Other custom ones" covers custom weapons with no Xbox original (for
   example a beam rifle): keep them, or replace them with an Xbox weapon.
-  Their effects, projectiles and animations take some of the Xbox's 22 MB
-  of memory (a model's geometry doesn't count toward it), so replacing them
-  can be what makes a big map fit.
+  Their models, effects, projectiles and animations take some of the Xbox's
+  22 MB of memory (on the Xbox a model's geometry is kept with the tag
+  data), so replacing them can be what makes a big map fit.
   Unticked, the map also keeps its own globals settings where they're the
   map's content: its grenades (e.g. custom grenade types), its weapon list
   (what the gametype weapon options use) and its multiplayer player model,
@@ -768,8 +815,8 @@ The log lists every automatic change:
   [textures] Textures were scaled or compressed like stock Xbox maps.
   [shaders] Layered transparent shaders were flattened for Xbox.
   [effects] Looping prop effects were lightened for Xbox.
-  [lod]   Models got switch distances for their lower-detail versions
-          (see "Levels of detail" above).
+  [lod]   Lower-detail versions were made for models, or models got
+          switch distances for theirs (see "Levels of detail" above).
 
 Warnings (for example "There are 1/16 Slayer spawns") don't stop the
 build. They point at things worth checking in your map.
@@ -816,8 +863,9 @@ Xbox hangs on "loading level"
 
 "The map needs more memory than Xbox has for it"
     Separate from the file size, the Xbox has 22 MB of memory for the
-    map's level geometry (BSP) and tag data. Textures, sounds and model
-    geometry don't count toward it, so shrinking them doesn't help. When a
+    map's level geometry (BSP) and tag data, models' geometry included.
+    Textures and sounds don't count toward it, so shrinking them doesn't
+    help. When a
     map is over, the app first rebuilds it with Invader's optimize option,
     which stores identical data only once (the log says "[optimize]"; the
     build takes longer). If it's still over, the map needs a simpler BSP or
@@ -883,5 +931,6 @@ HaloMapPorter_source.zip     Source code (C++)
 README.txt                   This file
 
 Settings:   %APPDATA%\HaloMapPorter\settings.ini
-Cache:      %LOCALAPPDATA%\HaloMapPorter\
+Cache:      %LOCALAPPDATA%\HaloMapPorter\ (the LOD library is in it too,
+            unless you moved it)
 Uninstall:  delete this folder and the two folders above.

@@ -1,6 +1,7 @@
 // Halo Map Porter - conversion engine
 #include "core.hpp"
 #include "inflate.hpp"
+#include "lod.hpp"
 #include "perf.hpp"
 #include "tagfile.hpp"
 
@@ -277,6 +278,10 @@ struct Job {
     fs::path choices_scenario;            // analysis: the scenario copy the stock choices were added to (backup alongside)
     std::string resources_from;           // convert: where the map's bitmaps.map/sounds.map were read from (for messages)
     ContentAnalysis *measure = nullptr;   // convert: measure here too when the map doesn't fit (see convert_map)
+    // Models the app made lower-detail versions for, as they were before (to take them out again when the map
+    // doesn't fit the Xbox), and what those versions take in the Xbox map.
+    std::vector<std::pair<fs::path, std::string>> lod_backups;
+    size_t lod_xbox_bytes = 0;
 
     Job(const Config &c, const Log &l, Game t) : cfg(c), log(l), target(t) {}
 
@@ -1079,7 +1084,7 @@ static bool measure_xbox_memory(const fs::path &map, XboxMemoryUse &u) {
 }
 void convert_bc7_textures(Job &job);
 void xbox_content_passes(Job &job);
-void fill_lod_cutoffs(Job &job, const std::vector<std::string> &deps);
+void xbox_lods(Job &job, const std::vector<std::string> &deps);
 static std::vector<std::string> performance_lines(Job &job);
 static void convert_scripts(Job &job, const fs::path &dir, Game target);
 bool prepare_models_for_pc(Job &job, std::string &err);
@@ -1462,6 +1467,21 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
     std::vector<std::string> cmd = make_cmd();
     bool scripts_tried = false;
     int none_fixes = 0;
+    // The map doesn't fit the Xbox with the lower-detail versions the app made: take them out again (they're for
+    // speed; the map's content comes first). `why` empty: quietly (measuring the map as it is without them).
+    auto undo_lods = [&](const std::string &why) {
+        if (job.lod_backups.empty()) return false;
+        for (auto &[p, b] : job.lod_backups) std::ofstream(p, std::ios::binary | std::ios::trunc) << b;
+        char mb[32];
+        snprintf(mb, sizeof mb, "%.1f", job.lod_xbox_bytes / 1048576.0);
+        job.lod_backups.clear();
+        job.lod_xbox_bytes = 0;
+        if (!why.empty()) {
+            job.note("[lod] the map " + why + ", so the lower-detail versions made for it (" + mb + " MB) were taken out again");
+            performance = performance_lines(job);   // the report's, with those models as they are
+        }
+        return true;
+    };
     std::set<std::string> stock_choices;   // analysis: Xbox weapons/vehicles added to be measured as replacements
     if (job.analysis) {
         stock_choices = add_stock_choices_for_analysis(job);
@@ -1498,6 +1518,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
     auto measure_for_window = [&] {
         if (!job.measure || measured || job.analysis || job.target != Game::Xbox || !cfg.xbox_replace.empty()) return;
         measured = true;
+        undo_lods("");   // as the window measures a map: without the lower-detail versions the app makes
         job.log("Measuring the map for the weapons & vehicles window...");
         job.analysis = job.measure;   // analysis build flags
         stock_choices = add_stock_choices_for_analysis(job);
@@ -1616,6 +1637,14 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
         Failure f;
         static const std::regex too_big(R"(exceeds (?:the )?maximum size[^(]*\(([\d.]+) (?:MiB )?> ([\d.]+))");
         std::smatch tb;
+        // Too big with the lower-detail versions the app made, and taking them out is enough: they come out (before
+        // any texture is halved). Shrinking textures may get it close enough for that later.
+        if (std::regex_search(out, tb, too_big) && job.target == Game::Xbox && !job.lod_backups.empty() &&
+            (std::atof(tb[1].str().c_str()) - std::atof(tb[2].str().c_str())) * 1048576.0 < job.lod_xbox_bytes * 0.9 &&
+            undo_lods("is " + tb[1].str().substr(0, 5) + " MB, over the Xbox's " + tb[2].str().substr(0, 5) + " MB limit")) {
+            cmd = make_cmd();
+            continue;
+        }
         if (std::regex_search(out, tb, too_big) && job.target == Game::Xbox && cfg.xbox_shrink && shrink_rounds < 6 &&
             !shrink_hopeless) {
             double over = std::atof(tb[1].str().c_str()) - std::atof(tb[2].str().c_str());
@@ -1654,6 +1683,13 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
             cmd = make_cmd();
             continue;
         }
+        // Still over the tag memory limit: the lower-detail versions the app made come out before anything of the
+        // map's is given up (and the numbers in the message are then the map's own).
+        if (std::regex_search(out, tb, tag_space) && job.target == Game::Xbox &&
+            undo_lods("needs " + tb[1].str().substr(0, 5) + " MB of the Xbox's " + tb[2].str().substr(0, 5) + " MB of tag memory")) {
+            cmd = make_cmd();
+            continue;
+        }
         if (std::regex_search(out, tb, tag_space) && job.target == Game::Xbox) measure_for_window();
         if (std::regex_search(out, tb, tag_space) && job.target == Game::Xbox && drop_kept_vehicles(job)) {
             cmd = make_cmd();
@@ -1667,8 +1703,8 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
                       "count toward this, so shrinking them doesn't help.";
             if (job.target == Game::Xbox)
                 r.error += "\nTo save memory, on the Xbox tab: keep \"Use the Xbox's own weapons, vehicles and player model\" "
-                           "ticked, and set \"Other custom ones\" to an Xbox weapon (each custom weapon's effects, projectiles and "
-                           "animations take memory; its model's geometry doesn't count). "
+                           "ticked, and set \"Other custom ones\" to an Xbox weapon (each custom weapon's model, effects, projectiles "
+                           "and animations take memory). "
                            "If that isn't enough, the map needs a simpler BSP or fewer custom objects.";
             r.error += size_breakdown(job);
             return r;
@@ -3235,7 +3271,7 @@ void xbox_content_passes(Job &job) {
     if (flares)
         job.note("[xbox] removed the reflections from " + std::to_string(flares) +
                  " lens flares that have no bitmap to draw them with");
-    fill_lod_cutoffs(job, deps);
+    xbox_lods(job, deps);
 }
 
 // The kind of object each model is drawn for in the world (v vehicle, b biped, s scenery and devices, w weapons and
@@ -3269,14 +3305,19 @@ static std::map<std::string, char> model_kinds(Job &job, const std::vector<std::
     return kind;
 }
 
-// Models with levels of detail but no switch distances always draw their most detailed level: the engine draws a
-// level once the model is at least that many pixels across, and with every distance 0 that's always the top one.
-// Give them switch distances like the stock Xbox models of their kind (Bungie's own, in tag order super high, high,
-// medium, low, super low; super low stays 0, so they're never left out). The map's own models always; Bungie's
-// (36 stock models ship like this, mostly trees, rocks and plants) with the Xbox tab's option. Only models an object
-// draws in the world: the engine draws first-person models (weapons, hands) as 0 pixels across, so with switch
-// distances they'd always be at their least detailed.
-void fill_lod_cutoffs(Job &job, const std::vector<std::string> &deps) {
+static std::string thousands(long long v);
+
+// Levels of detail. A model drawn in the world (not first-person) of the map's own with no lower-detail versions gets
+// them made (lod.hpp; Xbox tab option, on by default), kept in the LOD library so another map with the same model
+// reuses them; characters are left alone (bones bend them). Then models with lower-detail versions but no switch
+// distances get some: they always draw their most detailed level otherwise (the engine draws a level once the model
+// is at least that many pixels across, and with every distance 0 that's always the top one). The distances are like
+// the stock Xbox models of the kind (Bungie's own, in tag order super high, high, medium, low, super low; super low
+// stays 0, so nothing is left out). The map's own models always; Bungie's (36 stock models ship like this, mostly
+// trees, rocks and plants) with the Xbox tab's option. Only models an object draws in the world: the engine draws
+// first-person models (weapons, hands) as 0 pixels across, so with switch distances they'd always be at their least
+// detailed.
+void xbox_lods(Job &job, const std::vector<std::string> &deps) {
     struct Cut { char kind; const char *label; int px[5]; };
     static const Cut cuts[] = {{'v', "vehicles", {200, 100, 50, 20, 0}},
                                {'b', "characters", {280, 200, 80, 30, 0}},
@@ -3284,10 +3325,75 @@ void fill_lod_cutoffs(Job &job, const std::vector<std::string> &deps) {
                                {'w', "weapons and items", {100, 50, 25, 10, 0}}};
     static const char *keys[5] = {"super_high_detail_cutoff", "high_detail_cutoff", "medium_detail_cutoff",
                                   "low_detail_cutoff", "super_low_detail_cutoff"};
-    std::map<std::string, char> kinds;
     std::set<std::string> first_person;
     std::map<std::string, std::string> names;
-    bool kinds_read = false;
+    std::map<std::string, char> kinds = model_kinds(job, deps, first_person, names);
+    auto cut_for = [&](const std::string &dep) {
+        const Cut *c = &cuts[0];
+        for (auto &x : cuts)
+            if (x.kind == kinds[dep]) c = &x;
+        return c;
+    };
+    auto name_of = [&](const std::string &dep) { return names.count(dep) ? names[dep] : fs::path(from_u8(dep)).stem().u8string(); };
+    auto list = [](const std::vector<std::string> &v, size_t most = 8) {
+        std::string s;
+        for (size_t i = 0; i < v.size() && i < most; i++) s += (i ? ", " : "") + v[i];
+        if (v.size() > most) s += " and " + std::to_string(v.size() - most) + " more";
+        return s;
+    };
+
+    // 1. Making lower-detail versions. Not when measuring for the weapons & vehicles window: it shows what the map
+    // needs to fit, and the conversion takes them out again when they don't fit.
+    if (job.cfg.xbox_make_lods && !job.analysis) {
+        lod::Settings ls;
+        ls.library = !job.cfg.lod_library.empty() ? job.cfg.lod_library : job.cfg.cache_dir / "lod_library";
+        std::vector<std::string> made, reused, left;
+        size_t bytes = 0;
+        for (auto &dep : deps) {
+            if (!has_suffix(dep, ".model") && !has_suffix(dep, ".gbxmodel")) continue;
+            fs::path own = job.owner(dep);
+            if (own.empty() || own == job.overlay || !kinds.count(dep) || first_person.count(dep) || kinds[dep] == 'b') continue;
+            perf::ModelStats ms = perf::model_stats(own / from_u8(dep));
+            if (!ms.ok || ms.lods || ms.triangles < ls.min_triangles) continue;
+            if (lod::skipped(ls, dep, name_of(dep))) {
+                left.push_back(name_of(dep) + " (listed in the LOD library's skip.txt)");
+                continue;
+            }
+            fs::path ed = editable_owner(job, dep);
+            if (ed.empty()) continue;
+            double px[5];
+            for (int i = 0; i < 5; i++) px[i] = cut_for(dep)->px[i];
+            std::string before;
+            {
+                std::ifstream in(ed / from_u8(dep), std::ios::binary);
+                before.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            }
+            lod::Result r = lod::add_lods(ed / from_u8(dep), px, ls, dep);
+            if (!r.changed) {
+                left.push_back(name_of(dep) + " (" + r.why + ")");
+                continue;
+            }
+            job.lod_backups.push_back({ed / from_u8(dep), std::move(before)});
+            job.lod_xbox_bytes += r.xbox_bytes;
+            bytes += r.xbox_bytes;
+            std::string l = name_of(dep) + " " + thousands(r.triangles);
+            for (int k : r.level_triangles)
+                if (k) l += " > " + thousands(k);
+            (r.from_library ? reused : made).push_back(l);
+        }
+        if (!made.empty() || !reused.empty()) {
+            char mb[32];
+            snprintf(mb, sizeof mb, "%.1f", bytes / 1048576.0);
+            std::vector<std::string> all = made;
+            all.insert(all.end(), reused.begin(), reused.end());
+            job.note("[lod] made lower-detail versions of " + std::to_string(all.size()) + " of the map's models that had none (" +
+                     mb + " MB more of the Xbox's tag memory and map file; triangles, most detailed > medium > low): " + list(all) +
+                     (reused.empty() ? "" : " (" + std::to_string(reused.size()) + " reused from the LOD library)"));
+        }
+        if (!left.empty()) job.note("[lod] left as they are: " + list(left, 4));
+    }
+
+    // 2. Switch distances.
     std::vector<std::string> own_done, stock_done;
     for (auto &dep : deps) {
         if (!has_suffix(dep, ".model") && !has_suffix(dep, ".gbxmodel")) continue;
@@ -3295,28 +3401,17 @@ void fill_lod_cutoffs(Job &job, const std::vector<std::string> &deps) {
         if (own.empty()) continue;
         bool stock = own == job.overlay;
         if (stock && !job.cfg.xbox_lod_stock_models) continue;
+        if (!kinds.count(dep) || first_person.count(dep)) continue;
         perf::ModelStats ms = perf::model_stats(own / from_u8(dep));
         if (!ms.ok || !ms.lods || !ms.no_cutoffs()) continue;
-        if (!kinds_read) { kinds = model_kinds(job, deps, first_person, names); kinds_read = true; }
-        if (!kinds.count(dep) || first_person.count(dep)) continue;
-        char k = kinds[dep];
-        const Cut *c = &cuts[0];
-        for (auto &x : cuts)
-            if (x.kind == k) c = &x;
         fs::path ed = editable_owner(job, dep, stock);
         if (ed.empty()) continue;
         std::vector<std::string> args;
-        for (int i = 0; i < 5; i++) args.insert(args.end(), {"-S", keys[i], std::to_string(c->px[i])});
+        for (int i = 0; i < 5; i++) args.insert(args.end(), {"-S", keys[i], std::to_string(cut_for(dep)->px[i])});
         bool ok = false;
         edit_lines(job, ed, dep, args, &ok);
-        if (ok) (stock ? stock_done : own_done).push_back(names.count(dep) ? names[dep] : fs::path(from_u8(dep)).stem().u8string());
+        if (ok) (stock ? stock_done : own_done).push_back(name_of(dep));
     }
-    auto list = [](const std::vector<std::string> &v) {
-        std::string s;
-        for (size_t i = 0; i < v.size() && i < 8; i++) s += (i ? ", " : "") + v[i];
-        if (v.size() > 8) s += " and " + std::to_string(v.size() - 8) + " more";
-        return s;
-    };
     if (!own_done.empty())
         job.note("[lod] " + std::to_string(own_done.size()) + " of the map's models had lower-detail versions they never "
                  "used (no switch distances, so always drawn in full); gave them stock-style ones: " + list(own_done));

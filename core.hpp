@@ -50,6 +50,10 @@ struct Config {
     // Models with lower-detail versions but no switch distances always draw in full; the map's own get stock-style
     // distances. This also does it for stock Xbox models (36 ship that way, mostly trees, rocks and plants).
     bool xbox_lod_stock_models = false;
+    // Make lower-detail versions (LODs) for the map's own models that have none (lod.hpp), kept in the LOD library
+    // (empty: cache_dir/lod_library) so the same model in another map reuses them.
+    bool xbox_make_lods = true;
+    fs::path lod_library;
     // Custom weapons with no Xbox original: empty = keep them, else an Xbox weapon name (e.g. "sniper rifle").
     std::string xbox_other_weapons;
     // Largest side for the map's own world textures (stock Xbox maps stay at 512) and for lightmaps.

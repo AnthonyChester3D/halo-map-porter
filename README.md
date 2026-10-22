@@ -20,6 +20,8 @@ the free, open-source Halo map compiler, and it can download Invader for you.
   - It converts Gearbox models, HUDs and sounds, and flattens layered shaders the Xbox can't draw.
 - **Fitting the Xbox.** It works within the Xbox's limits: the 47 MB map file, the 22 MB of tag memory, and a
   texture memory target (22 / 20 / 18 MB) that the auto-shrinker halves your own textures to meet.
+- **Speed on the Xbox.** It makes lower-detail versions (LODs) of the map's custom models that have none, keeps
+  them in a library so other maps reuse them, and reports what the Xbox has to draw.
 - **Weapons & vehicles window.** It shows what each weapon and vehicle costs in tag memory and file size, and
   lets you replace or drop them.
 - **Map folders and packs** for the Halo Universal and
@@ -53,4 +55,6 @@ conversion engine, used for testing on Linux.
 
 ## License
 
-MIT, see [LICENSE](LICENSE). The bundled stb and bcdec headers keep their own (MIT or public domain) licenses.
+MIT, see [LICENSE](LICENSE). The bundled stb and bcdec headers keep their own (MIT or public domain) licenses, and
+`meshoptimizer/` (the parts of [meshoptimizer](https://github.com/zeux/meshoptimizer) 1.3 that make the LODs) keeps
+its MIT license, see [meshoptimizer/LICENSE.md](meshoptimizer/LICENSE.md).

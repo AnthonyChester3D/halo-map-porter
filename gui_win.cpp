@@ -66,6 +66,8 @@ enum {
     ID_PK_MAPLIST,
     // stock models' unused levels of detail
     ID_X_LODSTOCK,
+    // making lower-detail versions, and the LOD library's folder (each *_BROWSE directly follows its edit box)
+    ID_X_MAKELOD, ID_S_LOD_LBL, ID_S_LOD, ID_S_LOD_BROWSE, ID_S_LOD_HINT,
 };
 
 #define WM_APP_LOG (WM_APP + 1)
@@ -129,7 +131,7 @@ static const struct { int id; const wchar_t *key; } kSaved[] = {
     {ID_S_CE, L"ce_dir"},       {ID_S_MCC, L"mcc_maps"},       {ID_S_EK, L"ek_dir"},
     {ID_S_INV, L"invader_dir"}, {ID_IN, L"last_input"},        {ID_SCEN, L"scenario"},
     {ID_B_MCC_OUT, L"b_mcc_out"}, {ID_B_CE_OUT, L"b_ce_out"}, {ID_B_XBOX_OUT, L"b_xbox_out"},
-    {ID_S_XT, L"xbox_tags"},    {ID_S_XM, L"xbox_maps"},
+    {ID_S_XT, L"xbox_tags"},    {ID_S_XM, L"xbox_maps"},     {ID_S_LOD, L"lod_library"},
     {ID_PK_IN, L"pk_in"},       {ID_PK_OUT, L"pk_out"},        {ID_PK_LOGO, L"pk_logo"},
 };
 
@@ -147,6 +149,7 @@ static void save_settings() {
     ini_set(L"x_stock", checked(ID_X_STOCK) ? L"1" : L"0");
     ini_set(L"x_allveh", checked(ID_X_ALLVEH) ? L"1" : L"0");
     ini_set(L"x_lodstock", checked(ID_X_LODSTOCK) ? L"1" : L"0");
+    ini_set(L"x_makelod", checked(ID_X_MAKELOD) ? L"1" : L"0");
     ini_set(L"x_tex2", std::to_wstring(sel(ID_X_TEX)));
     ini_set(L"x_lm", std::to_wstring(sel(ID_X_LM)));
     ini_set(L"x_w2", std::to_wstring(sel(ID_X_W2)));
@@ -171,6 +174,7 @@ static Config make_config() {
     c.xbox_maps_dir = fs::path(get_text(ID_S_XM));
     c.invader_dir = fs::path(get_text(ID_S_INV));
     c.cache_dir = appdata_dir(CSIDL_LOCAL_APPDATA);
+    c.lod_library = fs::path(get_text(ID_S_LOD));
     return c;
 }
 
@@ -394,6 +398,7 @@ static void apply_xbox_options(Config &cfg) {
     cfg.xbox_use_stock_versions = checked(ID_X_STOCK);
     cfg.xbox_keep_all_vehicles = folder_mode() && checked(ID_X_ALLVEH);
     cfg.xbox_lod_stock_models = checked(ID_X_LODSTOCK);
+    cfg.xbox_make_lods = checked(ID_X_MAKELOD);
     {
         static const int tex[4] = {512, 512, 1024, 0}, obj[4] = {256, 0, 0, 0}, lm[3] = {0, 512, 256};
         int t = sel(ID_X_TEX), l = sel(ID_X_LM);
@@ -845,7 +850,8 @@ static std::string contents_key(const Config &cfg, const fs::path &in) {
     std::error_code ec;
     auto mt = fs::last_write_time(in, ec);
     std::string key = N(lower(in.wstring())) + "|" + std::to_string((long long)mt.time_since_epoch().count()) + "|" +
-                      (cfg.xbox_use_stock_versions ? "s" : "-") + (cfg.xbox_keep_all_vehicles ? "a" : "-") + "|" +
+                      (cfg.xbox_use_stock_versions ? "s" : "-") + (cfg.xbox_keep_all_vehicles ? "a" : "-") +
+                      (cfg.xbox_make_lods ? "l" : "-") + "|" +
                       cfg.xbox_other_weapons + "|" + cfg.xbox_vehicle_slots[0] + "|" + cfg.xbox_vehicle_slots[1] + "|" +
                       cfg.xbox_vehicle_slots[2];
     for (auto &w : cfg.xbox_keep_weapons) key += "|k" + w;
@@ -1528,7 +1534,7 @@ static bool pk_command(int id, int code) {
 }
 
 static void create_controls() {
-    g_tab = CreateWindowExW(0, WC_TABCONTROLW, L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, S(10), S(10), S(740), S(448),
+    g_tab = CreateWindowExW(0, WC_TABCONTROLW, L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, S(10), S(10), S(740), S(474),
                             g_wnd, (HMENU)ID_TAB, GetModuleHandleW(nullptr), nullptr);
     SendMessageW(g_tab, WM_SETFONT, (WPARAM)g_font, TRUE);
     const wchar_t *tabs[] = {L"  Convert a map  ", L"  Build from my tags  ", L"  Xbox  ", L"  Map packs  ", L"  Settings  "};
@@ -1661,6 +1667,9 @@ static void create_controls() {
             ID_X_W2_HINT);
     }
     y += 36;
+    check(2, L"Make lower-detail versions (LODs) of the map's models that have none, kept in the LOD library (Settings tab)",
+          26, y, 708, ID_X_MAKELOD);
+    y += 26;
     check(2, L"Also use the lower-detail versions of Bungie's own trees, rocks and plants at a distance (retail never did)",
           26, y, 708, ID_X_LODSTOCK);
 
@@ -1700,14 +1709,21 @@ static void create_controls() {
         L"Xbox tags folder: an Xbox tagset such as haloxbox-revised (recommended). Xbox maps: your own Xbox stock "
         L"maps, used only if no Xbox tags folder is set. See README.txt for details.",
         0, 26, y, 708, 36, ID_S_HINT);
+    y += 46;
+    label(4, L"LOD library folder:", 26, y, 160, ID_S_LOD_LBL);
+    edit(4, 190, y, 440, ID_S_LOD);
+    button(4, L"Browse...", 638, y - 1, 96, ID_S_LOD_BROWSE);
+    y += 30;
+    add(4, L"STATIC", L"The lower-detail versions the app makes are kept here, so the same model in another map reuses them. "
+        L"List models it should leave alone in skip.txt there (one per line).", 0, 190, y, 544, 36, ID_S_LOD_HINT);
 
     // Shared area
-    g_log = add(-1, L"EDIT", L"", WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 10, 468, 740, 250, ID_LOG,
+    g_log = add(-1, L"EDIT", L"", WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 10, 494, 740, 250, ID_LOG,
                 WS_EX_CLIENTEDGE);
     SendMessageW(g_log, WM_SETFONT, (WPARAM)g_mono, TRUE);
     SendMessageW(g_log, EM_SETLIMITTEXT, 0, 0);
-    add(-1, L"BUTTON", L"Open output folder", BS_PUSHBUTTON, 10, 726, 150, 26, ID_OPEN_FOLDER);
-    add(-1, L"BUTTON", L"Open report", BS_PUSHBUTTON, 168, 726, 120, 26, ID_OPEN_REPORT);
+    add(-1, L"BUTTON", L"Open output folder", BS_PUSHBUTTON, 10, 752, 150, 26, ID_OPEN_FOLDER);
+    add(-1, L"BUTTON", L"Open report", BS_PUSHBUTTON, 168, 752, 120, 26, ID_OPEN_REPORT);
     ShowWindow(GetDlgItem(g_wnd, ID_OPEN_FOLDER), SW_HIDE);
     ShowWindow(GetDlgItem(g_wnd, ID_OPEN_REPORT), SW_HIDE);
 
@@ -1737,6 +1753,11 @@ static void create_controls() {
     set_check(ID_X_STOCK, ini_get(L"x_stock", L"1") == L"1");
     set_check(ID_X_ALLVEH, ini_get(L"x_allveh", L"1") == L"1");
     set_check(ID_X_LODSTOCK, ini_get(L"x_lodstock", L"0") == L"1");
+    set_check(ID_X_MAKELOD, ini_get(L"x_makelod", L"1") == L"1");
+    {
+        std::wstring lib = ini_get(L"lod_library");
+        set_text(ID_S_LOD, lib.empty() ? (appdata_dir(CSIDL_LOCAL_APPDATA) / L"lod_library").wstring() : lib);
+    }
     for (auto [id, key, mx, def] : {std::tuple<int, const wchar_t *, int, const wchar_t *>{ID_X_TEX, L"x_tex2", 3, L"0"},
                                     {ID_X_LM, L"x_lm", 2, L"2"}}) {
         int k = _wtoi(ini_get(key, def).c_str());
@@ -1869,7 +1890,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case ID_X_ALLVEH:
             if (code == BN_CLICKED) { update_vehicle_texts(); save_settings(); }
             break;
-        case ID_X_LODSTOCK:
+        case ID_X_LODSTOCK: case ID_X_MAKELOD:
             if (code == BN_CLICKED) save_settings();
             break;
         case ID_X_CONTENTS:
@@ -1928,7 +1949,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case ID_B_MCC_BROWSE: case ID_B_CE_BROWSE: case ID_S_CE_BROWSE: case ID_S_MCC_BROWSE:
         case ID_B_XBOX_BROWSE: case ID_S_XT_BROWSE: case ID_S_XM_BROWSE:
-        case ID_S_EK_BROWSE: case ID_S_INV_BROWSE: {
+        case ID_S_EK_BROWSE: case ID_S_INV_BROWSE: case ID_S_LOD_BROWSE: {
             int target = id - 1;
             auto f = pick_folder(get_text(target));
             if (!f.empty()) {
@@ -2017,7 +2038,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(1));
     wc.hIconSm = wc.hIcon;
     RegisterClassExW(&wc);
-    RECT r{0, 0, S(760), S(762)};
+    RECT r{0, 0, S(760), S(788)};
     DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
     AdjustWindowRect(&r, style, FALSE);
     HWND h = CreateWindowExW(0, L"HaloMapPorter", L"Halo Map Porter", style, CW_USEDEFAULT, CW_USEDEFAULT,

@@ -54,6 +54,8 @@ int main(int argc, char **argv) {
     }
     cfg.xbox_keep_all_vehicles = getenv("XALLVEH") != nullptr;
     cfg.xbox_lod_stock_models = getenv("XLODSTOCK") != nullptr;
+    cfg.xbox_make_lods = getenv("XNOLOD") == nullptr;
+    if (getenv("LODLIB")) cfg.lod_library = getenv("LODLIB");
     if (getenv("XKEEP")) { // comma-separated weapon tags to keep
         std::string w = getenv("XKEEP"), item;
         std::stringstream ss(w);
