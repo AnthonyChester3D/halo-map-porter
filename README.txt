@@ -568,7 +568,7 @@ Weapons & vehicles window (Xbox)
   if it had been destroyed: a jet's pieces are never made, its health reads
   as gone. Try the map once to check its scripts still do what you want.
 
-Level reflections, fog and tiny scenery: the "Level..." window (Xbox)
+Level reflections, fog, scenery and weather: the "Level..." window (Xbox)
   The Xbox draws every level surface at least twice: its lightmap, then
   its textures. A shader with a reflection (a cube map, and a perpendicular
   or parallel brightness above 0) draws it a third time, and a fourth when
@@ -589,8 +589,8 @@ Level reflections, fog and tiny scenery: the "Level..." window (Xbox)
   (freeing its memory too); the surface keeps its textures, bump map and
   lightmap. The log's [reflections] line lists the ones dropped.
   The "Level..." button on the Xbox tab shows this for the Convert tab's map
-  (or the Build tab's scenario), with the level's fog and tiny scenery (see
-  "Fog" and "Tiny scenery" below). Measuring prepares the map as for a
+  (or the Build tab's scenario), with the level's fog, tiny scenery and
+  weather (see "Fog", "Tiny scenery" and "Weather" below). Measuring prepares the map as for a
   conversion without building it (seconds to a minute).
   - When converting: keep every reflection (the default), drop the
     suggested ones (the ones that cost the most passes for how little they
@@ -626,6 +626,8 @@ Level reflections, fog and tiny scenery: the "Level..." window (Xbox)
     own sky).
   - Hide scenery: never (the default), or below 4, 8, 12 or 16 pixels
     across. The picture shows the level only, not its objects.
+  - Weather: as made (the default), lighter, half the drops, or off, each
+    with the level's own number of drops. The picture doesn't show it.
   Hover over the choices and checkboxes for what each does. Choices are
   saved per map and used every time you convert it for the Xbox.
   Measurements are kept between runs of the app until the map file
@@ -665,6 +667,26 @@ Tiny scenery (Xbox, "Level..." window)
   skips everything. Halo 1 Unlimited counts every model at half its size
   in widescreen (to pay for the wider view), so there things go at twice
   the size chosen.
+
+Weather (Xbox, "Level..." window)
+  Rain and snow cost the Xbox's processor every frame, wherever you are,
+  indoors too: every drop around the camera is moved, clipped against the
+  level's rain-free volumes and drawn. Deathtrap's rain took 2.5 ms of
+  each 33 ms frame. A weather type keeps its particle count (per cubic
+  unit) x its fade-out end distance cubed drops in a box around you, and
+  the engine keeps at most 512: Deathtrap's asks for about 3,600, so it
+  always runs at 512. Bungie's heaviest rain (343 Guilty Spark) is about
+  220 drops, ending 5 units away.
+  - Lighter: just as dense around you as the engine draws it now, but
+    ending 5 units away (fading out over the same share of the distance),
+    so far fewer drops: Deathtrap's 512 become about 125. No change for
+    weather that already ends within 5 units and isn't at the cap.
+  - Half the drops: thinner everywhere (half of what the engine draws now,
+    not of what the tag asks for).
+  - Off: no rain or snow; the wind stays.
+  Every weather system the level uses is changed (a copy of a stock one
+  for this map). The log's [weather] line says what changed. As made by
+  default.
 
 Dynamic lights (Xbox)
   A dynamic light (a muzzle flash, an explosion, a map's lightning) lights
@@ -1022,6 +1044,8 @@ The log lists every automatic change:
   [fog]   The level's fog was made fully opaque (see "Fog" above).
   [scenery] Tiny scenery and devices aren't drawn (see "Tiny scenery"
           above).
+  [weather] The level's rain or snow was made lighter or turned off (see
+          "Weather" above).
   [lights] Dynamic lights that would have the Xbox draw most of the level
           again were turned off or shrunk (see "Dynamic lights" above).
 

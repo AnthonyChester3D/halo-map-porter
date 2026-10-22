@@ -78,6 +78,13 @@ struct Fog {
     bool any() const { return density > 0 && opaque > 0; }
     bool cuts() const { return density >= 1.0f && opaque > 0; }
 };
+// The level's heaviest rain or snow (its BSP's weather palette): the drops the engine keeps around the camera as made
+// and with each of the level window's weather choices (perf::weather_lighten), and how far away it ends.
+struct Weather {
+    int32_t systems = 0;
+    float made = 0, lighter = 0, half = 0;
+    float end = 0, lighter_end = 0;
+};
 struct Preview {
     std::vector<Triangle> triangles;
     std::vector<Material> materials;
@@ -90,6 +97,7 @@ struct Preview {
     std::vector<Fog> sky_fog;
     Fog indoor_fog;
     std::vector<int16_t> room_sky;
+    Weather weather;
     // Which room a point is in: the level's BSP tree (child: a node, ~leaf for a leaf (-2 and less), -1 solid).
     struct Node { float n[3] = {0, 0, 0}; float d = 0; int32_t front = -1, back = -1; };
     std::vector<Node> tree;

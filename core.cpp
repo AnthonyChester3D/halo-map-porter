@@ -1097,6 +1097,7 @@ void xbox_lights(Job &job, const std::vector<std::string> &deps);
 void xbox_reflections(Job &job);
 void xbox_fog(Job &job);
 void xbox_scenery(Job &job, const std::vector<std::string> &deps);
+void xbox_weather(Job &job);
 static std::string thousands(long long v);
 static std::vector<std::string> performance_lines(Job &job);
 static LodView make_lod_view(Job &job, const std::string &map_name);
@@ -3326,6 +3327,7 @@ void xbox_content_passes(Job &job) {
     if (!job.cfg.level_shaders_only) {   // (after the level is measured: the window shows the fog as the map has it)
         xbox_fog(job);
         xbox_scenery(job, deps);
+        xbox_weather(job);
     }
 }
 
@@ -3947,6 +3949,78 @@ void xbox_scenery(Job &job, const std::vector<std::string> &deps) {
         job.note("[scenery] scenery and devices aren't drawn once smaller on screen than " + fmt_num(px) + " pixels across (" +
                  fmt_num(px * 2) + " in widescreen; " + std::to_string(done.size()) + (done.size() == 1 ? " model's" : " models'") +
                  " smallest switch size raised to it): " + list);
+    }
+}
+
+// The level's rain or snow, lighter (the level window's choice: perf::weather_lighten). The engine moves, clips and
+// draws every drop each frame, indoors too (Deathtrap's: 2.5 ms of an Xbox's 33, every frame), and keeps at most
+// 512. Every weather system the level's BSPs use, stock ones too (a copy for this map).
+void xbox_weather(Job &job) {
+    const int mode = job.cfg.xbox_weather;
+    if (mode < 1 || mode > 3 || job.analysis) return;
+    std::string scen = job.scenario + ".scenario";
+    fs::path sdir = job.owner(scen);
+    tagfile::Tag st;
+    if (sdir.empty() || !st.load(sdir / from_u8(scen))) return;
+    std::set<std::string> systems;
+    tagfile::Block bsps = st.root().block("structure bsps");
+    for (size_t i = 0; i < bsps.size(); i++) {
+        std::string b = bsps[i].ref("structure bsp");
+        fs::path own = b.empty() ? fs::path() : job.owner(b);
+        tagfile::Tag bt;
+        if (own.empty() || !bt.load(own / from_u8(b))) continue;
+        tagfile::Block pal = bt.root().block("weather palette");
+        for (size_t k = 0; k < pal.size(); k++)
+            if (auto w = pal[k].ref("particle system"); !w.empty()) systems.insert(w);
+    }
+    std::vector<std::string> changed;
+    for (auto &w : systems) {
+        fs::path ed = editable_owner(job, w, true);
+        if (ed.empty()) continue;
+        tagfile::EditTag et;
+        if (!et.load(ed / from_u8(w))) continue;
+        std::vector<tagfile::TagNode> *types = tagfile::block(et.root(), "particle types");
+        if (!types || types->empty()) continue;
+        std::vector<perf::WeatherType> v;
+        for (auto &n : *types) {
+            perf::WeatherType t;
+            t.count_lo = tagfile::get_num(n, "particle count", 0);
+            t.count_hi = tagfile::get_num(n, "particle count", 1);
+            t.fade_in_start = tagfile::get_num(n, "fade in start distance");
+            t.fade_in_end = tagfile::get_num(n, "fade in end distance");
+            t.fade_out_start = tagfile::get_num(n, "fade out start distance");
+            t.fade_out_end = tagfile::get_num(n, "fade out end distance");
+            v.push_back(t);
+        }
+        double before = perf::weather_drops(v), end_before = 0;
+        for (auto &t : v) end_before = std::max(end_before, t.fade_out_end);
+        if (!perf::weather_lighten(v, mode)) continue;
+        for (size_t i = 0; i < v.size(); i++) {
+            tagfile::TagNode &n = (*types)[i];
+            tagfile::set_num(n, "particle count", v[i].count_lo, 0);
+            tagfile::set_num(n, "particle count", v[i].count_hi, 1);
+            tagfile::set_num(n, "fade in start distance", v[i].fade_in_start);
+            tagfile::set_num(n, "fade in end distance", v[i].fade_in_end);
+            tagfile::set_num(n, "fade out start distance", v[i].fade_out_start);
+            tagfile::set_num(n, "fade out end distance", v[i].fade_out_end);
+        }
+        if (!et.save(ed / from_u8(w))) continue;
+        double after = perf::weather_drops(v), end_after = 0;
+        for (auto &t : v) end_after = std::max(end_after, t.fade_out_end);
+        std::string what = fs::path(from_u8(w)).stem().u8string() + ": about " + thousands(std::lround(before)) + " drops";
+        if (mode == 3) what += ", now none";
+        else {
+            what += " -> " + thousands(std::lround(after));
+            if (end_after < end_before - 0.01)
+                what += " (ending " + fmt_num(end_after) + " units away instead of " + fmt_num(end_before) + ")";
+        }
+        changed.push_back(what);
+    }
+    if (!changed.empty()) {
+        std::string list;
+        for (auto &c : changed) list += (list.empty() ? "" : "; ") + c;
+        const char *how = mode == 1 ? "lighter (just as dense up close, ending nearer)" : mode == 2 ? "half as heavy" : "off";
+        job.note(std::string("[weather] made the level's rain/snow ") + how + ": " + list);
     }
 }
 

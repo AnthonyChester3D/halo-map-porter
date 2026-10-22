@@ -932,6 +932,7 @@ static shadersui::Picks load_shader_picks(const fs::path &input) {
             size_t t2 = v.find('\t');
             if (t2 != std::string::npos) picks.fog_scale = std::clamp(atof(v.c_str() + t2 + 1), 0.1, 1.0);
         } else if (k == "tinypx") picks.tiny_px = std::max(0.0, atof(v.c_str()));
+        else if (k == "weather") picks.weather = std::clamp(atoi(v.c_str()), 0, 3);
         // (an older "scenery" line, a distance, is left out: it popped big things in and out of view)
     }
     return picks;
@@ -940,7 +941,8 @@ static void save_shader_picks(const fs::path &input, const shadersui::Picks &pic
     fs::path p = shader_picks_file(input);
     std::error_code ec;
     shadersui::Picks defaults;
-    if (picks.mode == defaults.mode && picks.fog == defaults.fog && picks.tiny_px == defaults.tiny_px) {   // (all as by default)
+    if (picks.mode == defaults.mode && picks.fog == defaults.fog && picks.tiny_px == defaults.tiny_px &&
+        picks.weather == defaults.weather) {   // (all as by default)
         fs::remove(p, ec);
         return;
     }
@@ -951,6 +953,7 @@ static void save_shader_picks(const fs::path &input, const shadersui::Picks &pic
     f << "fog\t" << picks.fog << '\t' << picks.fog_scale << '\n';
     f << "fogdist\t" << picks.fog_distance << '\n';
     f << "tinypx\t" << picks.tiny_px << '\n';
+    f << "weather\t" << picks.weather << '\n';
 }
 static void apply_shader_picks(Config &cfg, const fs::path &input) {
     shadersui::Picks picks = load_shader_picks(input);
@@ -959,6 +962,7 @@ static void apply_shader_picks(Config &cfg, const fs::path &input) {
     cfg.xbox_fog_scale = picks.fog_scale;
     cfg.xbox_fog_distance = picks.fog_distance;
     cfg.xbox_scenery_pixels = picks.tiny_px;
+    cfg.xbox_weather = picks.weather;
     if (picks.mode == 1) {
         cfg.xbox_reflection_picks_set = true;
         cfg.xbox_reflection_picks = picks.drops;
@@ -1011,7 +1015,8 @@ static void open_shaders() {
         if (picks.tiny_px > 0) swprintf(tiny, 60, L"hidden below %g px", picks.tiny_px);
         else swprintf(tiny, 60, L"never hidden");
         append_log(L"Level choices for " + in.filename().wstring() + L", used when you convert it for the Xbox: " + refl +
-                   L"; fog " + fog + L"; scenery " + tiny + L".");
+                   L"; fog " + fog + L"; scenery " + tiny + L"; weather " +
+                   (picks.weather == 1 ? L"lighter" : picks.weather == 2 ? L"half the drops" : picks.weather == 3 ? L"off" : L"as made") + L".");
     }
 }
 

@@ -25,7 +25,7 @@ namespace {
 enum {
     IDC_MODE0 = 400, IDC_MODE1, IDC_MODE2, IDC_STATUS, IDC_LIST, IDC_VIEW, IDC_PREV, IDC_NEXT, IDC_BEFORE, IDC_AFTER,
     IDC_CHANGES, IDC_HILITE, IDC_COST, IDC_REMEASURE, IDC_OKB, IDC_CANCELB, IDC_ABOUT, IDC_PORTALS, IDC_FOG_LBL, IDC_FOG,
-    IDC_FAR_LBL, IDC_FAR, IDC_FOG_DIST, IDC_FOG_UNITS,
+    IDC_FAR_LBL, IDC_FAR, IDC_FOG_DIST, IDC_FOG_UNITS, IDC_WEATHER_LBL, IDC_WEATHER,
 };
 #define WM_LS_LOG (WM_APP + 60)
 #define WM_LS_DONE (WM_APP + 61)
@@ -342,6 +342,33 @@ void fill_fog() {
     show_fog_distance();
 }
 
+// The weather choices (Picks::weather), with the level's own drops.
+void fill_weather() {
+    HWND c = item(IDC_WEATHER);
+    SendMessageW(c, CB_RESETCONTENT, 0, 0);
+    const lshade::Weather w = St->data ? St->data->p.weather : lshade::Weather();
+    if (!St->data || !w.systems || w.made < 1) {
+        SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)(St->data ? L"The level has no rain or snow" : L""));
+        SendMessageW(c, CB_SETCURSEL, 0, 0);
+        EnableWindow(c, FALSE);
+        return;
+    }
+    EnableWindow(c, TRUE);
+    auto n = [](float v) { return thousands((long long)std::lround(v)); };
+    wchar_t e[24], le[24];
+    swprintf(e, 24, L"%g", std::round(w.end * 10) / 10);
+    swprintf(le, 24, L"%g", std::round(w.lighter_end * 10) / 10);
+    std::wstring items[4] = {
+        L"As made: about " + n(w.made) + L" drops around you, ending " + e + L" units away" +
+            (w.made >= 511.5f ? L" (the engine's most)" : L""),
+        w.lighter < w.made - 0.5f ? L"Lighter: just as dense up close, ending " + std::wstring(le) + L" units away: about " + n(w.lighter) + L" drops"
+                                  : L"Lighter: no change (it already ends within " + std::wstring(le) + L" units)",
+        L"Half the drops: about " + n(w.half),
+        L"Off: no rain or snow (the wind stays)"};
+    for (auto &t : items) SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)t.c_str());
+    SendMessageW(c, CB_SETCURSEL, std::clamp(St->picks.weather, 0, 3), 0);
+}
+
 void fill_list() {
     ListView_DeleteAllItems(St->list);
     St->row_shader.clear();
@@ -379,6 +406,7 @@ void fill_list() {
     SetWindowTextW(item(IDC_STATUS), s.c_str());
     update_cost();
     fill_fog();
+    fill_weather();
     pick_views();
     go_to_view();
 }
@@ -600,7 +628,7 @@ void create_controls() {
         IDC_MODE0);
     add(L"BUTTON", L"Drop the ones I tick", BS_AUTORADIOBUTTON, 756, 12, 160, 22, IDC_MODE1);
     add(L"STATIC", L"", 0, 12, 42, 1156, 20, IDC_STATUS);
-    St->list = add(WC_LISTVIEWW, L"", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP, 12, 68, 548, 556, IDC_LIST);
+    St->list = add(WC_LISTVIEWW, L"", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP, 12, 68, 548, 586, IDC_LIST);
     ListView_SetExtendedListViewStyle(St->list, LVS_EX_FULLROWSELECT | LVS_EX_CHECKBOXES | LVS_EX_DOUBLEBUFFER);
     struct Col { const wchar_t *name; int w; } cols[] = {{L"Shader (ticked: reflection goes)", 184}, {L"Extra passes", 84},
                                                         {L"Shows", 52}, {L"Covers", 54}, {L"Triangles", 64}, {L"Suggested", 74}};
@@ -635,11 +663,13 @@ void create_controls() {
                                                  L"Below 12 px (24 widescreen)", L"Below 16 px (32 widescreen)"};
         for (auto t : tiny_items) SendMessageW(item(IDC_FAR), CB_ADDSTRING, 0, (LPARAM)t);
     }
-    add(L"BUTTON", L"Measure again", BS_PUSHBUTTON | WS_TABSTOP, 12, 636, 120, 26, IDC_REMEASURE);
+    add(L"STATIC", L"Weather:", SS_NOTIFY, 572, 630, 56, 20, IDC_WEATHER_LBL);
+    add(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 630, 626, 538, 300, IDC_WEATHER);
+    add(L"BUTTON", L"Measure again", BS_PUSHBUTTON | WS_TABSTOP, 12, 666, 120, 26, IDC_REMEASURE);
     add(L"STATIC", L"Shows: how much of what you see is its reflection. Covers: how much of the screen it is. Passes: triangles drawn again per view.",
-        0, 140, 640, 740, 20, IDC_ABOUT);
-    add(L"BUTTON", L"OK", BS_DEFPUSHBUTTON | WS_TABSTOP, 966, 636, 96, 26, IDC_OKB);
-    add(L"BUTTON", L"Cancel", BS_PUSHBUTTON | WS_TABSTOP, 1072, 636, 96, 26, IDC_CANCELB);
+        0, 140, 670, 740, 20, IDC_ABOUT);
+    add(L"BUTTON", L"OK", BS_DEFPUSHBUTTON | WS_TABSTOP, 966, 666, 96, 26, IDC_OKB);
+    add(L"BUTTON", L"Cancel", BS_PUSHBUTTON | WS_TABSTOP, 1072, 666, 96, 26, IDC_CANCELB);
     CheckRadioButton(St->wnd, IDC_MODE0, IDC_MODE2, IDC_MODE0 + St->picks.mode);
     CheckRadioButton(St->wnd, IDC_BEFORE, IDC_CHANGES, IDC_AFTER);
     CheckDlgButton(St->wnd, IDC_HILITE, BST_CHECKED);
@@ -651,6 +681,7 @@ void create_controls() {
         SendMessageW(item(IDC_FAR), CB_SETCURSEL, k, 0);
     }
     fill_fog();
+    fill_weather();
 
     // Tooltips.
     St->tips = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT,
@@ -701,6 +732,13 @@ void create_controls() {
                              L"you look at; at these sizes that's hard to see. They don't show in the picture.";
     tip(IDC_FAR, far_tip);
     tip(IDC_FAR_LBL, far_tip);
+    const wchar_t *weather_tip = L"Rain and snow cost the Xbox's processor every frame, indoors too: every drop is moved, clipped "
+                                 L"and drawn (Deathtrap's rain: 2.5 ms of a 33 ms frame). The engine keeps at most 512 drops. "
+                                 L"Lighter keeps the rain just as dense around you but ends it 5 units away (Bungie's rain on "
+                                 L"343 Guilty Spark ends there), so far fewer drops; half the drops makes it thinner everywhere; "
+                                 L"off removes it. The picture doesn't show weather.";
+    tip(IDC_WEATHER, weather_tip);
+    tip(IDC_WEATHER_LBL, weather_tip);
     tip(IDC_VIEW, L"Click here, then fly: drag with the mouse to look around, W A S D to move where you look, Q / E to go "
                   L"down and up (Shift faster, Ctrl slower), the mouse wheel to step forward and back.");
     tip(IDC_PREV, L"The previous view (the selected shader's, or the ones that see most of the level).");
@@ -814,6 +852,12 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 if (k >= 0 && k < kTinyCount) St->picks.tiny_px = kTiny[k];
             }
             return 0;
+        case IDC_WEATHER:
+            if (HIWORD(wp) == CBN_SELCHANGE && St->data && St->data->p.weather.systems) {
+                int k = (int)SendMessageW(item(IDC_WEATHER), CB_GETCURSEL, 0, 0);
+                if (k >= 0 && k <= 3) St->picks.weather = k;
+            }
+            return 0;
         case IDC_PORTALS:
             St->portals = IsDlgButtonChecked(h, IDC_PORTALS) == BST_CHECKED;
             render(false);
@@ -892,7 +936,7 @@ bool edit(HWND owner, const std::wstring &title, const std::string &key, Measure
     st.measure = std::move(measure);
     st.picks = picks;
 
-    RECT r{0, 0, S(1180), S(674)};
+    RECT r{0, 0, S(1180), S(704)};
     DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
     AdjustWindowRect(&r, style, FALSE);
     RECT orc;

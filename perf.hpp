@@ -4,6 +4,7 @@
 #pragma once
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace perf {
 
@@ -34,5 +35,22 @@ ModelStats model_stats(const std::filesystem::path &model);
 std::string object_model(const std::filesystem::path &object);
 // A weapon's first-person model (drawn in the player's view; the engine always asks it for its most detailed level).
 std::string weapon_first_person_model(const std::filesystem::path &weapon);
+
+// A level's rain or snow (a .weather_particle_system): each type keeps its particle count (per cubic world unit) x
+// its fade-out end distance cubed drops in a box around the camera, and the engine keeps at most 512 drops in all
+// (weather_particle_systems.c), so a heavy system is thinner than its tag says. Every drop is moved, clipped and
+// drawn every frame, indoors too: Deathtrap's rain (asking for ~3,600) cost an Xbox 2.5 ms a frame.
+struct WeatherType {
+    double count_lo = 0, count_hi = 0;
+    double fade_in_start = 0, fade_in_end = 0, fade_out_start = 0, fade_out_end = 0;
+};
+constexpr double kMaxWeatherDrops = 512;
+constexpr double kLighterWeatherEnd = 5;   // (Bungie's rain on 343 Guilty Spark ends there)
+std::vector<WeatherType> weather_types(const std::filesystem::path &weather);
+double weather_wanted(const std::vector<WeatherType> &types);   // the drops the tag asks for
+double weather_drops(const std::vector<WeatherType> &types);    // the drops the engine keeps
+// The level window's choice applied to a system's types: 1 lighter (just as dense up close, as the engine draws it,
+// but ending at kLighterWeatherEnd units: fewer drops), 2 half the drops, 3 none. False if it changes nothing.
+bool weather_lighten(std::vector<WeatherType> &types, int mode);
 
 }   // namespace perf

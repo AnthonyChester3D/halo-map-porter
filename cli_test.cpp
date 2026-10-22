@@ -117,6 +117,7 @@ int main(int argc, char **argv) {
         if (const char *c = strchr(x, ':')) (cfg.xbox_fog == 3 ? cfg.xbox_fog_distance : cfg.xbox_fog_scale) = atof(c + 1);
     }
     if (getenv("XSCENERY")) cfg.xbox_scenery_pixels = atof(getenv("XSCENERY"));   // pixels across
+    if (getenv("XWEATHER")) cfg.xbox_weather = atoi(getenv("XWEATHER"));          // 1 lighter, 2 half, 3 off
     if (const char *x = getenv("XREFL")) {   // keep | tag,tag,... (the level shaders window's picks)
         std::string w = x, item;
         if (w == "keep") cfg.xbox_drop_reflections = false;

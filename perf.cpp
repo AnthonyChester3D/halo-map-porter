@@ -2,6 +2,7 @@
 #include "perf.hpp"
 #include "tagfile.hpp"
 #include <algorithm>
+#include <cmath>
 #include <vector>
 
 namespace perf {
@@ -133,6 +134,60 @@ std::string weapon_first_person_model(const std::filesystem::path &weapon) {
     tagfile::Tag t;
     if (!t.load(weapon)) return "";
     return t.root().ref("first person model");
+}
+
+std::vector<WeatherType> weather_types(const std::filesystem::path &weather) {
+    std::vector<WeatherType> v;
+    tagfile::Tag t;
+    if (!t.load(weather)) return v;
+    tagfile::Block types = t.root().block("particle types");
+    for (size_t i = 0; i < types.size(); i++) {
+        WeatherType w;
+        w.count_lo = types[i].num("particle count", 0);
+        w.count_hi = types[i].num("particle count", 1);
+        w.fade_in_start = types[i].num("fade in start distance");
+        w.fade_in_end = types[i].num("fade in end distance");
+        w.fade_out_start = types[i].num("fade out start distance");
+        w.fade_out_end = types[i].num("fade out end distance");
+        v.push_back(w);
+    }
+    return v;
+}
+
+double weather_wanted(const std::vector<WeatherType> &types) {
+    double n = 0;
+    for (auto &w : types) n += std::max(0.0, (w.count_lo + w.count_hi) / 2) * std::pow(std::max(0.0, w.fade_out_end), 3);
+    return n;
+}
+
+double weather_drops(const std::vector<WeatherType> &types) { return std::min(weather_wanted(types), kMaxWeatherDrops); }
+
+bool weather_lighten(std::vector<WeatherType> &types, int mode) {
+    double wanted = weather_wanted(types);
+    if (wanted <= 0) return false;
+    if (mode == 3) {
+        for (auto &w : types) w.count_lo = w.count_hi = 0;
+        return true;
+    }
+    double s = std::min(1.0, kMaxWeatherDrops / wanted);   // (how much of what it asks for the engine keeps)
+    bool changed = s < 0.999;
+    for (auto &w : types) {
+        w.count_lo *= s;
+        w.count_hi *= s;
+        if (mode == 2) {
+            w.count_lo *= 0.5;
+            w.count_hi *= 0.5;
+            changed = true;
+        } else if (mode == 1 && w.fade_out_end > kLighterWeatherEnd) {
+            double k = kLighterWeatherEnd / w.fade_out_end;
+            w.fade_out_start *= k;
+            w.fade_out_end = kLighterWeatherEnd;
+            w.fade_in_end = std::min(w.fade_in_end, w.fade_out_start);
+            w.fade_in_start = std::min(w.fade_in_start, w.fade_in_end);
+            changed = true;
+        }
+    }
+    return changed && mode >= 1 && mode <= 2;
 }
 
 }   // namespace perf

@@ -26,6 +26,7 @@ struct Picks {
     double fog_scale = 1.0;
     double fog_distance = 0;
     double tiny_px = 0;
+    int weather = 0;   // (Config::xbox_weather)
 };
 
 // Modal. `key` identifies the map and what changes its level (a measurement is reused while it's the same).

@@ -13,6 +13,7 @@ ROOTS = {   # tag extension -> root struct
     'shader_environment': 'ShaderEnvironment', 'shader_transparent_chicago': 'ShaderTransparentChicago',
     'shader_transparent_chicago_extended': 'ShaderTransparentChicagoExtended',
     'shader_transparent_generic': 'ShaderTransparentGeneric', 'effect': 'Effect', 'light': 'Light', 'sky': 'Sky',
+    'weather_particle_system': 'WeatherParticleSystem',
 }
 
 types = {}

@@ -68,6 +68,9 @@ struct Config {
     int xbox_fog = 0;
     double xbox_fog_scale = 1.0;
     double xbox_fog_distance = 0;
+    // The level's rain or snow (perf::weather_lighten): 0 as made, 1 lighter (as dense up close, ending at 5 units), 2
+    // half the drops, 3 none.
+    int xbox_weather = 0;
     // Scenery and devices not drawn once smaller on screen than this many pixels across (their models' smallest
     // switch size raised to it; 0: as the map has them).
     double xbox_scenery_pixels = 0;

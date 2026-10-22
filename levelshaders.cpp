@@ -9,6 +9,7 @@
 #include <set>
 
 #include "bcdec.h"
+#include "perf.hpp"
 #include "tagfile.hpp"
 
 namespace lshade {
@@ -406,6 +407,28 @@ bool analyze(const fs::path &bsp_file, const fs::path &scenario, const Find &fin
                 p.sky_fog.push_back(f);
             }
         }
+        // (the weather: the heaviest of the systems the level uses)
+        tagfile::Block pal = r.block("weather palette");
+        std::set<std::string> seen;
+        for (size_t i = 0; i < pal.size(); i++) {
+            std::string ref = pal[i].ref("particle system");
+            if (ref.empty() || !seen.insert(ref).second) continue;
+            fs::path file = find(ref);
+            std::vector<perf::WeatherType> v = file.empty() ? std::vector<perf::WeatherType>() : perf::weather_types(file);
+            if (v.empty()) continue;
+            p.weather.systems++;
+            float made = (float)perf::weather_drops(v);
+            if (made < p.weather.made) continue;
+            Weather w;
+            w.systems = p.weather.systems;
+            w.made = made;
+            for (auto &t : v) w.end = std::max(w.end, (float)t.fade_out_end);
+            std::vector<perf::WeatherType> l = v, h = v;
+            w.lighter = perf::weather_lighten(l, 1) ? (float)perf::weather_drops(l) : made;
+            for (auto &t : l) w.lighter_end = std::max(w.lighter_end, (float)t.fade_out_end);
+            w.half = perf::weather_lighten(h, 2) ? (float)perf::weather_drops(h) : made;
+            p.weather = w;
+        }
         for (size_t c = 0; c < clusters.size(); c++) {
             long long sky = clusters[c].integer("sky");
             p.room_sky.push_back((int16_t)(sky >= 0 && sky < 65535 ? sky : -1));
@@ -759,7 +782,7 @@ void draw(const Preview &p, const Camera &cam, const std::vector<char> &reflecti
 
 // The file: a magic, then each part as counts and raw values (this machine's byte order: the file is a cache).
 namespace {
-const char kMagic[8] = {'H', 'M', 'P', 'L', 'S', 'H', 'D', '4'};
+const char kMagic[8] = {'H', 'M', 'P', 'L', 'S', 'H', 'D', '5'};
 struct Out {
     std::ofstream f;
     template <class T> void raw(const T &v) { f.write((const char *)&v, sizeof v); }
@@ -818,6 +841,7 @@ bool save(const Analysis &a, const Preview &p, const fs::path &file) {
     o.vec(p.sky_fog);
     o.raw(p.indoor_fog);
     o.vec(p.room_sky);
+    o.raw(p.weather);
     o.vec(p.tree);
     o.vec(p.leaf_room);
     return (bool)o.f;
@@ -865,6 +889,7 @@ bool load(Analysis &a, Preview &p, const fs::path &file) {
     in.vec(p.sky_fog);
     in.raw(p.indoor_fog);
     in.vec(p.room_sky);
+    in.raw(p.weather);
     in.vec(p.tree);
     in.vec(p.leaf_room);
     return in.ok && a.drawn.size() == (size_t)a.views * a.shaders.size();
