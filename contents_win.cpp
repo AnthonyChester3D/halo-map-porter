@@ -3,6 +3,8 @@
 
 #include <commctrl.h>
 
+#include "modelview_win.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
@@ -19,7 +21,7 @@ namespace {
 
 enum {
     IDC_SUMMARY = 300, IDC_STATUS, IDC_LIST, IDC_REPL_LBL, IDC_REPL, IDC_KEEPALL, IDC_TOTAL, IDC_FILE, IDC_REMEASURE,
-    IDC_OKB, IDC_CANCELB,
+    IDC_OKB, IDC_CANCELB, IDC_VIEW, IDC_ABOUT,
 };
 #define WM_CU_LOG (WM_APP + 40)
 #define WM_CU_DONE (WM_APP + 41)
@@ -27,7 +29,7 @@ enum {
 const COLORREF kOk = RGB(16, 124, 16), kBad = RGB(196, 43, 28), kGrey = RGB(96, 96, 96);
 
 struct State {
-    HWND wnd = nullptr, list = nullptr;
+    HWND wnd = nullptr, list = nullptr, view = nullptr;
     int dpi = 96;
     HFONT font = nullptr, bold = nullptr;
     bool done = false, ok = false;
@@ -113,6 +115,19 @@ const ContentItem *find_item(const std::string &tag) {
     return nullptr;
 }
 std::wstring item_label(const ContentItem &it) { return (it.in_map ? L"" : L"Xbox ") + W(it.name); }
+// The map's vehicles that are pieces of `tag` (its scripts make them and attach them to it).
+std::vector<const ContentItem *> pieces_of(const std::string &tag) {
+    std::vector<const ContentItem *> v;
+    if (St->an)
+        for (auto &it : St->an->items)
+            if (it.in_map && it.piece_of == tag) v.push_back(&it);
+    return v;
+}
+std::wstring thousands(long long n) {
+    std::wstring s = std::to_wstring(n);
+    for (int i = (int)s.size() - 3; i > 0; i -= 3) s.insert((size_t)i, L",");
+    return s;
+}
 std::wstring pick_text(const ContentItem &it) {
     if (!it.in_map) return L"";
     auto p = St->picks.find(it.tag);
@@ -171,12 +186,14 @@ void update_combo() {
     std::vector<int> rows = selected_rows();
     int kind = -1;   // 0 weapons, 1 vehicles, 2 mixed / none usable
     std::set<std::string> sel;
+    bool only_pieces = true;   // pieces of a vehicle: kept or removed, not swapped for a working vehicle
     for (int r : rows) {
         const ContentItem &it = St->an->items[St->row_item[r]];
         if (!it.in_map) continue;
         int k = it.vehicle ? 1 : 0;
         kind = kind < 0 ? k : (kind == k ? k : 2);
         sel.insert(it.tag);
+        only_pieces = only_pieces && !it.piece_of.empty();
     }
     bool usable = kind == 0 || kind == 1;
     EnableWindow(c, usable);
@@ -189,7 +206,8 @@ void update_combo() {
     add(L"Keep", "\x01");
     add(L"None (remove it)", "");
     for (auto &it : St->an->items) {
-        if (it.vehicle != (kind == 1) || sel.count(it.tag)) continue;
+        if (only_pieces) break;
+        if (it.vehicle != (kind == 1) || sel.count(it.tag) || !it.piece_of.empty()) continue;
         if (it.in_map && St->picks.count(it.tag)) continue;   // one that's being replaced itself
         add(it.in_map ? W(it.name) : L"Xbox " + W(it.name) + L" (adds " + mb(it.memory_mb) + L" MB)", it.tag);
     }
@@ -214,6 +232,11 @@ void apply_combo() {
         if (!it.in_map) continue;
         if (to == "\x01") St->picks.erase(it.tag);
         else St->picks[it.tag] = to;
+        // Its pieces go with it (and come back with it): the scripts would attach them to whatever replaces it.
+        for (const ContentItem *p : pieces_of(it.tag)) {
+            if (to == "\x01") St->picks.erase(p->tag);
+            else St->picks[p->tag] = "";
+        }
         // Others that were replaced with this one follow it.
         for (auto &[from, t] : St->picks)
             if (t == it.tag && from != it.tag) t = to == "\x01" ? it.tag : to;
@@ -223,6 +246,41 @@ void apply_combo() {
     int n = ListView_GetItemCount(St->list);
     for (int r = 0; r < n; r++) set_row_pick(r);
     update_totals();
+}
+
+// The model of the first selected row, and what it is.
+void update_preview() {
+    if (!St->view) return;
+    std::vector<int> rows = St->an ? selected_rows() : std::vector<int>();
+    if (rows.empty()) {
+        modelview::show(St->view, nullptr, St->an ? L"Click a weapon or vehicle to see it here." : L"");
+        SetWindowTextW(item(IDC_ABOUT), L"");
+        return;
+    }
+    const ContentAnalysis &a = *St->an;
+    const ContentItem &it = a.items[St->row_item[rows[0]]];
+    const ModelPreview *m = it.preview >= 0 && it.preview < (int)a.previews.size() ? &a.previews[it.preview] : nullptr;
+    modelview::show(St->view, m, L"No model to show for this one.");
+    std::wstring t = item_label(it) + L"\r\n";
+    if (!it.vehicle) t += L"Weapon";
+    else if (it.seats > 0) t += L"Vehicle, " + std::to_wstring(it.seats) + (it.seats == 1 ? L" seat" : L" seats") +
+                               (it.seat_roles.empty() ? L"" : L": " + W(it.seat_roles));
+    else if (it.seats == 0) t += L"Vehicle with no seats: nobody can drive it or ride in it";
+    else t += L"Vehicle";
+    if (m) t += L"\r\n" + thousands(m->triangles()) + L" triangles";
+    if (!it.in_map) t += L"\r\nAn Xbox one the map doesn't have: picking it adds what it costs.";
+    if (!it.piece_of.empty()) {
+        std::wstring parent = W(fs::path(it.piece_of).stem().u8string());
+        if (const ContentItem *p = find_item(it.piece_of)) parent = W(p->name);
+        t += L"\r\nA piece of " + parent + L": the map's scripts make it (usually when " + parent +
+             L" is destroyed) and attach it. Removing " + parent + L" removes its pieces too.";
+    } else if (it.in_map) {
+        auto ps = pieces_of(it.tag);
+        if (!ps.empty())
+            t += L"\r\nThe map's scripts make " + std::to_wstring(ps.size()) + (ps.size() == 1 ? L" piece" : L" pieces") +
+                 L" of it (listed below it), removed along with it.";
+    }
+    SetWindowTextW(item(IDC_ABOUT), t.c_str());
 }
 
 void add_group(int id, const wchar_t *text) {
@@ -245,12 +303,31 @@ void fill_list() {
     add_group(1, L"Weapons in the map");
     add_group(2, L"Vehicles in the map");
     add_group(3, L"Xbox weapons and vehicles you can replace them with (what each would add)");
+    // A vehicle's pieces right below it.
+    std::vector<size_t> order;
+    std::vector<char> placed(a.items.size(), 0);
+    auto has_parent = [&](const ContentItem &it) {
+        if (it.piece_of.empty()) return false;
+        for (auto &x : a.items)
+            if (x.tag == it.piece_of && x.in_map) return true;
+        return false;
+    };
     for (size_t i = 0; i < a.items.size(); i++) {
+        if (placed[i] || has_parent(a.items[i])) continue;
+        order.push_back(i);
+        placed[i] = 1;
+        for (size_t k = 0; k < a.items.size(); k++)
+            if (!placed[k] && a.items[k].in_map && a.items[k].piece_of == a.items[i].tag && a.items[i].in_map) {
+                order.push_back(k);
+                placed[k] = 1;
+            }
+    }
+    for (size_t i : order) {
         const ContentItem &it = a.items[i];
         LVITEMW lv{};
         lv.mask = LVIF_TEXT | LVIF_GROUPID | LVIF_PARAM;
         lv.iItem = (int)St->row_item.size();
-        std::wstring name = W(it.name);
+        std::wstring name = (has_parent(it) ? L"    \u2514 " : L"") + W(it.name);
         lv.pszText = (LPWSTR)name.c_str();
         lv.iGroupId = !it.in_map ? 3 : it.vehicle ? 2 : 1;
         lv.lParam = (LPARAM)i;
@@ -276,6 +353,7 @@ void fill_list() {
     SetWindowTextW(item(IDC_STATUS), L"Select one or more rows (Ctrl/Shift for several), then choose what replaces them.");
     update_combo();
     update_totals();
+    update_preview();
 }
 
 void set_busy(bool busy) {
@@ -371,7 +449,10 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         NMHDR *n = (NMHDR *)lp;
         if (n->idFrom == IDC_LIST && n->code == LVN_ITEMCHANGED) {
             NMLISTVIEW *v = (NMLISTVIEW *)lp;
-            if (v->uChanged & LVIF_STATE) update_combo();
+            if (v->uChanged & LVIF_STATE) {
+                update_combo();
+                update_preview();
+            }
         }
         return 0;
     }
@@ -390,6 +471,8 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 g_cache.erase(St->key);
                 disk_forget(St->key);
             }
+            modelview::show(St->view, nullptr);   // (its model goes with the measurement)
+            SetWindowTextW(item(IDC_ABOUT), L"");
             St->an.reset();
             ListView_DeleteAllItems(St->list);
             start_measure();
@@ -420,8 +503,12 @@ HWND add(const wchar_t *cls, const wchar_t *text, DWORD style, int x, int y, int
 }
 
 void create_controls() {
-    add(L"STATIC", L"", 0, 16, 12, 828, 66, IDC_SUMMARY);
-    add(L"STATIC", L"", SS_ENDELLIPSIS, 16, 80, 828, 20, IDC_STATUS);
+    add(L"STATIC", L"", 0, 16, 12, 1136, 66, IDC_SUMMARY);
+    add(L"STATIC", L"", SS_ENDELLIPSIS, 16, 80, 1136, 20, IDC_STATUS);
+    // The selected one's model and what it is.
+    St->view = modelview::create(St->wnd, S(856), S(102), S(296), S(256), IDC_VIEW);
+    SendMessageW(St->view, WM_SETFONT, (WPARAM)St->font, TRUE);
+    add(L"STATIC", L"", SS_NOPREFIX, 856, 364, 296, 120, IDC_ABOUT);
     St->list = add(WC_LISTVIEWW, L"", WS_TABSTOP | WS_BORDER | LVS_REPORT | LVS_SHOWSELALWAYS, 16, 102, 828, 382, IDC_LIST);
     ListView_SetExtendedListViewStyle(St->list, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP);
     struct { const wchar_t *t; int w; int fmt; } cols[] = {{L"Weapon / vehicle", 190, LVCFMT_LEFT},
@@ -441,12 +528,12 @@ void create_controls() {
     add(L"COMBOBOX", L"", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 208, 496, 300, 300, IDC_REPL);
     add(L"BUTTON", L"Keep everything", WS_TABSTOP, 520, 495, 140, 28, IDC_KEEPALL);
     add(L"BUTTON", L"Measure again", WS_TABSTOP, 704, 495, 140, 28, IDC_REMEASURE);
-    add(L"STATIC", L"", 0, 16, 534, 828, 20, IDC_TOTAL);
+    add(L"STATIC", L"", 0, 16, 534, 1136, 20, IDC_TOTAL);
     SendMessageW(item(IDC_TOTAL), WM_SETFONT, (WPARAM)St->bold, TRUE);
-    add(L"STATIC", L"", 0, 16, 556, 828, 20, IDC_FILE);
+    add(L"STATIC", L"", 0, 16, 556, 1136, 20, IDC_FILE);
     add(L"STATIC", L"Your picks are saved for this map and used every time you convert it for the Xbox.", 0, 16, 590, 520, 20, 0);
-    add(L"BUTTON", L"OK", WS_TABSTOP | BS_DEFPUSHBUTTON, 600, 584, 116, 30, IDC_OKB);
-    add(L"BUTTON", L"Cancel", WS_TABSTOP, 728, 584, 116, 30, IDC_CANCELB);
+    add(L"BUTTON", L"OK", WS_TABSTOP | BS_DEFPUSHBUTTON, 908, 584, 116, 30, IDC_OKB);
+    add(L"BUTTON", L"Cancel", WS_TABSTOP, 1036, 584, 116, 30, IDC_CANCELB);
 }
 
 } // namespace
@@ -492,7 +579,7 @@ bool edit_picks(HWND owner, const std::wstring &title, const std::string &key, A
     st.analyze = std::move(analyze);
     st.picks = picks;
 
-    RECT r{0, 0, S(860), S(628)};
+    RECT r{0, 0, S(1168), S(628)};
     DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
     AdjustWindowRect(&r, style, FALSE);
     RECT orc;

@@ -3,6 +3,7 @@
 #include "inflate.hpp"
 #include "lod.hpp"
 #include "perf.hpp"
+#include "preview.hpp"
 #include "tagfile.hpp"
 
 #include <algorithm>
@@ -6382,7 +6383,112 @@ Result build_from_tags(const Config &cfg, const fs::path &scenario_file, Game ou
 ContentEstimate estimate_contents(const ContentAnalysis &a, const std::map<std::string, std::string> &picks) {
     return estimate_contents_impl(a, picks);
 }
-static const char *kAnalysisMagic = "HaloMapPorter contents 1";
+static const char *kAnalysisMagic = "HaloMapPorter contents 2";
+static const char kPreviewMagic[8] = {'H', 'M', 'P', 'M', 'O', 'D', 'L', '2'};
+
+// The items' models, in a file of their own (binary, a few MB; textures stored as DXT1, an eighth of their size).
+static std::string dxt1_of(const ModelPreview::Texture &t) {
+    int bw = (t.w + 3) / 4, bh = (t.h + 3) / 4;
+    std::string out((size_t)bw * bh * 8, '\0');
+    unsigned char blk[64];
+    for (int by = 0; by < bh; by++)
+        for (int bx = 0; bx < bw; bx++) {
+            for (int k = 0; k < 16; k++) {
+                int x = std::min(t.w - 1, bx * 4 + k % 4), y = std::min(t.h - 1, by * 4 + k / 4);
+                memcpy(blk + k * 4, &t.rgba[((size_t)y * t.w + x) * 4], 4);
+                blk[k * 4 + 3] = 255;
+            }
+            stb_compress_dxt_block((unsigned char *)&out[((size_t)by * bw + bx) * 8], blk, 0, STB_DXT_NORMAL);
+        }
+    return out;
+}
+static void rgba_of_dxt1(const std::string &d, ModelPreview::Texture &t) {
+    int bw = (t.w + 3) / 4, bh = (t.h + 3) / 4;
+    t.rgba.assign((size_t)t.w * t.h * 4, 255);
+    if (d.size() < (size_t)bw * bh * 8) return;
+    unsigned char blk[64];
+    for (int by = 0; by < bh; by++)
+        for (int bx = 0; bx < bw; bx++) {
+            bcdec_bc1(d.data() + ((size_t)by * bw + bx) * 8, blk, 16);
+            for (int k = 0; k < 16; k++) {
+                int x = bx * 4 + k % 4, y = by * 4 + k / 4;
+                if (x < t.w && y < t.h) memcpy(&t.rgba[((size_t)y * t.w + x) * 4], blk + k * 4, 4);
+            }
+        }
+}
+static bool save_previews(const std::vector<ModelPreview> &v, const fs::path &file) {
+    std::ofstream f(file, std::ios::binary | std::ios::trunc);
+    auto u32 = [&](uint32_t x) { f.write((const char *)&x, 4); };
+    auto vec = [&](const auto &x) {
+        u32((uint32_t)x.size());
+        if (!x.empty()) f.write((const char *)x.data(), (std::streamsize)(x.size() * sizeof(x[0])));
+    };
+    f.write(kPreviewMagic, 8);
+    u32((uint32_t)v.size());
+    for (auto &m : v) {
+        vec(m.pos);
+        vec(m.uv);
+        vec(m.tris);
+        u32((uint32_t)m.parts.size());
+        for (auto &p : m.parts) { u32(p.first); u32(p.count); u32((uint32_t)p.texture); }
+        u32((uint32_t)m.textures.size());
+        for (auto &t : m.textures) {
+            u32((uint32_t)t.w);
+            u32((uint32_t)t.h);
+            vec(dxt1_of(t));
+        }
+    }
+    return (bool)f;
+}
+static bool load_previews(std::vector<ModelPreview> &out, const fs::path &file) {
+    std::ifstream f(file, std::ios::binary);
+    std::string b((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    size_t o = 8;
+    bool ok = b.size() >= 12 && memcmp(b.data(), kPreviewMagic, 8) == 0;
+    auto u32 = [&]() -> uint32_t {
+        uint32_t x = 0;
+        if (o + 4 > b.size()) { ok = false; return 0; }
+        memcpy(&x, b.data() + o, 4);
+        o += 4;
+        return x;
+    };
+    auto vec = [&](auto &x) {
+        uint32_t n = u32();
+        size_t bytes = (size_t)n * sizeof(x[0]);
+        if (!ok || o + bytes > b.size()) { ok = false; return; }
+        x.resize(n);
+        if (n) memcpy(x.data(), b.data() + o, bytes);
+        o += bytes;
+    };
+    std::vector<ModelPreview> v(ok ? u32() : 0);
+    for (auto &m : v) {
+        if (!ok) break;
+        vec(m.pos);
+        vec(m.uv);
+        vec(m.tris);
+        m.parts.resize(std::min<uint32_t>(u32(), 100000));
+        for (auto &p : m.parts) { p.first = u32(); p.count = u32(); p.texture = (int)u32(); }
+        m.textures.resize(std::min<uint32_t>(u32(), 10000));
+        for (auto &t : m.textures) {
+            t.w = (int)u32();
+            t.h = (int)u32();
+            std::string d;
+            vec(d);
+            if (ok && t.w > 0 && t.h > 0 && t.w <= 4096 && t.h <= 4096) rgba_of_dxt1(d, t);
+            else t.rgba.clear();
+        }
+        // Indices in range, or the model is left out.
+        size_t verts = m.pos.size() / 3;
+        bool good = ok && m.uv.size() == verts * 2 && m.tris.size() % 3 == 0;
+        for (uint32_t x : m.tris) good = good && x < verts;
+        for (auto &p : m.parts) good = good && (uint64_t)p.first + p.count <= m.tris.size() / 3 && p.texture < (int)m.textures.size();
+        for (auto &t : m.textures) good = good && t.w > 0 && t.h > 0 && t.rgba.size() == (size_t)t.w * t.h * 4;
+        if (!good) m = ModelPreview();
+    }
+    if (!ok) return false;
+    out = std::move(v);
+    return true;
+}
 bool save_content_analysis(const ContentAnalysis &a, const fs::path &file) {
     std::error_code ec;
     fs::create_directories(file.parent_path(), ec);
@@ -6405,11 +6511,15 @@ bool save_content_analysis(const ContentAnalysis &a, const fs::path &file) {
         for (int r : a.roots) f << " " << r;
         f << "\n" << a.items.size() << "\n";
         for (auto &it : a.items)
-            f << it.tag << "\n" << it.name << "\n" << it.used_by << "\n" << it.vehicle << " " << it.in_map << " " << it.memory_mb << " "
-              << it.file_mb << "\n";
+            f << it.tag << "\n" << it.name << "\n" << it.used_by << "\n" << it.seat_roles << "\n" << it.piece_of << "\n"
+              << it.vehicle << " " << it.in_map << " " << it.memory_mb << " " << it.file_mb << " " << it.seats << " "
+              << it.preview << "\n";
         f << "end\n";
         if (!f) return false;
     }
+    fs::path models = file;
+    models += ".models";
+    if (!save_previews(a.previews, models)) fs::remove(models, ec);
     fs::rename(part, file, ec);
     if (ec) { fs::remove(part, ec); return false; }
     return true;
@@ -6453,11 +6563,18 @@ bool load_content_analysis(ContentAnalysis &out, const fs::path &file) {
     if (!(ss >> ni) || ni > 100000) return false;
     a.items.resize(ni);
     for (auto &it : a.items) {
-        if (!text(it.tag) || !text(it.name) || !text(it.used_by) || !text(line)) return false;
+        if (!text(it.tag) || !text(it.name) || !text(it.used_by) || !text(it.seat_roles) || !text(it.piece_of) || !text(line))
+            return false;
         nums(ss);
-        if (!(ss >> it.vehicle >> it.in_map >> it.memory_mb >> it.file_mb)) return false;
+        if (!(ss >> it.vehicle >> it.in_map >> it.memory_mb >> it.file_mb >> it.seats >> it.preview)) return false;
     }
     if (!text(line) || line != "end") return false;
+    fs::path models = file;
+    models += ".models";
+    if (!load_previews(a.previews, models)) a.previews.clear();
+    for (auto &it : a.items)
+        if (it.preview < -1 || it.preview >= (int)a.previews.size() || (it.preview >= 0 && a.previews[it.preview].tris.empty()))
+            it.preview = -1;
     out = std::move(a);
     return true;
 }

@@ -66,6 +66,18 @@ struct Config {
     std::map<std::string, std::string> xbox_replace;
 };
 
+// A model to show in the weapons & vehicles window: its most detailed version (each region's first permutation),
+// with each part's base texture made small.
+struct ModelPreview {
+    std::vector<float> pos, uv;    // per vertex: x y z (world units, z up); u v (texture repeats, as Halo maps it)
+    std::vector<uint32_t> tris;    // 3 vertex indices per triangle, in Halo's winding
+    struct Part { uint32_t first = 0, count = 0; int texture = -1; };   // a run of triangles and its texture (-1 none)
+    std::vector<Part> parts;
+    struct Texture { int w = 0, h = 0; std::vector<uint8_t> rgba; };   // top row first
+    std::vector<Texture> textures;
+    int triangles() const { return (int)(tris.size() / 3); }
+};
+
 // The Xbox tab's "Weapons & vehicles" window: each weapon and vehicle the map can give a player, what it costs
 // in the Xbox's 22 MB of tag memory and in the map file, and what the picks (replace with another one, or none)
 // would save. Costs come from an analysis build of the map (Invader with the tag space limit lifted), read back
@@ -78,6 +90,10 @@ struct ContentItem {
     std::string used_by;   // e.g. "18 spawn points, weapon list"
     double memory_mb = 0;  // tag memory freed if only this one is replaced with none (a stock one: what it adds)
     double file_mb = 0;    // map file size freed (or added)
+    int seats = -1;            // a vehicle's seats (-1: a weapon, or unknown)
+    std::string seat_roles;    // e.g. "driver, gunner, 2 passengers"
+    std::string piece_of;      // a vehicle with no seats the map's scripts create and attach to this one (its tag)
+    int preview = -1;          // its model in ContentAnalysis::previews (-1: none)
 };
 struct ContentAnalysis {
     std::string error;
@@ -94,6 +110,7 @@ struct ContentAnalysis {
     std::vector<int> roots;
     std::vector<std::vector<std::pair<uint32_t, uint32_t>>> geometry;   // model vertex/index ranges per tag
     double fixed_mb = 0, fixed_file_mb = 0;                              // what no pick changes (level BSP, ...)
+    std::vector<ModelPreview> previews;                                  // the items' models (shared ones once)
 };
 struct ContentEstimate { double memory_mb = 0, memory_optimized_mb = 0, file_mb = 0; };   // optimized: roughly, after Invader's optimize
 // Tag memory and file size with these picks (weapon/vehicle tag -> replacement tag, "" = none).
@@ -101,7 +118,8 @@ ContentEstimate estimate_contents(const ContentAnalysis &a, const std::map<std::
 // Runs the Xbox preparation of a map (input = a .map, or a .scenario in a tags folder when in_game is Unknown)
 // and measures it. Takes about as long as a conversion.
 bool analyze_xbox_contents(const Config &cfg, const fs::path &input, Game in_game, ContentAnalysis &out, const Log &log);
-// A measurement saved to / read from a file (read: false if missing, damaged or from another version).
+// A measurement saved to / read from a file (read: false if missing, damaged or from another version). The models
+// go in a second file beside it (`file` + ".models"); without it the measurement still reads, with no models.
 bool save_content_analysis(const ContentAnalysis &a, const fs::path &file);
 bool load_content_analysis(ContentAnalysis &a, const fs::path &file);
 

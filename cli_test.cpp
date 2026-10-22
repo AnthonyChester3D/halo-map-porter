@@ -2,12 +2,50 @@
 // usage: cli_test convert <in.map> <MCC|CE|Xbox> <out.map>
 //        cli_test build <file.scenario> <MCC|CE|Xbox> <out.map>
 #include "core.hpp"
+#include "render.hpp"
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
 #include <iostream>
 #include <sstream>
 using namespace porter;
+
+// XPREVIEW=<folder>: each item's model drawn to <folder>/<name>.ppm (two views side by side), for checking.
+static void write_previews(const ContentAnalysis &a) {
+    const char *dir = getenv("XPREVIEW");
+    if (!dir) return;
+    for (auto &it : a.items) {
+        if (it.preview < 0) continue;
+        const int w = 320, h = 280;
+        std::vector<uint32_t> p1, p2;
+        render::View v1, v2;
+        v2.yaw = 3.6f;
+        v2.pitch = 0.15f;
+        render::draw(a.previews[it.preview], v1, w, h, p1);
+        render::draw(a.previews[it.preview], v2, w, h, p2);
+        std::string name = it.name;
+        for (auto &c : name) if (c == '/' || c == ' ') c = '_';
+        FILE *f = fopen((std::string(dir) + "/" + name + ".ppm").c_str(), "wb");
+        if (!f) continue;
+        fprintf(f, "P6\n%d %d\n255\n", w * 2, h);
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w * 2; x++) {
+                uint32_t q = x < w ? p1[(size_t)y * w + x] : p2[(size_t)y * w + x - w];
+                unsigned char rgb[3] = {(unsigned char)(q >> 16), (unsigned char)(q >> 8), (unsigned char)q};
+                fwrite(rgb, 1, 3, f);
+            }
+        fclose(f);
+    }
+}
+
+static void print_items(const ContentAnalysis &a) {
+    for (auto &it : a.items)
+        printf("%s %-34s %7.3f MB mem %7.3f MB file  %-40s %s seats=%d [%s] piece_of=%s preview=%d tris=%d tex=%zu\n",
+               it.vehicle ? "V" : "W", it.name.c_str(), it.memory_mb, it.file_mb, it.used_by.c_str(), it.in_map ? "" : "[stock]",
+               it.seats, it.seat_roles.c_str(), it.piece_of.c_str(), it.preview,
+               it.preview >= 0 ? a.previews[it.preview].triangles() : 0,
+               it.preview >= 0 ? a.previews[it.preview].textures.size() : (size_t)0);
+}
 
 static Game parse(const std::string &s) {
     if (s == "MCC") return Game::MCC;
@@ -89,9 +127,8 @@ int main(int argc, char **argv) {
         if (!analyze_xbox_contents(cfg, argv[2], in, an, log)) { std::cout << "FAILED: " << an.error << "\n"; return 1; }
         printf("used %.3f MB (optimize saves %.3f), limit %.2f; file %.2f MB (limit %.0f); fixed %.3f; tags %zu roots %zu\n",
                an.used_mb, an.optimize_saves_mb, an.limit_mb, an.file_mb, an.file_limit_mb, an.fixed_mb, an.tags.size(), an.roots.size());
-        for (auto &it : an.items)
-            printf("%s %-34s %7.3f MB mem %7.3f MB file  %-40s %s\n", it.vehicle ? "V" : "W", it.name.c_str(), it.memory_mb,
-                   it.file_mb, it.used_by.c_str(), it.in_map ? "" : "[stock]");
+        print_items(an);
+        write_previews(an);
         if (getenv("XSAVE")) save_content_analysis(an, getenv("XSAVE"));
         if (getenv("XDUMP")) {   // for the window test
             FILE *f = fopen(getenv("XDUMP"), "wb");
@@ -130,10 +167,10 @@ int main(int argc, char **argv) {
             bool ok = load_content_analysis(back, getenv("XMEASURE"));
             printf("measured: used %.3f MB (optimize saves %.3f); file %.2f MB; tags %zu items %zu; reload %s\n", m.used_mb,
                    m.optimize_saves_mb, m.file_mb, m.tags.size(), m.items.size(),
-                   ok && back.tags == m.tags && back.items.size() == m.items.size() && back.deps == m.deps && back.geometry == m.geometry ? "ok" : "MISMATCH");
-            for (auto &it : m.items)
-                printf("%s %-34s %7.3f MB mem %7.3f MB file  %-40s %s\n", it.vehicle ? "V" : "W", it.name.c_str(), it.memory_mb,
-                       it.file_mb, it.used_by.c_str(), it.in_map ? "" : "[stock]");
+                   ok && back.tags == m.tags && back.items.size() == m.items.size() && back.deps == m.deps && back.geometry == m.geometry &&
+                   back.previews.size() == m.previews.size() ? "ok" : "MISMATCH");
+            print_items(back);
+            write_previews(back);
         }
     } else {
         r = build_from_tags(cfg, argv[2], parse(argv[3]), argv[4], true, log);

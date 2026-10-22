@@ -1,7 +1,7 @@
 # Generates tag_layouts.inc from Invader's tag definitions (invader/src/tag/hek/definition/*.json):
 #   python3 gen_tag_layouts.py <definition folder> tag_layouts.inc
-# The app reads a few kinds of tag itself (structure BSPs, models, scenarios, objects) instead of asking
-# invader-edit for each value: these are their structs' sizes and fields, and every struct they contain.
+# The app reads a few kinds of tag itself (structure BSPs, models, scenarios, objects, bitmaps, shaders) instead
+# of asking invader-edit for each value: these are their structs' sizes and fields, and every struct they contain.
 import glob, json, os, sys
 
 ROOTS = {   # tag extension -> root struct
@@ -9,7 +9,10 @@ ROOTS = {   # tag extension -> root struct
     'biped': 'Biped', 'vehicle': 'Vehicle', 'weapon': 'Weapon', 'equipment': 'Equipment', 'garbage': 'Garbage',
     'projectile': 'Projectile', 'scenery': 'Scenery', 'device_machine': 'DeviceMachine', 'device_control': 'DeviceControl',
     'device_light_fixture': 'DeviceLightFixture', 'placeholder': 'Placeholder', 'sound_scenery': 'SoundScenery',
-    'item_collection': 'ItemCollection',
+    'item_collection': 'ItemCollection', 'bitmap': 'Bitmap', 'shader_model': 'ShaderModel',
+    'shader_environment': 'ShaderEnvironment', 'shader_transparent_chicago': 'ShaderTransparentChicago',
+    'shader_transparent_chicago_extended': 'ShaderTransparentChicagoExtended',
+    'shader_transparent_generic': 'ShaderTransparentGeneric',
 }
 
 types = {}

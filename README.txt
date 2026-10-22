@@ -472,6 +472,19 @@ Weapons & vehicles window (Xbox)
   The top says how much the map needs and how much has to go; the line under
   the list adds up your picks as you make them. Select several rows with
   Ctrl or Shift to set them all at once.
+  Click a row to see it: the model shows on the right (its most detailed
+  version, with its textures; drag to turn it, mouse wheel to zoom,
+  double-click to put it back), with what it is: a weapon, or a vehicle and
+  its seats (driver, gunner, passengers), or "no seats" for one nobody can
+  drive or ride in.
+  Pieces of vehicles: some maps make a vehicle break apart by script (a
+  jet's wings, engines and burnt hull appear when it's shot down, a mech
+  leaves a wreck). Those pieces are vehicles too, so they show up here. The
+  app finds them in the map's scripts (the ones the scripts make and attach
+  to another vehicle) and lists them right below their vehicle as "piece
+  of ...". Replacing a vehicle with none (or with another vehicle) removes
+  its pieces with it, and Keep brings them back; a piece can also go on its
+  own (Keep or None).
   Measuring takes about as long as a conversion (the app prepares the map and
   builds a test copy, then reads back what each part takes). A conversion for
   the Xbox that doesn't fit (memory or file size) measures the map on the way,
@@ -487,7 +500,12 @@ Weapons & vehicles window (Xbox)
   the log lists them as a [replace] line. None takes the weapon out of its
   item collections (a collection left empty loses its spawn points), the
   palettes and the players' spawn weapons; in the globals weapon list and
-  vehicle slots its place stays, empty.
+  vehicle slots its place stays, empty. Placements the map's scripts refer to
+  by name (a jet the scripts respawn, its pieces) stay too, empty: Invader
+  only builds scripts whose names all belong to a placement. The game makes
+  nothing for an empty placement, and the scripts find no object there, as
+  if it had been destroyed: a jet's pieces are never made, its health reads
+  as gone. Try the map once to check its scripts still do what you want.
 
 Content nobody can get (Xbox)
   Xbox maps have only 22 MB for level geometry and other tag data,

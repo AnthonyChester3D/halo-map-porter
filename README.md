@@ -22,8 +22,9 @@ the free, open-source Halo map compiler, and it can download Invader for you.
   texture memory target (22 / 20 / 18 MB) that the auto-shrinker halves your own textures to meet.
 - **Speed on the Xbox.** It makes lower-detail versions (LODs) of the map's custom models that have none, keeps
   them in a library so other maps reuse them, and reports what the Xbox has to draw.
-- **Weapons & vehicles window.** It shows what each weapon and vehicle costs in tag memory and file size, and
-  lets you replace or drop them.
+- **Weapons & vehicles window.** It shows what each weapon and vehicle costs in tag memory and file size, with a
+  3D preview and its seats, groups the pieces a map's scripts make of a vehicle under it, and lets you replace or
+  drop them.
 - **Map folders and packs** for the Halo Universal and
   [Halo 1 Unlimited](https://github.com/AnthonyChester3D/halo-1-unlimited) XBEs. These come with map cards
   (preview picture, name, description, players, gametypes and genres), an `order.txt`, and series pictures for

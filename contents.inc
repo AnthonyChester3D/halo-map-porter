@@ -189,6 +189,84 @@ static double tag_space_used(const std::string &build_out) {
     return std::regex_search(build_out, m, re) ? std::atof(m[1].str().c_str()) : 0;
 }
 
+// Vehicles the map's scripts create and attach to another vehicle as its pieces (a jet's wings and engines when it's
+// shot down, a mech's wreck): vehicle tag -> the vehicle (tag) they're pieces of. `seatless`: the possible pieces
+// (no seats, or a wreck by its name); `with_seats`: the vehicles they can be pieces of. Found in the script
+// source: (objects_attach <vehicle> <marker> <piece> <marker>), else the vehicle a script that creates the piece
+// (object_create, object_create_anew) also names. Placements are known by their object names.
+static std::map<std::string, std::string> script_pieces(Job &job, const std::set<std::string> &seatless,
+                                                        const std::set<std::string> &with_seats) {
+    std::map<std::string, std::string> out;
+    if (seatless.empty() || with_seats.empty()) return out;
+    std::string scen = job.scenario + ".scenario";
+    fs::path sdir = job.owner(scen);
+    tagfile::Tag st;
+    if (sdir.empty() || !st.load(sdir / from_u8(scen))) return out;
+    tagfile::Elem r = st.root();
+    tagfile::Block names = r.block("object names"), placed = r.block("vehicles"), palette = r.block("vehicle palette");
+    std::map<std::string, std::string> vehicle_of;   // object name (lowercase) -> vehicle tag
+    for (size_t i = 0; i < placed.size(); i++) {
+        long long n = placed[i].integer("name"), ty = placed[i].integer("type");
+        if (n < 0 || n >= (long long)names.size() || ty < 0 || ty >= (long long)palette.size()) continue;
+        std::string tag = palette[(size_t)ty].ref("name");
+        if (!tag.empty()) vehicle_of[lc(names[(size_t)n].str("name"))] = tag;
+    }
+    if (vehicle_of.empty()) return out;
+    std::string text = map_script_text(job, sdir, scen);
+    // Tokens: "(", ")" and atoms (lowercase), comments left out.
+    std::vector<std::string> tok;
+    for (size_t i = 0; i < text.size();) {
+        char c = text[i];
+        if (c == ';') { while (i < text.size() && text[i] != '\n') i++; continue; }
+        if (isspace((unsigned char)c)) { i++; continue; }
+        if (c == '(' || c == ')') { tok.push_back(std::string(1, c)); i++; continue; }
+        size_t j = i;
+        if (c == '"') { j++; while (j < text.size() && text[j] != '"') j++; if (j < text.size()) j++; }
+        else while (j < text.size() && !isspace((unsigned char)text[j]) && text[j] != '(' && text[j] != ')' && text[j] != ';') j++;
+        tok.push_back(lc(text.substr(i, j - i)));
+        i = j;
+    }
+    auto vehicle = [&](const std::string &name) -> std::string {
+        auto it = vehicle_of.find(name);
+        return it == vehicle_of.end() ? std::string() : it->second;
+    };
+    std::map<std::string, std::map<std::string, int>> votes;   // piece -> vehicle -> times
+    for (size_t i = 0; i + 5 < tok.size(); i++) {
+        if (tok[i] != "(" || tok[i + 1] != "objects_attach") continue;
+        bool atoms = true;
+        for (size_t k = i + 2; k < i + 6; k++) atoms = atoms && tok[k] != "(" && tok[k] != ")";
+        if (!atoms) continue;
+        std::string parent = vehicle(tok[i + 2]), piece = vehicle(tok[i + 4]);
+        if (seatless.count(piece) && with_seats.count(parent)) votes[piece][parent]++;
+    }
+    // Not attached: the vehicle a script that creates it also names.
+    for (size_t i = 0; i < tok.size();) {
+        if (tok[i] != "(") { i++; continue; }
+        size_t end = i;
+        for (int depth = 0; end < tok.size(); end++) {
+            if (tok[end] == "(") depth++;
+            else if (tok[end] == ")" && --depth == 0) break;
+        }
+        std::set<std::string> created, others;
+        for (size_t k = i; k + 1 < end; k++) {
+            if (tok[k] == "(" && (tok[k + 1] == "object_create" || tok[k + 1] == "object_create_anew") && k + 2 < end) {
+                std::string v = vehicle(tok[k + 2]);
+                if (seatless.count(v) && !votes.count(v)) created.insert(v);
+            }
+            std::string v = vehicle(tok[k]);
+            if (with_seats.count(v)) others.insert(v);
+        }
+        if (others.size() == 1)
+            for (auto &c : created) votes[c][*others.begin()]++;
+        i = end + 1;
+    }
+    for (auto &[piece, v] : votes) {
+        auto best = std::max_element(v.begin(), v.end(), [](auto &x, auto &y) { return x.second < y.second; });
+        out[piece] = best->first;
+    }
+    return out;
+}
+
 // Read the analysis build back: each tag's bytes (its data, its entry in the tag array and its path), the model
 // geometry each model uses (Invader stores identical geometry once, so shared parts count once), the level's
 // BSPs and every tag reference, then list the weapons and vehicles a player can get.
@@ -396,6 +474,52 @@ static bool analyze_built_map(Job &job, const fs::path &map, const std::set<std:
     }
     for (auto &it : items)   // two weapons with the same name: say which folder
         if (stem_count[it.name] > 1) it.name += " (" + fs::path(from_u8(it.tag)).parent_path().filename().u8string() + ")";
+
+    // Each one's model (to show it), a vehicle's seats, and which vehicles are pieces of others.
+    preview::Find find = [&](const std::string &tag) {
+        fs::path o = job.owner(tag);
+        return o.empty() ? fs::path() : o / from_u8(tag);
+    };
+    std::map<std::string, int> preview_of;   // model tag -> preview
+    std::set<std::string> seatless, with_seats;
+    auto wreck = [](const std::string &tag) {   // a vehicle named as a wreck (a folder counts: ".../burnt/front")
+        std::string t = lc(tag);
+        for (auto w : {"burnt", "burned", "destroyed", "wreck", "debris", "broken", "dead", "damaged", "crashed"})
+            if (t.find(w) != std::string::npos) return true;
+        return false;
+    };
+    for (auto &it : items) {
+        fs::path of = find(it.tag);
+        if (of.empty()) continue;
+        if (it.vehicle) {
+            it.seats = preview::seats(of, &it.seat_roles);
+            if ((it.seats == 0 || wreck(it.tag)) && it.in_map) seatless.insert(it.tag);
+            else if (it.seats > 0) with_seats.insert(it.tag);
+        }
+        std::string model = perf::object_model(of);
+        if (model.empty()) continue;
+        auto pv = preview_of.find(model);
+        if (pv == preview_of.end()) {
+            ModelPreview mp;
+            int idx = preview::build(model, find, mp) ? (int)a.previews.size() : -1;
+            if (idx >= 0) a.previews.push_back(std::move(mp));
+            pv = preview_of.emplace(model, idx).first;
+        }
+        it.preview = pv->second;
+    }
+    std::map<std::string, std::string> pieces = script_pieces(job, seatless, with_seats);
+    for (auto &it : items) {
+        auto p = pieces.find(it.tag);
+        if (p != pieces.end()) {
+            it.piece_of = p->second;
+            std::string parent = fs::path(from_u8(p->second)).stem().u8string();
+            for (auto &x : items)
+                if (x.tag == p->second) parent = x.name;
+            it.used_by = "piece of " + parent + (it.seats == 0 ? ", no seats" : "");
+        } else if (it.vehicle && it.seats == 0) {
+            it.used_by += it.used_by.empty() ? "no seats" : ", no seats";
+        }
+    }
     std::stable_sort(items.begin(), items.end(), [](const ContentItem &x, const ContentItem &y) {
         if (x.vehicle != y.vehicle) return !x.vehicle;
         if (x.in_map != y.in_map) return x.in_map;
@@ -438,6 +562,7 @@ static void apply_replacements(Job &job, const fs::path &xsrc) {
     if (cfg.xbox_replace.empty()) return;
     std::string out;
     std::vector<std::string> notes;
+    int emptied_all = 0;
     job.log("Applying your weapons & vehicles picks...");
     // Tags that refer to each picked one (and each replacement, for a later pick of it), found in one pass over
     // the tags the map uses (following references from its scenario and globals, so a full Xbox tagset isn't read).
@@ -463,6 +588,9 @@ static void apply_replacements(Job &job, const fs::path &xsrc) {
             return {};
         };
         std::string label = fs::path(from_u8(from)).stem().u8string();
+        int same = 0;   // two picks with this name: say which folder
+        for (auto &[f2, t2] : cfg.xbox_replace) same += fs::path(from_u8(f2)).stem().u8string() == label;
+        if (same > 1) label += " (" + fs::path(from_u8(from)).parent_path().filename().u8string() + ")";
         if (!to.empty()) {
             int changed = 0;
             for (auto &r : refs) {
@@ -479,6 +607,7 @@ static void apply_replacements(Job &job, const fs::path &xsrc) {
         // None: take it out of each list that refers to it.
         auto values = [&](const fs::path &d, const std::string &tag) { return list_values(cfg, d, tag); };
         std::vector<std::string> left;
+        int emptied = 0;   // its placements the scripts name, left with no type
         for (auto &r : refs) {
             fs::path d = editable(r);
             if (d.empty()) { left.push_back(r); continue; }
@@ -507,7 +636,10 @@ static void apply_replacements(Job &job, const fs::path &xsrc) {
             for (auto &e : erase) ed.insert(ed.end(), {"-E", e});
             if (ed.size() > 4) run_process(ed, out);
             if (ext == ".scenario") {
-                // A palette entry: remove it and its placements, then shift the later placements down.
+                // A palette entry: remove it and its placements, then shift the later placements down. Placements the
+                // scripts know by name stay, with no type (the engine leaves those out): Invader only compiles scripts
+                // whose object names belong to a placement. The scripts then find no object there (a jet's pieces
+                // are never made, health reads -1), which they handle like an object that's been destroyed.
                 for (PalBlock pl : {PalBlock{"weapon_palette", "weapons"}, PalBlock{"vehicle_palette", "vehicles"}, PalBlock{"equipment_palette", "equipment"}}) {
                     auto kv = values(d, r);
                     int pi = -1;
@@ -524,16 +656,16 @@ static void apply_replacements(Job &job, const fs::path &xsrc) {
                         if (std::regex_match(k, m, objname_re) && !v.empty() && isdigit((unsigned char)v[0]) && std::atoi(v.c_str()) != 65535)
                             named.insert(std::stoi(m[1]));
                     }
-                    bool keep = false;
                     for (auto &[k, v] : kv) {
                         std::smatch m;
                         if (!std::regex_match(k, m, type_re) || v.empty() || !isdigit((unsigned char)v[0])) continue;
                         int ty = std::atoi(v.c_str());
-                        if (ty == pi && named.count(std::stoi(m[1]))) keep = true;
-                        if (ty == pi) drop.push_back(std::stoi(m[1]));
+                        if (ty == pi && named.count(std::stoi(m[1]))) {
+                            sc.insert(sc.end(), {"-S", k, "65535"});
+                            emptied++;
+                        } else if (ty == pi) drop.push_back(std::stoi(m[1]));
                         else if (ty > pi && ty != 65535) sc.insert(sc.end(), {"-S", k, std::to_string(ty - 1)});
                     }
-                    if (keep) { other = true; continue; }   // a named placement: it stays (and so does the weapon)
                     std::sort(drop.rbegin(), drop.rend());
                     for (int i : drop) sc.insert(sc.end(), {"-E", std::string(pl.block) + "[" + std::to_string(i) + "]"});
                     sc.insert(sc.end(), {"-E", std::string(pl.palette) + "[" + std::to_string(pi) + "]"});
@@ -551,10 +683,13 @@ static void apply_replacements(Job &job, const fs::path &xsrc) {
             if (other) left.push_back(r);
         }
         notes.push_back(label + " -> none" + (left.empty() ? "" : " (still used by " + left[0] + ", so it stays in the map)"));
+        emptied_all += emptied;
     }
     if (!notes.empty()) {
         std::string list = notes[0];
         for (size_t i = 1; i < notes.size(); i++) list += ", " + notes[i];
-        job.note("[replace] your weapons & vehicles picks: " + list);
+        job.note("[replace] your weapons & vehicles picks: " + list +
+                 (emptied_all ? "; the map's scripts name " + std::to_string(emptied_all) + " of their placements, which stay " +
+                                "empty so the scripts still work (they find nothing there)" : ""));
     }
 }
