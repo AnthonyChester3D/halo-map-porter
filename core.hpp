@@ -68,9 +68,9 @@ struct Config {
     int xbox_fog = 0;
     double xbox_fog_scale = 1.0;
     double xbox_fog_distance = 0;
-    // Scenery and devices not drawn past about this many world units (their models' smallest switch distance set so
-    // they vanish there; 0: as the map has them).
-    double xbox_scenery_distance = 0;
+    // Scenery and devices not drawn once smaller on screen than this many pixels across (their models' smallest
+    // switch size raised to it; 0: as the map has them).
+    double xbox_scenery_pixels = 0;
     // Level shaders' reflections (levelshaders.hpp): kept unless this map's choice in the level shaders window says
     // otherwise: drop the suggested ones (the ones that show least for the Xbox passes they cost, while the level costs
     // more than stock ones), or `xbox_reflection_picks` (exactly these shader tags lose their reflections).

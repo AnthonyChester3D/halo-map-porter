@@ -28,7 +28,7 @@ the free, open-source Halo map compiler, and it can download Invader for you.
 - **Level window.** It lists the level's reflecting shaders with what each reflection costs and how much of the
   picture it is, and draws the level on your graphics card from where players stand, as made, as converted, or
   with only what dropping reflections loses lit up, with its fog, portals and rooms. Fly through it, keep every
-  reflection (the default) or drop some, and set the fog and how far away scenery stops being drawn.
+  reflection (the default) or drop some, and set the fog and how small scenery gets before it stops being drawn.
 - **Weapons & vehicles window.** It shows what each weapon and vehicle costs in tag memory and file size, with a
   3D preview and its seats, groups the pieces a map's scripts make of a vehicle under it, and lets you replace or
   drop them.

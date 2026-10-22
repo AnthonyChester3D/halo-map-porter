@@ -280,9 +280,10 @@ void set_row(int row) {
     ListView_SetItemText(St->list, row, 5, (LPWSTR)sug.c_str());
 }
 
-// The fog and far scenery choices (Picks::fog, fog_scale, fog_distance, scenery): the fog's described with the level's
+// The fog and tiny scenery choices (Picks::fog, fog_scale, fog_distance, tiny_px): the fog's described with the level's
 // own numbers; the last fog choice is a distance typed into the box beside it.
-const double kFar[] = {0, 300, 200, 150, 100, 60};
+const double kTiny[] = {0, 4, 8, 12, 16};
+const int kTinyCount = 5;
 const double kFogScale[] = {1.0, 1.0, 1.0, 0.75, 0.5, 1.0};   // (by item: automatic, as made, opaque at 1, 3/4, 1/2 of its distance; typed)
 const int kFogOther = 5;
 int fog_item() {
@@ -623,16 +624,16 @@ void create_controls() {
     add(L"BUTTON", L"Show portals", BS_AUTOCHECKBOX | WS_TABSTOP, 1066, 524, 102, 22, IDC_PORTALS);
     add(L"STATIC", L"", SS_NOTIFY, 572, 554, 596, 36, IDC_COST);
     add(L"STATIC", L"Fog:", SS_NOTIFY, 572, 600, 34, 20, IDC_FOG_LBL);
-    add(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 608, 596, 222, 300, IDC_FOG);
-    add(L"EDIT", L"", ES_NUMBER | ES_RIGHT | ES_AUTOHSCROLL | WS_TABSTOP, 834, 597, 44, 22, IDC_FOG_DIST, WS_EX_CLIENTEDGE);
+    add(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 608, 596, 192, 300, IDC_FOG);
+    add(L"EDIT", L"", ES_NUMBER | ES_RIGHT | ES_AUTOHSCROLL | WS_TABSTOP, 804, 597, 44, 22, IDC_FOG_DIST, WS_EX_CLIENTEDGE);
     SendMessageW(item(IDC_FOG_DIST), EM_SETLIMITTEXT, 5, 0);
-    add(L"STATIC", L"units", SS_NOTIFY, 882, 600, 32, 20, IDC_FOG_UNITS);
-    add(L"STATIC", L"Far scenery:", SS_NOTIFY, 920, 600, 72, 20, IDC_FAR_LBL);
-    add(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 994, 596, 174, 300, IDC_FAR);
+    add(L"STATIC", L"units", SS_NOTIFY, 852, 600, 32, 20, IDC_FOG_UNITS);
+    add(L"STATIC", L"Hide scenery:", SS_NOTIFY, 890, 600, 76, 20, IDC_FAR_LBL);
+    add(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 968, 596, 200, 300, IDC_FAR);
     {
-        const wchar_t *far_items[] = {L"Always drawn", L"Not past 300 units (914 m)", L"Not past 200 units (610 m)",
-                                      L"Not past 150 units (457 m)", L"Not past 100 units (305 m)", L"Not past 60 units (183 m)"};
-        for (auto t : far_items) SendMessageW(item(IDC_FAR), CB_ADDSTRING, 0, (LPARAM)t);
+        const wchar_t *tiny_items[kTinyCount] = {L"Never (the default)", L"Below 4 px (8 widescreen)", L"Below 8 px (16 widescreen)",
+                                                 L"Below 12 px (24 widescreen)", L"Below 16 px (32 widescreen)"};
+        for (auto t : tiny_items) SendMessageW(item(IDC_FAR), CB_ADDSTRING, 0, (LPARAM)t);
     }
     add(L"BUTTON", L"Measure again", BS_PUSHBUTTON | WS_TABSTOP, 12, 636, 120, 26, IDC_REMEASURE);
     add(L"STATIC", L"Shows: how much of what you see is its reflection. Covers: how much of the screen it is. Passes: triangles drawn again per view.",
@@ -644,9 +645,9 @@ void create_controls() {
     CheckDlgButton(St->wnd, IDC_HILITE, BST_CHECKED);
     {
         int k = 0;   // (the nearest of the choices)
-        for (int i = 1; i < 6; i++)
-            if (St->picks.scenery > 0 && std::fabs(kFar[i] - St->picks.scenery) < std::fabs(kFar[k] - St->picks.scenery)) k = i;
-        if (St->picks.scenery > 0 && k == 0) k = 1;
+        for (int i = 1; i < kTinyCount; i++)
+            if (St->picks.tiny_px > 0 && std::fabs(kTiny[i] - St->picks.tiny_px) < std::fabs(kTiny[k] - St->picks.tiny_px)) k = i;
+        if (St->picks.tiny_px > 0 && k == 0) k = 1;
         SendMessageW(item(IDC_FAR), CB_SETCURSEL, k, 0);
     }
     fill_fog();
@@ -692,10 +693,12 @@ void create_controls() {
                               L"follows as you type.";
     tip(IDC_FOG_DIST, dist_tip);
     tip(IDC_FOG_UNITS, dist_tip);
-    const wchar_t *far_tip = L"Scenery and devices (trees, rocks, props, machines; not vehicles, characters or weapons) stop "
-                             L"being drawn about this far away: each model's smallest switch distance is set to its size on "
-                             L"screen there. They don't show in the picture. Big ones pop out of view, so pick a distance past "
-                             L"where they matter, or behind the fog.";
+    const wchar_t *far_tip = L"Scenery and devices (trees, rocks, props, machines; not vehicles, characters or weapons) aren't "
+                             L"drawn once they're smaller on screen than this, across: only specks go. A 1-unit prop goes at 8 px "
+                             L"about 57 units away; a 16-unit tree not until about 900. Halo 1 Unlimited counts models at half "
+                             L"their size in widescreen, so there they go at twice the size. The engine measures size by how far "
+                             L"ahead of the camera something is, so things at the screen's edges stay a little longer than ones "
+                             L"you look at; at these sizes that's hard to see. They don't show in the picture.";
     tip(IDC_FAR, far_tip);
     tip(IDC_FAR_LBL, far_tip);
     tip(IDC_VIEW, L"Click here, then fly: drag with the mouse to look around, W A S D to move where you look, Q / E to go "
@@ -808,7 +811,7 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case IDC_FAR:
             if (HIWORD(wp) == CBN_SELCHANGE) {
                 int k = (int)SendMessageW(item(IDC_FAR), CB_GETCURSEL, 0, 0);
-                if (k >= 0 && k < 6) St->picks.scenery = kFar[k];
+                if (k >= 0 && k < kTinyCount) St->picks.tiny_px = kTiny[k];
             }
             return 0;
         case IDC_PORTALS:

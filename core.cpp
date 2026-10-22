@@ -3899,14 +3899,16 @@ void xbox_fog(Job &job) {
     }
 }
 
-// Scenery and devices not drawn past a distance (the level window's choice): the engine draws nothing of a model
-// smaller on screen than its smallest switch distance ("super low", in pixels across), so that's set to the size
-// the object is at that distance (its bounding sphere: 457 x its diameter / the distance, on the Xbox's 480 lines).
-// The smallest object of each model sets it, so none vanishes nearer. Vehicles, characters and weapons are left
-// alone (players need to see them).
+// Tiny scenery and devices not drawn (the level window's choice): the engine draws nothing of a model smaller on
+// screen than its smallest switch size ("super low", the bounding sphere's pixels across), so that's raised to the
+// choice. A size, not a distance: big things stay drawn as far as anyone can see them, and what goes is specks.
+// (The engine measures an object's size from how far ahead of the camera it is, not how far away, so a cutoff at a
+// distance pops things in and out at the screen's edges as the camera turns: Bungie's own scenery never vanishes.
+// Halo 1 Unlimited halves every size in widescreen, so there things go at twice the size.) Vehicles, characters and
+// weapons are left alone (players need to see them).
 void xbox_scenery(Job &job, const std::vector<std::string> &deps) {
-    const double D = job.cfg.xbox_scenery_distance;
-    if (D <= 0 || job.analysis) return;
+    const double px = job.cfg.xbox_scenery_pixels;
+    if (px <= 0 || job.analysis) return;
     std::string scen = job.scenario + ".scenario";
     fs::path sdir = job.owner(scen);
     tagfile::Tag st;
@@ -3914,7 +3916,7 @@ void xbox_scenery(Job &job, const std::vector<std::string> &deps) {
     std::set<std::string> first_person;
     std::map<std::string, std::string> names;
     std::map<std::string, char> kinds = model_kinds(job, deps, first_person, names);
-    std::map<std::string, double> radius;   // model -> its smallest placed object's bounding radius
+    std::set<std::string> models;   // the scenery and devices the map places
     for (auto &[o, n] : object_counts(job, st.root())) {
         if (!(has_suffix(o, ".scenery") || has_suffix(o, ".device_machine") || has_suffix(o, ".device_control") ||
               has_suffix(o, ".device_light_fixture")))
@@ -3923,16 +3925,11 @@ void xbox_scenery(Job &job, const std::vector<std::string> &deps) {
         tagfile::Tag ot;
         if (own.empty() || !ot.load(own / from_u8(o))) continue;
         std::string m = ot.root().ref("model");
-        double r = ot.root().num("bounding radius");
-        if (m.empty() || r < 0.05) continue;
-        auto it = radius.find(m);
-        radius[m] = it == radius.end() ? r : std::min(it->second, r);
+        if (!m.empty()) models.insert(m);
     }
     std::vector<std::string> done;
-    for (auto &[m, r] : radius) {
+    for (auto &m : models) {
         if (!kinds.count(m) || kinds[m] != 's' || first_person.count(m)) continue;
-        double px = 457.0 * 2 * r / D;
-        if (px < 1) continue;
         fs::path own = job.owner(m);
         if (own.empty()) continue;
         perf::ModelStats ms = perf::model_stats(own / from_u8(m));
@@ -3947,9 +3944,9 @@ void xbox_scenery(Job &job, const std::vector<std::string> &deps) {
         std::string list;
         for (size_t i = 0; i < done.size() && i < 10; i++) list += (i ? ", " : "") + done[i];
         if (done.size() > 10) list += " and " + std::to_string(done.size() - 10) + " more";
-        job.note("[scenery] scenery and devices stop being drawn about " + fmt_num(D) + " units (" + fmt_num(D * 3.048) +
-                 " m) away (" + std::to_string(done.size()) + (done.size() == 1 ? " model's" : " models'") +
-                 " smallest switch distance set): " + list);
+        job.note("[scenery] scenery and devices aren't drawn once smaller on screen than " + fmt_num(px) + " pixels across (" +
+                 fmt_num(px * 2) + " in widescreen; " + std::to_string(done.size()) + (done.size() == 1 ? " model's" : " models'") +
+                 " smallest switch size raised to it): " + list);
     }
 }
 

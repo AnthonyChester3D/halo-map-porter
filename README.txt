@@ -568,7 +568,7 @@ Weapons & vehicles window (Xbox)
   if it had been destroyed: a jet's pieces are never made, its health reads
   as gone. Try the map once to check its scripts still do what you want.
 
-Level reflections, fog and far scenery: the "Level..." window (Xbox)
+Level reflections, fog and tiny scenery: the "Level..." window (Xbox)
   The Xbox draws every level surface at least twice: its lightmap, then
   its textures. A shader with a reflection (a cube map, and a perpendicular
   or parallel brightness above 0) draws it a third time, and a fourth when
@@ -589,8 +589,8 @@ Level reflections, fog and far scenery: the "Level..." window (Xbox)
   (freeing its memory too); the surface keeps its textures, bump map and
   lightmap. The log's [reflections] line lists the ones dropped.
   The "Level..." button on the Xbox tab shows this for the Convert tab's map
-  (or the Build tab's scenario), with the level's fog and far scenery (see
-  "Fog" and "Far scenery" below). Measuring prepares the map as for a
+  (or the Build tab's scenario), with the level's fog and tiny scenery (see
+  "Fog" and "Tiny scenery" below). Measuring prepares the map as for a
   conversion without building it (seconds to a minute).
   - When converting: keep every reflection (the default), drop the
     suggested ones (the ones that cost the most passes for how little they
@@ -624,8 +624,8 @@ Level reflections, fog and far scenery: the "Level..." window (Xbox)
     (in world units; 1 unit = 10 feet, about 3 m). The picture shows it,
     and follows as you type (its sky is a plain gradient, not the level's
     own sky).
-  - Far scenery: always drawn (the default), or not past 300, 200, 150,
-    100 or 60 units. The picture shows the level only, not its objects.
+  - Hide scenery: never (the default), or below 4, 8, 12 or 16 pixels
+    across. The picture shows the level only, not its objects.
   Hover over the choices and checkboxes for what each does. Choices are
   saved per map and used every time you convert it for the Xbox.
   Measurements are kept between runs of the app until the map file
@@ -647,15 +647,24 @@ Fog (Xbox)
   farther than the map's; not nearer than where its fog starts). The
   map's own skies only; Bungie's levels keep theirs.
 
-Far scenery (Xbox, "Level..." window)
+Tiny scenery (Xbox, "Level..." window)
   Halo 1 has no draw distance for objects, but it draws nothing of a model
-  smaller on screen than its smallest switch distance ("super low", in
-  pixels across). With "Far scenery" set to a distance, each scenery and
-  device model the map places gets that set to its size on screen at the
-  distance (from the smallest object using it), so it vanishes about that
-  far away. Vehicles, characters, weapons and items are left alone. Big
-  ones pop out of view, so pick a distance past where they matter, or
-  behind the fog. The log's [scenery] line lists them. Off by default.
+  smaller on screen than its smallest switch size ("super low", its
+  bounding sphere's pixels across). With "Hide scenery" set to a size,
+  each scenery and device model the map places gets that raised to it, so
+  only specks go: at 8 pixels a 1-unit prop goes about 57 units away, a
+  16-unit tree not until about 900. Vehicles, characters, weapons and
+  items are left alone. The log's [scenery] line lists them. Off by
+  default.
+  It's a size rather than a distance on purpose. The engine measures an
+  object's size by how far ahead of the camera it is, not how far away:
+  things at the edges of the screen count as nearer, so with a distance
+  cutoff, big objects show at the screen's edge and vanish when you turn
+  to face them. Bungie's own scenery never vanishes (they use cheaper
+  versions far away, and fog); past fully opaque fog the engine already
+  skips everything. Halo 1 Unlimited counts every model at half its size
+  in widescreen (to pay for the wider view), so there things go at twice
+  the size chosen.
 
 Dynamic lights (Xbox)
   A dynamic light (a muzzle flash, an explosion, a map's lightning) lights
@@ -1011,8 +1020,8 @@ The log lists every automatic change:
   [reflections] Level reflections were dropped, as chosen in the Level
           shaders window (see "Level reflections" above).
   [fog]   The level's fog was made fully opaque (see "Fog" above).
-  [scenery] Scenery and devices stop being drawn past a distance (see "Far
-          scenery" above).
+  [scenery] Tiny scenery and devices aren't drawn (see "Tiny scenery"
+          above).
   [lights] Dynamic lights that would have the Xbox draw most of the level
           again were turned off or shrunk (see "Dynamic lights" above).
 
