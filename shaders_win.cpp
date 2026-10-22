@@ -261,12 +261,25 @@ void update_cost() {
         if (a.shaders[s].reflection_passes > 0) reflecting++;
         if (dropped((int)s)) going++;
     }
-    std::wstring t = L"Triangle passes the Xbox draws of the level in a typical / busy view: " + thousands((long long)before.typical) + L" / " +
+    auto ms = [](double passes) {
+        wchar_t b[16];
+        swprintf(b, 16, L"%.1f", passes * lshade::kXboxCpuMsPer1000Passes / 1000);
+        return std::wstring(b);
+    };
+    std::wstring t = L"Level triangle passes, typical / busy view: " + thousands((long long)before.typical) + L" / " +
                      thousands((long long)before.busy) + L" as made";
-    if (going) t += L" \u2192 " + thousands((long long)after.typical) + L" / " + thousands((long long)after.busy) + L" with " +
-                    std::to_wstring(going) + L" of its " + std::to_wstring(reflecting) + L" reflections dropped";
-    t += L". Stock Xbox maps: Sidewinder " + thousands((long long)stock.typical) + L" / " + thousands((long long)stock.busy) +
-         L" (among the busiest).";
+    if (going) {
+        t += L" \u2192 " + thousands((long long)after.typical) + L" / " + thousands((long long)after.busy) + L" with " +
+             std::to_wstring(going) + L" of " + std::to_wstring(reflecting) + L" reflections dropped (about " +
+             ms(before.typical - after.typical) + L" / " + ms(before.busy - after.busy) + L" ms less processor time a frame)";
+    } else if (reflecting) {
+        std::vector<char> all(a.shaders.size(), 0);
+        for (size_t s = 0; s < a.shaders.size(); s++) all[s] = a.shaders[s].reflection_passes > 0;
+        lshade::Cost bare = lshade::cost(a, all);
+        t += L" (its reflections: about " + ms(before.typical - bare.typical) + L" / " + ms(before.busy - bare.busy) +
+             L" ms of the Xbox's processor a frame)";
+    }
+    t += L". Sidewinder: " + thousands((long long)stock.typical) + L" / " + thousands((long long)stock.busy) + L".";
     SetWindowTextW(item(IDC_COST), t.c_str());
 }
 
@@ -710,8 +723,11 @@ void create_controls() {
                      L"glowing orange where you can see through it, and tints each room (cluster) a colour of its own. The engine draws the room you're in, then only the rooms "
                      L"it can see through portals, so walls between rooms hide what's behind them.");
     tip(IDC_COST, L"Every level triangle is drawn at least twice (its lightmap, then its textures); a reflection draws it once "
-                  L"or twice more. Dropping one also frees its cube map's memory. Typical: half of the views from where "
-                  L"players stand draw more; busy: one in ten does.");
+                  L"or twice more. That's the processor's time as well as the graphics chip's: it sends the level again. "
+                  L"Measured on an Xbox, about 0.45 ms of each 33 ms frame per 1,000 passes (Deathtrap's reflections: 1.4 ms "
+                  L"a frame on average, 3.2 ms in its busiest view). Dropping one also frees its cube map's memory. Typical: "
+                  L"half of the views from where players stand draw more; busy: one in ten does. Sidewinder is among the "
+                  L"busiest stock maps that still run smoothly.");
     const wchar_t *fog_tip = L"The Xbox stops drawing anything (level, objects, effects) past the fog's opaque distance, but only "
                              L"when the fog is fully opaque there: at 99% it still draws everything. Automatic makes fog that's "
                              L"nearly opaque (90% or more) fully so. Nearer opaque fog draws less, but the level looks foggier. "

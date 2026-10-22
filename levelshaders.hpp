@@ -54,6 +54,12 @@ Cost cost(const Analysis &a, const std::vector<char> &dropped);
 // Stock Xbox maps' levels, the same way (for comparison): Sidewinder's, among the busiest that still run smoothly.
 Cost stock_cost();
 
+// The Xbox's processor time a reflection pass costs, as well as the graphics chip's: the level's triangles are sent
+// again. Measured on an Xbox (Halo 1 Unlimited's perf log, Deathtrap as made and with its reflections dropped, at
+// the same spots): 2,912 / 8,346 fewer passes in a typical / busy view took 1.4 ms (on average) / 3.2 ms (its busiest
+// view) off each frame's drawing, about 0.45 ms per 1,000 passes.
+constexpr double kXboxCpuMsPer1000Passes = 0.45;
+
 // The level's geometry and textures, for drawing it.
 struct Texture { int w = 0, h = 0; std::vector<uint8_t> rgba; };
 struct Material {

@@ -4485,6 +4485,11 @@ struct ScriptConverter {
     const std::map<std::string, std::string> *subst = nullptr; // param name -> global, inside such a script
     int param_globals = 0;
     std::string extra_globals; // temporaries for nested calls, declared at the top of the file
+    // Short variables that hold the game's time (wide_numbers): their declarations become long.
+    std::vector<std::string> texts;   // every file's text (collect_user_names), for that
+    bool planned = false;
+    std::set<std::string> wide;       // user globals
+    std::map<std::string, std::pair<int, std::string>> fixes; // name -> (count, what) (not for a missing name)
 
     static std::string default_value(const std::string &type) {
         static const std::map<std::string, std::string> defaults{
@@ -4507,6 +4512,7 @@ struct ScriptConverter {
     }
 
     void collect_user_names(const std::string &s) {
+        texts.push_back(s);
         std::vector<hsc::Node> top;
         size_t i = 0;
         if (!hsc::parse(s, i, top, false)) return;
@@ -4593,6 +4599,17 @@ struct ScriptConverter {
         };
         if (n.kids.empty() || n.kids[0].list || n.kids[0].str) return rebuild("");
         std::string head = hsc::lower(n.kids[0].atom);
+        // (global short <one that holds the game's time> ...) -> long (wide_numbers)
+        if (head == "global" && n.kids.size() >= 3 && !n.kids[1].list && !n.kids[2].list && hsc::lower(n.kids[1].atom) == "short" &&
+            wide.count(hsc::lower(n.kids[2].atom))) {
+            std::string r = s.substr(n.b, n.kids[1].b - n.b) + "long";
+            size_t pos = n.kids[1].e;
+            for (size_t k = 2; k < n.kids.size(); k++) {
+                r += s.substr(pos, n.kids[k].b - pos) + emit(s, n.kids[k]);
+                pos = n.kids[k].e;
+            }
+            return r + s.substr(pos, n.e - pos);
+        }
         if (!param_scripts.empty()) {
             // Definition: (script static void (name (type p) ...) body) -> parameters become globals
             if (head == "script" && n.kids.size() >= 3) {
@@ -4737,8 +4754,119 @@ struct ScriptConverter {
         return stand_in(f->type);
     }
 
+    // A short (16-bit) variable given the game's time, (game_time), wraps negative 32,768 ticks (18 min 12 s) into a
+    // game and keeps the wrong value until it wraps back at 36 minutes: Deathtrap's (modulo (game_time) 1800), whose
+    // parameters are shorts, stopped its lightning and jerked its warthogs about. Each short global, and each short
+    // parameter of a script with parameters, that's set from the time, or from another one that holds it, becomes a
+    // long (32 bits, half a year of ticks). Longs and shorts convert to each other where a function wants either.
+    void wide_numbers() {
+        if (planned) return;
+        planned = true;
+        std::set<std::string> shorts;   // short globals
+        struct Assign { std::string target; bool time = false; std::set<std::string> refs; };
+        std::vector<Assign> as;
+        auto key = [](const std::string &script, size_t k) { return "#" + script + ":" + std::to_string(k); };
+        // (what an expression reads: the time, and names; a parameter as its key)
+        std::function<void(const hsc::Node &, const std::map<std::string, std::string> &, Assign &)> reads =
+            [&](const hsc::Node &n, const std::map<std::string, std::string> &params, Assign &a) {
+                if (!n.list) {
+                    if (n.str) return;
+                    std::string l = hsc::lower(n.atom);
+                    auto p = params.find(l);
+                    a.refs.insert(p == params.end() ? l : p->second);
+                    return;
+                }
+                if (!n.kids.empty() && !n.kids[0].list) {
+                    std::string h = hsc::lower(n.kids[0].atom);
+                    if (h == "game_time" || h == "game_time_authoritative") a.time = true;
+                }
+                for (auto &k : n.kids) reads(k, params, a);
+            };
+        std::function<void(const hsc::Node &, const std::map<std::string, std::string> &)> walk =
+            [&](const hsc::Node &n, const std::map<std::string, std::string> &params) {
+                if (!n.list || n.kids.empty()) return;
+                if (!n.kids[0].list) {
+                    std::string h = hsc::lower(n.kids[0].atom);
+                    if (h == "set" && n.kids.size() >= 3 && !n.kids[1].list) {
+                        Assign a;
+                        std::string t = hsc::lower(n.kids[1].atom);
+                        auto p = params.find(t);
+                        a.target = p == params.end() ? t : p->second;
+                        reads(n.kids[2], params, a);
+                        as.push_back(a);
+                    }
+                    auto ps = param_scripts.find(h);
+                    if (ps != param_scripts.end() && n.kids.size() - 1 == ps->second.size())
+                        for (size_t k = 1; k < n.kids.size(); k++) {
+                            Assign a;
+                            a.target = key(h, k - 1);
+                            reads(n.kids[k], params, a);
+                            as.push_back(a);
+                        }
+                }
+                for (auto &k : n.kids) walk(k, params);
+            };
+        for (auto &s : texts) {
+            std::vector<hsc::Node> top;
+            size_t i = 0;
+            if (!hsc::parse(s, i, top, false)) continue;
+            for (auto &n : top) {
+                if (!n.list || n.kids.size() < 3 || n.kids[0].list) continue;
+                std::string h = hsc::lower(n.kids[0].atom);
+                if (h == "global" && !n.kids[1].list && hsc::lower(n.kids[1].atom) == "short" && !n.kids[2].list)
+                    shorts.insert(hsc::lower(n.kids[2].atom));
+                std::map<std::string, std::string> params;   // inside a script with parameters: name -> key
+                if (h == "script") {
+                    std::string type = n.kids[1].list ? "" : hsc::lower(n.kids[1].atom);
+                    size_t at = (type == "static" || type == "stub") ? 3 : 2;
+                    if (n.kids.size() > at && n.kids[at].list && !n.kids[at].kids.empty() && !n.kids[at].kids[0].list) {
+                        std::string sn = hsc::lower(n.kids[at].kids[0].atom);
+                        auto ps = param_scripts.find(sn);
+                        if (ps != param_scripts.end())
+                            for (size_t k = 0; k < ps->second.size(); k++) params[ps->second[k].name] = key(sn, k);
+                    }
+                }
+                walk(n, params);
+            }
+        }
+        auto is_short = [&](const std::string &t) {
+            if (t.empty() || t[0] != '#') return shorts.count(t) > 0;
+            size_t c = t.rfind(':');
+            auto ps = param_scripts.find(t.substr(1, c - 1));
+            size_t k = std::stoul(t.substr(c + 1));
+            return ps != param_scripts.end() && k < ps->second.size() && ps->second[k].type == "short";
+        };
+        std::set<std::string> grown;
+        for (bool more = true; more;) {
+            more = false;
+            for (auto &a : as) {
+                if (grown.count(a.target) || !is_short(a.target)) continue;
+                bool time = a.time;
+                for (auto &r : a.refs) time = time || grown.count(r);
+                if (time) { grown.insert(a.target); more = true; }
+            }
+        }
+        for (auto &t : grown) {
+            if (t[0] != '#') {
+                wide.insert(t);
+                auto &f = fixes[t];
+                f.first++;
+                f.second = "a short holding the game's time (it went wrong 18 minutes into a game): now a long";
+                continue;
+            }
+            size_t c = t.rfind(':');
+            std::string sn = t.substr(1, c - 1);
+            auto &p = param_scripts[sn][std::stoul(t.substr(c + 1))];
+            p.type = "long";
+            auto &f = fixes[sn + " (" + p.name + ")"];
+            f.first++;
+            f.second = "a short parameter given the game's time (it went wrong 18 minutes into a game): now a long";
+        }
+    }
+
     // Converts one file. Returns false if it can't be parsed (left unchanged).
     bool convert(std::string &text) {
+        wide_numbers();
         for (auto &[script, ps] : param_scripts)
             for (auto &p : ps)
                 if (p.global.empty()) {
@@ -4788,6 +4916,7 @@ static void convert_scripts(Job &job, const fs::path &dir, Game target) {
     for (auto &[name, c] : conv.changes)
         job.note("[scripts] " + name + " (not in " + game_name(target) + "): " + c.second + " (" +
                  std::to_string(c.first) + "x)");
+    for (auto &[name, c] : conv.fixes) job.note("[scripts] " + name + ": " + c.second);
 }
 
 // Prepare the user's/converted tags for Xbox: only tags the map uses are copied to a scratch
@@ -6993,8 +7122,10 @@ std::string convert_script_text(Game target, const std::string &text, std::vecto
     conv.collect_user_names(text);
     std::string t = text;
     if (!conv.convert(t) && notes) notes->push_back("could not parse");
-    if (notes)
+    if (notes) {
         for (auto &[name, c] : conv.changes) notes->push_back(name + ": " + c.second + " (" + std::to_string(c.first) + "x)");
+        for (auto &[name, c] : conv.fixes) notes->push_back(name + ": " + c.second);
+    }
     return t;
 }
 

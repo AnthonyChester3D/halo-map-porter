@@ -283,6 +283,14 @@ game, the app rewrites the map's scripts for that game:
     pictures are added to a copy of the Xbox's arrow sheet. If an arrow
     still can't be added (the HUD has room for 16), the scripts that use
     it show the plain arrow ("default") instead.
+  - A short (a whole number up to 32,767) given the game's time,
+    (game_time), goes negative 32,768 ticks (18 min 12 s) into a game and
+    stays wrong until 36 minutes: Deathtrap's (modulo (game_time) 1800),
+    whose parameters are shorts, stopped its lightning and threw its
+    warthogs about from then on. Every short global and short script
+    parameter set from the game's time, or from another one that holds
+    it, becomes a long (good for half a year of game time). Shorts and
+    longs convert to each other wherever a function wants one.
   - Anything else becomes a stand-in that does nothing: calls with no
     result (like sv_say, which posts a chat message on PC servers) are
     removed, true/false checks return false, numbers return 0, and
@@ -581,7 +589,12 @@ Level reflections, fog, scenery and weather: the "Level..." window (Xbox)
   Reflections are part of how a level looks, though, and they're only part
   of what it costs: dropping 45 of Deathtrap's 50 halved those passes but
   took its worst spot on an Xbox from 10-12 to only 12-14 frames a second,
-  and the level looked noticeably flatter. So a conversion keeps every
+  and the level looked noticeably flatter. Measured with Halo 1 Unlimited's
+  perf log, a reflection costs the Xbox's processor too, not only its
+  graphics chip (the level is sent again): dropping Deathtrap's took about
+  1.4 ms off each frame on average and 3.2 ms in its busiest view, of the
+  33 ms a frame has, about 0.45 ms per 1,000 triangle passes. The window's
+  line under the picture estimates that for the level. So a conversion keeps every
   reflection unless you choose otherwise for that map in this window. When
   a level's reflections cost much more than Sidewinder's, the Performance
   section says so.
@@ -617,7 +630,9 @@ Level reflections, fog, scenery and weather: the "Level..." window (Xbox)
     see through portals. The line above the list says how many rooms and
     portals the level has (after the app's own, when it adds them).
   - The line under the picture: the level's triangle passes in a typical /
-    busy view as made and with your choices, next to Sidewinder's.
+    busy view as made and with your choices, next to Sidewinder's, and
+    about how much of the Xbox's processor time a frame the reflections
+    take (or dropping them saves).
   - Fog: as the conversion leaves it (automatic, the default), as the map
     has it, fully opaque at its distance, three quarters of it or half of
     it, or Other: fully opaque at a distance you type in the box beside it
@@ -1031,7 +1046,8 @@ The log lists every automatic change:
   [xbox-mp] A vehicle or PC weapon was swapped, removed or kept for Xbox.
   [shrink] Textures were halved to fit the Xbox size limit.
   [textures] (also) Textures were halved to fit the texture memory target.
-  [scripts] A script function the target game lacks was replaced.
+  [scripts] A script function the target game lacks was replaced, or a
+          short that holds the game's time was made a long.
   [bc7]   MCC-only BC7 textures were re-encoded as DXT.
   [textures] Textures were scaled or compressed like stock Xbox maps.
   [shaders] Layered transparent shaders were flattened for Xbox.
