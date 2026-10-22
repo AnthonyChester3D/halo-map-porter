@@ -3,6 +3,7 @@
 //        cli_test build <file.scenario> <MCC|CE|Xbox> <out.map>
 #include "core.hpp"
 #include "render.hpp"
+#include <algorithm>
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
@@ -108,6 +109,16 @@ int main(int argc, char **argv) {
             if (eq != std::string::npos) cfg.xbox_replace[item.substr(0, eq)] = item.substr(eq + 1);
         }
     }
+    if (getenv("XNOPORTALS")) cfg.xbox_add_portals = false;
+    if (const char *x = getenv("XREFL")) {   // keep | tag,tag,... (the level shaders window's picks)
+        std::string w = x, item;
+        if (w == "keep") cfg.xbox_drop_reflections = false;
+        else {
+            cfg.xbox_reflection_picks_set = true;
+            std::stringstream ss(w);
+            while (std::getline(ss, item, ',')) if (!item.empty()) cfg.xbox_reflection_picks.insert(item);
+        }
+    }
     Log log = [](const std::string &s) { std::cout << s << std::endl; };
     std::string mode = argv[1];
     Result r;
@@ -118,6 +129,14 @@ int main(int argc, char **argv) {
         std::cout << "Gametypes: " << t.gametypes << "\nPlayers: " << t.pmin << "-" << t.pmax << "\nGenres:";
         for (auto &g : t.genres) std::cout << " [" << g << "]";
         std::cout << "\nwhy: " << t.why_genres << "\nplayers: " << t.players_why << "\n";
+        return 0;
+    }
+    if (mode == "shaders") {   // cli_test shaders <in.map|scenario> x x: the level shaders window's measurement
+        std::string name, err;
+        Game in = detect_game(argv[2], &name);
+        std::filesystem::path file;
+        if (!analyze_level_shaders(cfg, argv[2], in, file, err, log)) { std::cout << "FAILED: " << err << "\n"; return 1; }
+        std::cout << "level shaders file: " << file.u8string() << "\n";
         return 0;
     }
     if (mode == "analyze") {   // cli_test analyze <in.map|scenario> x x
@@ -174,6 +193,40 @@ int main(int argc, char **argv) {
         }
     } else {
         r = build_from_tags(cfg, argv[2], parse(argv[3]), argv[4], true, log);
+    }
+    if (!r.lods.empty()) {   // the LODs window's file: what's in it (XLODPREVIEW=<folder>: each model's levels drawn)
+        LodView v;
+        bool ok = load_lod_view(v, r.lods);
+        printf("lods: %s, %zu models, %zu drawings\n", ok ? "read back" : "UNREADABLE", v.models.size(), v.previews.size());
+        for (auto &m : v.models) {
+            printf("  %-30s %c %-9s%s placed %d radius %.2f cutoffs %g/%g/%g/%g/%g levels %d %d %d %d %d tris", m.name.c_str(), m.kind,
+                   m.change.c_str(), m.undone ? " UNDONE" : "", m.placed, m.radius, m.cutoffs[0], m.cutoffs[1], m.cutoffs[2],
+                   m.cutoffs[3], m.cutoffs[4], m.level[0], m.level[1], m.level[2], m.level[3], m.level[4]);
+            for (int l : m.level) printf(" %d", l >= 0 ? v.previews[l].triangles() : 0);
+            printf("\n");
+            if (const char *dir = getenv("XLODPREVIEW")) {
+                std::vector<int> shown;
+                for (int l : m.level) if (l >= 0 && std::find(shown.begin(), shown.end(), l) == shown.end()) shown.push_back(l);
+                const int w = 300, h = 240;
+                std::vector<std::vector<uint32_t>> px(shown.size());
+                render::View rv;
+                rv.wire = getenv("XWIRE") != nullptr;
+                for (size_t k = 0; k < shown.size(); k++) render::draw(v.previews[shown[k]], rv, w, h, px[k]);
+                std::string n = m.name;
+                for (auto &c : n) if (c == '/' || c == ' ') c = '_';
+                FILE *f = fopen((std::string(dir) + "/" + n + ".ppm").c_str(), "wb");
+                if (!f || shown.empty()) { if (f) fclose(f); continue; }
+                fprintf(f, "P6\n%d %d\n255\n", w * (int)shown.size(), h);
+                for (int y = 0; y < h; y++)
+                    for (size_t k = 0; k < shown.size(); k++)
+                        for (int x = 0; x < w; x++) {
+                            uint32_t q = px[k][(size_t)y * w + x];
+                            unsigned char c[3] = {(unsigned char)(q >> 16), (unsigned char)(q >> 8), (unsigned char)q};
+                            fwrite(c, 1, 3, f);
+                        }
+                fclose(f);
+            }
+        }
     }
     if (!r.ok) { std::cout << "FAILED: " << r.error << "\n"; return 1; }
     std::cout << r.info << "\nfixes=" << r.changes.size() << " warnings=" << r.warnings.size()

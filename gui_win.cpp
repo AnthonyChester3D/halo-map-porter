@@ -22,9 +22,11 @@
 
 #include "core.hpp"
 #include "contents_win.hpp"
+#include "lodview_win.hpp"
 #include "mapcard_win.hpp"
 #include "maplist_win.hpp"
 #include "mappack.hpp"
+#include "shaders_win.hpp"
 
 using namespace porter;
 
@@ -35,6 +37,7 @@ enum {
     ID_STATUS,
     ID_OPEN_FOLDER,
     ID_OPEN_REPORT,
+    ID_SEE_LODS,
     // convert page
     ID_IN_LBL, ID_IN, ID_IN_BROWSE, ID_FROM_LBL, ID_FROM, ID_DETECT, ID_TO_LBL, ID_TO, ID_OUT_LBL, ID_OUT,
     ID_OUT_BROWSE, ID_SHARE, ID_CONVERT, ID_CONV_HINT,
@@ -68,6 +71,10 @@ enum {
     ID_X_LODSTOCK,
     // making lower-detail versions, and the LOD library's folder (each *_BROWSE directly follows its edit box)
     ID_X_MAKELOD, ID_S_LOD_LBL, ID_S_LOD, ID_S_LOD_BROWSE, ID_S_LOD_HINT,
+    // portals for levels made without them
+    ID_X_PORTALS,
+    // the level shaders window
+    ID_X_SHADERS,
 };
 
 #define WM_APP_LOG (WM_APP + 1)
@@ -79,7 +86,7 @@ static int g_dpi = 96;
 static std::vector<int> g_pages[5];   // Convert, Build, Xbox, Map packs, Settings
 static std::atomic<bool> g_busy{false};
 static bool g_out_manual = false;
-static std::wstring g_last_output, g_last_report;
+static std::wstring g_last_output, g_last_report, g_last_lods;
 static int S(int v) { return MulDiv(v, g_dpi, 96); }
 
 // ---------------------------------------------------------------- strings
@@ -150,6 +157,7 @@ static void save_settings() {
     ini_set(L"x_allveh", checked(ID_X_ALLVEH) ? L"1" : L"0");
     ini_set(L"x_lodstock", checked(ID_X_LODSTOCK) ? L"1" : L"0");
     ini_set(L"x_makelod", checked(ID_X_MAKELOD) ? L"1" : L"0");
+    ini_set(L"x_portals", checked(ID_X_PORTALS) ? L"1" : L"0");
     ini_set(L"x_tex2", std::to_wstring(sel(ID_X_TEX)));
     ini_set(L"x_lm", std::to_wstring(sel(ID_X_LM)));
     ini_set(L"x_w2", std::to_wstring(sel(ID_X_W2)));
@@ -399,6 +407,7 @@ static void apply_xbox_options(Config &cfg) {
     cfg.xbox_keep_all_vehicles = folder_mode() && checked(ID_X_ALLVEH);
     cfg.xbox_lod_stock_models = checked(ID_X_LODSTOCK);
     cfg.xbox_make_lods = checked(ID_X_MAKELOD);
+    cfg.xbox_add_portals = checked(ID_X_PORTALS);
     {
         static const int tex[4] = {512, 512, 1024, 0}, obj[4] = {256, 0, 0, 0}, lm[3] = {0, 512, 256};
         int t = sel(ID_X_TEX), l = sel(ID_X_LM);
@@ -582,6 +591,7 @@ static void set_busy(bool b) {
     if (b) {
         ShowWindow(GetDlgItem(g_wnd, ID_OPEN_FOLDER), SW_HIDE);
         ShowWindow(GetDlgItem(g_wnd, ID_OPEN_REPORT), SW_HIDE);
+        ShowWindow(GetDlgItem(g_wnd, ID_SEE_LODS), SW_HIDE);
     }
 }
 
@@ -738,10 +748,10 @@ static void on_input_chosen() {
 }
 
 // ---------------------------------------------------------------- jobs
-struct Done { bool ok; std::wstring msg, output, report; };
+struct Done { bool ok; std::wstring msg, output, report, lods; };
 
 static void finish(const Result &r, const std::string &what) {
-    auto *d = new Done{r.ok, L"", W(u8(r.output)), W(u8(r.report))};
+    auto *d = new Done{r.ok, L"", W(u8(r.output)), W(u8(r.report)), W(u8(r.lods))};
     if (r.ok) {
         std::ostringstream s;
         s << "DONE: " << what << " -> " << u8(r.output) << "\n   " << r.changes.size() << " automatic fixes, "
@@ -896,6 +906,85 @@ static void open_contents() {
     }
 }
 
+// The level shaders window's choices, saved per input map (or scenario) next to its weapons & vehicles picks.
+static fs::path shader_picks_file(const fs::path &input) {
+    fs::path p = picks_file(input);
+    p.replace_extension(L".shaders.txt");
+    return p;
+}
+static shadersui::Picks load_shader_picks(const fs::path &input) {
+    shadersui::Picks picks;
+    std::ifstream f(shader_picks_file(input));
+    std::string l;
+    while (std::getline(f, l)) {
+        if (!l.empty() && l.back() == '\r') l.pop_back();
+        size_t tab = l.find('\t');
+        if (tab == std::string::npos) continue;
+        std::string k = l.substr(0, tab), v = l.substr(tab + 1);
+        if (k == "mode") picks.mode = std::clamp(atoi(v.c_str()), 0, 2);
+        else if (k == "drop" && !v.empty()) picks.drops.insert(v);
+    }
+    return picks;
+}
+static void save_shader_picks(const fs::path &input, const shadersui::Picks &picks) {
+    fs::path p = shader_picks_file(input);
+    std::error_code ec;
+    if (picks.mode == 2) { fs::remove(p, ec); return; }   // (the default: every reflection kept)
+    fs::create_directories(p.parent_path(), ec);
+    std::ofstream f(p, std::ios::binary);
+    f << "mode\t" << picks.mode << '\n';
+    for (auto &t : picks.drops) f << "drop\t" << t << '\n';
+}
+static void apply_shader_picks(Config &cfg, const fs::path &input) {
+    shadersui::Picks picks = load_shader_picks(input);
+    cfg.xbox_drop_reflections = picks.mode == 0;
+    if (picks.mode == 1) {
+        cfg.xbox_reflection_picks_set = true;
+        cfg.xbox_reflection_picks = picks.drops;
+    }
+}
+
+// What changes a map's level shaders measurement: the input file, and whether portals are added (what's drawn).
+static std::string shaders_key(const Config &cfg, const fs::path &in) {
+    std::error_code ec;
+    auto mt = fs::last_write_time(in, ec);
+    return N(lower(in.wstring())) + "|" + std::to_string((long long)mt.time_since_epoch().count()) + "|" +
+           (cfg.xbox_add_portals ? "p" : "-");
+}
+
+static void open_shaders() {
+    fs::path in;
+    Game game;
+    if (!contents_input(in, game)) {
+        MessageBoxW(g_wnd, L"Pick a map on the Convert tab (or a scenario on the Build tab) first.", L"Halo Map Porter",
+                    MB_ICONINFORMATION);
+        return;
+    }
+    if (g_busy) {
+        MessageBoxW(g_wnd, L"Wait for the conversion to finish first.", L"Halo Map Porter", MB_ICONINFORMATION);
+        return;
+    }
+    save_settings();
+    Config cfg = make_config();
+    apply_xbox_options(cfg);
+    std::string key = shaders_key(cfg, in);
+    shadersui::Picks picks = load_shader_picks(in);
+    bool ok = shadersui::edit(
+        g_wnd, L"Level shaders - " + in.filename().wstring(), key,
+        [cfg, in, game](fs::path &file, std::string &error, const std::function<void(const std::string &)> &log) {
+            return analyze_level_shaders(cfg, in, game, file, error, [log](const std::string &l) { log(l); });
+        },
+        picks);
+    if (ok) {
+        save_shader_picks(in, picks);
+        append_log(picks.mode == 0   ? L"Level shaders: the suggested reflections of " + in.filename().wstring() + L" go when you convert it for the Xbox."
+                   : picks.mode == 2 ? L"Level shaders: " + in.filename().wstring() + L" keeps every reflection when you convert it for the Xbox."
+                                     : L"Level shaders: " + std::to_wstring(picks.drops.size()) + L" reflection" +
+                                           (picks.drops.size() == 1 ? L"" : L"s") + L" of " + in.filename().wstring() +
+                                           L" go when you convert it for the Xbox (your picks).");
+    }
+}
+
 static void start_convert() {
     if (card_only()) { save_map_card(); return; }
     fs::path in(get_text(ID_IN)), out(get_text(ID_OUT));
@@ -922,19 +1011,24 @@ static void start_convert() {
     save_settings();
     Config cfg = make_config();
     apply_xbox_options(cfg);
-    if (to == Game::Xbox) cfg.xbox_replace = load_picks(in);
+    if (to == Game::Xbox) {
+        cfg.xbox_replace = load_picks(in);
+        apply_shader_picks(cfg, in);
+    }
     bool share = checked(ID_SHARE);
     set_busy(true);
     SetWindowTextW(g_log, L"");
     append_log(L"Converting " + in.filename().wstring() + L": " + W(game_name(from)) + L" -> " + W(game_name(to)));
     if (!card_note.empty()) append_log(card_note);
     std::string key = to == Game::Xbox ? contents_key(cfg, in) : std::string();
+    std::string lkey = to == Game::Xbox ? shaders_key(cfg, in) : std::string();
     fs::path card_dir = to == Game::Xbox && folder_mode() ? conv_card_dir() : fs::path();
     std::string card_name = N(conv_card_name());
     std::thread([=] {
         auto m = to == Game::Xbox ? std::make_shared<ContentAnalysis>() : nullptr;
         Result r = convert_map(cfg, in, from, to, out, share, post_log, m.get());
         keep_measurement(r, key, m);
+        if (!lkey.empty()) shadersui::remember(lkey, r.shaders);
         if (r.ok && !card_dir.empty())
             if (std::string t = card_traits(cfg, card_dir, card_name, out, out.parent_path()); !t.empty()) post_log(t);
         finish(r, std::string("Converted to ") + game_name(to));
@@ -959,6 +1053,7 @@ static void start_build() {
     Config cfg = make_config();
     apply_xbox_options(cfg);
     cfg.xbox_replace = load_picks(scen);   // used by the Xbox build only
+    apply_shader_picks(cfg, scen);
     bool share = checked(ID_B_SHARE);
     std::wstring xbox_name = chosen_map(ID_B_XBOX_NAME); // empty = the scenario's own name
     std::wstring xbox_note, xbox_folder;
@@ -976,7 +1071,7 @@ static void start_build() {
     set_busy(true);
     SetWindowTextW(g_log, L"");
     if (!xbox_note.empty()) append_log(xbox_note);
-    std::string key = contents_key(cfg, scen);
+    std::string key = contents_key(cfg, scen), lkey = shaders_key(cfg, scen);
     fs::path card_dir = xbox_folder.empty() ? fs::path() : build_card_dir();
     std::string card_name = N(build_map_name());
     std::thread([=] {
@@ -992,6 +1087,7 @@ static void start_build() {
             auto m = t.first == Game::Xbox ? std::make_shared<ContentAnalysis>() : nullptr;
             Result r = build_from_tags(cfg, scen, t.first, out, share, post_log, m.get());
             keep_measurement(r, key, m);
+            if (t.first == Game::Xbox) shadersui::remember(lkey, r.shaders);
             if (r.ok && t.first == Game::Xbox && !card_dir.empty())
                 if (std::string tr = card_traits(cfg, card_dir, card_name, out, out.parent_path()); !tr.empty()) post_log(tr);
             if (r.ok)
@@ -1644,7 +1740,7 @@ static void create_controls() {
     }
     check(2, L"Keep every vehicle (Halo Universal XBE)", 410, y - 88, 324, ID_X_ALLVEH);
     add(2, L"STATIC", L"", 0, 410, y - 62, 324, 58, ID_X_VHINT);
-    y += 6;
+    y += 2;
     add(2, L"STATIC", L"Weapons Xbox multiplayer doesn't have:", 0, 26, y, 480, 20, ID_X_WLBL);
     button(2, L"Weapons && vehicles...", 534, y - 4, 200, ID_X_CONTENTS);
     y += 24;
@@ -1655,10 +1751,10 @@ static void create_controls() {
         list_combo(2, 170, y, 220, ID_X_W0, w);
         add(2, L"STATIC", L"Kept weapons get the PC pickup animations and icons automatically.", 0, 410, y + 3, 324, 40,
             ID_X_WHINT);
-        y += 30;
+        y += 29;
         label(2, L"Fuel rod gun:", 46, y, 120, ID_X_W1_LBL);
         list_combo(2, 170, y, 220, ID_X_W1, w);
-        y += 30;
+        y += 29;
         std::vector<const wchar_t *> o = w;
         o[0] = L"Keep them";
         label(2, L"Other custom ones:", 46, y, 124, ID_X_W2_LBL);
@@ -1666,12 +1762,16 @@ static void create_controls() {
         add(2, L"STATIC", L"e.g. a custom tagset's beam rifle. Replacing them saves memory on big maps.", 0, 410, y - 2, 324, 36,
             ID_X_W2_HINT);
     }
-    y += 36;
+    y += 32;
     check(2, L"Make lower-detail versions (LODs) of the map's models that have none, kept in the LOD library (Settings tab)",
           26, y, 708, ID_X_MAKELOD);
-    y += 26;
+    y += 24;
     check(2, L"Also use the lower-detail versions of Bungie's own trees, rocks and plants at a distance (retail never did)",
           26, y, 708, ID_X_LODSTOCK);
+    y += 24;
+    check(2, L"Add portals to levels made without them, so walls hide what's behind them",
+          26, y, 500, ID_X_PORTALS);
+    button(2, L"Level shaders...", 534, y - 4, 200, ID_X_SHADERS);
 
     // Map packs page
     create_pack_page();
@@ -1724,8 +1824,10 @@ static void create_controls() {
     SendMessageW(g_log, EM_SETLIMITTEXT, 0, 0);
     add(-1, L"BUTTON", L"Open output folder", BS_PUSHBUTTON, 10, 752, 150, 26, ID_OPEN_FOLDER);
     add(-1, L"BUTTON", L"Open report", BS_PUSHBUTTON, 168, 752, 120, 26, ID_OPEN_REPORT);
+    add(-1, L"BUTTON", L"See the LODs", BS_PUSHBUTTON, 296, 752, 120, 26, ID_SEE_LODS);
     ShowWindow(GetDlgItem(g_wnd, ID_OPEN_FOLDER), SW_HIDE);
     ShowWindow(GetDlgItem(g_wnd, ID_OPEN_REPORT), SW_HIDE);
+    ShowWindow(GetDlgItem(g_wnd, ID_SEE_LODS), SW_HIDE);
 
     // Load settings
     std::wstring ce = ini_get(L"ce_dir");
@@ -1754,6 +1856,7 @@ static void create_controls() {
     set_check(ID_X_ALLVEH, ini_get(L"x_allveh", L"1") == L"1");
     set_check(ID_X_LODSTOCK, ini_get(L"x_lodstock", L"0") == L"1");
     set_check(ID_X_MAKELOD, ini_get(L"x_makelod", L"1") == L"1");
+    set_check(ID_X_PORTALS, ini_get(L"x_portals", L"1") == L"1");
     {
         std::wstring lib = ini_get(L"lod_library");
         set_text(ID_S_LOD, lib.empty() ? (appdata_dir(CSIDL_LOCAL_APPDATA) / L"lod_library").wstring() : lib);
@@ -1890,11 +1993,14 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case ID_X_ALLVEH:
             if (code == BN_CLICKED) { update_vehicle_texts(); save_settings(); }
             break;
-        case ID_X_LODSTOCK: case ID_X_MAKELOD:
+        case ID_X_LODSTOCK: case ID_X_MAKELOD: case ID_X_PORTALS:
             if (code == BN_CLICKED) save_settings();
             break;
         case ID_X_CONTENTS:
             if (code == BN_CLICKED) open_contents();
+            break;
+        case ID_X_SHADERS:
+            if (code == BN_CLICKED) open_shaders();
             break;
         case ID_X_MAPLIST:
             if (code == CBN_SELCHANGE) {
@@ -1971,6 +2077,12 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             break;
         case ID_OPEN_REPORT:
             if (!g_last_report.empty()) ShellExecuteW(h, L"open", g_last_report.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            return 0;
+        case ID_SEE_LODS:
+            if (!g_last_lods.empty()) {
+                Config c = make_config();
+                lodui::show(h, fs::path(g_last_lods), !c.lod_library.empty() ? c.lod_library : c.cache_dir / "lod_library");
+            }
             break;
         }
         return 0;
@@ -1999,6 +2111,8 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             ShowWindow(GetDlgItem(h, ID_OPEN_FOLDER), SW_SHOW);
             ShowWindow(GetDlgItem(h, ID_OPEN_REPORT), d->report.empty() ? SW_HIDE : SW_SHOW);
         }
+        g_last_lods = d->lods;   // (a map that didn't fit too: see what was made)
+        ShowWindow(GetDlgItem(h, ID_SEE_LODS), d->lods.empty() ? SW_HIDE : SW_SHOW);
         update_invader_status();
         update_conv_hint();
         if (!d->ok) MessageBeep(MB_ICONWARNING);
@@ -2023,6 +2137,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_TAB_CLASSES | ICC_STANDARD_CLASSES | ICC_LISTVIEW_CLASSES};
     InitCommonControlsEx(&icc);
     contentsui::set_cache_folder(appdata_dir(CSIDL_LOCAL_APPDATA) / L"measurements");
+    shadersui::set_cache_folder(appdata_dir(CSIDL_LOCAL_APPDATA) / L"levels");
     HDC dc = GetDC(nullptr);
     g_dpi = GetDeviceCaps(dc, LOGPIXELSY);
     ReleaseDC(nullptr, dc);

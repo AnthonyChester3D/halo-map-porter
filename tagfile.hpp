@@ -107,11 +107,17 @@ private:
 
 // Values of an editable struct (its own bytes; not for a struct inside a struct), by field name.
 double get_num(const TagNode &n, const char *field, int k = 0);
+std::string get_str(const TagNode &n, const char *field);   // a 32-character string
 bool set_num(TagNode &n, const char *field, double v, int k = 0);
 // A block's elements (nullptr if the struct has no such block). Elements added must be of the block's struct:
 // copies of its elements, or new_node(block_struct(...)).
 std::vector<TagNode> *block(TagNode &n, const char *field);
 int block_struct(const TagNode &n, const char *field);
+// A data field's bytes (nullptr if the struct has no such field). Saving writes its size.
+std::string *data(TagNode &n, const char *field);
+// A tag reference's path, '\\' separators, no extension ("" for none; nullptr if the struct has no such field).
+// Saving writes its length.
+std::string *ref_path(TagNode &n, const char *field);
 int struct_size(int sid);
 // A zero-filled struct with empty references, blocks and data.
 TagNode new_node(int sid);

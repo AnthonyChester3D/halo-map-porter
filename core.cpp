@@ -3,6 +3,8 @@
 #include "inflate.hpp"
 #include "lod.hpp"
 #include "perf.hpp"
+#include "levelshaders.hpp"
+#include "portals.hpp"
 #include "preview.hpp"
 #include "tagfile.hpp"
 
@@ -282,7 +284,11 @@ struct Job {
     // Models the app made lower-detail versions for, as they were before (to take them out again when the map
     // doesn't fit the Xbox), and what those versions take in the Xbox map.
     std::vector<std::pair<fs::path, std::string>> lod_backups;
+    std::vector<std::pair<fs::path, std::string>> portal_backups;   // levels the app gave portals, as they were
     size_t lod_xbox_bytes = 0;
+    std::vector<LodView::Model> lod_changes;   // the models whose levels of detail changed (for the LODs window)
+    fs::path shaders_file;                     // the level shaders file (levelshaders.hpp), for the window
+    std::string shaders_line;                  // the report's line on the level's shader passes
 
     Job(const Config &c, const Log &l, Game t) : cfg(c), log(l), target(t) {}
 
@@ -1086,7 +1092,12 @@ static bool measure_xbox_memory(const fs::path &map, XboxMemoryUse &u) {
 void convert_bc7_textures(Job &job);
 void xbox_content_passes(Job &job);
 void xbox_lods(Job &job, const std::vector<std::string> &deps);
+void xbox_portals(Job &job);
+void xbox_lights(Job &job, const std::vector<std::string> &deps);
+void xbox_reflections(Job &job);
+static std::string thousands(long long v);
 static std::vector<std::string> performance_lines(Job &job);
+static LodView make_lod_view(Job &job, const std::string &map_name);
 static void convert_scripts(Job &job, const fs::path &dir, Game target);
 bool prepare_models_for_pc(Job &job, std::string &err);
 
@@ -1443,6 +1454,20 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
             for (auto &l : performance) job.log("  " + l);
         }
     }
+    r.shaders = job.shaders_file;
+    if (cfg.level_shaders_only) {   // (measured: nothing more to do)
+        r.ok = !job.shaders_file.empty();
+        if (!r.ok) r.error = "The map's level couldn't be measured.";
+        return r;
+    }
+    // The models whose levels of detail changed, for the LODs window (drawn now, while the made versions are in).
+    LodView lod_view;
+    fs::path lod_file;
+    if (job.target == Game::Xbox && !job.analysis && !job.lod_changes.empty()) {
+        lod_view = make_lod_view(job, output.stem().u8string());
+        lod_file = job.cfg.cache_dir / "lods" / (output.stem().u8string() + ".txt");
+        if (save_lod_view(lod_view, lod_file)) r.lods = lod_file;
+    }
 
     std::string stem = output.stem().u8string();
     bool optimized = false;   // Invader's --optimize: identical data stored once (only when the tag space is short)
@@ -1477,6 +1502,11 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
         snprintf(mb, sizeof mb, "%.1f", job.lod_xbox_bytes / 1048576.0);
         job.lod_backups.clear();
         job.lod_xbox_bytes = 0;
+        if (!lod_file.empty()) {   // the LODs window shows they were taken out
+            for (auto &m : lod_view.models)
+                if (m.change == "made" || m.change == "library") m.undone = true;
+            save_lod_view(lod_view, lod_file);
+        }
         if (!why.empty()) {
             job.note("[lod] the map " + why + ", so the lower-detail versions made for it (" + mb + " MB) were taken out again");
             performance = performance_lines(job);   // the report's, with those models as they are
@@ -1636,6 +1666,21 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
         }
         if (rc == 0) break;
         Failure f;
+        // An error in a level the app gave portals: the level goes back as it was, and the map builds again.
+        if (!job.portal_backups.empty()) {
+            bool bsp_error = false;
+            std::istringstream ls(out);
+            for (std::string l; std::getline(ls, l);)
+                if (l.find("ERROR") != std::string::npos && l.find(".scenario_structure_bsp") != std::string::npos) bsp_error = true;
+            if (bsp_error) {
+                for (auto &[p, b] : job.portal_backups) std::ofstream(p, std::ios::binary | std::ios::trunc) << b;
+                job.portal_backups.clear();
+                job.note("[portals] Invader didn't accept the level with the portals the app added, so it was built as it was");
+                performance = performance_lines(job);
+                cmd = make_cmd();
+                continue;
+            }
+        }
         static const std::regex too_big(R"(exceeds (?:the )?maximum size[^(]*\(([\d.]+) (?:MiB )?> ([\d.]+))");
         std::smatch tb;
         // Too big with the lower-detail versions the app made, and taking them out is enough: they come out (before
@@ -3272,7 +3317,286 @@ void xbox_content_passes(Job &job) {
     if (flares)
         job.note("[xbox] removed the reflections from " + std::to_string(flares) +
                  " lens flares that have no bitmap to draw them with");
-    xbox_lods(job, deps);
+    if (!job.cfg.level_shaders_only) xbox_lods(job, deps);
+    xbox_lights(job, deps);
+    xbox_portals(job);
+    xbox_reflections(job);
+}
+
+// The level's reflections (levelshaders.hpp): the Xbox draws a reflecting surface once or twice more than any other,
+// so the ones that show least for what they cost lose their reflection while the level costs more than stock ones
+// (or this map's own picks from the level shaders window). The measurement is kept for that window either way.
+void xbox_reflections(Job &job) {
+    const Config &cfg = job.cfg;
+    if (job.analysis) return;
+    std::string scen = job.scenario + ".scenario";
+    fs::path sdir = job.owner(scen);
+    tagfile::Tag stag;
+    if (sdir.empty() || !stag.load(sdir / from_u8(scen))) return;
+    lshade::Find find = [&job](const std::string &t) {
+        fs::path o = job.owner(t);
+        return o.empty() ? fs::path() : o / from_u8(t);
+    };
+    tagfile::Block bsps = stag.root().block("structure bsps");
+    std::set<std::string> done;
+    for (size_t i = 0; i < bsps.size(); i++) {
+        std::string b = bsps[i].ref("structure bsp");
+        if (b.empty() || !done.insert(b).second) continue;
+        fs::path own = job.owner(b);
+        if (own.empty()) continue;
+        std::string name = bsps.size() > 1 ? " (" + fs::path(from_u8(b)).stem().u8string() + ")" : "";
+        job.log("Measuring the level's shaders" + name + "...");
+        lshade::Analysis a;
+        lshade::Preview p;
+        std::string why;
+        if (!lshade::analyze(own / from_u8(b), sdir / from_u8(scen), find, a, p, &why)) {
+            job.log("  [reflections] the level" + name + " couldn't be measured: it " + why);
+            continue;
+        }
+        a.map_name = fs::path(from_u8(job.scenario)).filename().u8string() + (bsps.size() > 1 ? " - " + fs::path(from_u8(b)).stem().u8string() : "");
+        lshade::suggest(a);
+        if (job.shaders_file.empty()) {   // (the window shows the first level)
+            fs::path f = cfg.cache_dir / "levels" / (fs::path(from_u8(job.scenario)).filename().u8string() + ".lsh");
+            if (lshade::save(a, p, f)) job.shaders_file = f;
+        }
+        std::vector<char> none(a.shaders.size(), 0), drop(a.shaders.size(), 0);
+        int reflective = 0;
+        for (size_t s = 0; s < a.shaders.size(); s++) {
+            if (a.shaders[s].reflection_passes > 0) reflective++;
+            if (a.shaders[s].reflection_passes == 0) continue;
+            drop[s] = cfg.xbox_reflection_picks_set ? cfg.xbox_reflection_picks.count(a.shaders[s].tag) > 0
+                                                    : cfg.xbox_drop_reflections && a.shaders[s].suggested;
+        }
+        lshade::Cost before = lshade::cost(a, none), after = lshade::cost(a, drop), stock = lshade::stock_cost();
+        char buf[300];
+        snprintf(buf, sizeof buf, "about %s triangle passes in a typical view, %s in a busy one",
+                 thousands((long long)before.typical).c_str(), thousands((long long)before.busy).c_str());
+        std::string line = "Level shaders" + name + ": " + buf;
+        if (cfg.level_shaders_only) continue;
+        std::vector<std::string> dropped;
+        for (size_t s = 0; s < a.shaders.size(); s++) {
+            if (!drop[s]) continue;
+            const std::string &t = a.shaders[s].tag;
+            fs::path ed = editable_owner(job, t, true);
+            if (!ed.empty() && lshade::drop_reflection(ed / from_u8(t))) dropped.push_back(fs::path(from_u8(t)).stem().u8string());
+        }
+        if (!dropped.empty()) {
+            snprintf(buf, sizeof buf, "%s / %s -> %s / %s", thousands((long long)before.typical).c_str(), thousands((long long)before.busy).c_str(),
+                     thousands((long long)after.typical).c_str(), thousands((long long)after.busy).c_str());
+            std::string list;
+            for (size_t k = 0; k < dropped.size() && k < 8; k++) list += (k ? ", " : "") + dropped[k];
+            if (dropped.size() > 8) list += " and " + std::to_string(dropped.size() - 8) + " more";
+            job.note("[reflections] dropped the reflections of " + std::to_string(dropped.size()) + " of the level" + name + "'s " +
+                     std::to_string(reflective) + " reflecting shaders (" +
+                     (cfg.xbox_reflection_picks_set ? std::string("your picks") : std::string("the ones that show least for what they cost")) +
+                     "): " + list + ". The Xbox draws a reflecting surface once or twice more than others; the level's triangle "
+                     "passes in a typical / busy view: " + buf);
+            snprintf(buf, sizeof buf, " (%s / %s with the reflections it had)", thousands((long long)before.typical).c_str(), thousands((long long)before.busy).c_str());
+            line = "Level shaders" + name + ": about " + thousands((long long)after.typical) + " triangle passes in a typical view, " +
+                   thousands((long long)after.busy) + " in a busy one" + buf;
+        }
+        snprintf(buf, sizeof buf, "; Sidewinder's %s / %s.", thousands((long long)stock.typical).c_str(), thousands((long long)stock.busy).c_str());
+        line += buf;
+        if (dropped.empty() && reflective > 0 && (before.busy > stock.busy * 1.15 || before.typical > stock.typical * 1.15))
+            line += " " + std::to_string(reflective) + " of its shaders reflect, which the Xbox draws again: the Xbox tab's "
+                    "\"Level shaders...\" window shows what dropping reflections would save and how it would look.";
+        job.shaders_line += (job.shaders_line.empty() ? "" : "\n") + line;
+    }
+}
+
+// The map's own dynamic lights that would have the Xbox draw most of the level again. A dynamic light lights the level
+// by drawing again what's in view of the pieces of it the light touches, twice (its diffuse and specular passes), out
+// of 32,768 triangles a frame for everything; and the pieces are whole subclusters whose bounds touch the box around
+// the light's sphere (portals::LevelChunks), up to 4,096 surfaces a pass. Deathtrap's lightning (radius 25, three at
+// once, high above the level) takes nearly all of it and stops the Xbox; made smaller, it no longer reaches anything
+// it could be seen on, yet still takes thousands. So a light that takes more than one pass can (kMostOfLevel) where
+// the map places it goes: its "dynamic" flag off, so the engine makes no light for it (one with a lens flare keeps
+// that). A light the map doesn't place (a weapon's or projectile's effects: where it goes off isn't known) is kept
+// to Bungie's biggest radius (the Scorpion shell's explosion, 15).
+static std::string fmt_num(double v) {   // 25, 8.9
+    char b[32];
+    snprintf(b, sizeof b, "%.1f", v);
+    std::string t = b;
+    if (t.size() > 2 && t.compare(t.size() - 2, 2, ".0") == 0) t.resize(t.size() - 2);
+    return t;
+}
+
+void xbox_lights(Job &job, const std::vector<std::string> &deps) {
+    const double kMaxRadius = 15.0;
+    const int kMostOfLevel = 4096;
+    if (job.analysis) return;
+    std::string scen = job.scenario + ".scenario";
+    fs::path sdir = job.owner(scen);
+    tagfile::Tag stag;
+    if (sdir.empty() || !stag.load(sdir / from_u8(scen))) return;
+    tagfile::Elem s = stag.root();
+    // The level (every BSP).
+    std::vector<portals::LevelChunks> levels;
+    tagfile::Block bsps = s.block("structure bsps");
+    for (size_t i = 0; i < bsps.size(); i++) {
+        std::string b = bsps[i].ref("structure bsp");
+        fs::path own = b.empty() ? fs::path() : job.owner(b);
+        portals::LevelChunks lc;
+        if (!own.empty() && lc.load(own / from_u8(b))) levels.push_back(std::move(lc));
+    }
+    // The lights each object makes: attached directly, or through an attached effect.
+    std::map<std::string, std::vector<std::string>> lights_of;
+    auto lights_for = [&](const std::string &object) -> const std::vector<std::string> & {
+        auto it = lights_of.find(object);
+        if (it != lights_of.end()) return it->second;
+        std::vector<std::string> &out = lights_of[object];
+        fs::path own = job.owner(object);
+        tagfile::Tag ot;
+        if (own.empty() || !ot.load(own / from_u8(object))) return out;
+        tagfile::Block at = ot.root().block("attachments");
+        for (size_t i = 0; i < at.size(); i++) {
+            std::string a = at[i].ref("type");
+            if (has_suffix(a, ".light")) out.push_back(a);
+            else if (has_suffix(a, ".effect")) {
+                fs::path eo = job.owner(a);
+                tagfile::Tag et;
+                if (eo.empty() || !et.load(eo / from_u8(a))) continue;
+                tagfile::Block ev = et.root().block("events");
+                for (size_t e = 0; e < ev.size(); e++) {
+                    tagfile::Block parts = ev[e].block("parts");
+                    for (size_t k = 0; k < parts.size(); k++)
+                        if (std::string l = parts[k].ref("type"); has_suffix(l, ".light")) out.push_back(l);
+                }
+            }
+        }
+        return out;
+    };
+    // Where the map places each light.
+    std::map<std::string, std::vector<portals::V3>> placed_at;
+    static const char *const kinds[][2] = {{"scenery", "scenery palette"}, {"machines", "machine palette"},
+                                           {"controls", "control palette"}, {"light fixtures", "light fixture palette"}};
+    for (auto &k : kinds) {
+        tagfile::Block items = s.block(k[0]), pal = s.block(k[1]);
+        for (size_t i = 0; i < items.size(); i++) {
+            long long t = items[i].integer("type");
+            if (t < 0 || t >= (long long)pal.size()) continue;
+            std::string o = pal[(size_t)t].ref("name");
+            if (o.empty()) continue;
+            portals::V3 p{items[i].num("position", 0), items[i].num("position", 1), items[i].num("position", 2)};
+            for (auto &l : lights_for(o)) {
+                auto &at = placed_at[l];
+                if (std::find(at.begin(), at.end(), p) == at.end()) at.push_back(p);   // (an effect may make it twice)
+            }
+        }
+    }
+    std::string removed, shrunk;
+    int n_removed = 0, n_shrunk = 0, n_flares = 0;
+    for (auto &dep : deps) {
+        if (!has_suffix(dep, ".light")) continue;
+        fs::path own = job.owner(dep);
+        if (own.empty() || own == job.overlay) continue;   // (Bungie's are as Bungie made them)
+        tagfile::Tag lt;
+        if (!lt.load(own / from_u8(dep))) continue;
+        tagfile::Elem l = lt.root();
+        long long flags = (long long)l.num("flags");
+        if (!(flags & 1)) continue;   // (not dynamic: only a lens flare, or for the lightmaps)
+        double r = l.num("radius"), scale = std::max(1.0, l.num("radius modifer", 1));
+        if (r <= 0) continue;
+        std::string name = fs::path(from_u8(dep)).stem().u8string();
+        auto it = placed_at.find(dep);
+        if (it != placed_at.end() && !levels.empty()) {
+            int least = INT_MAX, most = 0, of = 0;
+            for (auto &p : it->second)
+                for (auto &lv : levels) {
+                    int g = lv.gathered(p, r * scale);
+                    least = std::min(least, g);
+                    if (g > most) { most = g; of = lv.surface_count; }
+                }
+            if (most <= kMostOfLevel) continue;
+            fs::path ed = editable_owner(job, dep);
+            if (ed.empty()) continue;
+            tagfile::EditTag et;
+            if (!et.load(ed / from_u8(dep)) || !tagfile::set_num(et.root(), "flags", (double)(flags & ~1LL)) ||
+                !et.save(ed / from_u8(dep)))
+                continue;
+            n_removed++;
+            if (!l.ref("lens flare").empty()) n_flares++;
+            std::string where = it->second.size() == 1 ? "where the map places it, " + thousands(most)
+                                                       : "at the " + std::to_string(it->second.size()) + " places the map has it, " +
+                                                             (least == most ? thousands(most) : thousands(least) + " to " + thousands(most));
+            removed += (removed.empty() ? "" : "; ") + name + " (radius " + fmt_num(r * scale) + "; " + where + " of the level's " +
+                       thousands(of) + " triangles)";
+            continue;
+        }
+        if (r * scale <= kMaxRadius + 1e-3) continue;
+        double nr = kMaxRadius / scale;
+        fs::path ed = editable_owner(job, dep);
+        if (ed.empty()) continue;
+        tagfile::EditTag et;
+        if (!et.load(ed / from_u8(dep)) || !tagfile::set_num(et.root(), "radius", nr) || !et.save(ed / from_u8(dep))) continue;
+        n_shrunk++;
+        shrunk += (shrunk.empty() ? "" : ", ") + name + " (radius " + fmt_num(r * scale) + " -> " + fmt_num(kMaxRadius) + ")";
+    }
+    if (n_removed)
+        job.note("[lights] turned off " + std::to_string(n_removed) + (n_removed == 1 ? " dynamic light" : " dynamic lights") +
+                 " that would have the Xbox draw most of the level again each time it lit up (the engine redraws whole pieces "
+                 "of the level a light's box touches, not just what it reaches; too much at once stops the game): " + removed +
+                 (n_removed == 1 ? ". What makes it still plays (sounds, particles)" : ". What makes them still plays (sounds, particles)") +
+                 (n_flares ? std::string(", and a light's lens flare stays.") : std::string(".")));
+    if (n_shrunk)
+        job.note("[lights] shrank " + std::to_string(n_shrunk) + (n_shrunk == 1 ? " dynamic light" : " dynamic lights") +
+                 " of the map's weapons or effects to Bungie's biggest (radius 15, the Scorpion shell's explosion): " + shrunk);
+}
+
+// A level made without portals is one cluster: the Xbox draws everything of it in view, walls or not. Its rooms and
+// the openings between them (doorways, corridors) become clusters and portals (portals.hpp), when that draws less
+// from where players are. Levels with clusters of their own, and the Xbox's own levels, are left as they are.
+void xbox_portals(Job &job) {
+    if (!job.cfg.xbox_add_portals || job.analysis) return;
+    std::string scen = job.scenario + ".scenario";
+    fs::path sdir = job.owner(scen);
+    tagfile::Tag stag;
+    if (sdir.empty() || !stag.load(sdir / from_u8(scen))) return;
+    tagfile::Block bsps = stag.root().block("structure bsps");
+    std::set<std::string> done;
+    for (size_t i = 0; i < bsps.size(); i++) {
+        std::string b = bsps[i].ref("structure bsp");
+        if (b.empty() || !done.insert(b).second) continue;
+        fs::path own = job.owner(b);
+        if (own.empty() || own == job.overlay) continue;
+        {
+            tagfile::Tag t;
+            if (!t.load(own / from_u8(b)) || t.root().block("clusters").size() != 1) continue;
+        }
+        std::string name = bsps.size() > 1 ? " (" + fs::path(from_u8(b)).stem().u8string() + ")" : "";
+        job.log("Finding the level's rooms and doorways" + name + "...");
+        fs::path ed = editable_owner(job, b);
+        if (ed.empty()) continue;
+        fs::path file = ed / from_u8(b);
+        std::string before;
+        {
+            std::ifstream f(file, std::ios::binary);
+            before.assign(std::istreambuf_iterator<char>(f), {});
+        }
+        // What can be seen through: glass, water and the like; of the level's own shaders, the alpha-tested ones
+        // (grates, fences).
+        portals::Options po;
+        po.area = portals::play_area(sdir / from_u8(scen));
+        po.see_through = [&job](const std::string &shader, const std::string &group) {
+            if (group != "senv") return group != "soso";
+            std::string t = shader + ".shader_environment";
+            fs::path own = job.owner(t);
+            tagfile::Tag st;
+            if (own.empty() || !st.load(own / from_u8(t))) return false;
+            return ((long long)st.root().num("shader environment flags") & 1) != 0;   // alpha tested
+        };
+        portals::Result pr = portals::add_portals(file, po);
+        if (pr.changed) {
+            job.portal_backups.push_back({file, before});
+            job.note("[portals] the level" + name + " had no portals, so the Xbox drew everything of it in view, walls or not. Its " +
+                     std::to_string(pr.clusters_after) + " rooms are now clusters with " + std::to_string(pr.portals_after) +
+                     " portals between them: about " + thousands((long long)pr.drawn_after) + " of its triangles drawn in a typical view (was " +
+                     thousands((long long)pr.drawn_before) + "), " + thousands((long long)pr.drawn_high_after) + " in a busy one (was " +
+                     thousands((long long)pr.drawn_high_before) + ")");
+        } else {
+            job.log("  [portals] the level" + name + " has no portals; none added: it " + pr.why);
+        }
+    }
 }
 
 // The kind of object each model is drawn for in the world (v vehicle, b biped, s scenery and devices, w weapons and
@@ -3343,11 +3667,13 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
         return s;
     };
 
+    lod::Settings lod_settings;
+    lod_settings.library = !job.cfg.lod_library.empty() ? job.cfg.lod_library : job.cfg.cache_dir / "lod_library";
+
     // 1. Making lower-detail versions. Not when measuring for the weapons & vehicles window: it shows what the map
     // needs to fit, and the conversion takes them out again when they don't fit.
     if (job.cfg.xbox_make_lods && !job.analysis) {
-        lod::Settings ls;
-        ls.library = !job.cfg.lod_library.empty() ? job.cfg.lod_library : job.cfg.cache_dir / "lod_library";
+        const lod::Settings &ls = lod_settings;
         std::vector<std::string> made, reused, left;
         size_t bytes = 0;
         for (auto &dep : deps) {
@@ -3356,6 +3682,10 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
             if (own.empty() || own == job.overlay || !kinds.count(dep) || first_person.count(dep) || kinds[dep] == 'b') continue;
             perf::ModelStats ms = perf::model_stats(own / from_u8(dep));
             if (!ms.ok || ms.lods || ms.triangles < ls.min_triangles) continue;
+            if (ms.borrowed && ms.no_cutoffs()) {   // switch distances would turn its variants into one another
+                left.push_back(name_of(dep) + " (its variants share their lower levels, so they'd change shape at a distance)");
+                continue;
+            }
             if (lod::skipped(ls, dep, name_of(dep))) {
                 left.push_back(name_of(dep) + " (listed in the LOD library's skip.txt)");
                 continue;
@@ -3381,6 +3711,12 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
             for (int k : r.level_triangles)
                 if (k) l += " > " + thousands(k);
             (r.from_library ? reused : made).push_back(l);
+            LodView::Model lm;
+            lm.tag = dep;
+            lm.name = name_of(dep);
+            lm.kind = kinds[dep];
+            lm.change = r.from_library ? "library" : "made";
+            job.lod_changes.push_back(lm);
         }
         if (!made.empty() || !reused.empty()) {
             char mb[32];
@@ -3404,14 +3740,23 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
         if (stock && !job.cfg.xbox_lod_stock_models) continue;
         if (!kinds.count(dep) || first_person.count(dep)) continue;
         perf::ModelStats ms = perf::model_stats(own / from_u8(dep));
-        if (!ms.ok || !ms.lods || !ms.no_cutoffs()) continue;
+        if (!ms.ok || !ms.lods || ms.borrowed || !ms.no_cutoffs()) continue;
+        if (lod::skipped(lod_settings, dep, name_of(dep))) continue;   // (listed in the LOD library's skip.txt)
         fs::path ed = editable_owner(job, dep, stock);
         if (ed.empty()) continue;
         std::vector<std::string> args;
         for (int i = 0; i < 5; i++) args.insert(args.end(), {"-S", keys[i], std::to_string(cut_for(dep)->px[i])});
         bool ok = false;
         edit_lines(job, ed, dep, args, &ok);
-        if (ok) (stock ? stock_done : own_done).push_back(name_of(dep));
+        if (ok) {
+            (stock ? stock_done : own_done).push_back(name_of(dep));
+            LodView::Model lm;
+            lm.tag = dep;
+            lm.name = name_of(dep);
+            lm.kind = kinds[dep];
+            lm.change = stock ? "stock" : "distances";
+            job.lod_changes.push_back(lm);
+        }
     }
     if (!own_done.empty())
         job.note("[lod] " + std::to_string(own_done.size()) + " of the map's models had lower-detail versions they never "
@@ -3427,42 +3772,8 @@ static std::string thousands(long long v) {
     return (v < 0 ? "-" : "") + s;
 }
 
-// The report's "Performance" section: what the Xbox has to draw. The level: its triangles, and how many of them
-// the visibility data (clusters and portals) lets the engine draw from a typical spot and the worst one. The models:
-// the ones with no lower-detail versions (drawn in full at any distance), most triangles on the map first, and the
-// ones whose lower-detail versions are never used.
-static std::vector<std::string> performance_lines(Job &job) {
-    std::vector<std::string> lines;
-    std::string scen = job.scenario + ".scenario";
-    fs::path sdir = job.owner(scen);
-    tagfile::Tag stag;
-    if (sdir.empty() || !stag.load(sdir / from_u8(scen))) return lines;
-    tagfile::Elem s = stag.root();
-
-    tagfile::Block bsps = s.block("structure bsps");
-    for (size_t i = 0; i < bsps.size(); i++) {
-        std::string b = bsps[i].ref("structure bsp");
-        fs::path own = b.empty() ? fs::path() : job.owner(b);
-        if (own.empty()) continue;
-        perf::BspStats st = perf::bsp_stats(own / from_u8(b));
-        if (!st.ok) continue;
-        std::string name = bsps.size() > 1 ? " (" + fs::path(from_u8(b)).stem().u8string() + ")" : "";
-        std::string l = "Level" + name + ": " + thousands(st.triangles) + " triangles";
-        if (st.clusters <= 1 || st.portals == 0)
-            l += ", no portals, so all of it can be drawn from anywhere.";
-        else if (st.median_visible == st.worst_visible)
-            l += ", " + thousands(st.clusters) + " clusters, " + thousands(st.portals) + (st.portals == 1 ? " portal" : " portals") +
-                 ". About " + thousands(st.worst_visible) + " can be drawn from anywhere.";
-        else
-            l += ", " + thousands(st.clusters) + " clusters, " + thousands(st.portals) + (st.portals == 1 ? " portal" : " portals") +
-                 ". About " + thousands(st.median_visible) + " can be drawn from a typical spot, " + thousands(st.worst_visible) +
-                 " from the worst one.";
-        lines.push_back(l);
-    }
-    if (!lines.empty())
-        lines.push_back("  Stock Xbox maps at most: Blood Gulch 5,503, Damnation 8,618, Sidewinder 10,036.");
-
-    // How many times each object is on the map: placed, or at a weapon/item spawn point.
+// How many times each object is on the map (the scenario `s`): placed, or at a weapon/item spawn point.
+static std::map<std::string, int> object_counts(Job &job, const tagfile::Elem &s) {
     std::map<std::string, int> placed;
     static const char *const kinds[][2] = {
         {"scenery", "scenery palette"}, {"bipeds", "biped palette"}, {"vehicles", "vehicle palette"},
@@ -3495,6 +3806,109 @@ static std::vector<std::string> performance_lines(Job &job) {
         }
         for (auto &it : collections[ic]) placed[it]++;
     }
+    return placed;
+}
+
+// The LODs window's models (job.lod_changes): how many are on the map, their switch distances and size, and each
+// detail level drawn (levels that use the same version share a drawing).
+static LodView make_lod_view(Job &job, const std::string &map_name) {
+    LodView v;
+    v.map_name = map_name;
+    std::map<std::string, int> per_model;              // model -> on the map
+    std::map<std::string, double> radius_of;           // model -> its object's bounding radius
+    std::string scen = job.scenario + ".scenario";
+    fs::path sdir = job.owner(scen);
+    tagfile::Tag st;
+    if (!sdir.empty() && st.load(sdir / from_u8(scen)))
+        for (auto &[o, n] : object_counts(job, st.root())) {
+            fs::path own = job.owner(o);
+            tagfile::Tag ot;
+            if (own.empty() || !ot.load(own / from_u8(o))) continue;
+            std::string m = ot.root().ref("model");
+            if (m.empty()) continue;
+            per_model[m] += n;
+            radius_of[m] = std::max(radius_of[m], ot.root().num("bounding radius"));
+        }
+    preview::Find find = [&](const std::string &tag) {
+        fs::path o = job.owner(tag);
+        return o.empty() ? fs::path() : o / from_u8(tag);
+    };
+    for (const LodView::Model &c : job.lod_changes) {
+        LodView::Model m = c;
+        m.placed = per_model.count(m.tag) ? per_model[m.tag] : 0;
+        fs::path mf = find(m.tag);
+        perf::ModelStats ms = mf.empty() ? perf::ModelStats() : perf::model_stats(mf);
+        for (int i = 0; i < 5; i++) m.cutoffs[i] = ms.cutoff[i];
+        m.radius = radius_of.count(m.tag) ? radius_of[m.tag] : 0;
+        std::vector<std::vector<int>> seen;   // each drawing's geometries
+        std::vector<int> index;
+        for (int lv = 0; lv < 5; lv++) {
+            std::vector<int> geos;
+            ModelPreview p;
+            bool ok = preview::build(m.tag, find, p, 128, lv, &geos);
+            auto it = std::find(seen.begin(), seen.end(), geos);
+            if (it != seen.end()) { m.level[lv] = index[it - seen.begin()]; continue; }
+            m.level[lv] = ok ? (int)v.previews.size() : -1;
+            seen.push_back(geos);
+            index.push_back(m.level[lv]);
+            if (ok) v.previews.push_back(std::move(p));
+        }
+        if (m.radius <= 0 && m.level[0] >= 0) {   // no bounding radius: the model's own size
+            const ModelPreview &p = v.previews[m.level[0]];
+            float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+            for (size_t i = 0; i + 2 < p.pos.size(); i += 3)
+                for (int k = 0; k < 3; k++) { lo[k] = std::min(lo[k], p.pos[i + k]); hi[k] = std::max(hi[k], p.pos[i + k]); }
+            m.radius = 0.5 * std::sqrt((double)(hi[0] - lo[0]) * (hi[0] - lo[0]) + (double)(hi[1] - lo[1]) * (hi[1] - lo[1]) +
+                                       (double)(hi[2] - lo[2]) * (hi[2] - lo[2]));
+        }
+        v.models.push_back(std::move(m));
+    }
+    return v;
+}
+
+// The report's "Performance" section: what the Xbox has to draw. The level: its triangles, and how many of them
+// the engine draws (clusters and portals, and what's on screen) in a typical view and a busy one. The models:
+// the ones with no lower-detail versions (drawn in full at any distance), most triangles on the map first, and the
+// ones whose lower-detail versions are never used.
+static std::vector<std::string> performance_lines(Job &job) {
+    std::vector<std::string> lines;
+    std::string scen = job.scenario + ".scenario";
+    fs::path sdir = job.owner(scen);
+    tagfile::Tag stag;
+    if (sdir.empty() || !stag.load(sdir / from_u8(scen))) return lines;
+    tagfile::Elem s = stag.root();
+
+    tagfile::Block bsps = s.block("structure bsps");
+    portals::PlayArea area = portals::play_area(sdir / from_u8(scen));   // (where players play: views from there)
+    for (size_t i = 0; i < bsps.size(); i++) {
+        std::string b = bsps[i].ref("structure bsp");
+        fs::path own = b.empty() ? fs::path() : job.owner(b);
+        if (own.empty()) continue;
+        perf::BspStats st = perf::bsp_stats(own / from_u8(b));
+        if (!st.ok) continue;
+        std::string name = bsps.size() > 1 ? " (" + fs::path(from_u8(b)).stem().u8string() + ")" : "";
+        std::string l = "Level" + name + ": " + thousands(st.triangles) + " triangles";
+        if (st.clusters <= 1 || st.portals == 0) l += ", no portals (everything in view is drawn, walls or not)";
+        else l += ", " + thousands(st.clusters) + " clusters, " + thousands(st.portals) + (st.portals == 1 ? " portal" : " portals");
+        // What's drawn from where players stand, looking around (portals.hpp: the engine's own visibility).
+        portals::Drawn d;
+        if (portals::estimate(own / from_u8(b), portals::Arrangement::Own, nullptr, nullptr, d, area) && d.samples > 0)
+            l += ": about " + thousands((long long)d.median) + " drawn in a typical view, " + thousands((long long)d.high) + " in a busy one.";
+        else if (st.clusters <= 1 || st.portals == 0) l += ".";
+        else l += ". About " + thousands(st.median_visible) + " can be drawn from a typical spot, " + thousands(st.worst_visible) +
+                  " from the worst one.";
+        lines.push_back(l);
+    }
+    if (!lines.empty())
+        lines.push_back("  Stock Xbox maps, typical / busy view (busier than 9 views in 10): Blood Gulch 588 / 2,033, "
+                        "Damnation 419 / 2,134, Sidewinder 784 / 2,115, Prisoner (the most) 893 / 2,433.");
+    // Its shaders: every level triangle is drawn twice or more (lightmap, textures, reflections).
+    if (!job.shaders_line.empty()) {
+        std::istringstream sl(job.shaders_line);
+        for (std::string l; std::getline(sl, l);) lines.push_back(l);
+    }
+
+    std::map<std::string, int> placed = object_counts(job, s);
 
     struct M { int placed = 0; perf::ModelStats st; std::string object; };
     std::map<std::string, M> models;
@@ -3526,7 +3940,7 @@ static std::vector<std::string> performance_lines(Job &job) {
     for (auto &[m, x] : models) {
         if (!x.st.ok) continue;
         if (!x.st.lods && x.st.triangles >= 500) full.push_back({(long long)x.st.triangles * x.placed, m});
-        else if (x.st.lods && x.st.no_cutoffs()) unused.push_back({(long long)x.st.triangles * x.placed, m});
+        else if (x.st.lods && !x.st.borrowed && x.st.no_cutoffs()) unused.push_back({(long long)x.st.triangles * x.placed, m});
     }
     std::sort(full.rbegin(), full.rend());
     std::sort(unused.rbegin(), unused.rend());
@@ -6226,7 +6640,7 @@ static Result convert_map_impl(const Config &cfg, const fs::path &input, Game in
     job.from = in_game;
     job.analysis = an;
     job.measure = measure;
-    fresh_work(job, an ? "analyze" : "convert");
+    fresh_work(job, an ? "analyze" : cfg.level_shaders_only ? "shaders" : "convert");
     job.source = job.work / "source_tags";
     std::error_code ec;
     fs::create_directories(job.source, ec);
@@ -6327,7 +6741,7 @@ static Result build_from_tags_impl(const Config &cfg, const fs::path &scenario_f
     Job job(cfg, log, out_game);
     job.analysis = an;
     job.measure = measure;
-    fresh_work(job, an ? std::string("analyze") : std::string("build_") + game_engine(out_game));
+    fresh_work(job, an ? std::string("analyze") : cfg.level_shaders_only ? std::string("shaders") : std::string("build_") + game_engine(out_game));
     job.source = tags;
     job.user_tags = tags;
     fs::path rel = fs::relative(scenario_file, tags);
@@ -6579,6 +6993,54 @@ bool load_content_analysis(ContentAnalysis &out, const fs::path &file) {
     return true;
 }
 
+// The LODs window's file (text) and its models (file + ".models").
+static const char *kLodViewMagic = "HaloMapPorter lods 1";
+bool save_lod_view(const LodView &v, const fs::path &file) {
+    std::error_code ec;
+    fs::create_directories(file.parent_path(), ec);
+    fs::path models = file;
+    models += ".models";
+    if (!save_previews(v.previews, models)) return false;
+    std::ofstream f(file, std::ios::binary | std::ios::trunc);
+    f.precision(9);
+    f << kLodViewMagic << "\n" << v.map_name << "\n" << v.models.size() << "\n";
+    for (auto &m : v.models) {
+        f << m.tag << "\n" << m.name << "\n" << m.change << "\n" << m.kind << " " << m.undone << " " << m.placed << " " << m.radius;
+        for (double c : m.cutoffs) f << " " << c;
+        for (int l : m.level) f << " " << l;
+        f << "\n";
+    }
+    f << "end\n";
+    return (bool)f;
+}
+bool load_lod_view(LodView &out, const fs::path &file) {
+    std::ifstream f(file, std::ios::binary);
+    std::string line;
+    auto text = [&](std::string &s) { if (!std::getline(f, s)) return false; if (!s.empty() && s.back() == '\r') s.pop_back(); return true; };
+    LodView v;
+    size_t n = 0;
+    if (!text(line) || line != kLodViewMagic || !text(v.map_name) || !text(line)) return false;
+    n = std::strtoul(line.c_str(), nullptr, 10);
+    if (n > 100000) return false;
+    v.models.resize(n);
+    for (auto &m : v.models) {
+        if (!text(m.tag) || !text(m.name) || !text(m.change) || !text(line)) return false;
+        std::istringstream ss(line);
+        if (!(ss >> m.kind >> m.undone >> m.placed >> m.radius)) return false;
+        for (double &c : m.cutoffs) if (!(ss >> c)) return false;
+        for (int &l : m.level) if (!(ss >> l)) return false;
+    }
+    if (!text(line) || line != "end") return false;
+    fs::path models = file;
+    models += ".models";
+    if (!load_previews(v.previews, models)) v.previews.clear();
+    for (auto &m : v.models)
+        for (int &l : m.level)
+            if (l < -1 || l >= (int)v.previews.size() || (l >= 0 && v.previews[l].tris.empty())) l = -1;
+    out = std::move(v);
+    return true;
+}
+
 // ---------------------------------------------------------------- the map browser's info.txt lines (Halo Universal XBE build 20)
 namespace {
 const char *const kStockVehicles[] = {
@@ -6770,6 +7232,18 @@ bool analyze_map_traits(const Config &cfg, const fs::path &map, MapTraits &t, st
     }
     for (size_t i = 0; i < why.size(); i++) t.why_genres += (i ? "; " : "") + why[i];
     fs::remove_all(dir, ec);
+    return true;
+}
+
+bool analyze_level_shaders(const Config &cfg_in, const fs::path &input, Game in_game, fs::path &file, std::string &error, const Log &log) {
+    Config cfg = cfg_in;
+    cfg.level_shaders_only = true;
+    file.clear();
+    fs::path dummy = cfg.cache_dir / "shaders" / (input.stem().u8string() + ".map");
+    Result r = in_game == Game::Unknown ? build_from_tags_impl(cfg, input, Game::Xbox, dummy, false, log, nullptr)
+                                        : convert_map_impl(cfg, input, in_game, Game::Xbox, dummy, false, log, nullptr);
+    if (!r.ok) { error = r.error.empty() ? "The map couldn't be measured." : r.error; return false; }
+    file = r.shaders;
     return true;
 }
 

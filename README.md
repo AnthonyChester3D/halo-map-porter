@@ -21,7 +21,13 @@ the free, open-source Halo map compiler, and it can download Invader for you.
 - **Fitting the Xbox.** It works within the Xbox's limits: the 47 MB map file, the 22 MB of tag memory, and a
   texture memory target (22 / 20 / 18 MB) that the auto-shrinker halves your own textures to meet.
 - **Speed on the Xbox.** It makes lower-detail versions (LODs) of the map's custom models that have none, keeps
-  them in a library so other maps reuse them, and reports what the Xbox has to draw.
+  them in a library so other maps reuse them, gives levels made without portals clusters and portals at their
+  doorways (so walls hide what's behind them), turns off dynamic lights that would have the Xbox redraw most of
+  the level (the kind that runs it out of memory), and reports what the Xbox has to draw.
+- **Level shaders window.** It lists the level's reflecting shaders with what each reflection costs and how much
+  of the picture it is, and draws the level from where players stand, as made, as converted, or with only what
+  dropping reflections loses lit up, with its portals and rooms shown if you like. Keep every reflection (the
+  default), take the suggested drops, or tick your own.
 - **Weapons & vehicles window.** It shows what each weapon and vehicle costs in tag memory and file size, with a
   3D preview and its seats, groups the pieces a map's scripts make of a vehicle under it, and lets you replace or
   drop them.

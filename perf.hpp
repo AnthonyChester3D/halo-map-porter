@@ -21,7 +21,9 @@ BspStats bsp_stats(const std::filesystem::path &bsp);
 // Triangles: its most detailed level, the first permutation of each region; lowest: its least detailed.
 struct ModelStats {
     bool ok = false;
-    bool lods = false;           // a permutation with more than one level of detail
+    bool lods = false;           // a permutation with lower-detail versions (geometries of their own)
+    bool borrowed = false;       // a permutation whose lower levels draw another permutation (a variant: with switch
+                                 // distances, it would turn into that one at a distance)
     double cutoff[5] = {};
     int triangles = 0, lowest_triangles = 0;
     bool no_cutoffs() const { return !cutoff[0] && !cutoff[1] && !cutoff[2] && !cutoff[3] && !cutoff[4]; }

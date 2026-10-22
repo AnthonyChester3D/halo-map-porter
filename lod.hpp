@@ -38,5 +38,7 @@ Result add_lods(const std::filesystem::path &model, const double cutoffs[5], con
 // or just a name like jet (the model's or its object's). The library also keeps index.txt, its record of what it
 // holds.
 bool skipped(const Settings &settings, const std::string &model_tag, const std::string &object_name);
+// Adds a model (its tag path) to skip.txt, with a comment line before it (e.g. its name and map). False if it can't.
+bool add_skip(const Settings &settings, const std::string &model_tag, const std::string &comment);
 
 }   // namespace lod

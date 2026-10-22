@@ -12,6 +12,7 @@ struct View {
     float yaw = 0.75f;     // turned around the model's up axis (radians)
     float pitch = 0.32f;   // looked at from above (radians)
     float zoom = 1.0f;     // 1: the whole model fits
+    bool wire = false;     // its triangles' edges drawn over it
 };
 
 // Draws `m` into `px`: w x h pixels, top row first, each 0x00RRGGBB (a Windows 32-bit DIB's layout).

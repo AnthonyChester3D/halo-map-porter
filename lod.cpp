@@ -221,6 +221,28 @@ bool skipped(const Settings &settings, const std::string &model_tag, const std::
     return false;
 }
 
+bool add_skip(const Settings &settings, const std::string &model_tag, const std::string &comment) {
+    if (settings.library.empty()) return false;
+    std::error_code ec;
+    fs::create_directories(settings.library, ec);
+    fs::path f = settings.library / "skip.txt";
+    bool fresh = !fs::exists(f);
+    std::string before;
+    if (!fresh) {   // (a line of its own, even when the file doesn't end with one)
+        std::ifstream in(f, std::ios::binary);
+        before.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    }
+    std::ofstream out(f, std::ios::binary | std::ios::app);
+    if (fresh)
+        out << "# Models Halo Map Porter leaves as they are (no lower-detail versions made, no switch distances given):\r\n"
+               "# one per line, a tag path or a name. Lines starting with # are notes.\r\n";
+    else if (!before.empty() && before.back() != '\n')
+        out << "\r\n";
+    if (!comment.empty()) out << "# " << comment << "\r\n";
+    out << model_tag << "\r\n";
+    return (bool)out;
+}
+
 // The versions of one geometry: from the library, or made now (and kept there).
 static std::vector<TagNode> versions(const TagNode &geo, uint32_t checksum, double size, const Settings &settings, bool &from_library,
                                      std::string &key) {
@@ -267,13 +289,24 @@ Result add_lods(const fs::path &model, const double cutoffs[5], const Settings &
 
     // Geometries every detail level of some permutation uses (no lower-detail versions yet).
     std::set<int> single;
+    bool mixed = false;   // a permutation whose levels draw more than one geometry
     for (auto &reg : *regions)
         for (auto &perm : *tagfile::block(reg, "permutations")) {
             int g = (int)tagfile::get_num(perm, "super high");
             bool same = true;
             for (auto s : slots) same = same && (int)tagfile::get_num(perm, s) == g;
             if (same && g >= 0 && g < (int)geos->size()) single.insert(g);
+            std::string name = tagfile::get_str(perm, "name");
+            mixed = mixed || (!same && (name.empty() || name[0] != '~'));   // ("~blur": the engine's pick, can switch)
         }
+    // With no switch distances, the switch distances this sets would also start switching those (a rock's variants
+    // drawing another variant's geometry at a distance): leave such a model alone. Permutations the engine picks
+    // itself ("~blur", a moving tire) can switch to another's geometry at a distance.
+    static const char *cutoff_names[5] = {"super high detail cutoff", "high detail cutoff", "medium detail cutoff",
+                                          "low detail cutoff", "super low detail cutoff"};
+    bool no_cutoffs = true;
+    for (auto c : cutoff_names) no_cutoffs = no_cutoffs && tagfile::get_num(root, c) == 0;
+    if (mixed && no_cutoffs) { r.why = "its other permutations' levels would start switching"; return r; }
     // The model's triangles: its regions' first permutations, most detailed.
     for (auto &reg : *regions) {
         auto &perms = *tagfile::block(reg, "permutations");

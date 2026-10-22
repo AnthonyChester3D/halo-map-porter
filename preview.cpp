@@ -150,7 +150,8 @@ int seats(const std::filesystem::path &unit, std::string *roles) {
     return (int)s.size();
 }
 
-bool build(const std::string &model, const Find &find, ModelPreview &out, int max_texture) {
+bool build(const std::string &model, const Find &find, ModelPreview &out, int max_texture, int level,
+           std::vector<int> *geometries) {
     out = ModelPreview();
     std::filesystem::path mf = find(model);
     if (mf.empty()) return false;
@@ -160,10 +161,11 @@ bool build(const std::string &model, const Find &find, ModelPreview &out, int ma
     double mu = or_one(r.num("base map u scale")), mv = or_one(r.num("base map v scale"));
     tagfile::Block geos = r.block("geometries"), regions = r.block("regions"), shaders = r.block("shaders");
 
-    // Each region's first permutation, most detailed; a lower-detail version when that's a lot to draw.
+    // Each region's first permutation, most detailed (a lower-detail version when that's a lot to draw), or the
+    // level asked for.
     static const char *levels[5] = {"super high", "high", "medium", "low", "super low"};
     std::vector<int> use;
-    for (int lv = 0; lv < 5; lv++) {
+    for (int lv = level >= 0 && level < 5 ? level : 0; lv < 5; lv++) {
         std::set<long long> seen;
         use.clear();
         int tris = 0;
@@ -176,8 +178,9 @@ bool build(const std::string &model, const Find &find, ModelPreview &out, int ma
             tagfile::Block parts = geos[(size_t)g].block("parts");
             for (size_t k = 0; k < parts.size(); k++) tris += strip_triangles(parts[k]);
         }
-        if (tris <= 40000) break;
+        if (tris <= 40000 || (level >= 0 && level < 5)) break;
     }
+    if (geometries) *geometries = use;
     if (use.empty()) return false;
 
     std::map<long long, int> texture_of_shader;

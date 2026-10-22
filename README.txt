@@ -340,6 +340,12 @@ Levels of detail (LODs)
   and below the "super low" one the model isn't drawn at all. With every
   switch distance 0 (common in custom maps), the engine always draws the
   most detailed version, however far away the model is.
+  Some models use their levels for something else: a rock with five shapes
+  whose lower levels all point at the first shape. With switch distances,
+  every far-away rock would turn into that one, so the app only counts a
+  level as a lower-detail version when it has a geometry of its own (a
+  permutation the engine picks itself, like a tire's "~blur", may still
+  fall back to another's), and leaves models like the rock alone.
   The app gives the map's own models that have lower-detail versions but
   no switch distances ones like Bungie's (vehicles 200/100/50/20/0,
   characters 280/200/80/30/0, scenery 300/90/30/5/0, weapons and items
@@ -381,6 +387,21 @@ Levels of detail (LODs)
   and rebuilds, and the log says so. The weapons & vehicles window
   measures maps without them.
 
+  Seeing them: after an Xbox conversion that changed any model's levels of
+  detail, "See the LODs" (next to "Open report") lists those models, how
+  many are on the map and their triangles by level. Click one to see each
+  level ("Most detailed", "Medium", "Low"...: drag to turn it, wheel to
+  zoom; "Show the triangles" draws their edges) and roughly how far away
+  the game switches to it, in metres and feet (on a 4:3 screen; a model's
+  size on screen decides it). Versions you're happy with need nothing:
+  they're kept in the LOD library and reused every time. "Never make LODs
+  for this model" adds it to skip.txt, so no conversion makes lower-detail
+  versions or gives switch distances for it again, on this map or any
+  other that uses it (convert the map again to drop the ones it has now;
+  delete its line from skip.txt to undo). Hover over the button for what
+  it will do to the model shown. It also works after a map that didn't
+  fit: those versions were taken out again, and the list says so.
+
   The LOD library
   Every version the app makes is kept in the LOD library folder (Settings
   tab; %LOCALAPPDATA%\HaloMapPorter\lod_library unless you change it), so
@@ -390,16 +411,46 @@ Levels of detail (LODs)
                 edited model gets new ones).
     index.txt   One line per model added: date, tag path, triangles (most
                 detailed > medium > low) and its .lod files.
-    skip.txt    Models to leave alone, one per line: a tag path
+    skip.txt    Models to leave alone (no lower-detail versions made, no
+                switch distances given), one per line: a tag path
                 (vehicles\jet\jet.model) or a name (jet: the model's or
-                its object's). Lines starting with # are ignored. Make
-                this file yourself when a model's lower-detail versions
-                look wrong in game.
+                its object's). Lines starting with # are ignored. "Never
+                make LODs for this model" in the LODs window adds to it,
+                or write it yourself.
   Deleting .lod files (or the whole folder) has them made again next time.
   Stock maps are the exception: converting Custom Edition's Blood Gulch,
   Sidewinder and the other maps the Xbox also has gives you the Xbox's own
   version of the map, with the Xbox's vehicles. Maps the Xbox never had
   (Gephyrophobia, Infinity, Ice Fields...) keep their vehicles.
+
+Portals ("Add portals to levels made without them", Xbox tab, on)
+  The engine draws a level by clusters: it starts in the one the camera is
+  in and goes on only into the clusters it can see through the portals
+  (openings) between them, so what's behind a wall isn't drawn. A level
+  made without portals is one cluster: everything of it in front of the
+  camera is drawn, walls or not. Bungie's portals are why Damnation, Chill
+  Out and Danger Canyon draw from a half down to a quarter of what they
+  would without them; Prisoner, Hang 'Em High and Longest have none.
+  For a level that has none, the app finds its rooms and the doorways,
+  corridor and tunnel mouths between them (where the open space narrows
+  between two wider spaces), puts the boundary between two rooms on the
+  doorway's wall plane where it can, and makes the rooms clusters and the
+  openings portals. Glass, water, grates and fences (alpha-tested shaders)
+  and invisible walls count as openings, since you can see through them.
+  The level's geometry, collision and lightmaps stay exactly as they are;
+  each cluster gets the level's sky, fog, sound and weather. With their
+  portals taken out, indoor levels get close to Bungie's (in a typical
+  view, Chill Out draws 198 triangles, Bungie's portals 182, none 591;
+  Damnation 498, Bungie's 419, none 900) and open outdoor ones about
+  half way (Danger Canyon 274, Bungie's 156, none 570). Prisoner gets 11
+  rooms and draws 40% less, Longest 16 and draws a third as much.
+  It only adds them when they'd cut what's drawn by 15% or more:
+  open levels (Hang 'Em High, Spiral) are left as they are, and the log
+  says so. Levels with clusters of their own are never changed, and
+  neither are the Xbox's own levels. The [portals] line in the log says
+  how many rooms and portals the level got and what it draws in a typical
+  and a busy view, before and after (see "Performance" below). If Invader
+  ever rejects the level with them, the app builds it as it was.
 
 Custom weapons and "Use the Xbox's own weapons, vehicles and player model"
   Every Xbox map always contains the stock multiplayer weapons: the Xbox
@@ -506,6 +557,79 @@ Weapons & vehicles window (Xbox)
   nothing for an empty placement, and the scripts find no object there, as
   if it had been destroyed: a jet's pieces are never made, its health reads
   as gone. Try the map once to check its scripts still do what you want.
+
+Level reflections and the "Level shaders..." window (Xbox)
+  The Xbox draws every level surface at least twice: its lightmap, then
+  its textures. A shader with a reflection (a cube map, and a perpendicular
+  or parallel brightness above 0) draws it a third time, and a fourth when
+  its lightmap brightness scale is under 1 (which dims the reflection in
+  the shadows). On a level where most surfaces reflect that's most of the
+  level drawn 3 or 4 times: Deathtrap reflects on 97% of its triangles and
+  costs the Xbox about 5,900 triangle passes in a typical view and 16,900
+  in a busy one, against Sidewinder's 3,350 / 8,260 (among the busiest
+  stock maps that still run smoothly).
+  Reflections are part of how a level looks, though, and they're only part
+  of what it costs: dropping 45 of Deathtrap's 50 halved those passes but
+  took its worst spot on an Xbox from 10-12 to only 12-14 frames a second,
+  and the level looked noticeably flatter. So a conversion keeps every
+  reflection unless you choose otherwise for that map in this window. When
+  a level's reflections cost much more than Sidewinder's, the Performance
+  section says so.
+  Dropping a reflection sets its brightnesses to 0 and removes its cube map
+  (freeing its memory too); the surface keeps its textures, bump map and
+  lightmap. The log's [reflections] line lists the ones dropped.
+  The "Level shaders..." button on the Xbox tab shows this for the Convert
+  tab's map (or the Build tab's scenario). Measuring prepares the map as for
+  a conversion without building it (seconds to a minute).
+  - When converting: keep every reflection (the default), drop the
+    suggested ones (the ones that cost the most passes for how little they
+    show, until the level costs about what Sidewinder does: cheaper, but
+    flatter in places), or drop the ones you tick. Ticking or unticking one
+    switches to your own picks, starting from what was shown.
+  - The list: each reflecting shader with its extra passes (its triangles
+    drawn again in an average view), Shows (how much of what you see is its
+    reflection), Covers (how much of the screen it is), its triangles and
+    what's suggested. Biggest cost first.
+  - The picture: the level drawn from where players stand (textures,
+    lightmaps and reflections, close to the Xbox, not exact). As made, As
+    converted, or What it loses (the converted picture dimmed, with the
+    reflections that go lit up). Click a shader to see the views where its
+    reflection shows, tinted pink ("Tint selected"); the arrows go through
+    them. Drag to look around, mouse wheel or W A S D to move (Q / E down
+    and up, Shift faster).
+  - "Show portals": each portal outlined in yellow, glowing orange where
+    you can see through it, and each room (cluster) tinted a colour of its
+    own. The engine draws the room you're in, then only the rooms it can
+    see through portals. The line above the list says how many rooms and
+    portals the level has (after the app's own, when it adds them).
+  - The line under the picture: the level's triangle passes in a typical /
+    busy view as made and with your choices, next to Sidewinder's.
+  Hover over the choices and checkboxes for what each does. Choices are
+  saved per map and used every time you convert it for the Xbox.
+  Measurements are kept between runs of the app until the map file
+  changes (or the portals option); "Measure again" starts over.
+
+Dynamic lights (Xbox)
+  A dynamic light (a muzzle flash, an explosion, a map's lightning) lights
+  the level by drawing part of it again, twice (diffuse and specular), out
+  of a fixed amount for everything in a frame (32,768 triangles). The part
+  isn't just what the light reaches: the engine takes whole pieces of the
+  level (subclusters, up to about 100 triangles each, some spanning much of
+  it) whose box touches the box around the light, and draws again the ones
+  in view, up to 4,096 a pass. Deathtrap's lightning (radius 25, three at
+  once, high above its vehicle) takes 10,600 to 12,500 of the level's
+  12,749 triangles and stops the Xbox with an out-of-memory error. Made
+  smaller, it no longer reaches anything it could be seen on, but still
+  takes thousands.
+  So a light of the map's own that would take more than one pass can,
+  where the map places it, is turned off ("dynamic" off: the engine makes
+  no light for it; a lens flare stays). The engine can't light only
+  players and vehicles: every light it makes lights the level too. What
+  made the light still plays (Deathtrap's thunder). A light the map doesn't
+  place (a custom weapon's explosion: where it goes off isn't known) is
+  kept to Bungie's biggest, radius 15 (the Scorpion shell's explosion).
+  The log's [lights] line lists them. There's no option: those lights
+  don't run on the Xbox as they are.
 
 Content nobody can get (Xbox)
   Xbox maps have only 22 MB for level geometry and other tag data,
@@ -835,18 +959,31 @@ The log lists every automatic change:
   [effects] Looping prop effects were lightened for Xbox.
   [lod]   Lower-detail versions were made for models, or models got
           switch distances for theirs (see "Levels of detail" above).
+  [portals] A level made without portals got them (see "Portals" above).
+  [reflections] Level reflections were dropped, as chosen in the Level
+          shaders window (see "Level reflections" above).
+  [lights] Dynamic lights that would have the Xbox draw most of the level
+          again were turned off or shrunk (see "Dynamic lights" above).
 
 Warnings (for example "There are 1/16 Slayer spawns") don't stop the
 build. They point at things worth checking in your map.
 
 Xbox builds end with a "Performance" section (in the log, and in the
 report when the map builds): what the Xbox has to draw.
-  - Level: the level's triangles, its clusters and portals, and how many
-    triangles the visibility data lets the engine draw from a typical spot
-    and from the worst one (before the view's own culling), next to the
-    most any stock Xbox map has (Blood Gulch 5,503, Damnation 8,618,
-    Sidewinder 10,036). A level far above those is the likeliest reason a
-    map runs slowly; portals only help where walls block the view.
+  - Level: the level's triangles, its clusters and portals, and about how
+    many of them the engine draws in a typical view and in a busy one
+    (busier than 9 views in 10), standing on its floors around where the
+    players spawn (not in trigger volumes named for killing, like
+    Deathtrap's plains) and looking around: through the portals, as the
+    engine does, and on screen. Next to it, the same for stock Xbox maps (Blood
+    Gulch 588 / 2,033, Damnation 419 / 2,134, Sidewinder 784 / 2,115,
+    Prisoner 893 / 2,433, the most of any). A level far above
+    those is the likeliest reason a map runs slowly; portals only help
+    where walls block the view.
+  - Level shaders: the triangle passes the Xbox draws of the level in a
+    typical and a busy view (every surface twice, reflecting ones three or
+    four times), as converted and as made, next to Sidewinder's 3,350 /
+    8,260 (see "Level reflections" above).
   - Models with no lower-detail versions, drawn in full at any distance,
     with their triangles and how many are on the map (placed, or at weapon
     and item spawn points), most triangles on the map first.

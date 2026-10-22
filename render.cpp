@@ -95,6 +95,9 @@ void draw(const porter::ModelPreview &m, const View &v, int w, int h, std::vecto
                 float ua = m.uv[a * 2] * iz[a], va = m.uv[a * 2 + 1] * iz[a], ub = m.uv[b * 2] * iz[b], vb = m.uv[b * 2 + 1] * iz[b],
                       uc = m.uv[cc * 2] * iz[cc], vc = m.uv[cc * 2 + 1] * iz[cc];
                 float inv = 1.0f / area;
+                // For the triangles' edges: each one's length (the one across from each corner).
+                float len0 = std::hypot(x2 - x1, y2 - y1), len1 = std::hypot(x0 - x2, y0 - y2), len2 = std::hypot(x1 - x0, y1 - y0);
+                float twice = std::fabs(area);
                 for (int y = miny; y <= maxy; y++) {
                     float py = y + 0.5f;
                     for (int x = minx; x <= maxx; x++) {
@@ -118,8 +121,17 @@ void draw(const porter::ModelPreview &m, const View &v, int w, int h, std::vecto
                             g = s[1];
                             bl = s[2];
                         }
-                        uint32_t R = (uint32_t)std::min(255.0f, r * shade), G = (uint32_t)std::min(255.0f, g * shade),
-                                 B = (uint32_t)std::min(255.0f, bl * shade);
+                        float fr = r * shade, fg = g * shade, fb = bl * shade;
+                        if (v.wire) {   // near an edge (within a pixel and a bit, at twice the size): a light blue line
+                            float d = std::min({w0 * twice / std::max(len0, 1e-6f), w1 * twice / std::max(len1, 1e-6f),
+                                                w2 * twice / std::max(len2, 1e-6f)});
+                            if (d < 1.3f) {
+                                fr = fr * 0.3f + 120 * 0.7f;
+                                fg = fg * 0.3f + 210 * 0.7f;
+                                fb = fb * 0.3f + 255 * 0.7f;
+                            }
+                        }
+                        uint32_t R = (uint32_t)std::min(255.0f, fr), G = (uint32_t)std::min(255.0f, fg), B = (uint32_t)std::min(255.0f, fb);
                         big[o] = R << 16 | G << 8 | B;
                     }
                 }

@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <functional>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -54,6 +55,17 @@ struct Config {
     // (empty: cache_dir/lod_library) so the same model in another map reuses them.
     bool xbox_make_lods = true;
     fs::path lod_library;
+    // Give a level made without portals (one cluster: everything in view is drawn, walls or not) clusters and portals
+    // at its doorways and corridors (portals.hpp), when that cuts what the Xbox draws.
+    bool xbox_add_portals = true;
+    // Level shaders' reflections (levelshaders.hpp): kept unless this map's choice in the level shaders window says
+    // otherwise: drop the suggested ones (the ones that show least for the Xbox passes they cost, while the level costs
+    // more than stock ones), or `xbox_reflection_picks` (exactly these shader tags lose their reflections).
+    bool xbox_drop_reflections = false;
+    bool xbox_reflection_picks_set = false;
+    std::set<std::string> xbox_reflection_picks;
+    // Only measure the level's shaders (no build): Result::shaders is the file for the level shaders window.
+    bool level_shaders_only = false;
     // Custom weapons with no Xbox original: empty = keep them, else an Xbox weapon name (e.g. "sniper rifle").
     std::string xbox_other_weapons;
     // Largest side for the map's own world textures (stock Xbox maps stay at 512) and for lightmaps.
@@ -118,13 +130,40 @@ ContentEstimate estimate_contents(const ContentAnalysis &a, const std::map<std::
 // Runs the Xbox preparation of a map (input = a .map, or a .scenario in a tags folder when in_game is Unknown)
 // and measures it. Takes about as long as a conversion.
 bool analyze_xbox_contents(const Config &cfg, const fs::path &input, Game in_game, ContentAnalysis &out, const Log &log);
+// Prepares the map for the Xbox as a conversion would (without building it) and measures its level's shaders:
+// `file` the level shaders file (levelshaders.hpp save()). `in_game` Unknown: `input` is a scenario in a tags folder.
+bool analyze_level_shaders(const Config &cfg, const fs::path &input, Game in_game, fs::path &file, std::string &error, const Log &log);
 // A measurement saved to / read from a file (read: false if missing, damaged or from another version). The models
 // go in a second file beside it (`file` + ".models"); without it the measurement still reads, with no models.
 bool save_content_analysis(const ContentAnalysis &a, const fs::path &file);
 bool load_content_analysis(ContentAnalysis &a, const fs::path &file);
 
+// An Xbox build's models whose levels of detail it changed (lower-detail versions made, or switch distances given),
+// to look at in the "LODs" window: each detail level drawn, and where the game switches to it.
+struct LodView {
+    struct Model {
+        std::string tag;                 // the model tag
+        std::string name;                // the object it's drawn for ("mp_boulder_granite_medium")
+        char kind = 's';                 // v vehicle, s scenery (and machines...), w weapon or item
+        std::string change;              // "made" (lower-detail versions), "library" (reused from the LOD library),
+                                         // "distances" (switch distances for its own), "stock" (a stock model's)
+        bool undone = false;             // taken out again: the map didn't fit with them
+        int placed = 0;                  // how many are on the map (placed, or at weapon/item spawn points)
+        double cutoffs[5] = {0, 0, 0, 0, 0};   // switch distances, pixels across (super high, high, medium, low, super low)
+        double radius = 0;               // the model's size (world units), for the distances in metres
+        int level[5] = {-1, -1, -1, -1, -1};   // each level's drawing in `previews` (levels sharing a version share it)
+    };
+    std::string map_name;
+    std::vector<Model> models;
+    std::vector<ModelPreview> previews;
+};
+bool save_lod_view(const LodView &v, const fs::path &file);   // (and `file` + ".models")
+bool load_lod_view(LodView &v, const fs::path &file);
+
 struct Result {
     bool ok = false;
+    fs::path lods;                     // an Xbox build: its LodView, when it changed any model's levels of detail
+    fs::path shaders;                  // an Xbox build: its level shaders (levelshaders.hpp, for the window)
     std::string memory;                // an Xbox build: its tag memory and texture memory, for the log and report
     std::string error;                 // human readable reason when !ok
     std::vector<std::string> changes;  // automatic fixes

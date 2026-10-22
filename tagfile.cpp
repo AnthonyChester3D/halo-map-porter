@@ -196,7 +196,8 @@ static const char *extension_of(const std::string &group) {
         {"bipd", "biped"}, {"vehi", "vehicle"}, {"weap", "weapon"}, {"eqip", "equipment"}, {"garb", "garbage"},
         {"proj", "projectile"}, {"scen", "scenery"}, {"mach", "device_machine"}, {"ctrl", "device_control"},
         {"lifi", "device_light_fixture"}, {"plac", "placeholder"}, {"ssce", "sound_scenery"}, {"itmc", "item_collection"},
-        {"antr", "model_animations"}, {"coll", "model_collision_geometry"}, {"bitm", "bitmap"}, {"snd!", "sound"}};
+        {"antr", "model_animations"}, {"coll", "model_collision_geometry"}, {"bitm", "bitmap"}, {"snd!", "sound"},
+        {"effe", "effect"}, {"ligh", "light"}};
     auto it = ext.find(group);
     return it == ext.end() ? nullptr : it->second;
 }
@@ -404,6 +405,13 @@ double get_num(const TagNode &n, const char *name, int k) {
     }
 }
 
+std::string get_str(const TagNode &n, const char *name) {
+    int i = field_of(n.sid, name, 0);
+    if (i < 0 || kTagFields[i].type != 's' || kTagFields[i].offset + 32 > n.fixed.size()) return "";
+    std::string s = n.fixed.substr(kTagFields[i].offset, 32);
+    return s.substr(0, s.find('\0'));
+}
+
 bool set_num(TagNode &n, const char *name, double v, int k) {
     int i = field_of(n.sid, name, 0);
     if (i < 0 || k < 0 || k >= kTagFields[i].count) return false;
@@ -424,6 +432,20 @@ std::vector<TagNode> *block(TagNode &n, const char *name) {
     int i = field_of(n.sid, name, 2);
     for (auto &e : n.extras)
         if (e.field == i && e.item == 0) return &e.elems;
+    return nullptr;
+}
+
+std::string *data(TagNode &n, const char *name) {
+    int i = field_of(n.sid, name, 3);
+    for (auto &e : n.extras)
+        if (e.field == i && e.item == 0) return &e.bytes;
+    return nullptr;
+}
+
+std::string *ref_path(TagNode &n, const char *name) {
+    int i = field_of(n.sid, name, 1);
+    for (auto &e : n.extras)
+        if (e.field == i && e.item == 0) return &e.bytes;
     return nullptr;
 }
 

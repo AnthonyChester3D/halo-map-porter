@@ -97,12 +97,22 @@ ModelStats model_stats(const std::filesystem::path &model) {
     };
     for (size_t i = 0; i < regions.size(); i++) {
         tagfile::Block perms = regions[i].block("permutations");
+        std::vector<long long> tops;   // each permutation's most detailed geometry
+        for (size_t k = 0; k < perms.size(); k++) tops.push_back(perms[k].integer("super high"));
         for (size_t k = 0; k < perms.size(); k++) {
             long long lv[5];
             const char *names[5] = {"super low", "low", "medium", "high", "super high"};
             for (int j = 0; j < 5; j++) lv[j] = perms[k].integer(names[j]);
-            for (int j = 1; j < 5; j++)
-                if (lv[j] != lv[0]) s.lods = true;
+            // A lower level with its own geometry is a lower-detail version; one that's another permutation's most
+            // detailed geometry is that variant (one of a rock's 5 shapes), not a simpler version. A permutation the
+            // engine picks itself ("~blur": a moving tire) can fall back to another's at a distance.
+            std::string pname = perms[k].str("name");
+            bool special = !pname.empty() && pname[0] == '~';
+            for (int j = 0; j < 4; j++) {
+                if (lv[j] == lv[4]) continue;
+                if (std::find(tops.begin(), tops.end(), lv[j]) == tops.end()) s.lods = true;
+                else if (!special) s.borrowed = true;
+            }
             if (k == 0) {
                 s.triangles += count(lv[4]);
                 s.lowest_triangles += count(lv[0]);

@@ -12,7 +12,7 @@ ROOTS = {   # tag extension -> root struct
     'item_collection': 'ItemCollection', 'bitmap': 'Bitmap', 'shader_model': 'ShaderModel',
     'shader_environment': 'ShaderEnvironment', 'shader_transparent_chicago': 'ShaderTransparentChicago',
     'shader_transparent_chicago_extended': 'ShaderTransparentChicagoExtended',
-    'shader_transparent_generic': 'ShaderTransparentGeneric',
+    'shader_transparent_generic': 'ShaderTransparentGeneric', 'effect': 'Effect', 'light': 'Light',
 }
 
 types = {}

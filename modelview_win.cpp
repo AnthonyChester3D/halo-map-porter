@@ -136,7 +136,9 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_LBUTTONDBLCLK:
         if (v) {
+            bool wire = v->view.wire;
             v->view = render::View();
+            v->view.wire = wire;
             redraw(h, v);
         }
         return 0;
@@ -165,12 +167,23 @@ HWND create(HWND parent, int x, int y, int w, int h, int id) {
                            (HMENU)(INT_PTR)id, inst, nullptr);
 }
 
-void show(HWND h, const porter::ModelPreview *m, const std::wstring &empty_text) {
+void show(HWND h, const porter::ModelPreview *m, const std::wstring &empty_text, bool keep_view) {
     View *v = of(h);
     if (!v) return;
-    if (v->model != m) v->view = render::View();
+    if (v->model != m && !keep_view) {
+        bool wire = v->view.wire;
+        v->view = render::View();
+        v->view.wire = wire;
+    }
     v->model = m;
     v->empty = empty_text;
+    redraw(h, v);
+}
+
+void show_triangles(HWND h, bool on) {
+    View *v = of(h);
+    if (!v || v->view.wire == on) return;
+    v->view.wire = on;
     redraw(h, v);
 }
 
