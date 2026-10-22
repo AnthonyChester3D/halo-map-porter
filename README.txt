@@ -591,12 +591,15 @@ Level reflections and the "Level shaders..." window (Xbox)
     reflection), Covers (how much of the screen it is), its triangles and
     what's suggested. Biggest cost first.
   - The picture: the level drawn from where players stand (textures,
-    lightmaps and reflections, close to the Xbox, not exact). As made, As
-    converted, or What it loses (the converted picture dimmed, with the
-    reflections that go lit up). Click a shader to see the views where its
-    reflection shows, tinted pink ("Tint selected"); the arrows go through
-    them. Drag to look around, mouse wheel or W A S D to move (Q / E down
-    and up, Shift faster).
+    lightmaps and reflections, close to the Xbox, not exact), on your
+    graphics card (OpenGL 2; without it, the app draws it itself, more
+    slowly). As made, As converted, or What it loses (the converted picture
+    dimmed, with the reflections that go lit up). Click a shader to see the
+    views where its reflection shows, tinted pink ("Tint selected"); the
+    arrows go through them. To fly around, click the picture, then drag
+    with the mouse to look and hold W A S D to move the way you're looking
+    (Q / E down and up, the arrow keys turn and move too; Shift faster,
+    Ctrl slower); the mouse wheel steps forward and back.
   - "Show portals": each portal outlined in yellow, glowing orange where
     you can see through it, and each room (cluster) tinted a colour of its
     own. The engine draws the room you're in, then only the rooms it can

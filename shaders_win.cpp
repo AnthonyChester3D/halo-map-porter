@@ -4,6 +4,7 @@
 #include <commctrl.h>
 #include <windowsx.h>
 
+#include "glpreview_win.hpp"
 #include "levelshaders.hpp"
 
 #include <algorithm>
@@ -49,13 +50,17 @@ struct State {
     int show = 1;                  // 0 as made, 1 as converted, 2 what changes
     bool highlight = true, portals = false;
     HWND tips = nullptr;
-    // the camera: the view's spot, turned and moved by the mouse
+    // the camera: the view's spot, turned by dragging and flown with the keys
     lshade::Camera cam;
     bool dragging = false;
     POINT drag_from{};
-    double drag_yaw = 0, drag_pitch = 0;
+    // the picture: on the graphics card, or (without OpenGL 2) drawn here
+    std::unique_ptr<glpreview::Renderer> gl;
     std::vector<uint32_t> px;
     int pw = 0, ph = 0;
+    // the frame loop (while the camera moves): a timer that moves it by the keys held and redraws
+    bool ticking = false, dirty = false, coarse = false;
+    LARGE_INTEGER last_tick{};
 };
 State *St = nullptr;
 
@@ -141,18 +146,30 @@ std::vector<char> dropped_all() {
     return d;
 }
 
+// Draws the picture: on the graphics card when it can (fast enough to fly through), else here (`fast`: at half the
+// size, while the camera moves).
 void render(bool fast) {
     if (!St->data) return;
-    RECT rc;
-    GetClientRect(St->view, &rc);
-    int w = rc.right, h = rc.bottom;
-    if (fast) { w /= 2; h /= 2; }
     std::vector<char> all(St->data->a.shaders.size(), 1), refl = all;
     if (St->show != 0)
         for (size_t s = 0; s < refl.size(); s++) refl[s] = !dropped((int)s);
     lshade::Camera c = St->cam;
-    c.yaw += St->drag_yaw;
-    c.pitch = std::clamp(c.pitch + St->drag_pitch, -1.4, 1.4);
+    if (St->gl) {
+        glpreview::Frame f;
+        f.camera = c;
+        f.made = all;
+        f.converted = refl;
+        f.what_it_loses = St->show == 2;
+        f.highlight = St->highlight ? St->selected : -1;
+        f.portals = St->portals;
+        St->gl->draw(f);
+        ValidateRect(St->view, nullptr);
+        return;
+    }
+    RECT rc;
+    GetClientRect(St->view, &rc);
+    int w = rc.right, h = rc.bottom;
+    if (fast) { w /= 2; h /= 2; }
     if (St->show == 2) {
         // What changes: the converted picture dimmed, with what it loses (the dropped reflections) brightened on top.
         std::vector<uint32_t> made;
@@ -182,7 +199,6 @@ void go_to_view() {
     St->cam.eye = sv.eye;
     St->cam.yaw = sv.yaw;
     St->cam.pitch = -0.08;
-    St->drag_yaw = St->drag_pitch = 0;
     render(false);
 }
 
@@ -326,6 +342,7 @@ bool load_file(const fs::path &f) {
     auto d = std::make_shared<Data>();
     if (!lshade::load(d->a, d->p, f)) return false;
     St->data = d;
+    if (St->gl) St->gl->set_scene(&d->p);
     // (picks made against an older measurement keep only the shaders still there)
     std::set<std::string> tags;
     for (auto &s : d->a.shaders) tags.insert(s.tag);
@@ -334,9 +351,69 @@ bool load_file(const fs::path &f) {
     return true;
 }
 
+// The fly camera. Held keys move it every frame, by how long the frame took: W A S D forward, back and sideways (where
+// you're looking), Q / E down and up, the arrows turn; Shift faster, Ctrl slower.
+const UINT_PTR kTick = 1;
+bool key(int vk) { return GetKeyState(vk) < 0; }
+bool moving_keys() {
+    for (int vk : {(int)'W', (int)'A', (int)'S', (int)'D', (int)'Q', (int)'E', VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT})
+        if (key(vk)) return true;
+    return false;
+}
+void start_ticking() {
+    if (St->ticking) return;
+    St->ticking = true;
+    QueryPerformanceCounter(&St->last_tick);
+    SetTimer(St->view, kTick, 30, nullptr);   // (a backstop: the window's loop draws a frame each time round)
+}
+void tick() {
+    LARGE_INTEGER now, freq;
+    QueryPerformanceCounter(&now);
+    QueryPerformanceFrequency(&freq);
+    double dt = std::clamp((double)(now.QuadPart - St->last_tick.QuadPart) / (double)freq.QuadPart, 0.0, 0.1);
+    St->last_tick = now;
+    bool keys = GetFocus() == St->view && moving_keys();
+    if (keys && St->data) {
+        double speed = 3.0 * (key(VK_SHIFT) ? 3.0 : 1.0) * (key(VK_CONTROL) ? 0.3 : 1.0) * dt;   // (world units: 3 m)
+        lshade::Camera &c = St->cam;
+        if (key(VK_LEFT)) c.yaw += 1.6 * dt;
+        if (key(VK_RIGHT)) c.yaw -= 1.6 * dt;
+        double fw[3] = {std::cos(c.yaw) * std::cos(c.pitch), std::sin(c.yaw) * std::cos(c.pitch), std::sin(c.pitch)};
+        double rt[2] = {std::sin(c.yaw), -std::cos(c.yaw)};
+        double f = (key('W') || key(VK_UP) ? 1 : 0) - (key('S') || key(VK_DOWN) ? 1 : 0);
+        double r = (key('D') ? 1 : 0) - (key('A') ? 1 : 0), u = (key('E') ? 1 : 0) - (key('Q') ? 1 : 0);
+        for (int k = 0; k < 3; k++) c.eye[(size_t)k] += fw[k] * f * speed;
+        c.eye[0] += rt[0] * r * speed;
+        c.eye[1] += rt[1] * r * speed;
+        c.eye[2] += u * speed;
+        St->dirty = true;
+    }
+    if (St->dirty) {
+        bool coarse = !St->gl && (keys || St->dragging);   // (drawn here: smaller while it moves)
+        render(coarse);
+        St->coarse = coarse;
+        St->dirty = false;
+        return;
+    }
+    if (St->coarse) {   // (stopped: the full picture)
+        render(false);
+        St->coarse = false;
+    }
+    if (!keys && !St->dragging) {
+        KillTimer(St->view, kTick);
+        St->ticking = false;
+    }
+}
+
 LRESULT CALLBACK view_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
+    case WM_ERASEBKGND:
+        return 1;
     case WM_PAINT: {
+        if (St && St->gl && St->data) {
+            render(false);
+            return 0;
+        }
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(h, &ps);
         RECT rc;
@@ -350,80 +427,72 @@ LRESULT CALLBACK view_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             bi.bmiHeader.biBitCount = 32;
             SetStretchBltMode(dc, COLORONCOLOR);
             StretchDIBits(dc, 0, 0, rc.right, rc.bottom, 0, 0, St->pw, St->ph, St->px.data(), &bi, DIB_RGB_COLORS, SRCCOPY);
-            HGDIOBJ old = SelectObject(dc, St->font);
-            SetBkMode(dc, TRANSPARENT);
-            const wchar_t *hint = St->show == 2 ? L"Bright: the reflections that go. Drag to look; wheel or W A S D to move."
-                                                : L"Drag to look; wheel or W A S D to move.";
-            RECT tr{S(8) + 1, rc.bottom - S(24) + 1, rc.right, rc.bottom};
-            SetTextColor(dc, RGB(0, 0, 0));
-            DrawTextW(dc, hint, -1, &tr, DT_SINGLELINE | DT_NOPREFIX);
-            OffsetRect(&tr, -1, -1);
-            SetTextColor(dc, RGB(235, 235, 235));
-            DrawTextW(dc, hint, -1, &tr, DT_SINGLELINE | DT_NOPREFIX);
-            SelectObject(dc, old);
         } else {
             FillRect(dc, &rc, (HBRUSH)GetStockObject(DKGRAY_BRUSH));
         }
         EndPaint(h, &ps);
         return 0;
     }
+    case WM_TIMER:
+        if (St && wp == kTick) tick();
+        return 0;
     case WM_LBUTTONDOWN:
+    case WM_RBUTTONDOWN:
         if (!St || !St->data) return 0;
+        if (St->tips) {   // (the how-to-fly tip: not again once you're flying)
+            TOOLINFOW ti{};
+            ti.cbSize = sizeof(ti);
+            ti.hwnd = St->wnd;
+            ti.uId = (UINT_PTR)h;
+            SendMessageW(St->tips, TTM_DELTOOLW, 0, (LPARAM)&ti);
+        }
         SetCapture(h);
         SetFocus(h);
         St->dragging = true;
         St->drag_from = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        start_ticking();
         return 0;
     case WM_MOUSEMOVE:
         if (St && St->dragging) {
-            int dx = GET_X_LPARAM(lp) - St->drag_from.x, dy = GET_Y_LPARAM(lp) - St->drag_from.y;
-            St->drag_yaw = -dx * 0.006;
-            St->drag_pitch = -dy * 0.006;
-            render(true);
+            // Turns the camera itself, so the keys move it the way you look now.
+            POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            St->cam.yaw -= (pt.x - St->drag_from.x) * 0.005;
+            St->cam.pitch = std::clamp(St->cam.pitch - (pt.y - St->drag_from.y) * 0.005, -1.5, 1.5);
+            St->drag_from = pt;
+            St->dirty = true;
         }
         return 0;
     case WM_LBUTTONUP:
+    case WM_RBUTTONUP:
+    case WM_CAPTURECHANGED:
         if (St && St->dragging) {
-            ReleaseCapture();
             St->dragging = false;
-            St->cam.yaw += St->drag_yaw;
-            St->cam.pitch = std::clamp(St->cam.pitch + St->drag_pitch, -1.4, 1.4);
-            St->drag_yaw = St->drag_pitch = 0;
-            render(false);
+            if (msg != WM_CAPTURECHANGED) ReleaseCapture();
+            St->dirty = true;
         }
         return 0;
     case WM_MOUSEWHEEL:
         if (St && St->data) {
-            double step = GET_WHEEL_DELTA_WPARAM(wp) / 120.0 * 0.5;   // (half a world unit, 1.5 m, a notch)
-            St->cam.eye[0] += std::cos(St->cam.yaw) * std::cos(St->cam.pitch) * step;
-            St->cam.eye[1] += std::sin(St->cam.yaw) * std::cos(St->cam.pitch) * step;
-            St->cam.eye[2] += std::sin(St->cam.pitch) * step;
-            render(false);
+            double step = GET_WHEEL_DELTA_WPARAM(wp) / 120.0 * 0.5 * (key(VK_SHIFT) ? 3.0 : 1.0);   // (half a world unit a notch)
+            const lshade::Camera &c = St->cam;
+            St->cam.eye[0] += std::cos(c.yaw) * std::cos(c.pitch) * step;
+            St->cam.eye[1] += std::sin(c.yaw) * std::cos(c.pitch) * step;
+            St->cam.eye[2] += std::sin(c.pitch) * step;
+            St->dirty = true;
+            start_ticking();
         }
         return 0;
     case WM_GETDLGCODE:
         return DLGC_WANTARROWS | DLGC_WANTCHARS;
     case WM_KEYDOWN:
-        if (St && St->data) {
-            double f = 0, r = 0, turn = 0, step = (GetKeyState(VK_SHIFT) < 0 ? 1.0 : 0.3);
-            switch (wp) {
-            case 'W': case VK_UP: f = step; break;
-            case 'S': case VK_DOWN: f = -step; break;
-            case 'A': r = -step; break;
-            case 'D': r = step; break;
-            case VK_LEFT: turn = 0.1; break;
-            case VK_RIGHT: turn = -0.1; break;
-            case 'Q': St->cam.eye[2] -= step; break;
-            case 'E': St->cam.eye[2] += step; break;
-            default: return DefWindowProcW(h, msg, wp, lp);
-            }
-            double cy = std::cos(St->cam.yaw), sy = std::sin(St->cam.yaw);
-            St->cam.eye[0] += cy * f + sy * r;
-            St->cam.eye[1] += sy * f - cy * r;
-            St->cam.yaw += turn;
-            render(false);
+        switch (wp) {
+        case 'W': case 'A': case 'S': case 'D': case 'Q': case 'E': case VK_UP: case VK_DOWN: case VK_LEFT: case VK_RIGHT:
+            if (St && St->data) start_ticking();
+            return 0;
         }
-        return 0;
+        break;
+    case WM_CHAR:
+        return 0;   // (the movement keys: no beep)
     }
     return DefWindowProcW(h, msg, wp, lp);
 }
@@ -454,7 +523,8 @@ void create_controls() {
         c.pszText = (LPWSTR)cols[i].name;
         ListView_InsertColumn(St->list, i, &c);
     }
-    St->view = CreateWindowExW(WS_EX_CLIENTEDGE, L"HMPLevelView", L"", WS_CHILD | WS_VISIBLE, S(572), S(68), S(596), S(447), St->wnd,
+    St->view = CreateWindowExW(WS_EX_CLIENTEDGE, L"HMPLevelView", L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_TABSTOP,
+                               S(572), S(68), S(596), S(447), St->wnd,
                                (HMENU)(INT_PTR)IDC_VIEW, GetModuleHandleW(nullptr), nullptr);
     add(L"BUTTON", L"\u2190", BS_PUSHBUTTON | WS_TABSTOP, 572, 522, 36, 26, IDC_PREV);
     add(L"BUTTON", L"\u2192", BS_PUSHBUTTON | WS_TABSTOP, 612, 522, 36, 26, IDC_NEXT);
@@ -499,6 +569,8 @@ void create_controls() {
     tip(IDC_PORTALS, L"Outlines each portal in yellow (the openings the engine looks through from one room to the next), "
                      L"glowing orange where you can see through it, and tints each room (cluster) a colour of its own. The engine draws the room you're in, then only the rooms "
                      L"it can see through portals, so walls between rooms hide what's behind them.");
+    tip(IDC_VIEW, L"Click here, then fly: drag with the mouse to look around, W A S D to move where you look, Q / E to go "
+                  L"down and up (Shift faster, Ctrl slower), the mouse wheel to step forward and back.");
     tip(IDC_PREV, L"The previous view (the selected shader's, or the ones that see most of the level).");
     tip(IDC_NEXT, L"The next view.");
 }
@@ -634,9 +706,10 @@ bool edit(HWND owner, const std::wstring &title, const std::string &key, Measure
         RegisterClassExW(&wc);
         WNDCLASSEXW vc{sizeof(vc)};
         vc.hInstance = inst;
+        vc.style = CS_OWNDC;   // (OpenGL draws on it)
         vc.hCursor = LoadCursor(nullptr, IDC_HAND);
         vc.lpfnWndProc = view_proc;
-        vc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
+        vc.hbrBackground = nullptr;
         vc.lpszClassName = L"HMPLevelView";
         RegisterClassExW(&vc);
         registered = true;
@@ -669,6 +742,8 @@ bool edit(HWND owner, const std::wstring &title, const std::string &key, Measure
     }
     st.wnd = CreateWindowExW(WS_EX_DLGMODALFRAME, L"HMPLevelShaders", title.c_str(), style, x, y, w, hgt, owner, nullptr, inst, nullptr);
     create_controls();
+    // (none, or HMP_SOFTWARE_PREVIEW set: drawn here, slower)
+    if (!GetEnvironmentVariableW(L"HMP_SOFTWARE_PREVIEW", nullptr, 0)) st.gl = glpreview::Renderer::create(st.view);
     g_target = st.wnd;
     {
         fs::path cached;
@@ -682,8 +757,22 @@ bool edit(HWND owner, const std::wstring &title, const std::string &key, Measure
     ShowWindow(st.wnd, SW_SHOW);
     SetFocus(st.list);
 
+    // While the camera moves, a frame each time round (on the graphics card, at the screen's refresh: SwapBuffers
+    // waits for it), else waiting for messages.
     MSG m;
-    while (!st.done) {
+    bool quit = false;
+    while (!st.done && !quit) {
+        if (st.ticking) {
+            while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) {
+                if (m.message == WM_QUIT) { PostQuitMessage((int)m.wParam); quit = true; break; }
+                if (!IsDialogMessageW(st.wnd, &m)) {
+                    TranslateMessage(&m);
+                    DispatchMessageW(&m);
+                }
+            }
+            if (!quit && !st.done && st.ticking) tick();
+            continue;
+        }
         BOOL got = GetMessageW(&m, nullptr, 0, 0);
         if (got <= 0) { PostQuitMessage(got == 0 ? (int)m.wParam : 0); break; }
         if (!IsDialogMessageW(st.wnd, &m)) {
@@ -692,6 +781,8 @@ bool edit(HWND owner, const std::wstring &title, const std::string &key, Measure
         }
     }
     g_target = nullptr;
+    KillTimer(st.view, kTick);
+    st.gl.reset();
     EnableWindow(owner, TRUE);
     SetActiveWindow(owner);
     DestroyWindow(st.wnd);

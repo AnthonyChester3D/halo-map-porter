@@ -1,0 +1,39 @@
+// Halo Map Porter - the level shaders window's picture on the graphics card (OpenGL 2, Windows): the same picture as
+// lshade::draw (levelshaders.hpp), fast enough to fly through. The window falls back to lshade::draw when the
+// machine has no OpenGL 2 (create() returns nothing).
+#pragma once
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
+#include <memory>
+#include <vector>
+
+#include "levelshaders.hpp"
+
+namespace glpreview {
+
+struct Frame {
+    lshade::Camera camera;
+    std::vector<char> made, converted;   // per shader: its reflection drawn as made / as converted
+    bool what_it_loses = false;          // the converted picture dimmed, what dropping reflections loses lit up
+    int highlight = -1;                  // a shader to tint
+    bool portals = false;                // portals outlined, rooms tinted
+};
+
+class Renderer {
+public:
+    // OpenGL 2 on `view` (a window of its own with the CS_OWNDC class style): nothing when it can't be had.
+    static std::unique_ptr<Renderer> create(HWND view);
+    ~Renderer();
+    // The level to draw (uploaded to the card; nullptr: none).
+    void set_scene(const lshade::Preview *p);
+    // Draws a frame to the whole view and shows it.
+    void draw(const Frame &f);
+
+private:
+    Renderer() = default;
+    struct Impl;
+    std::unique_ptr<Impl> d;
+};
+
+}   // namespace glpreview
