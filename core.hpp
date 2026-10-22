@@ -47,6 +47,9 @@ struct Config {
     // Swap the map's own copies of stock weapons, vehicles and the player model (e.g. a custom tagset's
     // HD sniper rifle) for the Xbox originals that every Xbox multiplayer map already carries.
     bool xbox_use_stock_versions = true;
+    // Models with lower-detail versions but no switch distances always draw in full; the map's own get stock-style
+    // distances. This also does it for stock Xbox models (36 ship that way, mostly trees, rocks and plants).
+    bool xbox_lod_stock_models = false;
     // Custom weapons with no Xbox original: empty = keep them, else an Xbox weapon name (e.g. "sniper rifle").
     std::string xbox_other_weapons;
     // Largest side for the map's own world textures (stock Xbox maps stay at 512) and for lightmaps.

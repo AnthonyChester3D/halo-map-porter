@@ -1,6 +1,8 @@
 // Halo Map Porter - conversion engine
 #include "core.hpp"
 #include "inflate.hpp"
+#include "perf.hpp"
+#include "tagfile.hpp"
 
 #include <algorithm>
 #include <climits>
@@ -197,13 +199,23 @@ struct Failure {
     std::string msg, tag;
     std::vector<std::string> path; // e.g. events[1], particles[3]
     std::string script_error;
+    // Invader's own check of a script's names (nav points, objects, tags...), printed as
+    // "extracted.hsc:1492:43: error: can't find navpoint 'orange_landingpad'" before a FATAL ERROR
+    // "Failed to compile scripts: tag data is invalid" for the scenario.
+    std::string hsc_error;
 };
 
 static bool parse_failure(const std::string &log_text, Failure &f) {
     auto lines = unwrap(log_text);
     static const std::regex fail_re(R"(^Failed to compile (\w+)::(\w+) #(\d+))");
+    static const std::regex hsc_re(R"(([^\s:]+\.hsc:\d+:\d+: error: .*))");
     for (size_t i = 0; i < lines.size(); i++) {
         auto &l = lines[i];
+        std::smatch hm;
+        if (f.hsc_error.empty() && std::regex_search(l, hm, hsc_re)) {
+            f.hsc_error = hm[1].str();
+            while (!f.hsc_error.empty() && (f.hsc_error.back() == '\r' || f.hsc_error.back() == ' ')) f.hsc_error.pop_back();
+        }
         if (l.rfind("Script compilation error:", 0) == 0) {
             f.script_error = l.substr(25);
             size_t a = f.script_error.find_first_not_of(' ');
@@ -866,6 +878,10 @@ std::string friendly_script_error(const std::string &e, Game target) {
     if (std::regex_search(e, m, gl))
         return "Your map's scripts use the global '" + m[1].str() + "', which doesn't exist in " +
                game_name(target) + ".\n(" + e + ")";
+    static const std::regex nf(R"(can't find (\w+(?: \w+)*?) (?:tag )?['"]([^'"]+)['"])");
+    if (std::regex_search(e, m, nf))
+        return "Your map's scripts name the " + m[1].str() + " '" + m[2].str() + "', which the " + game_name(target) +
+               " build of this map doesn't have.\n(" + e + ")";
     return "Your map's scripts don't compile for " + std::string(game_name(target)) + ": " + e;
 }
 
@@ -991,6 +1007,7 @@ void fix_seat_labels(Job &job, const fs::path &xsrc);
 static void apply_replacements(Job &job, const fs::path &xsrc);
 static bool fix_script_none(Job &job, const std::string &err, std::string &what);
 static bool fix_script_shadow(Job &job, const std::string &err, std::string &what);
+static bool fix_script_navpoint(Job &job, const std::string &err, std::string &what);
 static std::string script_error_line(Job &job, const std::string &err);
 static std::set<std::string> add_stock_choices_for_analysis(Job &job);
 static bool analyze_built_map(Job &job, const fs::path &map, const std::set<std::string> &added, ContentAnalysis &a,
@@ -1062,6 +1079,8 @@ static bool measure_xbox_memory(const fs::path &map, XboxMemoryUse &u) {
 }
 void convert_bc7_textures(Job &job);
 void xbox_content_passes(Job &job);
+void fill_lod_cutoffs(Job &job, const std::vector<std::string> &deps);
+static std::vector<std::string> performance_lines(Job &job);
 static void convert_scripts(Job &job, const fs::path &dir, Game target);
 bool prepare_models_for_pc(Job &job, std::string &err);
 
@@ -1410,6 +1429,14 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
     if (job.target != Game::MCC) convert_bc7_textures(job);
     if (job.target == Game::Xbox) xbox_content_passes(job);
     place_kept_level_tags(job);
+    std::vector<std::string> performance;   // the report's "Performance" section (Xbox)
+    if (job.target == Game::Xbox && !job.analysis) {
+        performance = performance_lines(job);
+        if (!performance.empty()) {
+            job.log("Performance (what the Xbox has to draw):");
+            for (auto &l : performance) job.log("  " + l);
+        }
+    }
 
     std::string stem = output.stem().u8string();
     bool optimized = false;   // Invader's --optimize: identical data stored once (only when the tag space is short)
@@ -1695,7 +1722,23 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
             if (!line.empty()) r.error += "\nThe line: " + line;
             return r;
         }
+        if (!f.hsc_error.empty()) {
+            // A name in the map's scripts that the built map doesn't have (a nav point arrow its HUD lacks...).
+            std::string what;
+            if (!job.extra.empty() && none_fixes < 40 && fix_script_navpoint(job, f.hsc_error, what)) {
+                none_fixes++;
+                job.note("[scripts] " + what);
+                continue;
+            }
+        }
         if (f.tag.empty() || !job.fix(f)) {
+            if (!f.hsc_error.empty()) {
+                r.error = friendly_script_error(f.hsc_error, job.target);
+                std::string line = script_error_line(job, f.hsc_error);
+                if (!line.empty()) r.error += "\nThe line: " + line;
+                r.error += "\nFull log: " + u8(job.work / "build.log");
+                return r;
+            }
             r.error = "Build failed and no automatic fix applies.\nError: " + f.msg + "\nTag: " + f.tag +
                       "\nFull log: " + u8(job.work / "build.log");
             return r;
@@ -1734,6 +1777,10 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
     if (r.changes.empty()) rep << "  none\n";
     rep << "\nBuild warnings (" << r.warnings.size() << "):\n";
     for (auto &w : r.warnings) rep << "  " << w << "\n";
+    if (!performance.empty()) {
+        rep << "\nPerformance (what the Xbox has to draw):\n";
+        for (auto &l : performance) rep << "  " << l << "\n";
+    }
     return r;
 }
 
@@ -3188,6 +3235,221 @@ void xbox_content_passes(Job &job) {
     if (flares)
         job.note("[xbox] removed the reflections from " + std::to_string(flares) +
                  " lens flares that have no bitmap to draw them with");
+    fill_lod_cutoffs(job, deps);
+}
+
+// The kind of object each model is drawn for in the world (v vehicle, b biped, s scenery and devices, w weapons and
+// other items), from the object tags among `deps`; and the weapons' first-person models.
+static std::map<std::string, char> model_kinds(Job &job, const std::vector<std::string> &deps,
+                                               std::set<std::string> &first_person,
+                                               std::map<std::string, std::string> &object_name) {
+    std::map<std::string, char> kind;
+    for (auto &dep : deps)
+        if (has_suffix(dep, ".weapon")) {
+            fs::path own = job.owner(dep);
+            std::string m = own.empty() ? "" : perf::weapon_first_person_model(own / from_u8(dep));
+            if (!m.empty()) first_person.insert(m);
+        }
+    static const std::pair<const char *, char> kinds[] = {
+        {".vehicle", 'v'}, {".biped", 'b'}, {".scenery", 's'}, {".device_machine", 's'}, {".device_control", 's'},
+        {".device_light_fixture", 's'}, {".sound_scenery", 's'}, {".placeholder", 's'}, {".weapon", 'w'},
+        {".equipment", 'w'}, {".garbage", 'w'}, {".projectile", 'w'}};
+    static const std::string rank = "vbsw";   // a model several kinds use: the first of these
+    for (auto &dep : deps)
+        for (auto &[ext, k] : kinds) {
+            if (!has_suffix(dep, ext)) continue;
+            fs::path own = job.owner(dep);
+            std::string m = own.empty() ? "" : perf::object_model(own / from_u8(dep));
+            if (m.empty()) break;
+            auto it = kind.find(m);
+            if (it == kind.end() || rank.find(k) < rank.find(it->second)) kind[m] = k;
+            if (!object_name.count(m)) object_name[m] = fs::path(from_u8(dep)).stem().u8string();
+            break;
+        }
+    return kind;
+}
+
+// Models with levels of detail but no switch distances always draw their most detailed level: the engine draws a
+// level once the model is at least that many pixels across, and with every distance 0 that's always the top one.
+// Give them switch distances like the stock Xbox models of their kind (Bungie's own, in tag order super high, high,
+// medium, low, super low; super low stays 0, so they're never left out). The map's own models always; Bungie's
+// (36 stock models ship like this, mostly trees, rocks and plants) with the Xbox tab's option. Only models an object
+// draws in the world: the engine draws first-person models (weapons, hands) as 0 pixels across, so with switch
+// distances they'd always be at their least detailed.
+void fill_lod_cutoffs(Job &job, const std::vector<std::string> &deps) {
+    struct Cut { char kind; const char *label; int px[5]; };
+    static const Cut cuts[] = {{'v', "vehicles", {200, 100, 50, 20, 0}},
+                               {'b', "characters", {280, 200, 80, 30, 0}},
+                               {'s', "scenery", {300, 90, 30, 5, 0}},
+                               {'w', "weapons and items", {100, 50, 25, 10, 0}}};
+    static const char *keys[5] = {"super_high_detail_cutoff", "high_detail_cutoff", "medium_detail_cutoff",
+                                  "low_detail_cutoff", "super_low_detail_cutoff"};
+    std::map<std::string, char> kinds;
+    std::set<std::string> first_person;
+    std::map<std::string, std::string> names;
+    bool kinds_read = false;
+    std::vector<std::string> own_done, stock_done;
+    for (auto &dep : deps) {
+        if (!has_suffix(dep, ".model") && !has_suffix(dep, ".gbxmodel")) continue;
+        fs::path own = job.owner(dep);
+        if (own.empty()) continue;
+        bool stock = own == job.overlay;
+        if (stock && !job.cfg.xbox_lod_stock_models) continue;
+        perf::ModelStats ms = perf::model_stats(own / from_u8(dep));
+        if (!ms.ok || !ms.lods || !ms.no_cutoffs()) continue;
+        if (!kinds_read) { kinds = model_kinds(job, deps, first_person, names); kinds_read = true; }
+        if (!kinds.count(dep) || first_person.count(dep)) continue;
+        char k = kinds[dep];
+        const Cut *c = &cuts[0];
+        for (auto &x : cuts)
+            if (x.kind == k) c = &x;
+        fs::path ed = editable_owner(job, dep, stock);
+        if (ed.empty()) continue;
+        std::vector<std::string> args;
+        for (int i = 0; i < 5; i++) args.insert(args.end(), {"-S", keys[i], std::to_string(c->px[i])});
+        bool ok = false;
+        edit_lines(job, ed, dep, args, &ok);
+        if (ok) (stock ? stock_done : own_done).push_back(names.count(dep) ? names[dep] : fs::path(from_u8(dep)).stem().u8string());
+    }
+    auto list = [](const std::vector<std::string> &v) {
+        std::string s;
+        for (size_t i = 0; i < v.size() && i < 8; i++) s += (i ? ", " : "") + v[i];
+        if (v.size() > 8) s += " and " + std::to_string(v.size() - 8) + " more";
+        return s;
+    };
+    if (!own_done.empty())
+        job.note("[lod] " + std::to_string(own_done.size()) + " of the map's models had lower-detail versions they never "
+                 "used (no switch distances, so always drawn in full); gave them stock-style ones: " + list(own_done));
+    if (!stock_done.empty())
+        job.note("[lod] gave " + std::to_string(stock_done.size()) + " stock models switch distances, so their "
+                 "lower-detail versions get used (Xbox tab option): " + list(stock_done));
+}
+
+static std::string thousands(long long v) {
+    std::string s = std::to_string(v < 0 ? -v : v);
+    for (int i = (int)s.size() - 3; i > 0; i -= 3) s.insert((size_t)i, ",");
+    return (v < 0 ? "-" : "") + s;
+}
+
+// The report's "Performance" section: what the Xbox has to draw. The level: its triangles, and how many of them
+// the visibility data (clusters and portals) lets the engine draw from a typical spot and the worst one. The models:
+// the ones with no lower-detail versions (drawn in full at any distance), most triangles on the map first, and the
+// ones whose lower-detail versions are never used.
+static std::vector<std::string> performance_lines(Job &job) {
+    std::vector<std::string> lines;
+    std::string scen = job.scenario + ".scenario";
+    fs::path sdir = job.owner(scen);
+    tagfile::Tag stag;
+    if (sdir.empty() || !stag.load(sdir / from_u8(scen))) return lines;
+    tagfile::Elem s = stag.root();
+
+    tagfile::Block bsps = s.block("structure bsps");
+    for (size_t i = 0; i < bsps.size(); i++) {
+        std::string b = bsps[i].ref("structure bsp");
+        fs::path own = b.empty() ? fs::path() : job.owner(b);
+        if (own.empty()) continue;
+        perf::BspStats st = perf::bsp_stats(own / from_u8(b));
+        if (!st.ok) continue;
+        std::string name = bsps.size() > 1 ? " (" + fs::path(from_u8(b)).stem().u8string() + ")" : "";
+        std::string l = "Level" + name + ": " + thousands(st.triangles) + " triangles";
+        if (st.clusters <= 1 || st.portals == 0)
+            l += ", no portals, so all of it can be drawn from anywhere.";
+        else if (st.median_visible == st.worst_visible)
+            l += ", " + thousands(st.clusters) + " clusters, " + thousands(st.portals) + (st.portals == 1 ? " portal" : " portals") +
+                 ". About " + thousands(st.worst_visible) + " can be drawn from anywhere.";
+        else
+            l += ", " + thousands(st.clusters) + " clusters, " + thousands(st.portals) + (st.portals == 1 ? " portal" : " portals") +
+                 ". About " + thousands(st.median_visible) + " can be drawn from a typical spot, " + thousands(st.worst_visible) +
+                 " from the worst one.";
+        lines.push_back(l);
+    }
+    if (!lines.empty())
+        lines.push_back("  Stock Xbox maps at most: Blood Gulch 5,503, Damnation 8,618, Sidewinder 10,036.");
+
+    // How many times each object is on the map: placed, or at a weapon/item spawn point.
+    std::map<std::string, int> placed;
+    static const char *const kinds[][2] = {
+        {"scenery", "scenery palette"}, {"bipeds", "biped palette"}, {"vehicles", "vehicle palette"},
+        {"equipment", "equipment palette"}, {"weapons", "weapon palette"}, {"machines", "machine palette"},
+        {"controls", "control palette"}, {"light fixtures", "light fixture palette"},
+        {"sound scenery", "sound scenery palette"}};
+    for (auto &k : kinds) {
+        tagfile::Block items = s.block(k[0]), pal = s.block(k[1]);
+        for (size_t i = 0; i < items.size(); i++) {
+            long long t = items[i].integer("type");
+            if (t < 0 || t >= (long long)pal.size()) continue;
+            std::string o = pal[(size_t)t].ref("name");
+            if (!o.empty()) placed[o]++;
+        }
+    }
+    tagfile::Block spawns = s.block("netgame equipment");
+    std::map<std::string, std::vector<std::string>> collections;
+    for (size_t i = 0; i < spawns.size(); i++) {
+        std::string ic = spawns[i].ref("item collection");
+        if (ic.empty()) continue;
+        if (!collections.count(ic)) {
+            auto &items = collections[ic];
+            fs::path own = job.owner(ic);
+            tagfile::Tag t;
+            if (!own.empty() && t.load(own / from_u8(ic))) {
+                tagfile::Block perms = t.root().block("permutations");
+                for (size_t k = 0; k < perms.size(); k++)
+                    if (auto it = perms[k].ref("item"); !it.empty()) items.push_back(it);
+            }
+        }
+        for (auto &it : collections[ic]) placed[it]++;
+    }
+
+    struct M { int placed = 0; perf::ModelStats st; std::string object; };
+    std::map<std::string, M> models;
+    for (auto &[o, n] : placed) {
+        fs::path own = job.owner(o);
+        std::string m = own.empty() ? "" : perf::object_model(own / from_u8(o));
+        if (m.empty()) continue;
+        auto it = models.find(m);
+        if (it == models.end()) {
+            fs::path mown = job.owner(m);
+            M x;
+            if (!mown.empty()) x.st = perf::model_stats(mown / from_u8(m));
+            x.object = o;
+            it = models.emplace(m, x).first;
+        }
+        it->second.placed += n;
+    }
+    // Each model by the name of the object it's drawn for (as in the weapons & vehicles window), with the object's
+    // folder when two share a name: "hull (destroyed)".
+    std::map<std::string, int> stems;
+    for (auto &[m, x] : models) stems[fs::path(from_u8(x.object)).stem().u8string()]++;
+    auto label = [&](const std::string &m) {
+        fs::path o = from_u8(models[m].object);
+        std::string s = o.stem().u8string();
+        if (stems[s] > 1) s += " (" + o.parent_path().filename().u8string() + ")";
+        return s;
+    };
+    std::vector<std::pair<long long, std::string>> full, unused;
+    for (auto &[m, x] : models) {
+        if (!x.st.ok) continue;
+        if (!x.st.lods && x.st.triangles >= 500) full.push_back({(long long)x.st.triangles * x.placed, m});
+        else if (x.st.lods && x.st.no_cutoffs()) unused.push_back({(long long)x.st.triangles * x.placed, m});
+    }
+    std::sort(full.rbegin(), full.rend());
+    std::sort(unused.rbegin(), unused.rend());
+    if (!full.empty()) {
+        lines.push_back("Models with no lower-detail versions (drawn in full at any distance), most triangles on the map first:");
+        for (size_t i = 0; i < full.size() && i < 8; i++) {
+            const M &x = models[full[i].second];
+            lines.push_back("  " + label(full[i].second) + ": " + thousands(x.st.triangles) + " triangles x " +
+                            std::to_string(x.placed) + " on the map");
+        }
+        if (full.size() > 8) lines.push_back("  and " + std::to_string(full.size() - 8) + " more");
+    }
+    if (!unused.empty()) {
+        std::string l;
+        for (size_t i = 0; i < unused.size() && i < 8; i++) l += (i ? ", " : "") + label(unused[i].second);
+        if (unused.size() > 8) l += " and " + std::to_string(unused.size() - 8) + " more";
+        lines.push_back("Lower-detail versions never used (no switch distances): " + l);
+    }
+    return lines;
 }
 
 // Re-encode every BC7 texture the map uses (Xbox/Custom Edition targets). Tags in the app's own
@@ -3429,6 +3691,59 @@ static bool fix_script_shadow(Job &job, const std::string &err, std::string &wha
     std::ofstream(file, std::ios::binary) << s;
     what = "the map's script \"" + name + "\" has the name of a game function its own lines call: renamed it \"" +
            renamed + "\"";
+    return true;
+}
+
+// A nav point type (a waypoint arrow of the HUD globals, e.g. Coldsnap's "orange_landingpad") that the built map's
+// HUD globals doesn't have. merge_map_globals adds the map's own arrows to the Xbox's HUD globals; this is for
+// what that can't cover (no room for more arrows, or the map's HUD globals is missing). The calls naming it use
+// "default" (the plain arrow) instead, then the build is tried again.
+static bool fix_script_navpoint(Job &job, const std::string &err, std::string &what) {
+    static const std::regex tok(R"(can't find navpoint '([^']+)')");
+    std::smatch m;
+    if (!std::regex_search(err, m, tok)) return false;
+    std::string name = hsc::lower(m[1].str());
+    if (name == "default") return false;
+    fs::path file;
+    int line = 0, col = 0;
+    if (!script_error_place(job, err, file, line, col)) return false;
+    std::ifstream in(file, std::ios::binary);
+    std::string s((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+    size_t off = 0;
+    for (int l = 1; l < line && off < s.size(); off++) if (s[off] == '\n') l++;
+    off += col > 0 ? col - 1 : 0;
+    std::vector<hsc::Node> top;
+    size_t i = 0;
+    if (!hsc::parse(s, i, top, false)) return false;
+    auto text = [](const hsc::Node &n) {
+        std::string t = n.atom;
+        if (n.str && t.size() >= 2) t = t.substr(1, t.size() - 2);
+        return hsc::lower(t);
+    };
+    // Every nav point call's first argument with that name ((activate_team_nav_point_flag orange_landingpad ...)),
+    // and the spot the error points at.
+    std::vector<std::pair<size_t, size_t>> spots;
+    std::function<void(const std::vector<hsc::Node> &)> walk = [&](const std::vector<hsc::Node> &ns) {
+        for (auto &n : ns) {
+            if (!n.list) {
+                if (n.b <= off && off < n.e && text(n) == name) spots.push_back({n.b, n.e - n.b});
+                continue;
+            }
+            walk(n.kids);
+            if (n.kids.size() < 2 || n.kids[0].list || n.kids[1].list) continue;
+            if (hsc::lower(n.kids[0].atom).find("nav_point") == std::string::npos || text(n.kids[1]) != name) continue;
+            spots.push_back({n.kids[1].b, n.kids[1].e - n.kids[1].b});
+        }
+    };
+    walk(top);
+    if (spots.empty()) return false;
+    std::sort(spots.rbegin(), spots.rend());
+    spots.erase(std::unique(spots.begin(), spots.end()), spots.end());
+    for (auto &sp : spots) s.replace(sp.first, sp.second, "default");
+    std::ofstream(file, std::ios::binary) << s;
+    what = "the nav point arrow \"" + m[1].str() + "\" isn't in this build's HUD, so the " + std::to_string(spots.size()) +
+           " nav point" + (spots.size() == 1 ? "" : "s") + " the scripts set with it use the plain arrow (\"default\")";
     return true;
 }
 
@@ -3947,9 +4262,156 @@ static int string_count(const Config &cfg, const fs::path &dir, const std::strin
     return std::atoi(c.c_str());
 }
 
+// How wide a bitmap sequence's first picture is, in pixels (a sprite's share of its sheet, or the whole texture).
+static double sequence_width(const BitmapParts &p, uint32_t seq) {
+    if (seq >= p.nseq) return 0;
+    auto bitmap_width = [&](int bi) { return bi >= 0 && bi < (int)p.nbd ? (double)be16(p.b, p.bd_off + 48 * (size_t)bi + 4) : 0.0; };
+    if (p.sprites(seq)) {
+        size_t so = p.sprite_at(seq);
+        auto f = [&](size_t o) { uint32_t u = be32(p.b, o); float v; memcpy(&v, &u, 4); return (double)v; };
+        return (f(so + 12) - f(so + 8)) * bitmap_width((int16_t)be16(p.b, so));
+    }
+    return bitmap_width((int16_t)be16(p.b, p.seq_off + 64 * (size_t)seq + 32));
+}
+
+// Nav point arrows (the HUD globals' waypoint arrows): scripts name them ((activate_team_nav_point_flag
+// orange_landingpad player o_pad 5)), and a name the built map's HUD globals lacks stops the build. The map's arrows
+// the Xbox's HUD globals doesn't have are added after its own (the Xbox's keep their numbers). Their pictures:
+// when they use sequences past the end of the Xbox's arrow sheet, a copy of the Xbox's sheet gets the map's
+// sequences from there on (drawn at the size the Xbox draws the Xbox's own arrows).
+static void merge_nav_arrows(Job &job, const fs::path &xsrc, const std::vector<std::pair<std::string, std::string>> &mh,
+                             const std::string &xhg, std::vector<std::string> &what) {
+    const Config &cfg = job.cfg;
+    fs::path xhdir = job.owner(xhg);
+    if (xhdir.empty()) return;
+    auto xh = list_values(cfg, xhdir, xhg);
+    std::map<std::string, std::string> mhv(mh.begin(), mh.end()), xhv(xh.begin(), xh.end());
+    static const std::regex field(R"(^waypoint_arrows\[(\d+)\]\.(.+)$)");
+    auto arrows = [&](const std::vector<std::pair<std::string, std::string>> &kv) {
+        std::map<int, std::vector<std::pair<std::string, std::string>>> a;   // index -> (field, value) in tag order
+        std::smatch m;
+        for (auto &[k, v] : kv)
+            if (std::regex_match(k, m, field)) a[std::stoi(m[1])].push_back({m[2].str(), v});
+        return a;
+    };
+    auto value_of = [](const std::vector<std::pair<std::string, std::string>> &fs_, const std::string &f) {
+        for (auto &[k, v] : fs_)
+            if (k == f) return v;
+        return std::string();
+    };
+    auto ma = arrows(mh), xa = arrows(xh);
+    if (xa.empty()) return;
+    std::set<std::string> xnames;
+    int plain = xa.begin()->first;   // the plain arrow ("default"): stands in for a picture the sheet lacks
+    for (auto &[i, fs_] : xa) {
+        xnames.insert(hsc::lower(value_of(fs_, "name")));
+        if (hsc::lower(value_of(fs_, "name")) == "default") plain = i;
+    }
+    std::vector<int> add;
+    for (auto &[i, fs_] : ma) {
+        std::string n = hsc::lower(value_of(fs_, "name"));
+        if (!n.empty() && !xnames.count(n)) {
+            add.push_back(i);
+            xnames.insert(n);
+        }
+    }
+    if (add.empty()) return;
+    const int kMaxArrows = 16;   // hud_globals' limit
+    int xc = (int)xa.size(), room = std::max(0, kMaxArrows - xc);
+    std::vector<std::string> left_out;
+    while ((int)add.size() > room) {
+        left_out.push_back(value_of(ma[add.back()], "name"));
+        add.pop_back();
+    }
+    std::reverse(left_out.begin(), left_out.end());
+    std::string out;
+    auto seqs = [&](const fs::path &dir, const std::string &t) {
+        std::string c;
+        run_process({u8(tool(cfg, "invader-edit")), "-t", u8(dir), t, "-C", "bitmap_group_sequence"}, c);
+        return std::atoi(c.c_str());
+    };
+    auto is_seq = [](const std::string &f) { return f.size() > 14 && f.compare(f.size() - 14, 14, "sequence_index") == 0; };
+
+    // The sheet: how many sequences the arrows can use, and whether they need the map's.
+    std::string mab = norm_rel(mhv["arrow_bitmap"]), xab = norm_rel(xhv["arrow_bitmap"]);
+    fs::path xadir = xab.empty() ? fs::path() : job.owner(xab);
+    int have = xadir.empty() ? 0 : seqs(xadir, xab), need = 0;
+    for (int i : add)
+        for (auto &[f, v] : ma[i])
+            if (is_seq(f) && !v.empty() && std::atoi(v.c_str()) != 65535 && std::atoi(v.c_str()) >= 0)
+                need = std::max(need, std::atoi(v.c_str()) + 1);
+    std::string sheet_note;
+    if (need > have && have > 0 && !mab.empty() && fs::exists(xsrc / from_u8(mab))) {
+        int mseq = seqs(xsrc, mab);
+        std::string merged = xab.substr(0, xab.size() - 7) + "_with_map.bitmap";
+        BitmapParts mp, xp;
+        if (mseq >= need && !fs::exists(job.overlay / from_u8(merged)) && mp.read(xsrc / from_u8(mab)) &&
+            xp.read(xadir / from_u8(xab))) {
+            // Draw the map's arrows at the size the Xbox draws its own: compare the plain arrow ("default") in
+            // both sheets, and halve the map's sheet until they match.
+            int shrink = 0;
+            std::string dseq = value_of(xa[plain], "on_screen_sequence_index");
+            if (!dseq.empty()) {
+                double mw = sequence_width(mp, (uint32_t)std::atoi(dseq.c_str())), xw = sequence_width(xp, (uint32_t)std::atoi(dseq.c_str()));
+                while (xw > 0 && mw > xw * 1.5 && shrink < 2) { mw /= 2; shrink++; }
+            }
+            fs::path tmp = job.work / "map_waypoints.bitmap";
+            std::error_code ec;
+            fs::copy_file(xsrc / from_u8(mab), tmp, fs::copy_options::overwrite_existing, ec);
+            int got = !ec && shrink ? shrink_hud_bitmap_tag(tmp, shrink) : 0;
+            if (!ec && got == shrink && merge_icon_sheets(xadir / from_u8(xab), tmp, (uint32_t)have, xsrc / from_u8(merged)) &&
+                job.edit(xhg, "arrow_bitmap", merged)) {
+                sheet_note = ", with their " + std::to_string(mseq - have) + " picture" + (mseq - have == 1 ? "" : "s") +
+                             " added to the Xbox's arrow sheet";
+                have = mseq;
+            }
+        }
+    }
+
+    // The arrows, after the Xbox's own.
+    fs::path own = job.owner(xhg);
+    if (own != job.fixes && !job.to_fixes(xhg, own)) return;
+    if (run_process({u8(tool(cfg, "invader-edit")), "-t", u8(job.fixes), xhg, "-I", "waypoint_arrows",
+                     std::to_string(add.size()), "end"}, out) != 0)
+        return;
+    std::vector<std::pair<std::string, std::string>> sets;
+    std::vector<std::string> names;
+    for (size_t n = 0; n < add.size(); n++) {
+        std::string base = "waypoint_arrows[" + std::to_string(xc + (int)n) + "].";
+        for (auto &[f, v] : ma[add[n]]) {
+            if (v.empty()) continue;
+            std::string val = v;
+            // A picture the sheet doesn't have: the Xbox's plain arrow's.
+            if (is_seq(f) && std::atoi(v.c_str()) != 65535 && std::atoi(v.c_str()) >= have) val = value_of(xa[plain], f);
+            if (val == "*") {   // an enum's chosen option: set the enum to it
+                size_t d = f.rfind('.');
+                if (d != std::string::npos) sets.push_back({base + f.substr(0, d), f.substr(d + 1)});
+                continue;
+            }
+            if (!val.empty()) sets.push_back({base + f, val});
+        }
+        names.push_back(value_of(ma[add[n]], "name"));
+    }
+    std::vector<std::string> cmd{u8(tool(cfg, "invader-edit")), "-t", u8(job.fixes), xhg};
+    for (auto &[k, v] : sets) cmd.insert(cmd.end(), {"-S", k, v});
+    if (run_process(cmd, out) != 0)   // one bad key shouldn't lose the rest
+        for (auto &[k, v] : sets) run_process({u8(tool(cfg, "invader-edit")), "-t", u8(job.fixes), xhg, "-S", k, v}, out);
+    std::string list;
+    for (size_t n = 0; n < names.size(); n++) list += (n ? ", " : "") + names[n];
+    what.push_back("its " + std::to_string(names.size()) + " nav point arrow" + (names.size() == 1 ? "" : "s") + " (" + list +
+                   ", added after the Xbox's own" + sheet_note + ")");
+    if (!left_out.empty()) {
+        std::string lo;
+        for (size_t n = 0; n < left_out.size(); n++) lo += (n ? ", " : "") + left_out[n];
+        job.note("[xbox-mp] the HUD has room for " + std::to_string(kMaxArrows) + " nav point arrows, so the map's " + lo +
+                 " didn't fit (scripts that use " + (left_out.size() == 1 ? "it" : "them") + " get the plain arrow)");
+    }
+}
+
 // The Xbox's own globals (and HUD globals) win over the map's copies, which keeps the Xbox menus, fonts and
 // multiplayer sounds. Bring over what is the map's own content:
 //  - the HUD name lists, when the map's are longer (its custom weapons' pickup names and vehicles' names);
+//  - its own nav point arrows (its scripts name them), after the Xbox's (merge_nav_arrows);
 //  - unless "use the Xbox's own weapons" is on: its grenades, its weapon list (gametype weapon sets) and its
 //    multiplayer player biped (players spawn with that biped's weapons), and its own tuning of fall damage
 //    and the player (Custom Edition's stock values match the Xbox's, so a difference is the map's).
@@ -4017,6 +4479,7 @@ void merge_map_globals(Job &job, const fs::path &xsrc) {
                         what.push_back("its " + std::to_string(mc - xc) + " extra pickup icons (added after the Xbox's own)");
                 }
             }
+            merge_nav_arrows(job, xsrc, mh, xhg, what);
         }
     }
 

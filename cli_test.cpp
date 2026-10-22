@@ -53,6 +53,7 @@ int main(int argc, char **argv) {
         if (getenv(k.c_str())) cfg.xbox_vehicle_slots[i] = getenv(k.c_str());
     }
     cfg.xbox_keep_all_vehicles = getenv("XALLVEH") != nullptr;
+    cfg.xbox_lod_stock_models = getenv("XLODSTOCK") != nullptr;
     if (getenv("XKEEP")) { // comma-separated weapon tags to keep
         std::string w = getenv("XKEEP"), item;
         std::stringstream ss(w);

@@ -47,6 +47,10 @@ This uses MinGW-w64: the `x86_64-w64-mingw32` cross compiler on Linux or WSL, or
 Windows (`CXX=g++ CC=gcc WINDRES=windres ./build.sh`). `cli_test.cpp` is a command-line driver for the
 conversion engine, used for testing on Linux.
 
+`tag_layouts.inc` (the tag layouts the app reads directly) is generated from
+[Invader](https://github.com/SnowyMouse/invader)'s tag definitions:
+`python3 gen_tag_layouts.py <invader>/src/tag/hek/definition tag_layouts.inc`.
+
 ## License
 
 MIT, see [LICENSE](LICENSE). The bundled stb and bcdec headers keep their own (MIT or public domain) licenses.

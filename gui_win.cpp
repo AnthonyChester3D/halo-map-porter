@@ -64,6 +64,8 @@ enum {
     ID_PK_MNAME_LBL, ID_PK_MNAME, ID_PK_DESC, ID_PK_OUT_LBL, ID_PK_OUT, ID_PK_OUT_BROWSE, ID_PK_CREATE,
     // the Halo Universal XBE's map list settings (build 20)
     ID_PK_MAPLIST,
+    // stock models' unused levels of detail
+    ID_X_LODSTOCK,
 };
 
 #define WM_APP_LOG (WM_APP + 1)
@@ -144,6 +146,7 @@ static void save_settings() {
     ini_set(L"x_limit", std::to_wstring(sel(ID_X_LIMIT) == 1 ? 1 : 0));
     ini_set(L"x_stock", checked(ID_X_STOCK) ? L"1" : L"0");
     ini_set(L"x_allveh", checked(ID_X_ALLVEH) ? L"1" : L"0");
+    ini_set(L"x_lodstock", checked(ID_X_LODSTOCK) ? L"1" : L"0");
     ini_set(L"x_tex2", std::to_wstring(sel(ID_X_TEX)));
     ini_set(L"x_lm", std::to_wstring(sel(ID_X_LM)));
     ini_set(L"x_w2", std::to_wstring(sel(ID_X_W2)));
@@ -390,6 +393,7 @@ static void apply_xbox_options(Config &cfg) {
     }
     cfg.xbox_use_stock_versions = checked(ID_X_STOCK);
     cfg.xbox_keep_all_vehicles = folder_mode() && checked(ID_X_ALLVEH);
+    cfg.xbox_lod_stock_models = checked(ID_X_LODSTOCK);
     {
         static const int tex[4] = {512, 512, 1024, 0}, obj[4] = {256, 0, 0, 0}, lm[3] = {0, 512, 256};
         int t = sel(ID_X_TEX), l = sel(ID_X_LM);
@@ -1524,7 +1528,7 @@ static bool pk_command(int id, int code) {
 }
 
 static void create_controls() {
-    g_tab = CreateWindowExW(0, WC_TABCONTROLW, L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, S(10), S(10), S(740), S(422),
+    g_tab = CreateWindowExW(0, WC_TABCONTROLW, L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, S(10), S(10), S(740), S(448),
                             g_wnd, (HMENU)ID_TAB, GetModuleHandleW(nullptr), nullptr);
     SendMessageW(g_tab, WM_SETFONT, (WPARAM)g_font, TRUE);
     const wchar_t *tabs[] = {L"  Convert a map  ", L"  Build from my tags  ", L"  Xbox  ", L"  Map packs  ", L"  Settings  "};
@@ -1656,6 +1660,9 @@ static void create_controls() {
         add(2, L"STATIC", L"e.g. a custom tagset's beam rifle. Replacing them saves memory on big maps.", 0, 410, y - 2, 324, 36,
             ID_X_W2_HINT);
     }
+    y += 36;
+    check(2, L"Also use the lower-detail versions of Bungie's own trees, rocks and plants at a distance (retail never did)",
+          26, y, 708, ID_X_LODSTOCK);
 
     // Map packs page
     create_pack_page();
@@ -1695,12 +1702,12 @@ static void create_controls() {
         0, 26, y, 708, 36, ID_S_HINT);
 
     // Shared area
-    g_log = add(-1, L"EDIT", L"", WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 10, 442, 740, 250, ID_LOG,
+    g_log = add(-1, L"EDIT", L"", WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 10, 468, 740, 250, ID_LOG,
                 WS_EX_CLIENTEDGE);
     SendMessageW(g_log, WM_SETFONT, (WPARAM)g_mono, TRUE);
     SendMessageW(g_log, EM_SETLIMITTEXT, 0, 0);
-    add(-1, L"BUTTON", L"Open output folder", BS_PUSHBUTTON, 10, 700, 150, 26, ID_OPEN_FOLDER);
-    add(-1, L"BUTTON", L"Open report", BS_PUSHBUTTON, 168, 700, 120, 26, ID_OPEN_REPORT);
+    add(-1, L"BUTTON", L"Open output folder", BS_PUSHBUTTON, 10, 726, 150, 26, ID_OPEN_FOLDER);
+    add(-1, L"BUTTON", L"Open report", BS_PUSHBUTTON, 168, 726, 120, 26, ID_OPEN_REPORT);
     ShowWindow(GetDlgItem(g_wnd, ID_OPEN_FOLDER), SW_HIDE);
     ShowWindow(GetDlgItem(g_wnd, ID_OPEN_REPORT), SW_HIDE);
 
@@ -1729,6 +1736,7 @@ static void create_controls() {
     SendDlgItemMessageW(g_wnd, ID_X_LIMIT, CB_SETCURSEL, ini_get(L"x_limit", L"0") == L"1" ? 1 : 0, 0);
     set_check(ID_X_STOCK, ini_get(L"x_stock", L"1") == L"1");
     set_check(ID_X_ALLVEH, ini_get(L"x_allveh", L"1") == L"1");
+    set_check(ID_X_LODSTOCK, ini_get(L"x_lodstock", L"0") == L"1");
     for (auto [id, key, mx, def] : {std::tuple<int, const wchar_t *, int, const wchar_t *>{ID_X_TEX, L"x_tex2", 3, L"0"},
                                     {ID_X_LM, L"x_lm", 2, L"2"}}) {
         int k = _wtoi(ini_get(key, def).c_str());
@@ -1860,6 +1868,9 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             break;
         case ID_X_ALLVEH:
             if (code == BN_CLICKED) { update_vehicle_texts(); save_settings(); }
+            break;
+        case ID_X_LODSTOCK:
+            if (code == BN_CLICKED) save_settings();
             break;
         case ID_X_CONTENTS:
             if (code == BN_CLICKED) open_contents();
@@ -2006,7 +2017,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(1));
     wc.hIconSm = wc.hIcon;
     RegisterClassExW(&wc);
-    RECT r{0, 0, S(760), S(736)};
+    RECT r{0, 0, S(760), S(762)};
     DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
     AdjustWindowRect(&r, style, FALSE);
     HWND h = CreateWindowExW(0, L"HaloMapPorter", L"Halo Map Porter", style, CW_USEDEFAULT, CW_USEDEFAULT,

@@ -271,6 +271,13 @@ game, the app rewrites the map's scripts for that game:
   - MCC scripts can use "none" as a team (no team), which the Xbox and
     Custom Edition can't read: it becomes unused9, a team nothing is on, so
     allying with it or comparing with it still does nothing.
+  - Nav points: a map can add its own nav point arrows to its HUD globals
+    (Coldsnap's landing pads use "orange_landingpad" and
+    "green_landingpad"). On the Xbox the Xbox's own HUD globals is used,
+    so the map's extra arrows are added after the Xbox's, and their
+    pictures are added to a copy of the Xbox's arrow sheet. If an arrow
+    still can't be added (the HUD has room for 16), the scripts that use
+    it show the plain arrow ("default") instead.
   - Anything else becomes a stand-in that does nothing: calls with no
     result (like sv_say, which posts a chat message on PC servers) are
     removed, true/false checks return false, numbers return 0, and
@@ -320,6 +327,28 @@ Keep every vehicle (Halo Universal XBE)
   doesn't fit with them, the app swaps or removes them as it would for a
   stock XBE and says so in the log. More vehicles also make the Xbox stop
   the flashlight sooner (see Flashlight above).
+
+Levels of detail (LODs)
+  A model can have up to five versions, from "super high" detail down to
+  "super low", and switch distances that say when each is used: a version
+  is drawn once the model is at least that many pixels across the screen,
+  and below the "super low" one the model isn't drawn at all. With every
+  switch distance 0 (common in custom maps), the engine always draws the
+  most detailed version, however far away the model is.
+  The app gives the map's own models that have lower-detail versions but
+  no switch distances ones like Bungie's (vehicles 200/100/50/20/0,
+  characters 280/200/80/30/0, scenery 300/90/30/5/0, weapons and items
+  100/50/25/10/0 pixels; super low stays 0, so nothing disappears). The
+  log lists them as [lod] lines. First-person models are left alone: the
+  engine asks them for their most detailed version by drawing them as 0
+  pixels across, so switch distances would make them use their least
+  detailed one.
+  "Also use the lower-detail versions of Bungie's own trees, rocks and
+  plants" (Xbox tab, off by default) does the same for stock models: 36 of
+  the Xbox's models ship with lower-detail versions and no switch
+  distances (also the multiplayer Scorpion). Faster on maps full of
+  scenery, but those models then switch detail where they never did on
+  retail.
   Stock maps are the exception: converting Custom Edition's Blood Gulch,
   Sidewinder and the other maps the Xbox also has gives you the Xbox's own
   version of the map, with the Xbox's vehicles. Maps the Xbox never had
@@ -739,9 +768,26 @@ The log lists every automatic change:
   [textures] Textures were scaled or compressed like stock Xbox maps.
   [shaders] Layered transparent shaders were flattened for Xbox.
   [effects] Looping prop effects were lightened for Xbox.
+  [lod]   Models got switch distances for their lower-detail versions
+          (see "Levels of detail" above).
 
 Warnings (for example "There are 1/16 Slayer spawns") don't stop the
 build. They point at things worth checking in your map.
+
+Xbox builds end with a "Performance" section (in the log, and in the
+report when the map builds): what the Xbox has to draw.
+  - Level: the level's triangles, its clusters and portals, and how many
+    triangles the visibility data lets the engine draw from a typical spot
+    and from the worst one (before the view's own culling), next to the
+    most any stock Xbox map has (Blood Gulch 5,503, Damnation 8,618,
+    Sidewinder 10,036). A level far above those is the likeliest reason a
+    map runs slowly; portals only help where walls block the view.
+  - Models with no lower-detail versions, drawn in full at any distance,
+    with their triangles and how many are on the map (placed, or at weapon
+    and item spawn points), most triangles on the map first.
+  - Models whose lower-detail versions are never used (no switch
+    distances), when the app didn't fill them in (stock models with the
+    Xbox tab's LOD option off).
 
 The full report for each build is saved in:
   %LOCALAPPDATA%\HaloMapPorter\reports\
@@ -798,6 +844,12 @@ Framerate drops or stutters while turning (Xbox)
     The app converts scripts automatically (see "Scripts"), so this only
     happens for something it doesn't know. Remove or change that line in
     your .hsc script and build again.
+
+"Your map's scripts name the ... '...', which the ... build of this map doesn't have"
+    A script line names something (an object, a nav point, a tag) that
+    didn't make it into the converted map. The message shows the line.
+    Change or remove it in your .hsc script, or send the error over for
+    help.
 
 "Build failed and no automatic fix applies"
     The log shows the error and the tag it came from, plus the path to
