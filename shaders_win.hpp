@@ -21,9 +21,10 @@ using Measure = std::function<bool(std::filesystem::path &file, std::string &err
 struct Picks {
     int mode = 2;
     std::set<std::string> drops;
-    // The level's fog and far scenery (Config::xbox_fog, xbox_fog_scale, xbox_scenery_distance).
+    // The level's fog and far scenery (Config::xbox_fog, xbox_fog_scale, xbox_fog_distance, xbox_scenery_distance).
     int fog = 0;
     double fog_scale = 1.0;
+    double fog_distance = 0;
     double scenery = 0;
 };
 

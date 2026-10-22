@@ -63,9 +63,11 @@ struct Config {
     bool xbox_replan_portals = false;
     // The level's fog (its skies' outdoor fog): 0 automatic: fog that's nearly opaque (90% or more) is made fully
     // opaque, so the Xbox draws nothing past it (the engine moves the view's far end to the fog's opaque distance
-    // only at full density); 1 as the map has it; 2 fully opaque at `xbox_fog_scale` x its own opaque distance.
+    // only at full density); 1 as the map has it; 2 fully opaque at `xbox_fog_scale` x its own opaque distance; 3
+    // fully opaque at `xbox_fog_distance` world units.
     int xbox_fog = 0;
     double xbox_fog_scale = 1.0;
+    double xbox_fog_distance = 0;
     // Scenery and devices not drawn past about this many world units (their models' smallest switch distance set so
     // they vanish there; 0: as the map has them).
     double xbox_scenery_distance = 0;

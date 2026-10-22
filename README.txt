@@ -619,9 +619,11 @@ Level reflections, fog and far scenery: the "Level..." window (Xbox)
   - The line under the picture: the level's triangle passes in a typical /
     busy view as made and with your choices, next to Sidewinder's.
   - Fog: as the conversion leaves it (automatic, the default), as the map
-    has it, or fully opaque at its distance, three quarters of it or half
-    of it. The picture shows it (its sky is a plain gradient, not the
-    level's own sky).
+    has it, fully opaque at its distance, three quarters of it or half of
+    it, or Other: fully opaque at a distance you type in the box beside it
+    (in world units; 1 unit = 10 feet, about 3 m). The picture shows it,
+    and follows as you type (its sky is a plain gradient, not the level's
+    own sky).
   - Far scenery: always drawn (the default), or not past 300, 200, 150,
     100 or 60 units. The picture shows the level only, not its objects.
   Hover over the choices and checkboxes for what each does. Choices are
@@ -640,9 +642,10 @@ Fog (Xbox)
   own distance: what was 8% visible past it is gone, distant hills
   included (the sky shows there instead). The log's [fog] line says what
   changed. Per map, the "Level..." window can keep the fog as the map has
-  it, or make it fully opaque nearer (three quarters or half its distance:
-  less drawn, foggier). The map's own skies only; Bungie's levels keep
-  theirs.
+  it, make it fully opaque nearer (three quarters or half its distance:
+  less drawn, foggier), or fully opaque at a distance you type (nearer or
+  farther than the map's; not nearer than where its fog starts). The
+  map's own skies only; Bungie's levels keep theirs.
 
 Far scenery (Xbox, "Level..." window)
   Halo 1 has no draw distance for objects, but it draws nothing of a model

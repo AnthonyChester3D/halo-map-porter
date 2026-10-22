@@ -25,7 +25,7 @@ namespace {
 enum {
     IDC_MODE0 = 400, IDC_MODE1, IDC_MODE2, IDC_STATUS, IDC_LIST, IDC_VIEW, IDC_PREV, IDC_NEXT, IDC_BEFORE, IDC_AFTER,
     IDC_CHANGES, IDC_HILITE, IDC_COST, IDC_REMEASURE, IDC_OKB, IDC_CANCELB, IDC_ABOUT, IDC_PORTALS, IDC_FOG_LBL, IDC_FOG,
-    IDC_FAR_LBL, IDC_FAR,
+    IDC_FAR_LBL, IDC_FAR, IDC_FOG_DIST, IDC_FOG_UNITS,
 };
 #define WM_LS_LOG (WM_APP + 60)
 #define WM_LS_DONE (WM_APP + 61)
@@ -156,6 +156,9 @@ lshade::Fog fog_for(const lshade::Camera &c) {
     if (St->picks.fog == 2 && outdoor) {
         f.density = 1;
         f.opaque = std::max(f.opaque * (float)std::clamp(St->picks.fog_scale, 0.1, 1.0), f.start + 1.0f);
+    } else if (St->picks.fog == 3 && outdoor && St->picks.fog_distance > 0) {
+        f.density = 1;
+        f.opaque = std::max((float)St->picks.fog_distance, f.start + 1.0f);
     } else if (f.density >= 0.9f && f.density < 1.0f) {
         f.density = 1;
     }
@@ -277,20 +280,44 @@ void set_row(int row) {
     ListView_SetItemText(St->list, row, 5, (LPWSTR)sug.c_str());
 }
 
-// The fog and far scenery choices (Picks::fog, fog_scale, scenery): the fog's described with the level's own numbers.
+// The fog and far scenery choices (Picks::fog, fog_scale, fog_distance, scenery): the fog's described with the level's
+// own numbers; the last fog choice is a distance typed into the box beside it.
 const double kFar[] = {0, 300, 200, 150, 100, 60};
-const double kFogScale[] = {1.0, 1.0, 1.0, 0.75, 0.5};   // (by item: automatic, as made, opaque at 1, 3/4, 1/2 of its distance)
-int fog_item() { return St->picks.fog == 0 ? 0 : St->picks.fog == 1 ? 1 : St->picks.fog_scale >= 0.875 ? 2 : St->picks.fog_scale >= 0.625 ? 3 : 4; }
-void fill_fog() {
-    HWND c = item(IDC_FOG);
-    SendMessageW(c, CB_RESETCONTENT, 0, 0);
+const double kFogScale[] = {1.0, 1.0, 1.0, 0.75, 0.5, 1.0};   // (by item: automatic, as made, opaque at 1, 3/4, 1/2 of its distance; typed)
+const int kFogOther = 5;
+int fog_item() {
+    if (St->picks.fog == 3) return kFogOther;
+    return St->picks.fog == 0 ? 0 : St->picks.fog == 1 ? 1 : St->picks.fog_scale >= 0.875 ? 2 : St->picks.fog_scale >= 0.625 ? 3 : 4;
+}
+// The level's outdoor fog as the map has it (the first sky's; else its indoor fog).
+lshade::Fog level_fog() {
     lshade::Fog f;
     if (St->data && !St->data->p.sky_fog.empty()) f = St->data->p.sky_fog[0];
     if (St->data && !f.any()) f = St->data->p.indoor_fog;
+    return f;
+}
+// The typed distance's box: shows the distance in use, and takes typing only with "Other" chosen.
+void show_fog_distance() {
+    lshade::Fog f = level_fog();
+    double d = St->picks.fog_distance > 0 ? St->picks.fog_distance : f.opaque;
+    wchar_t b[32] = L"";
+    if (d > 0) swprintf(b, 32, L"%.0f", d);
+    St->filling = true;
+    SetWindowTextW(item(IDC_FOG_DIST), b);
+    St->filling = false;
+    bool on = St->data && f.any() && St->picks.fog == 3;
+    EnableWindow(item(IDC_FOG_DIST), on);
+    EnableWindow(item(IDC_FOG_UNITS), on);
+}
+void fill_fog() {
+    HWND c = item(IDC_FOG);
+    SendMessageW(c, CB_RESETCONTENT, 0, 0);
+    lshade::Fog f = level_fog();
     if (!St->data || !f.any()) {
         SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)L"The level has no fog");
         SendMessageW(c, CB_SETCURSEL, 0, 0);
         EnableWindow(c, FALSE);
+        show_fog_distance();
         return;
     }
     EnableWindow(c, TRUE);
@@ -304,11 +331,14 @@ void fill_fog() {
     std::wstring a = f.density >= 1 ? L"Automatic: it's fully opaque at " + units(f.opaque)
                      : f.density >= 0.9f ? L"Automatic: made fully opaque at " + units(f.opaque) + L" (it's " + pc + L")"
                                          : L"Automatic: left as it is (" + std::wstring(pc) + L" at " + units(f.opaque) + L")";
-    std::wstring items[5] = {a, L"As the map has it (" + std::wstring(pc) + L" at " + units(f.opaque) + L")",
+    std::wstring items[6] = {a, L"As the map has it (" + std::wstring(pc) + L" at " + units(f.opaque) + L")",
                              L"Fully opaque at " + units(f.opaque), L"Fully opaque nearer, at " + units(f.opaque * 0.75),
-                             L"Fully opaque nearer still, at " + units(f.opaque * 0.5)};
+                             L"Fully opaque nearer still, at " + units(f.opaque * 0.5),
+                             L"Other: type a distance \u2192"};
     for (auto &t : items) SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)t.c_str());
+    SendMessageW(c, CB_SETDROPPEDWIDTH, S(380), 0);
     SendMessageW(c, CB_SETCURSEL, fog_item(), 0);
+    show_fog_distance();
 }
 
 void fill_list() {
@@ -593,8 +623,11 @@ void create_controls() {
     add(L"BUTTON", L"Show portals", BS_AUTOCHECKBOX | WS_TABSTOP, 1066, 524, 102, 22, IDC_PORTALS);
     add(L"STATIC", L"", SS_NOTIFY, 572, 554, 596, 36, IDC_COST);
     add(L"STATIC", L"Fog:", SS_NOTIFY, 572, 600, 34, 20, IDC_FOG_LBL);
-    add(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 608, 596, 300, 300, IDC_FOG);
-    add(L"STATIC", L"Far scenery:", SS_NOTIFY, 918, 600, 74, 20, IDC_FAR_LBL);
+    add(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 608, 596, 222, 300, IDC_FOG);
+    add(L"EDIT", L"", ES_NUMBER | ES_RIGHT | ES_AUTOHSCROLL | WS_TABSTOP, 834, 597, 44, 22, IDC_FOG_DIST, WS_EX_CLIENTEDGE);
+    SendMessageW(item(IDC_FOG_DIST), EM_SETLIMITTEXT, 5, 0);
+    add(L"STATIC", L"units", SS_NOTIFY, 882, 600, 32, 20, IDC_FOG_UNITS);
+    add(L"STATIC", L"Far scenery:", SS_NOTIFY, 920, 600, 72, 20, IDC_FAR_LBL);
     add(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 994, 596, 174, 300, IDC_FAR);
     {
         const wchar_t *far_items[] = {L"Always drawn", L"Not past 300 units (914 m)", L"Not past 200 units (610 m)",
@@ -650,9 +683,15 @@ void create_controls() {
     const wchar_t *fog_tip = L"The Xbox stops drawing anything (level, objects, effects) past the fog's opaque distance, but only "
                              L"when the fog is fully opaque there: at 99% it still draws everything. Automatic makes fog that's "
                              L"nearly opaque (90% or more) fully so. Nearer opaque fog draws less, but the level looks foggier. "
+                             L"Other: type the distance yourself in the box beside it. "
                              L"The picture shows the fog as the conversion leaves it.";
     tip(IDC_FOG, fog_tip);
     tip(IDC_FOG_LBL, fog_tip);
+    const wchar_t *dist_tip = L"Where the fog turns fully opaque, in world units (1 unit = 10 feet, about 3 m), with \"Other\" "
+                              L"chosen: nothing past it is drawn. It can't be nearer than where the fog starts. The picture "
+                              L"follows as you type.";
+    tip(IDC_FOG_DIST, dist_tip);
+    tip(IDC_FOG_UNITS, dist_tip);
     const wchar_t *far_tip = L"Scenery and devices (trees, rocks, props, machines; not vehicles, characters or weapons) stop "
                              L"being drawn about this far away: each model's smallest switch distance is set to its size on "
                              L"screen there. They don't show in the picture. Big ones pop out of view, so pick a distance past "
@@ -742,9 +781,26 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case IDC_FOG:
             if (HIWORD(wp) == CBN_SELCHANGE) {
                 int k = (int)SendMessageW(item(IDC_FOG), CB_GETCURSEL, 0, 0);
-                if (k >= 0 && k < 5) {
-                    St->picks.fog = k <= 1 ? k : 2;
+                if (k >= 0 && k <= kFogOther) {
+                    St->picks.fog = k <= 1 ? k : k == kFogOther ? 3 : 2;
                     St->picks.fog_scale = kFogScale[k];
+                    if (k == kFogOther && St->picks.fog_distance <= 0) St->picks.fog_distance = std::round(level_fog().opaque);
+                    show_fog_distance();
+                    if (k == kFogOther) {
+                        SetFocus(item(IDC_FOG_DIST));
+                        SendMessageW(item(IDC_FOG_DIST), EM_SETSEL, 0, -1);
+                    }
+                    render(false);
+                }
+            }
+            return 0;
+        case IDC_FOG_DIST:
+            if (HIWORD(wp) == EN_CHANGE && !St->filling && St->picks.fog == 3) {
+                wchar_t b[16] = L"";
+                GetWindowTextW(item(IDC_FOG_DIST), b, 16);
+                double d = wcstod(b, nullptr);
+                if (d >= 1) {   // (an empty box, or 0, while typing: the last distance stays)
+                    St->picks.fog_distance = d;
                     render(false);
                 }
             }

@@ -3840,8 +3840,9 @@ static std::map<std::string, int> object_counts(Job &job, const tagfile::Elem &s
 // The level's fog. The engine moves the view's far end to the fog's opaque distance only when the fog is fully
 // opaque there (maximum density exactly 1: render.c), and then draws nothing past it: the level, objects, effects.
 // Fog that's nearly so (90% or more) hides what's past it anyway, so by default it's made fully opaque (Deathtrap's,
-// Precipice's sky: 92% at 110 units, past which the airbase and many trees were still drawn). The map's own skies
-// only (Bungie's levels keep theirs); a sky's indoor fog too (rooms with no sky).
+// Precipice's sky: 92% at 110 units, past which the airbase and many trees were still drawn). The level window can
+// instead make the outdoor fog fully opaque nearer (a share of its distance) or at a distance typed in. The map's own
+// skies only (Bungie's levels keep theirs); a sky's indoor fog too (rooms with no sky).
 void xbox_fog(Job &job) {
     const Config &cfg = job.cfg;
     if (cfg.xbox_fog == 1 || job.analysis) return;
@@ -3873,6 +3874,9 @@ void xbox_fog(Job &job) {
             if (cfg.xbox_fog == 2 && k == "outdoor") {
                 nd = 1.0;
                 no = std::max(opaque * std::clamp(cfg.xbox_fog_scale, 0.1, 1.0), start + 1.0);
+            } else if (cfg.xbox_fog == 3 && k == "outdoor" && cfg.xbox_fog_distance > 0) {
+                nd = 1.0;
+                no = std::max(cfg.xbox_fog_distance, start + 1.0);
             } else if (density >= 0.9 && density < 1.0) {
                 nd = 1.0;
             }

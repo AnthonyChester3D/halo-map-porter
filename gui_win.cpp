@@ -926,8 +926,9 @@ static shadersui::Picks load_shader_picks(const fs::path &input) {
         std::string k = l.substr(0, tab), v = l.substr(tab + 1);
         if (k == "mode") picks.mode = std::clamp(atoi(v.c_str()), 0, 2);
         else if (k == "drop" && !v.empty()) picks.drops.insert(v);
+        else if (k == "fogdist") picks.fog_distance = std::max(0.0, atof(v.c_str()));
         else if (k == "fog") {
-            picks.fog = std::clamp(atoi(v.c_str()), 0, 2);
+            picks.fog = std::clamp(atoi(v.c_str()), 0, 3);
             size_t t2 = v.find('\t');
             if (t2 != std::string::npos) picks.fog_scale = std::clamp(atof(v.c_str() + t2 + 1), 0.1, 1.0);
         } else if (k == "scenery") picks.scenery = std::max(0.0, atof(v.c_str()));
@@ -947,6 +948,7 @@ static void save_shader_picks(const fs::path &input, const shadersui::Picks &pic
     f << "mode\t" << picks.mode << '\n';
     for (auto &t : picks.drops) f << "drop\t" << t << '\n';
     f << "fog\t" << picks.fog << '\t' << picks.fog_scale << '\n';
+    f << "fogdist\t" << picks.fog_distance << '\n';
     f << "scenery\t" << picks.scenery << '\n';
 }
 static void apply_shader_picks(Config &cfg, const fs::path &input) {
@@ -954,6 +956,7 @@ static void apply_shader_picks(Config &cfg, const fs::path &input) {
     cfg.xbox_drop_reflections = picks.mode == 0;
     cfg.xbox_fog = picks.fog;
     cfg.xbox_fog_scale = picks.fog_scale;
+    cfg.xbox_fog_distance = picks.fog_distance;
     cfg.xbox_scenery_distance = picks.scenery;
     if (picks.mode == 1) {
         cfg.xbox_reflection_picks_set = true;
@@ -1001,6 +1004,7 @@ static void open_shaders() {
         wchar_t fog[80];
         if (picks.fog == 0) swprintf(fog, 80, L"automatic");
         else if (picks.fog == 1) swprintf(fog, 80, L"as the map has it");
+        else if (picks.fog == 3) swprintf(fog, 80, L"fully opaque at %g units", picks.fog_distance);
         else swprintf(fog, 80, L"fully opaque at %.0f%% of its distance", picks.fog_scale * 100);
         wchar_t far_[60];
         if (picks.scenery > 0) swprintf(far_, 60, L"not past %.0f units", picks.scenery);

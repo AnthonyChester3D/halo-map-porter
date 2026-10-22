@@ -112,9 +112,9 @@ int main(int argc, char **argv) {
     }
     if (getenv("XNOPORTALS")) cfg.xbox_add_portals = false;
     if (getenv("XREPLAN")) cfg.xbox_replan_portals = true;
-    if (const char *x = getenv("XFOG")) {   // 0 automatic, 1 as made, 2[:scale] opaque at scale x its distance
+    if (const char *x = getenv("XFOG")) {   // 0 automatic, 1 as made, 2[:scale] opaque at scale x its distance, 3:units
         cfg.xbox_fog = atoi(x);
-        if (const char *c = strchr(x, ':')) cfg.xbox_fog_scale = atof(c + 1);
+        if (const char *c = strchr(x, ':')) (cfg.xbox_fog == 3 ? cfg.xbox_fog_distance : cfg.xbox_fog_scale) = atof(c + 1);
     }
     if (getenv("XSCENERY")) cfg.xbox_scenery_distance = atof(getenv("XSCENERY"));
     if (const char *x = getenv("XREFL")) {   // keep | tag,tag,... (the level shaders window's picks)
