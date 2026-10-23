@@ -933,6 +933,8 @@ static shadersui::Picks load_shader_picks(const fs::path &input) {
             if (t2 != std::string::npos) picks.fog_scale = std::clamp(atof(v.c_str() + t2 + 1), 0.1, 1.0);
         } else if (k == "tinypx") picks.tiny_px = std::max(0.0, atof(v.c_str()));
         else if (k == "weather") picks.weather = std::clamp(atoi(v.c_str()), 0, 3);
+        else if (k == "riders") picks.riders = atoi(v.c_str()) ? 1 : 0;
+        else if (k == "props") picks.props = atoi(v.c_str()) ? 1 : 0;
         // (an older "scenery" line, a distance, is left out: it popped big things in and out of view)
     }
     return picks;
@@ -942,7 +944,7 @@ static void save_shader_picks(const fs::path &input, const shadersui::Picks &pic
     std::error_code ec;
     shadersui::Picks defaults;
     if (picks.mode == defaults.mode && picks.fog == defaults.fog && picks.tiny_px == defaults.tiny_px &&
-        picks.weather == defaults.weather) {   // (all as by default)
+        picks.weather == defaults.weather && picks.riders == defaults.riders && picks.props == defaults.props) {   // (all as by default)
         fs::remove(p, ec);
         return;
     }
@@ -954,6 +956,8 @@ static void save_shader_picks(const fs::path &input, const shadersui::Picks &pic
     f << "fogdist\t" << picks.fog_distance << '\n';
     f << "tinypx\t" << picks.tiny_px << '\n';
     f << "weather\t" << picks.weather << '\n';
+    f << "riders\t" << picks.riders << '\n';
+    f << "props\t" << picks.props << '\n';
 }
 static void apply_shader_picks(Config &cfg, const fs::path &input) {
     shadersui::Picks picks = load_shader_picks(input);
@@ -963,6 +967,8 @@ static void apply_shader_picks(Config &cfg, const fs::path &input) {
     cfg.xbox_fog_distance = picks.fog_distance;
     cfg.xbox_scenery_pixels = picks.tiny_px;
     cfg.xbox_weather = picks.weather;
+    cfg.xbox_rider_ai_off = picks.riders == 1;
+    cfg.xbox_detailed_props_off = picks.props == 1;
     if (picks.mode == 1) {
         cfg.xbox_reflection_picks_set = true;
         cfg.xbox_reflection_picks = picks.drops;
@@ -1016,7 +1022,8 @@ static void open_shaders() {
         else swprintf(tiny, 60, L"never hidden");
         append_log(L"Level choices for " + in.filename().wstring() + L", used when you convert it for the Xbox: " + refl +
                    L"; fog " + fog + L"; scenery " + tiny + L"; weather " +
-                   (picks.weather == 1 ? L"lighter" : picks.weather == 2 ? L"half the drops" : picks.weather == 3 ? L"off" : L"as made") + L".");
+                   (picks.weather == 1 ? L"lighter" : picks.weather == 2 ? L"half the drops" : picks.weather == 3 ? L"off" : L"as made") +
+                   (picks.riders ? L"; riders without AI" : L"") + (picks.props ? L"; detailed props without collision" : L"") + L".");
     }
 }
 

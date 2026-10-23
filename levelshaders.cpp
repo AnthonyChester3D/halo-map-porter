@@ -429,6 +429,33 @@ bool analyze(const fs::path &bsp_file, const fs::path &scenario, const Find &fin
             w.half = perf::weather_lighten(h, 2) ? (float)perf::weather_drops(h) : made;
             p.weather = w;
         }
+        // (the scripts' riders, and the small props with very detailed collision)
+        tagfile::Tag sc;
+        if (!scenario.empty() && sc.load(scenario)) {
+            std::string src;
+            tagfile::Block files = sc.root().block("source files");
+            for (size_t i = 0; i < files.size(); i++) src += files[i].data("source") + "\n";
+            p.content.riders = (int32_t)perf::script_riders(src).size();
+            tagfile::Block placed = sc.root().block("scenery"), spal = sc.root().block("scenery palette");
+            std::map<long long, int> count;
+            for (size_t i = 0; i < placed.size(); i++) count[placed[i].integer("type")]++;
+            std::string names;
+            for (auto &[k, n] : count) {
+                if (k < 0 || (size_t)k >= spal.size()) continue;
+                std::string ref = spal[(size_t)k].ref("name");
+                fs::path of = ref.empty() ? fs::path() : find(ref);
+                tagfile::Tag ot;
+                if (of.empty() || !ot.load(of)) continue;
+                std::string coll = ot.root().ref("collision model");
+                if (coll.empty() || ot.root().num("bounding radius") > perf::kDetailedPropRadius) continue;
+                fs::path cf = find(coll);
+                int surfaces = cf.empty() ? 0 : perf::collision_surfaces(cf);
+                if (surfaces < perf::kDetailedPropSurfaces) continue;
+                p.content.detailed_props += n;
+                names += (names.empty() ? "" : ", ") + fs::path(ref).stem().string() + " (" + std::to_string(surfaces) + " surfaces)";
+            }
+            snprintf(p.content.prop_names, sizeof p.content.prop_names, "%s", names.c_str());
+        }
         for (size_t c = 0; c < clusters.size(); c++) {
             long long sky = clusters[c].integer("sky");
             p.room_sky.push_back((int16_t)(sky >= 0 && sky < 65535 ? sky : -1));
@@ -782,7 +809,7 @@ void draw(const Preview &p, const Camera &cam, const std::vector<char> &reflecti
 
 // The file: a magic, then each part as counts and raw values (this machine's byte order: the file is a cache).
 namespace {
-const char kMagic[8] = {'H', 'M', 'P', 'L', 'S', 'H', 'D', '5'};
+const char kMagic[8] = {'H', 'M', 'P', 'L', 'S', 'H', 'D', '6'};
 struct Out {
     std::ofstream f;
     template <class T> void raw(const T &v) { f.write((const char *)&v, sizeof v); }
@@ -842,6 +869,7 @@ bool save(const Analysis &a, const Preview &p, const fs::path &file) {
     o.raw(p.indoor_fog);
     o.vec(p.room_sky);
     o.raw(p.weather);
+    o.raw(p.content);
     o.vec(p.tree);
     o.vec(p.leaf_room);
     return (bool)o.f;
@@ -890,6 +918,7 @@ bool load(Analysis &a, Preview &p, const fs::path &file) {
     in.raw(p.indoor_fog);
     in.vec(p.room_sky);
     in.raw(p.weather);
+    in.raw(p.content);
     in.vec(p.tree);
     in.vec(p.leaf_room);
     return in.ok && a.drawn.size() == (size_t)a.views * a.shaders.size();

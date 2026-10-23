@@ -27,6 +27,8 @@ struct Picks {
     double fog_distance = 0;
     double tiny_px = 0;
     int weather = 0;   // (Config::xbox_weather)
+    int riders = 0;    // 1: no AI for units riding other objects (Config::xbox_rider_ai_off)
+    int props = 0;     // 1: no collision for small props with very detailed collision (Config::xbox_detailed_props_off)
 };
 
 // Modal. `key` identifies the map and what changes its level (a measurement is reused while it's the same).

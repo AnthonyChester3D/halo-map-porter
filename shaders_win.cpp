@@ -25,7 +25,8 @@ namespace {
 enum {
     IDC_MODE0 = 400, IDC_MODE1, IDC_MODE2, IDC_STATUS, IDC_LIST, IDC_VIEW, IDC_PREV, IDC_NEXT, IDC_BEFORE, IDC_AFTER,
     IDC_CHANGES, IDC_HILITE, IDC_COST, IDC_REMEASURE, IDC_OKB, IDC_CANCELB, IDC_ABOUT, IDC_PORTALS, IDC_FOG_LBL, IDC_FOG,
-    IDC_FAR_LBL, IDC_FAR, IDC_FOG_DIST, IDC_FOG_UNITS, IDC_WEATHER_LBL, IDC_WEATHER,
+    IDC_FAR_LBL, IDC_FAR, IDC_FOG_DIST, IDC_FOG_UNITS, IDC_WEATHER_LBL, IDC_WEATHER, IDC_RIDERS_LBL, IDC_RIDERS, IDC_PROPS_LBL,
+    IDC_PROPS,
 };
 #define WM_LS_LOG (WM_APP + 60)
 #define WM_LS_DONE (WM_APP + 61)
@@ -382,6 +383,31 @@ void fill_weather() {
     SendMessageW(c, CB_SETCURSEL, std::clamp(St->picks.weather, 0, 3), 0);
 }
 
+// The riders and detailed props choices (Picks::riders, props), with what the map has.
+void fill_content() {
+    const lshade::Content c = St->data ? St->data->p.content : lshade::Content();
+    auto fill = [](int id, bool any, const std::wstring &none, const std::wstring &keep, const std::wstring &change, int pick) {
+        HWND h = item(id);
+        SendMessageW(h, CB_RESETCONTENT, 0, 0);
+        if (!any) {
+            SendMessageW(h, CB_ADDSTRING, 0, (LPARAM)(St->data ? none.c_str() : L""));
+            SendMessageW(h, CB_SETCURSEL, 0, 0);
+            EnableWindow(h, FALSE);
+            return;
+        }
+        EnableWindow(h, TRUE);
+        SendMessageW(h, CB_ADDSTRING, 0, (LPARAM)keep.c_str());
+        SendMessageW(h, CB_ADDSTRING, 0, (LPARAM)change.c_str());
+        SendMessageW(h, CB_SETDROPPEDWIDTH, S(460), 0);
+        SendMessageW(h, CB_SETCURSEL, pick ? 1 : 0, 0);
+    };
+    fill(IDC_RIDERS, c.riders > 0, L"No units ride other objects", L"Keep their AI (as made)",
+         L"No AI for the " + std::to_wstring(c.riders) + L" riding other objects", St->picks.riders);
+    std::string names(c.prop_names);
+    fill(IDC_PROPS, c.detailed_props > 0, L"No small props with very detailed collision", L"Keep their collision (as made)",
+         L"No collision: " + W(names), St->picks.props);
+}
+
 void fill_list() {
     ListView_DeleteAllItems(St->list);
     St->row_shader.clear();
@@ -420,6 +446,7 @@ void fill_list() {
     update_cost();
     fill_fog();
     fill_weather();
+    fill_content();
     pick_views();
     go_to_view();
 }
@@ -641,7 +668,7 @@ void create_controls() {
         IDC_MODE0);
     add(L"BUTTON", L"Drop the ones I tick", BS_AUTORADIOBUTTON, 756, 12, 160, 22, IDC_MODE1);
     add(L"STATIC", L"", 0, 12, 42, 1156, 20, IDC_STATUS);
-    St->list = add(WC_LISTVIEWW, L"", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP, 12, 68, 548, 586, IDC_LIST);
+    St->list = add(WC_LISTVIEWW, L"", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP, 12, 68, 548, 616, IDC_LIST);
     ListView_SetExtendedListViewStyle(St->list, LVS_EX_FULLROWSELECT | LVS_EX_CHECKBOXES | LVS_EX_DOUBLEBUFFER);
     struct Col { const wchar_t *name; int w; } cols[] = {{L"Shader (ticked: reflection goes)", 184}, {L"Extra passes", 84},
                                                         {L"Shows", 52}, {L"Covers", 54}, {L"Triangles", 64}, {L"Suggested", 74}};
@@ -678,11 +705,15 @@ void create_controls() {
     }
     add(L"STATIC", L"Weather:", SS_NOTIFY, 572, 630, 56, 20, IDC_WEATHER_LBL);
     add(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 630, 626, 538, 300, IDC_WEATHER);
-    add(L"BUTTON", L"Measure again", BS_PUSHBUTTON | WS_TABSTOP, 12, 666, 120, 26, IDC_REMEASURE);
+    add(L"STATIC", L"Riders:", SS_NOTIFY, 572, 660, 46, 20, IDC_RIDERS_LBL);
+    add(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 620, 656, 254, 300, IDC_RIDERS);
+    add(L"STATIC", L"Props:", SS_NOTIFY, 884, 660, 42, 20, IDC_PROPS_LBL);
+    add(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 928, 656, 240, 300, IDC_PROPS);
+    add(L"BUTTON", L"Measure again", BS_PUSHBUTTON | WS_TABSTOP, 12, 696, 120, 26, IDC_REMEASURE);
     add(L"STATIC", L"Shows: how much of what you see is its reflection. Covers: how much of the screen it is. Passes: triangles drawn again per view.",
-        0, 140, 670, 740, 20, IDC_ABOUT);
-    add(L"BUTTON", L"OK", BS_DEFPUSHBUTTON | WS_TABSTOP, 966, 666, 96, 26, IDC_OKB);
-    add(L"BUTTON", L"Cancel", BS_PUSHBUTTON | WS_TABSTOP, 1072, 666, 96, 26, IDC_CANCELB);
+        0, 140, 700, 740, 20, IDC_ABOUT);
+    add(L"BUTTON", L"OK", BS_DEFPUSHBUTTON | WS_TABSTOP, 966, 696, 96, 26, IDC_OKB);
+    add(L"BUTTON", L"Cancel", BS_PUSHBUTTON | WS_TABSTOP, 1072, 696, 96, 26, IDC_CANCELB);
     CheckRadioButton(St->wnd, IDC_MODE0, IDC_MODE2, IDC_MODE0 + St->picks.mode);
     CheckRadioButton(St->wnd, IDC_BEFORE, IDC_CHANGES, IDC_AFTER);
     CheckDlgButton(St->wnd, IDC_HILITE, BST_CHECKED);
@@ -695,6 +726,7 @@ void create_controls() {
     }
     fill_fog();
     fill_weather();
+    fill_content();
 
     // Tooltips.
     St->tips = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT,
@@ -755,6 +787,18 @@ void create_controls() {
                                  L"off removes it. The picture doesn't show weather.";
     tip(IDC_WEATHER, weather_tip);
     tip(IDC_WEATHER_LBL, weather_tip);
+    const wchar_t *riders_tip = L"Units the scripts give AI and then attach to another object, like Deathtrap's marines sitting in its "
+                                L"moving warthogs: they can't go anywhere, but their AI still thinks every tick (Deathtrap's 9: 1.5 ms "
+                                L"of each Xbox tick). Without AI they sit where they're attached, as before. Try the map once: a rider "
+                                L"meant to shoot at players would stop.";
+    tip(IDC_RIDERS, riders_tip);
+    tip(IDC_RIDERS_LBL, riders_tip);
+    const wchar_t *props_tip = L"Small scenery (1 unit or less) whose collision model is very detailed (300 surfaces or more; "
+                               L"Deathtrap's pilot chairs have 416, a warthog's whole chassis 47). Each tick a player's movement is "
+                               L"tested against the collision models it's near: standing by one of Deathtrap's chairs cost 5-6 ms a "
+                               L"tick. Without collision, players and shots pass through them.";
+    tip(IDC_PROPS, props_tip);
+    tip(IDC_PROPS_LBL, props_tip);
     tip(IDC_VIEW, L"Click here, then fly: drag with the mouse to look around, W A S D to move where you look, Q / E to go "
                   L"down and up (Shift faster, Ctrl slower), the mouse wheel to step forward and back.");
     tip(IDC_PREV, L"The previous view (the selected shader's, or the ones that see most of the level).");
@@ -874,6 +918,12 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 if (k >= 0 && k <= 3) St->picks.weather = k;
             }
             return 0;
+        case IDC_RIDERS: case IDC_PROPS:
+            if (HIWORD(wp) == CBN_SELCHANGE && St->data) {
+                int k = (int)SendMessageW(item(id), CB_GETCURSEL, 0, 0);
+                if (k == 0 || k == 1) (id == IDC_RIDERS ? St->picks.riders : St->picks.props) = k;
+            }
+            return 0;
         case IDC_PORTALS:
             St->portals = IsDlgButtonChecked(h, IDC_PORTALS) == BST_CHECKED;
             render(false);
@@ -952,7 +1002,7 @@ bool edit(HWND owner, const std::wstring &title, const std::string &key, Measure
     st.measure = std::move(measure);
     st.picks = picks;
 
-    RECT r{0, 0, S(1180), S(704)};
+    RECT r{0, 0, S(1180), S(734)};
     DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
     AdjustWindowRect(&r, style, FALSE);
     RECT orc;

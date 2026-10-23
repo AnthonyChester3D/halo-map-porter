@@ -53,4 +53,19 @@ double weather_drops(const std::vector<WeatherType> &types);    // the drops the
 // but ending at kLighterWeatherEnd units: fewer drops), 2 half the drops, 3 none. False if it changes nothing.
 bool weather_lighten(std::vector<WeatherType> &types, int mode);
 
+// A collision model's surfaces (all its nodes' BSPs): what a player's movement is tested against near the object.
+// Deathtrap's pilot chairs (416 for an object 1 unit across; a warthog's chassis has 47) cost an Xbox 5-6 ms a tick
+// whenever a player stood next to one.
+int collision_surfaces(const std::filesystem::path &collision_model);
+// A small prop whose collision is that detailed: scenery at most kDetailedPropRadius units across its bounding
+// sphere's radius with kDetailedPropSurfaces surfaces or more (Bungie's most detailed small prop, a10's oxygen tank,
+// has 163).
+constexpr double kDetailedPropRadius = 1.0;
+constexpr int kDetailedPropSurfaces = 300;
+
+// The units a map's scripts give AI (ai_attach) and also attach to another object (objects_attach, as the child):
+// riders, like Deathtrap's marines sitting in its moving warthogs, which can't go anywhere but still think every
+// tick (9 of them: 1.5 ms of each Xbox tick). Their names, lowercase, from the scripts' source text.
+std::vector<std::string> script_riders(const std::string &hsc);
+
 }   // namespace perf

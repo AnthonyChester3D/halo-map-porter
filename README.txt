@@ -220,6 +220,24 @@ left alone):
   256 px.
 - "512 max (sharper)": everything at most 512 px, no budget.
 - "1024" / "No limit": for testing.
+How a texture is halved: usually its own next smaller version (its next
+mip level, made with it) becomes the new full size. Two kinds are made
+again instead:
+- See-through cut-outs (leaves, fences, grates, chain link): a shader
+  that alpha-tests a texture draws a pixel only where its alpha is over
+  half. Averaging blurs the cut-out edges into partly transparent pixels,
+  most of them under half, so leaves and grates thin out and a couple of
+  halvings down all but vanish. For a texture a shader alpha-tests (a
+  model shader's base map unless "not alpha tested", an environment
+  shader's base map when "alpha tested", a transparent shader's first map
+  when "alpha tested"), if the usual way would leave less than 90% as
+  much of it solid, each smaller level is made from the one above and its
+  alpha scaled so as much of it stays solid as at full size.
+- A texture whose own next version looks unlike it (faded out, as detail
+  maps are by design, or its alpha thinned or broken): the new full size
+  is a 2x2 average of the old one; its smaller versions stay as they were.
+DXT1 textures with see-through pixels stay DXT1 (its 1-bit transparency)
+rather than doubling in size as DXT5.
 Uncompressed textures are also compressed to DXT (a quarter of the memory
 or less). "Lightmaps" scales the map's lightmaps (its baked lighting);
 "Max 256" is like stock maps and the default. 512 looks sharper but costs
@@ -576,7 +594,7 @@ Weapons & vehicles window (Xbox)
   if it had been destroyed: a jet's pieces are never made, its health reads
   as gone. Try the map once to check its scripts still do what you want.
 
-Level reflections, fog, scenery and weather: the "Level..." window (Xbox)
+Level reflections, fog, scenery, weather and more: the "Level..." window (Xbox)
   The Xbox draws every level surface at least twice: its lightmap, then
   its textures. A shader with a reflection (a cube map, and a perpendicular
   or parallel brightness above 0) draws it a third time, and a fourth when
@@ -643,6 +661,10 @@ Level reflections, fog, scenery and weather: the "Level..." window (Xbox)
     across. The picture shows the level only, not its objects.
   - Weather: as made (the default), lighter, half the drops, or off, each
     with the level's own number of drops. The picture doesn't show it.
+  - Riders: keep the AI of units the scripts sit on other objects (the
+    default), or leave them without AI (see "Riders" below).
+  - Props: keep the collision of small props whose collision is very
+    detailed (the default), or leave it out (see "Detailed props" below).
   Hover over the choices and checkboxes for what each does. Choices are
   saved per map and used every time you convert it for the Xbox.
   Measurements are kept between runs of the app until the map file
@@ -702,6 +724,25 @@ Weather (Xbox, "Level..." window)
   Every weather system the level uses is changed (a copy of a stock one
   for this map). The log's [weather] line says what changed. As made by
   default.
+
+Riders (Xbox, "Level..." window)
+  Units the scripts give AI (ai_attach) and then attach to another object
+  (objects_attach), like Deathtrap's marines sitting in its moving
+  warthogs, can't go anywhere, but their AI still thinks every tick:
+  Deathtrap's 9 took 1.5 ms of each Xbox tick, a tenth of its game time.
+  "No AI" leaves their ai_attach calls out; they're still placed, attached
+  and seated as before. Try the map once: a rider meant to shoot at players
+  would stop. The log's [scripts] ai_attach line counts them.
+
+Detailed props (Xbox, "Level..." window)
+  Each tick a player's movement is tested against every surface of the
+  collision models it's near. Small props ported with their whole mesh as
+  collision make that expensive: standing by one of Deathtrap's pilot
+  chairs (416 surfaces for a 1-unit object; a warthog's whole chassis has
+  47) cost an Xbox 5-6 ms a tick. "No collision" leaves out the collision
+  of scenery 1 unit or less across with 300 surfaces or more (Bungie's most
+  detailed small prop, a10's oxygen tank, has 163): players and shots pass
+  through them. The window names them; the log's [props] line too.
 
 Dynamic lights (Xbox)
   A dynamic light (a muzzle flash, an explosion, a map's lightning) lights
@@ -1045,7 +1086,8 @@ The log lists every automatic change:
   [slots] An Xbox vehicle slot was changed (Xbox tab).
   [xbox-mp] A vehicle or PC weapon was swapped, removed or kept for Xbox.
   [shrink] Textures were halved to fit the Xbox size limit.
-  [textures] (also) Textures were halved to fit the texture memory target.
+  [textures] (also) Textures were halved to fit the texture memory target;
+          cut-outs kept as solid, or a faded next version averaged instead.
   [scripts] A script function the target game lacks was replaced, or a
           short that holds the game's time was made a long.
   [bc7]   MCC-only BC7 textures were re-encoded as DXT.
@@ -1062,6 +1104,8 @@ The log lists every automatic change:
           above).
   [weather] The level's rain or snow was made lighter or turned off (see
           "Weather" above).
+  [props] Small props with very detailed collision lost it (see "Detailed
+          props" above).
   [lights] Dynamic lights that would have the Xbox draw most of the level
           again were turned off or shrunk (see "Dynamic lights" above).
 

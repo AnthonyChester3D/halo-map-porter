@@ -91,6 +91,13 @@ struct Weather {
     float made = 0, lighter = 0, half = 0;
     float end = 0, lighter_end = 0;
 };
+// What else of the map's costs the level window offers to change: the units its scripts give AI while attached to
+// another object (perf::script_riders), and the small props with very detailed collision (perf::kDetailedProp...).
+struct Content {
+    int32_t riders = 0;
+    int32_t detailed_props = 0;          // placed
+    char prop_names[160] = {};           // "chair pilot (416 surfaces), ..."
+};
 struct Preview {
     std::vector<Triangle> triangles;
     std::vector<Material> materials;
@@ -104,6 +111,7 @@ struct Preview {
     Fog indoor_fog;
     std::vector<int16_t> room_sky;
     Weather weather;
+    Content content;
     // Which room a point is in: the level's BSP tree (child: a node, ~leaf for a leaf (-2 and less), -1 solid).
     struct Node { float n[3] = {0, 0, 0}; float d = 0; int32_t front = -1, back = -1; };
     std::vector<Node> tree;

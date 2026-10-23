@@ -3,6 +3,8 @@
 #include "tagfile.hpp"
 #include <algorithm>
 #include <cmath>
+#include <functional>
+#include <set>
 #include <vector>
 
 namespace perf {
@@ -188,6 +190,75 @@ bool weather_lighten(std::vector<WeatherType> &types, int mode) {
         }
     }
     return changed && mode >= 1 && mode <= 2;
+}
+
+int collision_surfaces(const std::filesystem::path &collision_model) {
+    tagfile::Tag t;
+    if (!t.load(collision_model)) return 0;
+    int n = 0;
+    tagfile::Block nodes = t.root().block("nodes");
+    for (size_t i = 0; i < nodes.size(); i++) {
+        tagfile::Block bsps = nodes[i].block("bsps");
+        for (size_t k = 0; k < bsps.size(); k++) n += (int)bsps[k].block("surfaces").size();
+    }
+    return n;
+}
+
+std::vector<std::string> script_riders(const std::string &s) {
+    // (a small reader: lists and atoms, comments skipped)
+    struct N { bool list = false; std::string atom; std::vector<N> kids; };
+    size_t i = 0;
+    std::function<bool(std::vector<N> &, bool)> parse = [&](std::vector<N> &out, bool nested) -> bool {
+        while (i < s.size()) {
+            char c = s[i];
+            if (isspace((unsigned char)c)) { i++; continue; }
+            if (c == ';') {
+                if (i + 1 < s.size() && s[i + 1] == '*') {
+                    size_t e = s.find("*;", i + 2);
+                    i = e == std::string::npos ? s.size() : e + 2;
+                } else
+                    while (i < s.size() && s[i] != '\n') i++;
+                continue;
+            }
+            if (c == ')') return nested;
+            N n;
+            if (c == '(') {
+                n.list = true;
+                i++;
+                if (!parse(n.kids, true) || i >= s.size()) return false;
+                i++;
+            } else if (c == '"') {
+                size_t e = s.find('"', i + 1);
+                if (e == std::string::npos) return false;
+                i = e + 1;
+            } else {
+                size_t b = i;
+                while (i < s.size() && !isspace((unsigned char)s[i]) && s[i] != '(' && s[i] != ')' && s[i] != ';' && s[i] != '"') i++;
+                n.atom = s.substr(b, i - b);
+                for (auto &ch : n.atom) ch = (char)tolower((unsigned char)ch);
+            }
+            out.push_back(std::move(n));
+        }
+        return !nested;
+    };
+    std::vector<N> top;
+    if (!parse(top, false)) return {};
+    std::set<std::string> ai, attached;
+    std::function<void(const N &)> walk = [&](const N &n) {
+        if (!n.list) return;
+        if (!n.kids.empty() && !n.kids[0].list) {
+            const std::string &h = n.kids[0].atom;
+            if (h == "ai_attach" && n.kids.size() >= 3 && !n.kids[1].list) ai.insert(n.kids[1].atom);
+            // (objects_attach parent parent_marker child child_marker)
+            if (h == "objects_attach" && n.kids.size() >= 4 && !n.kids[3].list) attached.insert(n.kids[3].atom);
+        }
+        for (auto &k : n.kids) walk(k);
+    };
+    for (auto &n : top) walk(n);
+    std::vector<std::string> v;
+    for (auto &a : ai)
+        if (attached.count(a)) v.push_back(a);
+    return v;
 }
 
 }   // namespace perf

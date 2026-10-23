@@ -71,6 +71,12 @@ struct Config {
     // The level's rain or snow (perf::weather_lighten): 0 as made, 1 lighter (as dense up close, ending at 5 units), 2
     // half the drops, 3 none.
     int xbox_weather = 0;
+    // Units the scripts give AI while attaching them to another object (perf::script_riders): their ai_attach calls
+    // are left out, so they sit there without thinking.
+    bool xbox_rider_ai_off = false;
+    // Small scenery with very detailed collision (perf::kDetailedProp...): its collision left out (players and shots
+    // pass through it).
+    bool xbox_detailed_props_off = false;
     // Scenery and devices not drawn once smaller on screen than this many pixels across (their models' smallest
     // switch size raised to it; 0: as the map has them).
     double xbox_scenery_pixels = 0;

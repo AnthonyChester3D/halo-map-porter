@@ -264,6 +264,7 @@ struct Job {
     Game target;
     fs::path work, fixes;
     fs::path overlay;  // stock tags of target game (optional)
+    std::set<std::string> alpha_tested;   // bitmaps a shader alpha-tests (find_alpha_tested: halve_cutout)
     fs::path source;   // tags of the map being converted / user's tags
     fs::path user_tags; // build-from-tags: the user's own tags folder (never modified)
     fs::path user_data; // build-from-tags: the user's data folder (scripts, sounds)
@@ -1098,6 +1099,8 @@ void xbox_reflections(Job &job);
 void xbox_fog(Job &job);
 void xbox_scenery(Job &job, const std::vector<std::string> &deps);
 void xbox_weather(Job &job);
+void xbox_props(Job &job);
+static int g_cutout_textures = 0;   // cut-out textures halve_cutout made smaller (for the log)
 static std::string thousands(long long v);
 static std::vector<std::string> performance_lines(Job &job);
 static LodView make_lod_view(Job &job, const std::string &map_name);
@@ -1649,11 +1652,13 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
                     if (cfg.xbox_shrink && texture_rounds < 6 && !texture_hopeless) {
                         size_t need = (size_t)((use.texture_mb - budget) * 1048576.0) + 256 * 1024;
                         int n = 0;
+                        g_cutout_textures = 0;
                         size_t saved = shrink_textures_to_fit(job, need, n);
                         if (saved > 0) {
                             texture_rounds++;
                             snprintf(buf, sizeof buf, "[textures] %.1f MB of textures is over the %.1f MB target; halved %d of "
-                                     "your textures (saved %.1f MB)", use.texture_mb, budget, n, saved / 1048576.0);
+                                     "your textures (saved %.1f MB%s)", use.texture_mb, budget, n, saved / 1048576.0,
+                                     g_cutout_textures ? "; see-through cut-outs kept as solid" : "");
                             job.note(buf);
                             if (saved < need && saved / 3 < need - saved) texture_hopeless = true;
                             continue;
@@ -1699,11 +1704,13 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
             double over = std::atof(tb[1].str().c_str()) - std::atof(tb[2].str().c_str());
             size_t need = (size_t)(over * 1048576.0) + 256 * 1024;
             int n = 0;
+            g_cutout_textures = 0;
             size_t saved = shrink_textures_to_fit(job, need, n);
             if (saved > 0) {
                 shrink_rounds++;
                 job.note("[shrink] " + tb[1].str().substr(0, 5) + " MB is over the limit; halved " + std::to_string(n) +
-                         " of your textures (saved " + std::to_string(saved / 1048576.0).substr(0, 4) + " MB)");
+                         " of your textures (saved " + std::to_string(saved / 1048576.0).substr(0, 4) + " MB" +
+                         (g_cutout_textures ? "; see-through cut-outs kept as solid" : "") + ")");
                 // Halving again saves about a quarter as much each time; stop if that can't cover the rest.
                 if (saved < need && saved / 3 < need - saved) shrink_hopeless = true;
                 continue;
@@ -2236,10 +2243,250 @@ size_t mip_bytes(int w, int h, int fmt) {
 static bool block_format(int fmt) { return fmt == 14 || fmt == 15 || fmt == 16 || fmt == 18; }
 static bool block_halvable(int w, int h) { return w >= 8 && h >= 8 && (w / 2) % 4 == 0 && (h / 2) % 4 == 0; }
 
-// Halve a .bitmap tag's 2D textures by dropping their largest mip level.
+// ---- Textures with see-through cut-outs (leaves, fences, grates, chain link)
+// An alpha-tested surface draws a pixel only where its alpha is at least half. A smaller version made by averaging
+// (the texture's own smaller mip levels, or a 2x2 box filter) blurs each cut-out edge into partly transparent pixels,
+// most of them under half: leaves and grates thin out, and a couple of halvings down they all but vanish. A texture
+// whose alpha is nearly all fully transparent or fully opaque is taken as cut out: when it's made smaller, each
+// level is made again from the one above, its alpha scaled so the same share of it stays solid as in the full-size
+// texture (alpha coverage, as texture tools do for foliage).
+
+// One level's pixels as RGBA (A8 / Y8 / AY8: the one channel in R; A8Y8: R and G), in any of halve_pixels' formats.
+// DXT levels smaller than a block are read from their one block.
+static bool decode_level(const std::string &d, int w, int h, int fmt, std::vector<unsigned char> &rgba) {
+    rgba.assign((size_t)w * h * 4, 0);
+    if (fmt == 14 || fmt == 15 || fmt == 16) {
+        int bs = fmt == 14 ? 8 : 16, bw = std::max(1, (w + 3) / 4), bh = std::max(1, (h + 3) / 4);
+        if (d.size() < (size_t)bw * bh * bs) return false;
+        unsigned char blk[64];
+        for (int by = 0; by < bh; by++)
+            for (int bx = 0; bx < bw; bx++) {
+                const char *src = d.data() + ((size_t)by * bw + bx) * bs;
+                if (fmt == 14) bcdec_bc1(src, blk, 16);
+                else if (fmt == 15) bcdec_bc2(src, blk, 16);
+                else bcdec_bc3(src, blk, 16);
+                for (int r = 0; r < 4; r++)
+                    for (int c = 0; c < 4; c++) {
+                        int x = bx * 4 + c, y = by * 4 + r;
+                        if (x < w && y < h) memcpy(&rgba[((size_t)y * w + x) * 4], blk + (r * 4 + c) * 4, 4);
+                    }
+            }
+        return true;
+    }
+    int bpp = fmt <= 2 ? 1 : (fmt == 3 || fmt == 6 || fmt == 8 || fmt == 9) ? 2 : (fmt == 10 || fmt == 11) ? 4 : 0;
+    if (!bpp || d.size() < (size_t)w * h * bpp) return false;
+    const unsigned char *p = (const unsigned char *)d.data();
+    for (size_t i = 0; i < (size_t)w * h; i++) {
+        unsigned char *q = &rgba[i * 4];
+        unsigned v = bpp == 2 ? p[i * 2] | (p[i * 2 + 1] << 8) : 0;
+        switch (fmt) {
+        case 0: case 1: case 2: q[0] = p[i]; break;
+        case 3: q[0] = p[i * 2]; q[1] = p[i * 2 + 1]; break;
+        case 6: q[0] = (v >> 11) * 255 / 31; q[1] = ((v >> 5) & 63) * 255 / 63; q[2] = (v & 31) * 255 / 31; q[3] = 255; break;
+        case 8: q[3] = (v >> 15) * 255; q[0] = ((v >> 10) & 31) * 255 / 31; q[1] = ((v >> 5) & 31) * 255 / 31;
+                q[2] = (v & 31) * 255 / 31; break;
+        case 9: q[3] = (v >> 12) * 17; q[0] = ((v >> 8) & 15) * 17; q[1] = ((v >> 4) & 15) * 17; q[2] = (v & 15) * 17; break;
+        default: q[0] = p[i * 4 + 2]; q[1] = p[i * 4 + 1]; q[2] = p[i * 4]; q[3] = fmt == 10 ? 255 : p[i * 4 + 3]; break;   // B,G,R,A
+        }
+    }
+    return true;
+}
+
+// A DXT1 block with see-through pixels (its 3-colour mode: the 4th index is transparent black). The colours come from
+// stb's fit of the solid pixels (the see-through ones given their average), put in the order that selects the mode.
+static void dxt1_cutout_block(const unsigned char *blk, unsigned char out[8]) {
+    unsigned char solid[64];
+    int sum[3] = {0, 0, 0}, n = 0;
+    for (int k = 0; k < 16; k++)
+        if (blk[k * 4 + 3] >= 128) { for (int c = 0; c < 3; c++) sum[c] += blk[k * 4 + c]; n++; }
+    for (int k = 0; k < 16; k++) {
+        bool on = blk[k * 4 + 3] >= 128;
+        for (int c = 0; c < 3; c++) solid[k * 4 + c] = on ? blk[k * 4 + c] : (unsigned char)(n ? sum[c] / n : 0);
+        solid[k * 4 + 3] = 255;
+    }
+    unsigned char enc[8];
+    stb_compress_dxt_block(enc, solid, 0, STB_DXT_HIGHQUAL);
+    unsigned c0 = enc[0] | enc[1] << 8, c1 = enc[2] | enc[3] << 8;
+    if (c0 > c1) std::swap(c0, c1);   // c0 <= c1: 3 colours and transparent
+    auto rgb = [](unsigned c, int *o) { o[0] = (c >> 11) * 255 / 31; o[1] = ((c >> 5) & 63) * 255 / 63; o[2] = (c & 31) * 255 / 31; };
+    int pal[3][3];
+    rgb(c0, pal[0]);
+    rgb(c1, pal[1]);
+    for (int c = 0; c < 3; c++) pal[2][c] = (pal[0][c] + pal[1][c]) / 2;
+    uint32_t idx = 0;
+    for (int k = 0; k < 16; k++) {
+        unsigned sel = 3;
+        if (blk[k * 4 + 3] >= 128) {
+            int best = INT32_MAX;
+            for (unsigned s = 0; s < 3; s++) {
+                int d = 0;
+                for (int c = 0; c < 3; c++) d += (blk[k * 4 + c] - pal[s][c]) * (blk[k * 4 + c] - pal[s][c]);
+                if (d < best) { best = d; sel = s; }
+            }
+        }
+        idx |= sel << (k * 2);
+    }
+    out[0] = (unsigned char)(c0 & 255); out[1] = (unsigned char)(c0 >> 8);
+    out[2] = (unsigned char)(c1 & 255); out[3] = (unsigned char)(c1 >> 8);
+    for (int k = 0; k < 4; k++) out[4 + k] = (unsigned char)(idx >> (k * 8));
+}
+
+// RGBA pixels back into a level of `fmt` (decode_level's channels). DXT1 keeps see-through pixels in its own
+// 3-colour mode; DXT levels smaller than a block fill their one block.
+static std::string encode_level(const std::vector<unsigned char> &rgba, int w, int h, int fmt) {
+    std::string out;
+    if (fmt == 14 || fmt == 15 || fmt == 16) {
+        int bw = std::max(1, (w + 3) / 4), bh = std::max(1, (h + 3) / 4);
+        for (int by = 0; by < bh; by++)
+            for (int bx = 0; bx < bw; bx++) {
+                unsigned char blk[64], enc[16];
+                bool see_through = false;
+                for (int r = 0; r < 4; r++)
+                    for (int c = 0; c < 4; c++) {
+                        int x = std::min(w - 1, bx * 4 + c), y = std::min(h - 1, by * 4 + r);
+                        memcpy(blk + (r * 4 + c) * 4, &rgba[((size_t)y * w + x) * 4], 4);
+                        see_through = see_through || blk[(r * 4 + c) * 4 + 3] < 128;
+                    }
+                if (fmt == 14) {
+                    if (see_through) dxt1_cutout_block(blk, enc);
+                    else stb_compress_dxt_block(enc, blk, 0, STB_DXT_HIGHQUAL);
+                    out.append((const char *)enc, 8);
+                } else if (fmt == 15) {   // DXT3: explicit 4-bit alpha, then the colour block
+                    stb_compress_dxt_block(enc, blk, 1, STB_DXT_HIGHQUAL);
+                    unsigned char a[8] = {};
+                    for (int k = 0; k < 16; k++) a[k / 2] |= (unsigned char)(((blk[k * 4 + 3] * 15 + 127) / 255) << ((k & 1) * 4));
+                    out.append((const char *)a, 8);
+                    out.append((const char *)enc + 8, 8);
+                } else {
+                    stb_compress_dxt_block(enc, blk, 1, STB_DXT_HIGHQUAL);
+                    out.append((const char *)enc, 16);
+                }
+            }
+        return out;
+    }
+    for (size_t i = 0; i < (size_t)w * h; i++) {
+        const unsigned char *q = &rgba[i * 4];
+        unsigned v;
+        switch (fmt) {
+        case 0: case 1: case 2: out += (char)q[0]; break;
+        case 3: out += (char)q[0]; out += (char)q[1]; break;
+        case 6: v = ((q[0] * 31 + 127) / 255) << 11 | ((q[1] * 63 + 127) / 255) << 5 | ((q[2] * 31 + 127) / 255);
+                out += (char)(v & 255); out += (char)(v >> 8); break;
+        case 8: v = (q[3] >= 128 ? 1u : 0u) << 15 | ((q[0] * 31 + 127) / 255) << 10 | ((q[1] * 31 + 127) / 255) << 5 |
+                    ((q[2] * 31 + 127) / 255);
+                out += (char)(v & 255); out += (char)(v >> 8); break;
+        case 9: v = ((q[3] + 8) / 17) << 12 | ((q[0] + 8) / 17) << 8 | ((q[1] + 8) / 17) << 4 | ((q[2] + 8) / 17);
+                out += (char)(v & 255); out += (char)(v >> 8); break;
+        default: { char px[4] = {(char)q[2], (char)q[1], (char)q[0], (char)(fmt == 10 ? 255 : q[3])}; out.append(px, 4); break; }
+        }
+    }
+    return out;
+}
+
+// A 2x2 box filter (a side of 1 stays 1).
+static void box_half(const std::vector<unsigned char> &in, int w, int h, std::vector<unsigned char> &out) {
+    int nw = std::max(1, w / 2), nh = std::max(1, h / 2);
+    out.assign((size_t)nw * nh * 4, 0);
+    for (int y = 0; y < nh; y++)
+        for (int x = 0; x < nw; x++)
+            for (int c = 0; c < 4; c++) {
+                int sx = std::min(w - 1, x * 2), sy = std::min(h - 1, y * 2), sx1 = std::min(w - 1, sx + 1), sy1 = std::min(h - 1, sy + 1);
+                int sum = in[((size_t)sy * w + sx) * 4 + c] + in[((size_t)sy * w + sx1) * 4 + c] + in[((size_t)sy1 * w + sx) * 4 + c] +
+                          in[((size_t)sy1 * w + sx1) * 4 + c];
+                out[((size_t)y * nw + x) * 4 + c] = (unsigned char)((sum + 2) / 4);
+            }
+}
+
+static bool alpha_format(int fmt) { return fmt == 14 || fmt == 15 || fmt == 16 || fmt == 8 || fmt == 9 || fmt == 11; }
+// The share of pixels at least half opaque, with alpha scaled by `s`.
+static double alpha_coverage(const std::vector<unsigned char> &rgba, double s) {
+    size_t n = rgba.size() / 4, on = 0;
+    for (size_t i = 0; i < n; i++) on += rgba[i * 4 + 3] * s >= 127.5;
+    return n ? (double)on / n : 0;
+}
+// Some of it see-through where alpha-tested (under half), and some solid.
+static bool see_through(const std::vector<unsigned char> &rgba) {
+    size_t n = rgba.size() / 4, clear = 0;
+    for (size_t i = 0; i < n; i++) clear += rgba[i * 4 + 3] < 128;
+    return n && clear >= n / 100 && clear <= n - n / 100;
+}
+// Scales alpha so `target` of the pixels are at least half opaque.
+static void keep_coverage(std::vector<unsigned char> &rgba, double target) {
+    if (alpha_coverage(rgba, 1.0) >= target) return;
+    double lo = 1.0, hi = 16.0;
+    for (int k = 0; k < 20; k++) {
+        double mid = (lo + hi) / 2;
+        (alpha_coverage(rgba, mid) < target ? lo : hi) = mid;
+    }
+    for (size_t i = 3; i < rgba.size(); i += 4) rgba[i] = (unsigned char)std::min(255.0, rgba[i] * hi + 0.5);
+}
+
+// One texture of a bitmap a shader alpha-tests (find_alpha_tested), halved (all its levels: a mip level fewer) if it
+// has see-through parts and the usual way (its own next level, or a plain 2x2 average) would leave less than 90% as
+// much of it solid: each level made from the one above and kept as solid as the full-size texture. False (data
+// unchanged) otherwise.
+static bool halve_cutout(std::string &data, int &w, int &h, int &fmt, int &mips) {
+    size_t m0 = mip_bytes(w, h, fmt);
+    if (!alpha_format(fmt) || !m0 || data.size() < m0) return false;
+    std::vector<unsigned char> cur, usual;
+    if (!decode_level(data.substr(0, m0), w, h, fmt, cur) || !see_through(cur)) return false;
+    double target = alpha_coverage(cur, 1.0);
+    int uw = std::max(1, w / 2), uh = std::max(1, h / 2);
+    if (mips >= 1 && data.size() > m0) {
+        if (!decode_level(data.substr(m0), uw, uh, fmt, usual)) return false;
+    } else {
+        box_half(cur, w, h, usual);
+    }
+    if (alpha_coverage(usual, 1.0) >= target * 0.9) return false;
+    int nmips = std::max(0, mips - 1), cw = w, ch = h;
+    std::string out;
+    for (int k = 0; k <= nmips; k++) {
+        std::vector<unsigned char> next;
+        box_half(cur, cw, ch, next);
+        cw = std::max(1, cw / 2);
+        ch = std::max(1, ch / 2);
+        keep_coverage(next, target);
+        out += encode_level(next, cw, ch, fmt);
+        cur.swap(next);
+    }
+    data = out;
+    w = std::max(1, w / 2);
+    h = std::max(1, h / 2);
+    mips = nmips;
+    g_cutout_textures++;
+    return true;
+}
+
+// A texture's own next level, used as its new top when it's halved, unless it looks unlike the texture: a level a tool
+// faded out (detail maps fade toward grey in their smaller levels by design), or one whose alpha thinned or is broken.
+// Then the new top level is a 2x2 average of the full-size one, and the smaller levels stay as they were. True if so
+// (data: the new top level and the rest; mips one fewer).
+static int g_remade_tops = 0;   // (for the log)
+static bool halve_unlike_mip(std::string &data, int w, int h, int fmt, int &mips) {
+    size_t m0 = mip_bytes(w, h, fmt), m1 = mip_bytes(std::max(1, w / 2), std::max(1, h / 2), fmt);
+    if (!m0 || mips < 1 || data.size() < m0 + m1) return false;
+    std::vector<unsigned char> top, own, avg;
+    if (!decode_level(data.substr(0, m0), w, h, fmt, top) || !decode_level(data.substr(m0, m1), std::max(1, w / 2), std::max(1, h / 2), fmt, own))
+        return false;
+    box_half(top, w, h, avg);
+    double diff[4] = {0, 0, 0, 0};
+    size_t n = avg.size() / 4;
+    for (size_t i = 0; i < n; i++)
+        for (int c = 0; c < 4; c++) diff[c] += std::abs((int)avg[i * 4 + c] - (int)own[i * 4 + c]);
+    double worst = 0;
+    for (int c = 0; c < 4; c++) worst = std::max(worst, n ? diff[c] / n : 0);
+    if (worst <= 24) return false;   // (a different filter or compression differs by a few levels at most)
+    data = encode_level(avg, std::max(1, w / 2), std::max(1, h / 2), fmt) + data.substr(m0 + m1);
+    mips--;
+    g_remade_tops++;
+    return true;
+}
+
+// Halve a .bitmap tag's 2D textures by dropping their largest mip level (cut-out ones: halve_cutout; a next level
+// unlike the texture: halve_unlike_mip).
 // Layout: 64-byte header, Bitmap (108), color plate data, pixel data, sequences (64 each),
 // their sprites (32 each), bitmap data entries (48 each). Returns bytes saved (0 = unchanged).
-size_t shrink_bitmap_tag(const fs::path &p, bool write) {
+size_t shrink_bitmap_tag(const fs::path &p, bool write, bool alpha_tested = false) {
     std::string b;
     {
         std::ifstream f(p, std::ios::binary);
@@ -2272,8 +2519,18 @@ size_t shrink_bitmap_tag(const fs::path &p, bool write) {
         if (full && pow2 && !swizzled && !linear && mips >= 1 && w >= 64 && h >= 64) {
             size_t m0 = mip_bytes(w, h, fmt);
             if (m0 < data.size()) {
-                data.erase(0, m0);
-                saved += m0;
+                int nw = w, nh = h, nf = fmt, nm = mips;
+                std::string cd = data;
+                if (write && alpha_tested && halve_cutout(cd, nw, nh, nf, nm)) {   // (counting: about as much as a level dropped)
+                    saved += data.size() > cd.size() ? data.size() - cd.size() : 0;
+                    data = cd;
+                } else if (write && halve_unlike_mip(cd = data, w, h, fmt, nm = mips)) {
+                    saved += data.size() > cd.size() ? data.size() - cd.size() : 0;
+                    data = cd;
+                } else {
+                    data.erase(0, m0);
+                    saved += m0;
+                }
                 put_be16(b, e + 4, (uint16_t)(w / 2));
                 put_be16(b, e + 6, (uint16_t)(h / 2));
                 put_be16(b, e + 20, (uint16_t)(mips - 1));
@@ -2358,8 +2615,15 @@ int convert_bc7_bitmap_tag(const fs::path &p, bool write) {
 }
 
 // Halve an image (2x2 box filter) in one of Halo's pixel formats. Pixel data is little endian (as the
-// GPU reads it). DXT1 with transparent pixels comes back as DXT5 (`fmt` is updated). False = unsupported.
+// GPU reads it). DXT1 keeps its see-through pixels in its own 3-colour mode. False = unsupported.
 bool halve_pixels(const std::string &d, int w, int h, int &fmt, std::string &out) {
+    if ((fmt == 14 || fmt == 15 || fmt == 16) && !(w % 4 || h % 4 || std::max(1, w / 2) % 4 || std::max(1, h / 2) % 4)) {
+        std::vector<unsigned char> rgba, half;
+        if (!decode_level(d, w, h, fmt, rgba)) return false;
+        box_half(rgba, w, h, half);
+        out = encode_level(half, std::max(1, w / 2), std::max(1, h / 2), fmt);
+        return true;
+    }
     int nw = std::max(1, w / 2), nh = std::max(1, h / 2);
     std::vector<unsigned char> rgba((size_t)w * h * 4), half((size_t)nw * nh * 4);
     bool dxt = fmt == 14 || fmt == 15 || fmt == 16;
@@ -2636,7 +2900,7 @@ int unblock_unaligned_dxt_bitmap_tag(const fs::path &p, bool write) {
 
 // Scale a .bitmap tag's 2D textures down until their largest side is at most `max_side`: drop the top
 // mip level where there is one, otherwise resample. Returns how many textures were scaled (-1 = unreadable).
-int cap_bitmap_tag(const fs::path &p, int max_side) {
+int cap_bitmap_tag(const fs::path &p, int max_side, bool alpha_tested = false) {
     std::string b;
     {
         std::ifstream f(p, std::ios::binary);
@@ -2672,8 +2936,13 @@ int cap_bitmap_tag(const fs::path &p, int max_side) {
         while (type == 0 && !(flags & 8) && std::max(w, h) > max_side) { // not swizzled (palettized: mips only)
             size_t m0 = mip_bytes(w, h, fmt);
             if (!m0 || (block_format(fmt) && !block_halvable(w, h))) break;   // e.g. a 1024x4 DXT strip stays as is
-            std::string nd;
-            if (mips >= 1 && data.size() > m0) {
+            std::string nd = data;
+            int cw = w, chh = h, cf = fmt, cm = mips;
+            if (alpha_tested && halve_cutout(nd, cw, chh, cf, cm)) {
+                mips = cm;
+            } else if (halve_unlike_mip(nd = data, w, h, fmt, cm = mips)) {
+                mips = cm;
+            } else if (mips >= 1 && data.size() > m0) {
                 nd = data.substr(m0);
                 mips--;
             } else {
@@ -3164,9 +3433,46 @@ void thin_attached_effects(Job &job, const std::vector<std::string> &deps) {
 // art are left alone) are compressed if they're uncompressed 32-bit, and capped: the level and sky at
 // xbox_max_texture (512, like stock maps), props/vehicles/effects at xbox_max_object_texture (256),
 // lightmaps at xbox_max_lightmap.
+// The bitmaps whose alpha a shader alpha-tests (a pixel drawn only where it's over half): a model shader's base map
+// unless it's "not alpha tested" or an alpha-blended decal, an environment shader's base map when "alpha tested", a
+// transparent shader's first map when "alpha tested" (rasterizer_xbox_models.c, _environment.c,
+// _transparent_geometry.c). Their see-through parts are what halve_cutout keeps when they're made smaller.
+static void find_alpha_tested(Job &job, const std::vector<std::string> &deps) {
+    for (auto &dep : deps) {
+        std::string ext = fs::path(from_u8(dep)).extension().u8string();
+        if (ext != ".shader_model" && ext != ".shader_environment" && ext != ".shader_transparent_chicago" &&
+            ext != ".shader_transparent_chicago_extended" && ext != ".shader_transparent_generic")
+            continue;
+        fs::path own = job.owner(dep);
+        tagfile::Tag t;
+        if (own.empty() || !t.load(own / from_u8(dep))) continue;
+        tagfile::Elem r = t.root();
+        std::string map;
+        if (ext == ".shader_model") {
+            long long f = (long long)r.num("shader model flags");
+            if (!(f & 4) && !(f & 8)) map = r.ref("base map");
+        } else if (ext == ".shader_environment") {
+            if ((long long)r.num("shader environment flags") & 1) map = r.ref("base map");
+        } else {
+            const char *flags = ext == ".shader_transparent_chicago" ? "shader transparent chicago flags"
+                              : ext == ".shader_transparent_generic" ? "shader transparent generic flags"
+                                                                      : "shader transparent chicago extended flags";
+            if ((long long)r.num(flags) & 1) {
+                tagfile::Block maps = r.block(ext == ".shader_transparent_chicago_extended" ? "maps 4 stage" : "maps");
+                if (!maps.size() && ext == ".shader_transparent_chicago_extended") maps = r.block("maps 2 stage");
+                if (maps.size()) map = maps[0].ref("map");
+            }
+        }
+        if (!map.empty()) job.alpha_tested.insert(map);
+    }
+}
+
 void cap_texture_sizes(Job &job, const std::vector<std::string> &deps) {
     const Config &cfg = job.cfg;
+    find_alpha_tested(job, deps);
     if (cfg.xbox_max_texture <= 0 && cfg.xbox_max_lightmap <= 0) return;
+    g_cutout_textures = 0;
+    g_remade_tops = 0;
     std::set<std::string> world, level; // textures the level (BSP) and sky use; the BSP alone
     for (auto &d : tag_dependencies(job, job.scenario + ".scenario", false))
         if (has_suffix(d, ".scenario_structure_bsp") || has_suffix(d, ".sky")) {
@@ -3203,7 +3509,7 @@ void cap_texture_sizes(Job &job, const std::vector<std::string> &deps) {
             if (c > 0) compressed += c;
         }
         if (cap <= 0) continue;
-        int n = cap_bitmap_tag(own / from_u8(dep), cap);
+        int n = cap_bitmap_tag(own / from_u8(dep), cap, job.alpha_tested.count(dep) > 0);
         if (n > 0) (lightmap ? lightmaps : object && cap < cfg.xbox_max_texture ? objects : textures) += n;
     }
     // Level texture budget: stock outdoor maps use about 3-6 MB of level textures (Blood Gulch 3.3 MB,
@@ -3254,7 +3560,10 @@ void cap_texture_sizes(Job &job, const std::vector<std::string> &deps) {
                 }
             if (!pick) break;
             fs::path ed = editable_owner(job, pick->tag, true);
-            if (ed.empty() || cap_bitmap_tag(ed / from_u8(pick->tag), pick->side / 2) <= 0) { pick->done = true; continue; }
+            if (ed.empty() || cap_bitmap_tag(ed / from_u8(pick->tag), pick->side / 2, job.alpha_tested.count(pick->tag) > 0) <= 0) {
+                pick->done = true;
+                continue;
+            }
             int side = 0;
             size_t now = bitmap_tag_memory(ed / from_u8(pick->tag), &side);
             if (now >= pick->bytes) { pick->done = true; continue; }
@@ -3284,6 +3593,13 @@ void cap_texture_sizes(Job &job, const std::vector<std::string> &deps) {
     if (lightmaps)
         job.note("[textures] scaled " + std::to_string(lightmaps) + " lightmap pages down to " +
                  std::to_string(cfg.xbox_max_lightmap) + " px");
+    if (g_cutout_textures)
+        job.note("[textures] " + std::to_string(g_cutout_textures) + " of those halvings were of see-through cut-out textures " +
+                 "(leaves, fences, grates): made again from the full-size texture, keeping as much of them solid, instead of " +
+                 "using their own smaller versions, which fade away");
+    if (g_remade_tops)
+        job.note("[textures] " + std::to_string(g_remade_tops) + " of those halvings averaged the full-size texture instead of " +
+                 "using its own smaller version, which looked unlike it (faded out, or its alpha thinned)");
 }
 
 // All Xbox-only content passes that need the finished tag set.
@@ -3328,6 +3644,7 @@ void xbox_content_passes(Job &job) {
         xbox_fog(job);
         xbox_scenery(job, deps);
         xbox_weather(job);
+        xbox_props(job);
     }
 }
 
@@ -4024,6 +4341,49 @@ void xbox_weather(Job &job) {
     }
 }
 
+// Small scenery with very detailed collision (the level window's choice): its collision model is left out, so
+// players and shots pass through it. A player's movement is tested against every surface of the collision models
+// it's near, each tick: standing by one of Deathtrap's pilot chairs (416 surfaces for a 1-unit object; a warthog's
+// chassis has 47) cost an Xbox 5-6 ms a tick, half the frame's game time.
+void xbox_props(Job &job) {
+    if (!job.cfg.xbox_detailed_props_off || job.analysis) return;
+    std::string scen = job.scenario + ".scenario";
+    fs::path sdir = job.owner(scen);
+    tagfile::Tag st;
+    if (sdir.empty() || !st.load(sdir / from_u8(scen))) return;
+    tagfile::Block placed = st.root().block("scenery"), pal = st.root().block("scenery palette");
+    std::map<long long, int> count;
+    for (size_t i = 0; i < placed.size(); i++) count[placed[i].integer("type")]++;
+    std::vector<std::string> done;
+    for (auto &[k, n] : count) {
+        if (k < 0 || (size_t)k >= pal.size()) continue;
+        std::string ref = pal[(size_t)k].ref("name");
+        fs::path own = ref.empty() ? fs::path() : job.owner(ref);
+        tagfile::Tag ot;
+        if (own.empty() || !ot.load(own / from_u8(ref))) continue;
+        std::string coll = ot.root().ref("collision model");
+        if (coll.empty() || ot.root().num("bounding radius") > perf::kDetailedPropRadius) continue;
+        fs::path cown = job.owner(coll);
+        int surfaces = cown.empty() ? 0 : perf::collision_surfaces(cown / from_u8(coll));
+        if (surfaces < perf::kDetailedPropSurfaces) continue;
+        fs::path ed = editable_owner(job, ref, true);
+        tagfile::EditTag et;
+        if (ed.empty() || !et.load(ed / from_u8(ref))) continue;
+        std::string *path = tagfile::ref_path(et.root(), "collision model");
+        if (!path) continue;
+        path->clear();
+        if (!et.save(ed / from_u8(ref))) continue;
+        done.push_back(fs::path(from_u8(ref)).stem().u8string() + " x" + std::to_string(n) + " (" + std::to_string(surfaces) +
+                       " surfaces)");
+    }
+    if (!done.empty()) {
+        std::string list;
+        for (auto &d : done) list += (list.empty() ? "" : ", ") + d;
+        job.note("[props] left out the collision of small props whose collision is very detailed (players and shots "
+                 "pass through them; a player near one cost the Xbox several ms a tick): " + list);
+    }
+}
+
 // The LODs window's models (job.lod_changes): how many are on the map, their switch distances and size, and each
 // detail level drawn (levels that use the same version share a drawing).
 static LodView make_lod_view(Job &job, const std::string &map_name) {
@@ -4490,6 +4850,10 @@ struct ScriptConverter {
     bool planned = false;
     std::set<std::string> wide;       // user globals
     std::map<std::string, std::pair<int, std::string>> fixes; // name -> (count, what) (not for a missing name)
+    // Units given AI while attached to another object (perf::script_riders): their (ai_attach ...) left out
+    // (Config::xbox_rider_ai_off).
+    bool rider_ai_off = false;
+    std::set<std::string> riders;
 
     static std::string default_value(const std::string &type) {
         static const std::map<std::string, std::string> defaults{
@@ -4599,6 +4963,14 @@ struct ScriptConverter {
         };
         if (n.kids.empty() || n.kids[0].list || n.kids[0].str) return rebuild("");
         std::string head = hsc::lower(n.kids[0].atom);
+        // (ai_attach <a rider> <encounter>) -> nothing: it sits on another object without thinking
+        if (head == "ai_attach" && !riders.empty() && n.kids.size() >= 2 && !n.kids[1].list && riders.count(hsc::lower(n.kids[1].atom))) {
+            auto &f = fixes["ai_attach"];
+            f.first++;
+            f.second = "units riding other objects left without AI (" + std::to_string(f.first) + ": they sit there as before, without " +
+                       "thinking every tick)";
+            return stand_in('v');
+        }
         // (global short <one that holds the game's time> ...) -> long (wide_numbers)
         if (head == "global" && n.kids.size() >= 3 && !n.kids[1].list && !n.kids[2].list && hsc::lower(n.kids[1].atom) == "short" &&
             wide.count(hsc::lower(n.kids[2].atom))) {
@@ -4762,6 +5134,11 @@ struct ScriptConverter {
     void wide_numbers() {
         if (planned) return;
         planned = true;
+        if (rider_ai_off) {
+            std::string all;
+            for (auto &s : texts) all += s + "\n";
+            for (auto &r : perf::script_riders(all)) riders.insert(r);
+        }
         std::set<std::string> shorts;   // short globals
         struct Assign { std::string target; bool time = false; std::set<std::string> refs; };
         std::vector<Assign> as;
@@ -4899,6 +5276,7 @@ static void convert_scripts(Job &job, const fs::path &dir, Game target) {
     for (auto &e : fs::recursive_directory_iterator(dir))
         if (e.path().extension() == ".hsc") files.push_back(e.path());
     ScriptConverter conv(target);
+    conv.rider_ai_off = target == Game::Xbox && job.cfg.xbox_rider_ai_off;
     std::map<fs::path, std::string> texts;
     for (auto &f : files) {
         std::ifstream in(f, std::ios::binary);
@@ -5643,7 +6021,7 @@ size_t shrink_textures_to_fit(Job &job, size_t needed, int &count) {
     size_t saved = 0;
     for (auto &c : cands) {
         if (saved >= needed) break;
-        saved += shrink_bitmap_tag(job.source / from_u8(c.second), true);
+        saved += shrink_bitmap_tag(job.source / from_u8(c.second), true, job.alpha_tested.count(c.second) > 0);
         count++;
     }
     return saved;
