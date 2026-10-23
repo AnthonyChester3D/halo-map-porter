@@ -34,6 +34,28 @@ struct Result {
 Result add_lods(const std::filesystem::path &model, const double cutoffs[5], const Settings &settings,
                 const std::string &tag = {});
 
+// A heavy model's most detailed version made lighter ("trimmed"), for the Xbox: every permutation's most detailed
+// geometry is simplified by the same share, aiming at `budget` triangles for the model (its regions' first
+// permutations, as the game counts them), but never moving its shape further than `max_change` of the model's size
+// or `max_units` world units, whichever is less, so a model whose triangles all show keeps them. Texture seams stay
+// exactly as made (the simplifier only slides along them), hard edges left stay as hard, every vertex keeps its bones
+// (a character bends as before), and layers drawn over a part (a shield shimmer) follow it. Lower levels made for the
+// old version that are now as detailed as the trimmed one draw it instead, and geometries nothing draws any more are
+// dropped. Saved in place; the trimmed geometries are kept in the library (.top files) and reused.
+struct TrimSettings {
+    int budget = 4000;
+    double max_change = 0.004;
+    double max_units = 0.01;
+};
+struct Trim {
+    bool changed = false;
+    std::string why;                 // nothing changed: why
+    int before = 0, after = 0;       // most detailed triangles, as made and now
+    size_t xbox_bytes_saved = 0;     // vertex and triangle data the Xbox map no longer holds (32-byte vertices, strips)
+    bool from_library = false;
+};
+Trim trim_top(const std::filesystem::path &model, const TrimSettings &ts, const Settings &settings, const std::string &tag = {});
+
 // The models never to touch, listed in the library's skip.txt: one per line, a tag path like vehicles/jet/jet.model,
 // or just a name like jet (the model's or its object's). The library also keeps index.txt, its record of what it
 // holds.

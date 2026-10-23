@@ -1,7 +1,8 @@
 # Generates tag_layouts.inc from Invader's tag definitions (invader/src/tag/hek/definition/*.json):
 #   python3 gen_tag_layouts.py <definition folder> tag_layouts.inc
-# The app reads a few kinds of tag itself (structure BSPs, models, scenarios, objects, bitmaps, shaders) instead
-# of asking invader-edit for each value: these are their structs' sizes and fields, and every struct they contain.
+# The app reads a few kinds of tag itself (structure BSPs, models, animations, scenarios, objects, bitmaps, shaders)
+# instead of asking invader-edit for each value: these are their structs' sizes and fields, and every struct they
+# contain.
 import glob, json, os, sys
 
 ROOTS = {   # tag extension -> root struct
@@ -13,7 +14,7 @@ ROOTS = {   # tag extension -> root struct
     'shader_environment': 'ShaderEnvironment', 'shader_transparent_chicago': 'ShaderTransparentChicago',
     'shader_transparent_chicago_extended': 'ShaderTransparentChicagoExtended',
     'shader_transparent_generic': 'ShaderTransparentGeneric', 'effect': 'Effect', 'light': 'Light', 'sky': 'Sky',
-    'weather_particle_system': 'WeatherParticleSystem', 'model_collision_geometry': 'ModelCollisionGeometry',
+    'weather_particle_system': 'WeatherParticleSystem', 'model_collision_geometry': 'ModelCollisionGeometry', 'model_animations': 'ModelAnimations',
 }
 
 types = {}
@@ -98,7 +99,7 @@ for name in order:
     out_structs.append('    {"%s", %d, %d, %d},' % (name, off, first, len(out_fields) - first))
 
 lines = [
-    '// Halo CE tag (HEK) layouts the app reads directly: structure BSPs, models, scenarios, objects.',
+    '// Halo CE tag (HEK) layouts the app reads directly: structure BSPs, models, animations, scenarios, objects.',
     "// Generated from Invader's tag definitions (src/tag/hek/definition/*.json) by gen_tag_layouts.py.",
     '// kind: 0 value (type: f float, b/B 8-bit, h/H 16-bit, i/I 32-bit, s 32-character string; count values),',
     '// 1 tag reference (16 bytes, its path after the struct), 2 block (12 bytes, its elements after the struct;',

@@ -19,8 +19,8 @@ using namespace porter;
 
 namespace {
 
-enum { IDC_INTRO = 400, IDC_LIST, IDC_VIEW, IDC_LEVEL0, IDC_LEVEL4 = IDC_LEVEL0 + 4, IDC_WIRE, IDC_ABOUT, IDC_SKIP,
-       IDC_LIBRARY, IDC_CLOSE };
+enum { IDC_INTRO = 400, IDC_LIST, IDC_VIEW, IDC_LEVEL0, IDC_LEVEL4 = IDC_LEVEL0 + 4, IDC_WIRE, IDC_ASMADE, IDC_ABOUT,
+       IDC_SKIP, IDC_LIBRARY, IDC_CLOSE };
 
 struct State {
     HWND wnd = nullptr, list = nullptr, view = nullptr, tips = nullptr;
@@ -50,19 +50,27 @@ std::wstring thousands(long long n) {
     for (int i = (int)s.size() - 3; i > 0; i -= 3) s.insert((size_t)i, L",");
     return s;
 }
-const wchar_t *kind_text(char k) { return k == 'v' ? L"Vehicle" : k == 'w' ? L"Weapon or item" : k == 'b' ? L"Character" : L"Scenery"; }
+const wchar_t *kind_text(char k) {
+    return k == 'v' ? L"Vehicle" : k == 'w' ? L"Weapon or item" : k == 'b' ? L"Character" : k == 'f' ? L"First person" : L"Scenery";
+}
 std::wstring change_short(const LodView::Model &m) {   // (for the list)
     std::wstring t = m.change == "made" ? L"Made" : m.change == "library" ? L"From the LOD library"
-                     : m.change == "stock" ? L"Distances (stock)" : L"Switch distances";
+                     : m.change == "stock" ? L"Distances (stock)" : m.change == "trimmed" ? L"" : L"Switch distances";
     if (m.undone) t += L", taken out";
+    if (m.trimmed_from > 0) t = t.empty() ? L"Trimmed" : L"Trimmed; " + t;
     return t;
 }
 std::wstring change_text(const LodView::Model &m) {
     std::wstring t = m.change == "made"      ? L"Lower-detail versions made"
                      : m.change == "library" ? L"Lower-detail versions (from the LOD library)"
                      : m.change == "stock"   ? L"Switch distances (stock model)"
+                     : m.change == "trimmed" ? L""
                                              : L"Switch distances for its own";
     if (m.undone) t += L", taken out again";
+    if (m.trimmed_from > 0) {
+        std::wstring trim = L"Most detailed version trimmed for the Xbox (" + thousands(m.trimmed_from) + L" triangles as made)";
+        t = t.empty() ? trim : trim + L"; " + (wchar_t)towlower(t[0]) + t.substr(1);
+    }
     return t;
 }
 const wchar_t *level_name(int tag_level) {
@@ -90,8 +98,11 @@ bool in_skip(const LodView::Model &m) {
 // The "never make LODs" button, for the model shown.
 void update_skip() {
     bool skip = St->model >= 0 && in_skip(St->v.models[St->model]);
+    bool trimmed = St->model >= 0 && St->v.models[St->model].trimmed_from > 0;
     EnableWindow(item(IDC_SKIP), St->model >= 0 && !skip && !St->library.empty());
-    SetWindowTextW(item(IDC_SKIP), skip ? L"Never gets LODs (in skip.txt)" : L"Never make LODs for this model");
+    SetWindowTextW(item(IDC_SKIP), skip      ? L"Left as made (in skip.txt)"
+                                   : trimmed ? L"Leave this model as made"
+                                             : L"Never make LODs for this model");
 }
 
 // Its tooltip: what pressing it does (and that doing nothing keeps what's shown), or how to undo it.
@@ -103,6 +114,12 @@ const wchar_t *skip_tip() {
         St->tip = W(m.name) + L" is in skip.txt in the LOD library: conversions leave it as the map has it. To undo, "
                   L"click \"Open the LOD library folder\" and delete its line from skip.txt (the line above it names the "
                   L"model and the map).";
+    else if (m.trimmed_from > 0)
+        St->tip = L"Adds " + W(m.name) + L" to skip.txt in the LOD library, so conversions leave it exactly as the map has "
+                  L"it, for this map or any other that uses it: its most detailed version untrimmed, and no lower-detail "
+                  L"versions or switch distances made for it.\n\nTo keep what's shown here, don't press this: the trimmed "
+                  L"version is saved in the LOD library and reused every time.\n\nThe map you have now keeps it until you "
+                  L"convert it again.";
     else if (m.change == "made" || m.change == "library")
         St->tip = L"Adds " + W(m.name) + L" to skip.txt in the LOD library, so no conversion makes lower-detail versions "
                   L"of it again, for this map or any other that uses it: it's drawn in full at every distance.\n\n"
@@ -144,11 +161,16 @@ void add_tips() {
 void show_level(int k) {
     if (St->model < 0 || k < 0 || k >= (int)St->levels.size()) {
         modelview::show(St->view, nullptr, L"Click a model to see it here.");
+        EnableWindow(item(IDC_ASMADE), FALSE);
         return;
     }
     St->level = k;
     const LodView::Model &m = St->v.models[St->model];
     int p = m.level[St->levels[k]];
+    // A trimmed model's most detailed level can be shown as the map made it, to compare.
+    bool can = k == 0 && m.as_made >= 0;
+    EnableWindow(item(IDC_ASMADE), can);
+    if (can && SendMessageW(item(IDC_ASMADE), BM_GETCHECK, 0, 0) == BST_CHECKED) p = m.as_made;
     modelview::show(St->view, p >= 0 ? &St->v.previews[p] : nullptr, L"No drawing of this level.", true);
     for (int i = 0; i < 5; i++) SendMessageW(item(IDC_LEVEL0 + i), BM_SETCHECK, i == k ? BST_CHECKED : BST_UNCHECKED, 0);
 }
@@ -200,6 +222,7 @@ void select_model(int i) {
         t += L"\r\nOne level" + tris(St->levels[0]) + L".";
     }
     if (m.cutoffs[4] > 0) t += L" Not drawn at all from " + distance(m, m.cutoffs[4]) + L".";
+    if (m.as_made >= 0) t += L" Tick \"As the map made it\" to compare its most detailed level with the original.";
     SetWindowTextW(item(IDC_ABOUT), t.c_str());
     update_skip();
 }
@@ -260,6 +283,9 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case IDC_WIRE:
             modelview::show_triangles(St->view, SendMessageW(item(IDC_WIRE), BM_GETCHECK, 0, 0) == BST_CHECKED);
             return 0;
+        case IDC_ASMADE:
+            show_level(St->level);
+            return 0;
         case IDC_SKIP:
             if (St->model >= 0) {
                 const LodView::Model &m = St->v.models[St->model];
@@ -272,7 +298,10 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 update_skip();
                 std::wstring note = L"Added " + W(m.name) + L" to skip.txt: conversions won't make LODs for it again (the "
                                     L"map you have now still has them; convert it again to drop them).";
-                if (m.change != "made" && m.change != "library")
+                if (m.trimmed_from > 0)
+                    note = L"Added " + W(m.name) + L" to skip.txt: conversions will leave it as made (the map you have "
+                           L"now still has it trimmed; convert it again to keep it whole).";
+                else if (m.change != "made" && m.change != "library")
                     note = L"Added " + W(m.name) + L" to skip.txt: conversions won't give it switch distances again.";
                 SetWindowTextW(item(IDC_INTRO), note.c_str());
             }
@@ -306,8 +335,9 @@ HWND add(const wchar_t *cls, const wchar_t *text, DWORD style, int x, int y, int
 }
 
 void create_controls() {
-    add(L"STATIC", L"The models whose levels of detail this conversion changed. Click one to see each of its levels: the "
-                   L"game draws a lower one once the model is far enough away to look small.",
+    add(L"STATIC", L"The models whose levels of detail this conversion changed, or whose most detailed version it trimmed. "
+                   L"Click one to see each of its levels: the game draws a lower one once the model is far enough away to "
+                   L"look small.",
         SS_NOPREFIX, 16, 12, 1048, 36, IDC_INTRO);
     St->list = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT |
                                LVS_SINGLESEL | LVS_SHOWSELALWAYS, S(16), S(56), S(600), S(480), St->wnd, (HMENU)(INT_PTR)IDC_LIST,
@@ -332,12 +362,14 @@ void create_controls() {
         add(L"BUTTON", L"", BS_AUTORADIOBUTTON | BS_PUSHLIKE | (i == 0 ? WS_GROUP | WS_TABSTOP : 0), 632 + i * 87, 382, 84, 26,
             IDC_LEVEL0 + i);
     add(L"BUTTON", L"Show the triangles", BS_AUTOCHECKBOX | WS_TABSTOP, 632, 414, 200, 22, IDC_WIRE);
+    add(L"BUTTON", L"As the map made it", BS_AUTOCHECKBOX | WS_TABSTOP, 840, 414, 224, 22, IDC_ASMADE);
     add(L"STATIC", L"", SS_NOPREFIX, 632, 440, 432, 96, IDC_ABOUT);
     add(L"BUTTON", L"Never make LODs for this model", WS_TABSTOP, 16, 548, 260, 30, IDC_SKIP);
     add(L"BUTTON", L"Open the LOD library folder", WS_TABSTOP, 288, 548, 220, 30, IDC_LIBRARY);
     add(L"BUTTON", L"Close", WS_TABSTOP | BS_DEFPUSHBUTTON, 948, 548, 116, 30, IDC_CLOSE);
     for (int i = 0; i < 5; i++) ShowWindow(item(IDC_LEVEL0 + i), SW_HIDE);
     EnableWindow(item(IDC_SKIP), FALSE);
+    EnableWindow(item(IDC_ASMADE), FALSE);
     add_tips();
 }
 

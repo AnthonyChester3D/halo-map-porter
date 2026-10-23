@@ -214,8 +214,8 @@ On Halo Universal (no lending), "18 MB - Safe" is the closer match.
 Texture sizes (Xbox tab): the Xbox loads textures as things come into
 view. A map that needs much more texture memory than stock maps stutters
 (or briefly loses HUD graphics) wherever you can see most of it at once.
-"Max texture size" handles the map's own textures (HUD and menu art are
-left alone):
+"Max texture size" handles the map's own textures (HUD art has its own
+pass, see HUD textures; menu art is left alone):
 - "Stock-like budget (smoothest)", the default: level and sky textures at
   most 512 px, and the level's textures together kept to about 6 MB, like
   stock outdoor maps (Blood Gulch 3.3 MB, Sidewinder 5.3 MB). If the level
@@ -391,11 +391,101 @@ Levels of detail (LODs)
   scenery, but those models then switch detail where they never did on
   retail.
 
+  Heavy models ("Heavy models", Xbox tab)
+  Some custom models are far denser than anything the Xbox shipped with:
+  Precipice's beam cannon has 15,327 triangles in the world and as many
+  in first person, where the Xbox's heaviest stock first-person weapon
+  has about 2,200 and its warthog about 2,800. Every triangle costs tag
+  memory and drawing time, and lower-detail versions don't help up close.
+  So before any lower-detail versions are made, the app trims the most
+  detailed version of the map's own heavy models: it takes out the
+  vertices that change the shape least, keeping every other vertex
+  exactly as it was. Texture seams stay exactly where they are (vertices
+  can only slide along them), every hard edge left is as hard as made
+  (a model of flat facets, like a mech's armor plates, can lose triangles
+  too), two-sided surfaces (glass, fins) stay as made, and a change in
+  texture coordinates or shading counts like a change in shape, so a
+  texture can't slide across a surface.
+  Bones: every vertex keeps the bones that move it and how much, and a
+  vertex is only ever taken out into one moved exactly the same way. So
+  the triangles left either move as one piece or are the model's own
+  (where a joint bends), and a character or a vehicle with moving parts
+  bends as before in every pose, off by no more than at rest.
+  Layers: a part drawn over another with the same triangles (a
+  character's shield shimmer is its whole body again with the shield's
+  shader; a weapon's hologram over its gauge) gets exactly the triangles
+  the part below keeps.
+    Leave them as made   Nothing trimmed.
+    Trim (they look the same)   The default. The shape moves at most
+                         0.25% of the model's size (characters 0.18%:
+                         fingers thin out first; first-person weapons
+                         0.12%, seen closest) and never more than 0.006
+                         world units (about 2 cm).
+    Trim harder (details change)   0.6% (characters 0.4%, first person
+                         0.25%), at most 0.015 units: much lighter, but
+                         small details (a seat, a bumper bar, fingers)
+                         can lose their shape up close.
+  Only models over their kind's budget are trimmed, and never below it:
+  vehicles and scenery 4,000 triangles, characters and first-person
+  weapons 3,000, weapons and items 2,000. Stock models and the models in
+  skip.txt are left alone. A model whose triangles all show (a mech made
+  of hundreds of separately textured panels) can't lose many, and the
+  log says so. Lower levels a model already had that are now as detailed
+  as its trimmed top draw the top instead, and versions nothing draws any
+  more are dropped (more memory saved). The lower-detail versions below
+  are then made from the trimmed version. Trimmed versions are kept in
+  the LOD library (.top files) and reused. The log's [heavy] line names
+  each model with its triangles as made > now, and how much tag memory
+  that saved; in the LODs window, "As the map made it" swaps the original
+  back in, to compare.
+  Precipice, as made > trimmed (harder): beam cannon 15,327 > 5,156
+  (2,548), its first-person model 15,331 > 8,203 (5,162), the damaged
+  chaingun warthog 8,580 > 5,435 (3,994), and with "Use the Xbox's own
+  weapons, vehicles and player model" off, its player model 7,483 > 6,543
+  (4,529), which then gets lower-detail versions too.
+  First-person arms always come from the Xbox's own globals, so a map's
+  custom arms never reach the Xbox.
+
+  Animations ("Animations", Xbox tab)
+  Animations take tag memory, the Xbox's hard limit (22 MB on every Xbox,
+  modded or not). Stored frame by frame, a bone that turns takes 8 bytes
+  for every frame of the animation, even where it barely moves. The Xbox
+  can also play animations stored as keyframes ("compressed"): each bone
+  keeps only the frames where its motion changes, and the engine blends
+  in between. Bungie stored the Xbox's cinematics that way. The app
+  stores the map's animations that way too, its own and the Xbox's it
+  uses (as copies; your Xbox tagset is left alone).
+    Leave them as made   Nothing changed.
+    Compress (they move the same)   The default. Every bone stays within
+                         0.05 degrees and 0.0001 world units (0.3 mm) of
+                         each frame as made, about what the format's own
+                         rounding moves it anyway (its rotations keep 12
+                         bits a number). First-person animations come out
+                         about half their size, characters about a
+                         quarter smaller.
+    Compress harder (fast moves drift)   0.2 degrees / 0.0004 units:
+                         another 10-15% smaller; a fast move (a melee
+                         swing) can be a few millimetres off.
+  Each animation is also checked as a whole: its bones are posed down the
+  skeleton in every frame, and if any bone's end would land further from
+  where it was made than the rounding alone puts it (plus 0.3 mm; harder:
+  2 mm), tighter tolerances are tried, and an animation that still can't
+  is left as made. The tags keep their frames as made too, with the
+  keyframes after them (as Bungie's tools save them); the map keeps only
+  the keyframes. Animations already stored as keyframes (some of an MCC
+  tagset's are) are left as they are. The log's [anim] line gives the tag
+  memory before and after, and the farthest any bone end moved.
+  Blood Gulch (the Xbox's own animations): tag memory 8.1 MB > 7.6 MB
+  (harder 7.5 MB). Precipice with its own weapons: 1.4 MB of animations >
+  853 KB. Posing a bone from keyframes takes the Xbox a little more work
+  than reading a stored frame (finding its two keyframes and blending
+  them).
+
   Making lower-detail versions
   Many custom models have only one version, so the Xbox draws all of
   their triangles however far away they are. "Make lower-detail versions
-  (LODs) of the map's models that have none" (Xbox tab, on by default)
-  makes them for the map's own models with 1,000 triangles or more: a
+  (LODs) when a model has none" (Xbox tab, on by default) makes them for
+  the map's own models with 1,000 triangles or more: a
   medium version with about half the triangles (used from the "high"
   switch distance down) and a low one with about a fifth (from "medium"
   down). It takes out the vertices that change the shape least and keeps
@@ -405,9 +495,11 @@ Levels of detail (LODs)
   stays separate from the body). A version is only added when it has at
   least a fifth fewer triangles than the one above it, and a model with
   no switch distances gets the stock-style ones above.
-  Left alone: stock models, characters (bipeds), first-person models,
-  models whose shape needs most of their triangles, and the models listed
-  in skip.txt (below). The [lod] lines in the log name each model with its
+  Characters get them too: as when trimming (see Bones above), every
+  vertex keeps its bones, so they bend as before at every distance.
+  Left alone: stock models, first-person models, models whose shape
+  needs most of their triangles, and the models listed in skip.txt
+  (below). The [lod] lines in the log name each model with its
   triangles, most detailed > medium > low.
   The versions cost memory: on the Xbox, a model's vertices and triangles
   are part of the 22 MB of tag memory (and of the map file), and the
@@ -418,17 +510,19 @@ Levels of detail (LODs)
   measures maps without them.
 
   Seeing them: after an Xbox conversion that changed any model's levels of
-  detail, "See the LODs" (next to "Open report") lists those models, how
-  many are on the map and their triangles by level. Click one to see each
-  level ("Most detailed", "Medium", "Low"...: drag to turn it, wheel to
-  zoom; "Show the triangles" draws their edges) and roughly how far away
-  the game switches to it, in metres and feet (on a 4:3 screen; a model's
-  size on screen decides it). Versions you're happy with need nothing:
-  they're kept in the LOD library and reused every time. "Never make LODs
-  for this model" adds it to skip.txt, so no conversion makes lower-detail
-  versions or gives switch distances for it again, on this map or any
-  other that uses it (convert the map again to drop the ones it has now;
-  delete its line from skip.txt to undo). Hover over the button for what
+  detail or trimmed it, "See the LODs" (next to "Open report") lists those
+  models, how many are on the map and their triangles by level. Click one
+  to see each level ("Most detailed", "Medium", "Low"...: drag to turn it,
+  wheel to zoom; "Show the triangles" draws their edges) and roughly how
+  far away the game switches to it, in metres and feet (on a 4:3 screen; a
+  model's size on screen decides it). For a trimmed model, "As the map
+  made it" swaps its most detailed level for the original, to compare.
+  Versions you're happy with need nothing: they're kept in the LOD library
+  and reused every time. "Never make LODs for this model" ("Leave this
+  model as made" for a trimmed one) adds it to skip.txt, so no conversion
+  trims it, makes lower-detail versions or gives switch distances for it
+  again, on this map or any other that uses it (convert the map again to
+  drop what it has now; delete its line from skip.txt to undo). Hover over the button for what
   it will do to the model shown. It also works after a map that didn't
   fit: those versions were taken out again, and the list says so.
 
@@ -439,15 +533,20 @@ Levels of detail (LODs)
   them instead of making them again. In the folder:
     *.lod       The versions of one model's geometry, named after it (an
                 edited model gets new ones).
+    *.top       A trimmed most detailed version of one geometry (see
+                "Heavy models"; each setting has its own).
     index.txt   One line per model added: date, tag path, triangles (most
-                detailed > medium > low) and its .lod files.
-    skip.txt    Models to leave alone (no lower-detail versions made, no
-                switch distances given), one per line: a tag path
-                (vehicles\jet\jet.model) or a name (jet: the model's or
-                its object's). Lines starting with # are ignored. "Never
-                make LODs for this model" in the LODs window adds to it,
-                or write it yourself.
-  Deleting .lod files (or the whole folder) has them made again next time.
+                detailed > medium > low, or "trimmed" as made > now) and
+                its files.
+    skip.txt    Models to leave alone (not trimmed, no lower-detail
+                versions made, no switch distances given), one per line: a
+                tag path (vehicles\jet\jet.model) or a name (jet: the
+                model's or its object's). Lines starting with # are
+                ignored. The LODs window's "Never make LODs for this
+                model" or "Leave this model as made" adds to it, or write
+                it yourself.
+  Deleting .lod or .top files (or the whole folder) has them made again
+  next time.
   Stock maps are the exception: converting Custom Edition's Blood Gulch,
   Sidewinder and the other maps the Xbox also has gives you the Xbox's own
   version of the map, with the Xbox's vehicles. Maps the Xbox never had
@@ -849,11 +948,34 @@ HUDs from MCC maps
   everything at double the Xbox's positions, and its HUD bitmaps are drawn
   at half size ("half hud scale"). The Xbox ignores that flag, so MCC HUDs
   used to come out twice as big. The app now halves the map's own HUDs'
-  positions and sizes, shrinks HUD bitmaps MCC draws at half size to the
-  resolution the Xbox draws them at (a quarter of the memory or less), and
-  places elements MCC anchors to the screen centre (scopes) from the HUD's
-  corner instead. It tells an MCC HUD from a Custom Edition one by
-  comparing the stock assault rifle HUD with the Xbox's.
+  positions and sizes (and halves again elements whose bitmaps MCC draws
+  at half size), and places elements MCC anchors to the screen centre
+  (scopes) from the HUD's corner instead. It tells an MCC HUD from a
+  Custom Edition one by comparing the stock assault rifle HUD with the
+  Xbox's. The textures themselves are then fitted (see HUD textures).
+
+HUD textures
+  The Xbox draws the HUD on a 640x480 screen, one texel to a pixel at
+  scale 1. HUDs made for big screens draw big textures at a fraction of
+  that: an MCC tagset like CMT's draws its 512x512 sheets at a quarter,
+  so 15 of every 16 texels never reach the screen, and with no mipmaps
+  the thin lines that do break up into dashes. For every bitmap of the
+  map's own that only HUD elements draw, the app halves the texture while
+  every element still draws it at no more than a texel to a pixel, and
+  doubles those elements' scales: the same size on screen, the lines
+  whole again, and a quarter of the memory per halving. (Precipice with
+  CMT's weapons: 23 HUD bitmaps, 12.6 MB of textures down to 1.4 MB.)
+  Bitmaps a HUD also uses some other way (a multitexture overlay's map),
+  or that anything besides HUDs uses, are left alone.
+  Scope masks (a weapon HUD's screen effect mask: the dark surround of a
+  zoomed view) are drawn a texel to a pixel too, centred, not stretched to
+  the screen. One made for a 1080p screen (1024 rows tall) is bigger than
+  the whole Xbox screen, so the scope's window covered all of it and the
+  surround never showed. Each is halved while it still covers the screen
+  (240 rows for a split-screen-only mask), so it frames the view about as
+  it does on the screen it was made for (CMT's 4 masks: 6 MB down to
+  1.5 MB). MCC's BC7 HUD textures are written as DXT5 (DXT1 when nothing
+  in them is see-through) as they're halved.
 
 The output is an NTSC (US) Xbox map.
 
@@ -1114,6 +1236,9 @@ The log lists every automatic change:
   [textures] Textures were scaled or compressed like stock Xbox maps.
   [shaders] Layered transparent shaders were flattened for Xbox.
   [effects] Looping prop effects were lightened for Xbox.
+  [heavy] Heavy models' most detailed versions were trimmed (see "Heavy
+          models" above).
+  [anim]  Animations were stored as keyframes (see "Animations" above).
   [lod]   Lower-detail versions were made for models, or models got
           switch distances for theirs (see "Levels of detail" above).
   [portals] A level made without portals got them (see "Portals" above).

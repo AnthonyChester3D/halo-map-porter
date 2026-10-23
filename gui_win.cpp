@@ -67,10 +67,10 @@ enum {
     ID_PK_MNAME_LBL, ID_PK_MNAME, ID_PK_DESC, ID_PK_OUT_LBL, ID_PK_OUT, ID_PK_OUT_BROWSE, ID_PK_CREATE,
     // the Halo Universal XBE's map list settings (build 20)
     ID_PK_MAPLIST,
-    // stock models' unused levels of detail
-    ID_X_LODSTOCK,
+    // stock models' unused levels of detail; storing animations as keyframes
+    ID_X_LODSTOCK, ID_X_ANIM_LBL, ID_X_ANIM,
     // making lower-detail versions, and the LOD library's folder (each *_BROWSE directly follows its edit box)
-    ID_X_MAKELOD, ID_S_LOD_LBL, ID_S_LOD, ID_S_LOD_BROWSE, ID_S_LOD_HINT, ID_S_TOUR,
+    ID_X_MAKELOD, ID_X_TRIM_LBL, ID_X_TRIM, ID_S_LOD_LBL, ID_S_LOD, ID_S_LOD_BROWSE, ID_S_LOD_HINT, ID_S_TOUR,
     // portals for levels made without them
     ID_X_PORTALS,
     // the level shaders window
@@ -159,6 +159,8 @@ static void save_settings() {
     ini_set(L"x_allveh", checked(ID_X_ALLVEH) ? L"1" : L"0");
     ini_set(L"x_lodstock", checked(ID_X_LODSTOCK) ? L"1" : L"0");
     ini_set(L"x_makelod", checked(ID_X_MAKELOD) ? L"1" : L"0");
+    ini_set(L"x_trim", std::to_wstring(std::max(0, sel(ID_X_TRIM))));
+    ini_set(L"x_anim", std::to_wstring(std::max(0, sel(ID_X_ANIM))));
     ini_set(L"x_portals", std::to_wstring(std::max(0, sel(ID_X_PORTALS))));
     ini_set(L"x_tex2", std::to_wstring(sel(ID_X_TEX)));
     ini_set(L"x_lm", std::to_wstring(sel(ID_X_LM)));
@@ -411,6 +413,8 @@ static void apply_xbox_options(Config &cfg) {
     cfg.xbox_keep_all_vehicles = folder_mode() && checked(ID_X_ALLVEH);
     cfg.xbox_lod_stock_models = checked(ID_X_LODSTOCK);
     cfg.xbox_make_lods = checked(ID_X_MAKELOD);
+    cfg.xbox_trim_models = std::clamp(sel(ID_X_TRIM), 0, 2);
+    cfg.xbox_compress_animations = std::clamp(sel(ID_X_ANIM), 0, 2);
     cfg.xbox_add_portals = sel(ID_X_PORTALS) >= 1;
     cfg.xbox_replan_portals = sel(ID_X_PORTALS) == 2;
     {
@@ -866,7 +870,7 @@ static std::string contents_key(const Config &cfg, const fs::path &in) {
     auto mt = fs::last_write_time(in, ec);
     std::string key = N(lower(in.wstring())) + "|" + std::to_string((long long)mt.time_since_epoch().count()) + "|" +
                       (cfg.xbox_use_stock_versions ? "s" : "-") + (cfg.xbox_keep_all_vehicles ? "a" : "-") +
-                      (cfg.xbox_make_lods ? "l" : "-") + "|" +
+                      (cfg.xbox_make_lods ? "l" : "-") + std::to_string(cfg.xbox_trim_models) + std::to_string(cfg.xbox_compress_animations) + "|" +
                       cfg.xbox_other_weapons + "|" + cfg.xbox_vehicle_slots[0] + "|" + cfg.xbox_vehicle_slots[1] + "|" +
                       cfg.xbox_vehicle_slots[2];
     for (auto &w : cfg.xbox_keep_weapons) key += "|k" + w;
@@ -1807,11 +1811,15 @@ static void create_controls() {
             ID_X_W2_HINT);
     }
     y += 32;
-    check(2, L"Make lower-detail versions (LODs) of the map's models that have none, kept in the LOD library (Settings tab)",
-          26, y, 708, ID_X_MAKELOD);
+    check(2, L"Make lower-detail versions (LODs) when a model has none", 26, y, 380, ID_X_MAKELOD);
+    label(2, L"Heavy models:", 410, y - 2, 86, ID_X_TRIM_LBL);
+    list_combo(2, 500, y - 2, 234, ID_X_TRIM,
+               {L"Leave them as made", L"Trim (they look the same)", L"Trim harder (details change)"});
     y += 24;
-    check(2, L"Also use the lower-detail versions of Bungie's own trees, rocks and plants at a distance (retail never did)",
-          26, y, 708, ID_X_LODSTOCK);
+    check(2, L"Also use LODs of Bungie's trees, rocks and plants (retail didn't)", 26, y, 380, ID_X_LODSTOCK);
+    label(2, L"Animations:", 410, y - 2, 86, ID_X_ANIM_LBL);
+    list_combo(2, 500, y - 2, 234, ID_X_ANIM,
+               {L"Leave them as made", L"Compress (they move the same)", L"Compress harder (fast moves drift)"});
     y += 24;
     label(2, L"Portals:", 26, y - 2, 60, ID_X_PORTALS_LBL);
     list_combo(2, 90, y - 2, 430, ID_X_PORTALS,
@@ -1905,6 +1913,8 @@ static void create_controls() {
     set_check(ID_X_ALLVEH, ini_get(L"x_allveh", L"1") == L"1");
     set_check(ID_X_LODSTOCK, ini_get(L"x_lodstock", L"0") == L"1");
     set_check(ID_X_MAKELOD, ini_get(L"x_makelod", L"1") == L"1");
+    SendDlgItemMessageW(g_wnd, ID_X_TRIM, CB_SETCURSEL, std::clamp(_wtoi(ini_get(L"x_trim", L"1").c_str()), 0, 2), 0);
+    SendDlgItemMessageW(g_wnd, ID_X_ANIM, CB_SETCURSEL, std::clamp(_wtoi(ini_get(L"x_anim", L"1").c_str()), 0, 2), 0);
     SendDlgItemMessageW(g_wnd, ID_X_PORTALS, CB_SETCURSEL, std::clamp(_wtoi(ini_get(L"x_portals", L"1").c_str()), 0, 2), 0);
     {
         std::wstring lib = ini_get(L"lod_library");
@@ -2046,7 +2056,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case ID_X_LODSTOCK: case ID_X_MAKELOD:
             if (code == BN_CLICKED) save_settings();
             break;
-        case ID_X_PORTALS:
+        case ID_X_PORTALS: case ID_X_TRIM: case ID_X_ANIM:
             if (code == CBN_SELCHANGE) save_settings();
             break;
         case ID_X_CONTENTS:

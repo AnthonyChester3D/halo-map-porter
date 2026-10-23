@@ -1,5 +1,6 @@
 // Halo Map Porter - conversion engine
 #include "core.hpp"
+#include "animcomp.hpp"
 #include "inflate.hpp"
 #include "lod.hpp"
 #include "perf.hpp"
@@ -289,6 +290,7 @@ struct Job {
     std::vector<std::pair<fs::path, std::string>> portal_backups;   // levels the app gave portals, as they were
     size_t lod_xbox_bytes = 0;
     std::vector<LodView::Model> lod_changes;   // the models whose levels of detail changed (for the LODs window)
+    std::map<std::string, std::string> trim_originals;   // trimmed models (tag) as the map made them, for that window
     fs::path shaders_file;                     // the level shaders file (levelshaders.hpp), for the window
     std::string shaders_line;                  // the report's line on the level's shader passes
 
@@ -2278,7 +2280,7 @@ static bool block_halvable(int w, int h) { return w >= 8 && h >= 8 && (w / 2) % 
 // DXT levels smaller than a block are read from their one block.
 static bool decode_level(const std::string &d, int w, int h, int fmt, std::vector<unsigned char> &rgba) {
     rgba.assign((size_t)w * h * 4, 0);
-    if (fmt == 14 || fmt == 15 || fmt == 16) {
+    if (fmt == 14 || fmt == 15 || fmt == 16 || fmt == 18) {
         int bs = fmt == 14 ? 8 : 16, bw = std::max(1, (w + 3) / 4), bh = std::max(1, (h + 3) / 4);
         if (d.size() < (size_t)bw * bh * bs) return false;
         unsigned char blk[64];
@@ -2287,7 +2289,8 @@ static bool decode_level(const std::string &d, int w, int h, int fmt, std::vecto
                 const char *src = d.data() + ((size_t)by * bw + bx) * bs;
                 if (fmt == 14) bcdec_bc1(src, blk, 16);
                 else if (fmt == 15) bcdec_bc2(src, blk, 16);
-                else bcdec_bc3(src, blk, 16);
+                else if (fmt == 16) bcdec_bc3(src, blk, 16);
+                else bcdec_bc7(src, blk, 16);   // MCC's BC7
                 for (int r = 0; r < 4; r++)
                     for (int c = 0; c < 4; c++) {
                         int x = bx * 4 + c, y = by * 4 + r;
@@ -2450,7 +2453,7 @@ static void keep_coverage(std::vector<unsigned char> &rgba, double target) {
 // unchanged) otherwise.
 static bool halve_cutout(std::string &data, int &w, int &h, int &fmt, int &mips) {
     size_t m0 = mip_bytes(w, h, fmt);
-    if (!alpha_format(fmt) || !m0 || data.size() < m0) return false;
+    if (!alpha_format(fmt) || !m0 || data.size() < m0 || fmt == 18) return false;   // (BC7 can't be written)
     std::vector<unsigned char> cur, usual;
     if (!decode_level(data.substr(0, m0), w, h, fmt, cur) || !see_through(cur)) return false;
     double target = alpha_coverage(cur, 1.0);
@@ -2487,7 +2490,7 @@ static bool halve_cutout(std::string &data, int &w, int &h, int &fmt, int &mips)
 static int g_remade_tops = 0;   // (for the log)
 static bool halve_unlike_mip(std::string &data, int w, int h, int fmt, int &mips) {
     size_t m0 = mip_bytes(w, h, fmt), m1 = mip_bytes(std::max(1, w / 2), std::max(1, h / 2), fmt);
-    if (!m0 || mips < 1 || data.size() < m0 + m1) return false;
+    if (!m0 || mips < 1 || data.size() < m0 + m1 || fmt == 18) return false;   // (BC7 can't be written)
     std::vector<unsigned char> top, own, avg;
     if (!decode_level(data.substr(0, m0), w, h, fmt, top) || !decode_level(data.substr(m0, m1), std::max(1, w / 2), std::max(1, h / 2), fmt, own))
         return false;
@@ -2640,10 +2643,15 @@ int convert_bc7_bitmap_tag(const fs::path &p, bool write) {
 // Halve an image (2x2 box filter) in one of Halo's pixel formats. Pixel data is little endian (as the
 // GPU reads it). DXT1 keeps its see-through pixels in its own 3-colour mode. False = unsupported.
 bool halve_pixels(const std::string &d, int w, int h, int &fmt, std::string &out) {
-    if ((fmt == 14 || fmt == 15 || fmt == 16) && !(w % 4 || h % 4 || std::max(1, w / 2) % 4 || std::max(1, h / 2) % 4)) {
+    if ((fmt == 14 || fmt == 15 || fmt == 16 || fmt == 18) && !(w % 4 || h % 4 || std::max(1, w / 2) % 4 || std::max(1, h / 2) % 4)) {
         std::vector<unsigned char> rgba, half;
         if (!decode_level(d, w, h, fmt, rgba)) return false;
         box_half(rgba, w, h, half);
+        if (fmt == 18) {   // BC7 (MCC) can't be written: DXT5, or DXT1 when nothing is see-through
+            fmt = 14;
+            for (size_t i = 3; i < half.size() && fmt == 14; i += 4)
+                if (half[i] != 255) fmt = 16;
+        }
         out = encode_level(half, std::max(1, w / 2), std::max(1, h / 2), fmt);
         return true;
     }
@@ -3028,10 +3036,11 @@ static bool halve_texture(std::string &data, int &w, int &h, int &fmt, int &mips
     return true;
 }
 
-// HUD bitmaps that MCC (or Halo PC) draws at half size ("half hud scale"): shrink every texture in the
-// tag the same number of times, up to `times`, so the Xbox draws them at the size MCC does. Sprite
-// rectangles are fractions of the sheet, so they stay right. Returns how many halvings were done for all
-// of the tag's textures (0 = none: unreadable, or a texture that can't be halved).
+// A HUD bitmap made smaller: every texture in the tag halved the same number of times, up to `times` (for
+// HUD bitmaps MCC or Halo PC draws at half size, "half hud scale", so the Xbox draws them at the size MCC
+// does; and fit_hud_textures). Sprite rectangles are fractions of the sheet, so they stay right. Returns how
+// many halvings were done for all of the tag's textures (0 = none: unreadable, or a texture that can't be
+// halved).
 int shrink_hud_bitmap_tag(const fs::path &p, int times) {
     std::string b;
     {
@@ -3074,6 +3083,15 @@ int shrink_hud_bitmap_tag(const fs::path &p, int times) {
         }
         if (!ok) continue;
         put_be16(nb, S + 6, (uint16_t)(be16(nb, S + 6) & ~0x90));   // the half-scale flags are done with
+        if (be16(nb, S + 2) == 6) {   // tag-level format BC7: DXT5/DXT1 once no texture is BC7 any more
+            bool bc7 = false, alpha = false;
+            for (uint32_t i = 0; i < nbd; i++) {
+                int f = be16(nb, bd_off + 48 * i + 12);
+                bc7 = bc7 || f == 18;
+                alpha = alpha || f == 15 || f == 16;
+            }
+            if (!bc7) put_be16(nb, S + 2, alpha ? 2 : 0);
+        }
         std::string out = nb.substr(0, pp_off) + out_pix + nb.substr(pp_off + pp);
         put_be32(out, S + 48, (uint32_t)out_pix.size());
         put_be32(out, 40, ~crc32_of(out.data() + 64, out.size() - 64));
@@ -3626,6 +3644,45 @@ void cap_texture_sizes(Job &job, const std::vector<std::string> &deps) {
 }
 
 // All Xbox-only content passes that need the finished tag set.
+// The map's animations stored as keyframes, the way Bungie stored the Xbox's cinematics (animcomp.hpp): its own, and
+// the Xbox's it uses (copied to fixes). Also when measuring for the weapons & vehicles window: the map has them so.
+static void xbox_animations(Job &job, const std::vector<std::string> &deps) {
+    const int level = job.cfg.xbox_compress_animations;
+    if (level <= 0) return;
+    int graphs = 0, anims = 0, stock = 0;
+    size_t before = 0, after = 0;
+    double worst = 0;
+    for (auto &dep : deps) {
+        if (!has_suffix(dep, ".model_animations")) continue;
+        fs::path own = job.owner(dep);
+        tagfile::EditTag ed;
+        if (own.empty() || !ed.load(own / from_u8(dep))) continue;
+        animcomp::GraphResult r = animcomp::compress_graph(ed.root(), level);
+        if (!r.compressed) continue;
+        fs::path dst = editable_owner(job, dep, true);
+        if (dst.empty() || !ed.save(dst / from_u8(dep))) continue;
+        graphs++;
+        anims += r.compressed;
+        before += r.before;
+        after += r.after;
+        worst = std::max(worst, r.worst);
+        if (own == job.overlay) stock++;
+    }
+    if (!graphs) return;
+    auto size = [](size_t b) {
+        char t[32];
+        if (b >= 1048576) snprintf(t, sizeof t, "%.1f MB", b / 1048576.0);
+        else snprintf(t, sizeof t, "%d KB", (int)((b + 1023) / 1024));
+        return std::string(t);
+    };
+    char mm[32];
+    snprintf(mm, sizeof mm, "%.1f mm", worst * 3048.0);   // (a world unit is 10 feet)
+    job.note("[anim] stored " + std::to_string(anims) + " animations of " + std::to_string(graphs) + " animation graphs" +
+             (stock ? " (" + std::to_string(stock) + " of them the Xbox's own)" : "") +
+             " as keyframes, the Xbox's compressed format" + (level >= 2 ? ", compressed harder" : "") + ": " +
+             size(before) + " of tag memory now " + size(after) + " (the farthest any bone end moves: " + mm + ")");
+}
+
 void xbox_content_passes(Job &job) {
     auto deps = tag_dependencies(job, job.scenario + ".scenario", true);
     flatten_layered_shaders(job, deps);
@@ -3659,7 +3716,10 @@ void xbox_content_passes(Job &job) {
     if (flares)
         job.note("[xbox] removed the reflections from " + std::to_string(flares) +
                  " lens flares that have no bitmap to draw them with");
-    if (!job.cfg.level_shaders_only) xbox_lods(job, deps);
+    if (!job.cfg.level_shaders_only) {
+        xbox_lods(job, deps);
+        xbox_animations(job, deps);
+    }
     xbox_lights(job, deps);
     xbox_portals(job);
     xbox_reflections(job);
@@ -4094,6 +4154,7 @@ static std::map<std::string, char> model_kinds(Job &job, const std::vector<std::
             fs::path own = job.owner(dep);
             std::string m = own.empty() ? "" : perf::weapon_first_person_model(own / from_u8(dep));
             if (!m.empty()) first_person.insert(m);
+            if (!m.empty() && !object_name.count(m)) object_name[m] = fs::path(from_u8(dep)).stem().u8string() + " (first person)";
         }
     static const std::pair<const char *, char> kinds[] = {
         {".vehicle", 'v'}, {".biped", 'b'}, {".scenery", 's'}, {".device_machine", 's'}, {".device_control", 's'},
@@ -4116,10 +4177,12 @@ static std::map<std::string, char> model_kinds(Job &job, const std::vector<std::
 
 static std::string thousands(long long v);
 
-// Levels of detail. A model drawn in the world (not first-person) of the map's own with no lower-detail versions gets
-// them made (lod.hpp; Xbox tab option, on by default), kept in the LOD library so another map with the same model
-// reuses them; characters are left alone (bones bend them). Then models with lower-detail versions but no switch
-// distances get some: they always draw their most detailed level otherwise (the engine draws a level once the model
+// Levels of detail. First, the map's own heavy models (over their kind's budget) get a lighter most detailed version
+// (trimmed: Xbox tab option, on by default), first-person weapons and characters included. Then a model drawn in the
+// world (not first-person) of the map's own with no lower-detail versions gets them made (lod.hpp; Xbox tab option,
+// on by default), kept in the LOD library so another map with the same model reuses them. Characters too: every
+// vertex keeps its bones, so they bend as before (lod.cpp, Bones). Then models with lower-detail versions but no
+// switch distances get some: they always draw their most detailed level otherwise (the engine draws a level once the model
 // is at least that many pixels across, and with every distance 0 that's always the top one). The distances are like
 // the stock Xbox models of the kind (Bungie's own, in tag order super high, high, medium, low, super low; super low
 // stays 0, so nothing is left out). The map's own models always; Bungie's (36 stock models ship like this, mostly
@@ -4153,6 +4216,76 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
 
     lod::Settings lod_settings;
     lod_settings.library = !job.cfg.lod_library.empty() ? job.cfg.lod_library : job.cfg.cache_dir / "lod_library";
+    // A model's entry in the LODs window (one per model: trimmed, then given LODs or distances, is one entry).
+    auto record = [&](const std::string &dep, char kind, const std::string &change) -> LodView::Model & {
+        for (auto &m : job.lod_changes)
+            if (m.tag == dep) {
+                m.change = change;
+                return m;
+            }
+        LodView::Model lm;
+        lm.tag = dep;
+        lm.name = name_of(dep);
+        lm.kind = kind;
+        lm.change = change;
+        job.lod_changes.push_back(lm);
+        return job.lod_changes.back();
+    };
+
+    // 0. Trimming: the most detailed version of the map's own heavy models made lighter (lod.hpp trim_top), first, so
+    // the lower-detail versions are made from the lighter one. Also when measuring for the weapons & vehicles window:
+    // the map has them so. First-person weapons too (drawn whenever they're held, always in full, and close up: kept
+    // closer to their shape), and characters (they bend as before: lod.cpp, Bones).
+    if (job.cfg.xbox_trim_models > 0) {
+        bool harder = job.cfg.xbox_trim_models >= 2;
+        std::vector<std::string> trimmed, floor;
+        size_t saved = 0;
+        for (auto &dep : deps) {
+            if (!has_suffix(dep, ".model") && !has_suffix(dep, ".gbxmodel")) continue;
+            fs::path own = job.owner(dep);
+            bool fp = first_person.count(dep) > 0;
+            if (own.empty() || own == job.overlay || (!fp && !kinds.count(dep))) continue;
+            lod::TrimSettings ts;
+            char kind = fp ? 'f' : kinds[dep];
+            ts.budget = kind == 'f' || kind == 'b' ? 3000 : kind == 'w' ? 2000 : 4000;
+            // (first-person weapons are seen closest; characters up close too, and their fingers thin out first)
+            ts.max_change = fp ? (harder ? 0.0025 : 0.0012) : kind == 'b' ? (harder ? 0.004 : 0.0018) : (harder ? 0.006 : 0.0025);
+            ts.max_units = harder ? 0.015 : 0.006;
+            perf::ModelStats ms = perf::model_stats(own / from_u8(dep));
+            if (!ms.ok || ms.triangles <= ts.budget) continue;
+            if (lod::skipped(lod_settings, dep, name_of(dep))) continue;   // (listed in the LOD library's skip.txt)
+            fs::path ed = editable_owner(job, dep);
+            if (ed.empty()) continue;
+            std::string before;
+            {
+                std::ifstream in(ed / from_u8(dep), std::ios::binary);
+                before.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            }
+            lod::Trim r = lod::trim_top(ed / from_u8(dep), ts, lod_settings, dep);
+            if (!r.changed) {
+                floor.push_back(name_of(dep) + " " + thousands(r.before));
+                continue;
+            }
+            saved += r.xbox_bytes_saved;
+            trimmed.push_back(name_of(dep) + " " + thousands(r.before) + " > " + thousands(r.after) +
+                              (r.after > ts.budget * 1.1 ? "" : " (its budget)"));
+            if (!job.analysis) {
+                job.trim_originals[dep] = std::move(before);
+                record(dep, kind, "trimmed").trimmed_from = r.before;
+            }
+        }
+        if (!trimmed.empty()) {
+            char size[32];
+            if (saved >= 1048576) snprintf(size, sizeof size, "%.1f MB", saved / 1048576.0);
+            else snprintf(size, sizeof size, "%d KB", (int)((saved + 1023) / 1024));
+            job.note("[heavy] made the most detailed version of " + std::to_string(trimmed.size()) +
+                     (trimmed.size() == 1 ? " heavy model" : " heavy models") + " lighter" +
+                     (harder ? ", trimmed harder so small details may change" : ", so they look the same") + " (" + size +
+                     " less of the Xbox's tag memory and map file; triangles as made > now): " + list(trimmed));
+        }
+        if (!floor.empty())
+            job.note("[heavy] left as they are (every triangle shows, or keeps a texture in place): " + list(floor, 4));
+    }
 
     // 1. Making lower-detail versions. Not when measuring for the weapons & vehicles window: it shows what the map
     // needs to fit, and the conversion takes them out again when they don't fit.
@@ -4163,7 +4296,7 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
         for (auto &dep : deps) {
             if (!has_suffix(dep, ".model") && !has_suffix(dep, ".gbxmodel")) continue;
             fs::path own = job.owner(dep);
-            if (own.empty() || own == job.overlay || !kinds.count(dep) || first_person.count(dep) || kinds[dep] == 'b') continue;
+            if (own.empty() || own == job.overlay || !kinds.count(dep) || first_person.count(dep)) continue;
             perf::ModelStats ms = perf::model_stats(own / from_u8(dep));
             if (!ms.ok || ms.lods || ms.triangles < ls.min_triangles) continue;
             if (ms.borrowed && ms.no_cutoffs()) {   // switch distances would turn its variants into one another
@@ -4195,12 +4328,7 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
             for (int k : r.level_triangles)
                 if (k) l += " > " + thousands(k);
             (r.from_library ? reused : made).push_back(l);
-            LodView::Model lm;
-            lm.tag = dep;
-            lm.name = name_of(dep);
-            lm.kind = kinds[dep];
-            lm.change = r.from_library ? "library" : "made";
-            job.lod_changes.push_back(lm);
+            record(dep, kinds[dep], r.from_library ? "library" : "made");
         }
         if (!made.empty() || !reused.empty()) {
             char mb[32];
@@ -4234,12 +4362,7 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
         edit_lines(job, ed, dep, args, &ok);
         if (ok) {
             (stock ? stock_done : own_done).push_back(name_of(dep));
-            LodView::Model lm;
-            lm.tag = dep;
-            lm.name = name_of(dep);
-            lm.kind = kinds[dep];
-            lm.change = stock ? "stock" : "distances";
-            job.lod_changes.push_back(lm);
+            record(dep, kinds[dep], stock ? "stock" : "distances");
         }
     }
     if (!own_done.empty())
@@ -4564,6 +4687,20 @@ static LodView make_lod_view(Job &job, const std::string &map_name) {
             seen.push_back(geos);
             index.push_back(m.level[lv]);
             if (ok) v.previews.push_back(std::move(p));
+        }
+        auto orig = job.trim_originals.find(m.tag);
+        if (m.trimmed_from > 0 && orig != job.trim_originals.end()) {   // its most detailed version as the map made it
+            fs::path tmp = job.cfg.cache_dir / "lods" / ("as_made" + fs::path(from_u8(m.tag)).extension().u8string());
+            std::error_code ec;
+            fs::create_directories(tmp.parent_path(), ec);
+            std::ofstream(tmp, std::ios::binary | std::ios::trunc) << orig->second;
+            preview::Find made = [&](const std::string &tag) { return tag == m.tag ? tmp : find(tag); };
+            ModelPreview p;
+            if (preview::build(m.tag, made, p, 128, 0)) {
+                m.as_made = (int)v.previews.size();
+                v.previews.push_back(std::move(p));
+            }
+            fs::remove(tmp, ec);
         }
         if (m.radius <= 0 && m.level[0] >= 0) {   // no bounding radius: the model's own size
             const ModelPreview &p = v.previews[m.level[0]];
@@ -5470,34 +5607,34 @@ static bool mcc_hud_layout(Job &job, const fs::path &tags) {
     return job.from == Game::MCC;
 }
 
-// The bitmap a HUD element draws (element keys start with `base`): its own interface/meter bitmap, or for
-// crosshair overlays, overlay items and a grenade HUD's overlays, their parent's. "" = none (numbers,
-// the motion sensor centre).
-static std::string hud_element_bitmap(const std::map<std::string, std::string> &vals, const std::string &base) {
-    for (auto f : {"interface_bitmap", "meter_bitmap"}) {
-        auto it = vals.find(base + f);
-        if (it != vals.end()) return it->second;
-    }
+// The field holding the bitmap a HUD element draws (element keys start with `base`): its own interface/meter
+// bitmap, or for crosshair overlays, overlay items and a grenade HUD's overlays, their parent's. "" = none
+// (numbers, the motion sensor centre).
+static std::string hud_element_bitmap_key(const std::map<std::string, std::string> &vals, const std::string &base) {
+    for (auto f : {"interface_bitmap", "meter_bitmap"})
+        if (vals.count(base + f)) return base + f;
     std::smatch m;
     static const std::regex nested(R"(^(.*\]\.)[a-z_]+\[\d+\]\.$)");    // crosshairs[0].crosshair_overlays[1].
     if (std::regex_match(base, m, nested)) {
         std::string p = m[1];
         for (auto it = vals.lower_bound(p); it != vals.end() && it->first.compare(0, p.size(), p) == 0; ++it)
-            if (it->first.find('.', p.size()) == std::string::npos && ends_with(it->first, "_bitmap")) return it->second;
+            if (it->first.find('.', p.size()) == std::string::npos && ends_with(it->first, "_bitmap")) return it->first;
     }
     static const std::regex grenade(R"(^([a-z_]+)s\[\d+\]\.$)");         // total_grenades_overlays[0].
-    if (std::regex_match(base, m, grenade)) {
-        auto it = vals.find(m[1].str() + "_bitmap");
-        if (it != vals.end()) return it->second;
-    }
+    if (std::regex_match(base, m, grenade) && vals.count(m[1].str() + "_bitmap")) return m[1].str() + "_bitmap";
     return "";
+}
+
+// The bitmap a HUD element draws (see hud_element_bitmap_key). "" = none.
+static std::string hud_element_bitmap(const std::map<std::string, std::string> &vals, const std::string &base) {
+    std::string k = hud_element_bitmap_key(vals, base);
+    return k.empty() ? "" : vals.at(k);
 }
 
 // The map's own HUD tags, sized and placed for the Xbox:
 //  - "use high res scale" (on an element) and "half hud scale" / "force hud use highres scale" (on the bitmap
-//    it draws) each halve an element on PC and MCC (once, whichever is set). The Xbox ignores both. Flagged
-//    bitmaps used only by HUDs are shrunk to match (less texture memory too); otherwise the element's scale
-//    is halved.
+//    it draws) each halve an element on PC and MCC (once, whichever is set). The Xbox ignores both, so the
+//    element's scale is halved. (fit_hud_textures then shrinks bitmaps drawn smaller than they're made.)
 //  - MCC's double-size canvas: positions are halved, and so are the sizes of elements drawing the map's
 //    bitmaps (numbers use the Xbox's own digits, which are already the right size). Elements MCC anchors to
 //    the screen centre get an offset from the HUD's top-left corner instead.
@@ -5536,27 +5673,6 @@ void convert_hud_layout(Job &job, const fs::path &xsrc, const std::vector<std::s
         kvs[tag] = std::move(kv);
     }
 
-    // Shrink flagged bitmaps that only HUDs use: once for the flag, once more for MCC's canvas.
-    std::map<std::string, int> shrunk;
-    int shrunk_count = 0;
-    std::set<std::string> flagged;
-    for (auto &[bm, f] : half)
-        if (f && !in_overlay(bm) && fs::exists(xsrc / from_u8(bm))) flagged.insert(bm);
-    auto users_of = find_referrers({xsrc}, flagged);
-    for (auto &bm : flagged) {
-        bool hud_only = true;
-        for (auto &u : users_of[bm]) {
-            std::string ext = fs::path(from_u8(u)).extension().u8string();
-            if (ext != ".unit_hud_interface" && ext != ".weapon_hud_interface" && ext != ".grenade_hud_interface" &&
-                ext != ".hud_globals")
-                hud_only = false;
-        }
-        if (!hud_only) continue;
-        int k = shrink_hud_bitmap_tag(xsrc / from_u8(bm), mcc ? 2 : 1);
-        shrunk[bm] = k;
-        if (k) shrunk_count++;
-    }
-
     int scaled = 0, high_res = 0, moved = 0, centred = 0;
     for (auto &tag : hud_tags) {
         auto &kv = kvs[tag];
@@ -5573,7 +5689,6 @@ void convert_hud_layout(Job &job, const fs::path &xsrc, const std::vector<std::s
             if (!e.bitmap.empty()) {
                 if (mcc) factor *= 0.5;
                 if (e.flag || half[e.bitmap]) factor *= 0.5;
-                factor *= 1 << shrunk[e.bitmap];
             } else if (e.flag) {
                 factor = 0.5;
             }
@@ -5619,9 +5734,138 @@ void convert_hud_layout(Job &job, const fs::path &xsrc, const std::vector<std::s
                  (centred ? " (" + std::to_string(centred) + " anchored to the screen centre now count from the corner)" : ""));
     else if (high_res || scaled)
         job.note("[xbox] converted " + std::to_string(std::max(high_res, scaled)) + " HUD elements from PC high-res scaling");
-    if (shrunk_count)
-        job.note("[xbox] shrank " + std::to_string(shrunk_count) + " HUD bitmaps that " + (mcc ? "MCC" : "PC") +
-                 " draws at half size to the size the Xbox draws them (and a quarter of the texture memory or less)");
+}
+
+// The map's own HUD bitmaps at the resolution the Xbox shows them. The Xbox draws its HUD on a 640x480 screen,
+// a texel to a pixel at scale 1. A HUD made for big screens draws big textures at a fraction of that (an MCC
+// tagset's often at a quarter), so most of their texels never reach the screen, and without mipmaps the ones
+// that do shimmer. A bitmap that only HUD elements draw is halved while every element still draws it at no
+// more than a texel to a pixel, and the elements' scales are doubled to match: the same size on screen, from a
+// quarter of the memory per halving.
+// A weapon's screen effect mask (a scope's dark surround) is drawn a texel to a pixel, centred on the view
+// (rasterizer_xbox_screen_effect.c), not stretched: one made for a 1080p screen (1024 rows) is bigger than the
+// whole 480-row Xbox screen, so the scope's window covers all of it and the surround never shows. It is halved
+// while it still covers the screen (the split-screen view, for a split-screen-only mask), which frames the
+// view about as it does on the screen it was made for.
+static void fit_hud_textures(Job &job, const fs::path &xsrc, const std::vector<std::string> &hud_tags) {
+    if (hud_tags.empty()) return;
+    const Config &cfg = job.cfg;
+    auto in_overlay = [&](const std::string &rel) { return !job.overlay.empty() && fs::exists(job.overlay / from_u8(rel)); };
+    auto bitmap_path = [](const std::string &v) {
+        std::string b = norm_rel(v);
+        if (!b.empty() && !ends_with(b, ".bitmap")) b += ".bitmap";
+        return b;
+    };
+    struct Draw { std::string tag, base; double w, h; };
+    std::map<std::string, std::vector<Draw>> draws;   // bitmap -> the elements that draw it
+    std::map<std::string, int> mask_rows;             // mask -> the screen rows it must cover (480; split screen 240)
+    std::set<std::string> other;                      // anything else a HUD refers to (those bitmaps are left alone)
+    const std::set<std::string> huds(hud_tags.begin(), hud_tags.end());
+    for (auto &tag : hud_tags) {
+        auto kv = list_values(cfg, xsrc, tag);
+        std::map<std::string, std::string> vals(kv.begin(), kv.end());
+        std::set<std::string> drawn;   // the fields elements draw from
+        for (auto &[key, v] : kv) {
+            const std::string suffix = "scaling_flags.use_high_res_scale";
+            if (!ends_with(key, suffix)) continue;
+            std::string base = key.substr(0, key.size() - suffix.size()), bk = hud_element_bitmap_key(vals, base);
+            if (bk.empty() || vals[bk].empty()) continue;
+            drawn.insert(bk);
+            auto w = vals.find(base + "width_scale"), h = vals.find(base + "height_scale");
+            if (w == vals.end() || h == vals.end()) {
+                other.insert(bitmap_path(vals[bk]));
+                continue;
+            }
+            Draw d{tag, base, std::atof(w->second.c_str()), std::atof(h->second.c_str())};
+            if (d.w == 0) d.w = 1;   // 0 draws at 1
+            if (d.h == 0) d.h = 1;
+            draws[bitmap_path(vals[bk])].push_back(d);
+        }
+        for (auto &[key, v] : kv) {
+            if (v.empty() || drawn.count(key)) continue;
+            if (ends_with(key, "mask_fullscreen")) mask_rows[bitmap_path(v)] = 480;
+            else if (ends_with(key, "mask_splitscreen")) mask_rows[bitmap_path(v)] = std::max(mask_rows[bitmap_path(v)], 240);
+            else other.insert(bitmap_path(v));   // every other value: a reference in a field this doesn't know
+        }
+    }
+    std::set<std::string> cands;
+    for (auto &[bm, d] : draws)
+        if (!mask_rows.count(bm)) cands.insert(bm);
+    for (auto &[bm, r] : mask_rows)
+        if (!draws.count(bm)) cands.insert(bm);
+    for (auto it = cands.begin(); it != cands.end();)
+        if (other.count(*it) || in_overlay(*it) || !fs::exists(xsrc / from_u8(*it))) it = cands.erase(it);
+        else ++it;
+    if (cands.empty()) return;
+
+    // The HUD globals the build uses: the Xbox's (merge_map_globals copies what it needs from the map's), unless
+    // the map's own wins. Another one (the map's, now unused) can refer to the HUD's bitmaps without drawing them.
+    std::string hud_globals;
+    {
+        const std::string g = "globals/globals.globals";
+        fs::path gd = job.owner(g);
+        if (gd.empty() && fs::exists(xsrc / from_u8(g))) gd = xsrc;
+        std::string v;
+        if (!gd.empty()) run_process({u8(tool(cfg, "invader-edit")), "-t", u8(gd), g, "-G", "interface_bitmaps[0].hud_globals"}, v);
+        hud_globals = norm_rel(v);
+        if (!hud_globals.empty() && !ends_with(hud_globals, ".hud_globals")) hud_globals += ".hud_globals";
+    }
+    auto users = find_referrers({xsrc}, cands);
+    size_t hud_before = 0, hud_after = 0, mask_before = 0, mask_after = 0;
+    int fitted = 0, masks = 0;
+    std::map<std::string, std::vector<std::pair<std::string, std::string>>> sets;   // HUD tag -> (field, value)
+    for (auto &bm : cands) {
+        bool hud_only = true;
+        for (auto &u : users[bm])
+            if (!huds.count(norm_rel(u)) && !(ends_with(u, ".hud_globals") && norm_rel(u) != hud_globals && !hud_globals.empty()))
+                hud_only = false;
+        if (!hud_only) continue;
+        fs::path p = xsrc / from_u8(bm);
+        BitmapParts parts;
+        if (!parts.read(p) || !parts.nbd) continue;
+        const bool mask = mask_rows.count(bm) > 0;
+        int want = 0;
+        if (mask) {
+            for (int rows = be16(parts.b, parts.bd_off + 6); rows / 2 >= mask_rows[bm] && want < 4; rows /= 2) want++;
+        } else {
+            double s = 0;
+            for (auto &d : draws[bm]) s = std::max({s, std::fabs(d.w), std::fabs(d.h)});
+            for (; s > 0 && s * 2 <= 1.0001 && want < 4; s *= 2) want++;
+        }
+        if (!want) continue;
+        int k = shrink_hud_bitmap_tag(p, want);
+        BitmapParts now;
+        if (!k || !now.read(p)) continue;
+        (mask ? mask_before : hud_before) += parts.pp;
+        (mask ? mask_after : hud_after) += now.pp;
+        (mask ? masks : fitted)++;
+        if (mask) continue;
+        for (auto &d : draws[bm]) {
+            sets[d.tag].push_back({d.base + "width_scale", std::to_string(d.w * (1 << k))});
+            sets[d.tag].push_back({d.base + "height_scale", std::to_string(d.h * (1 << k))});
+        }
+    }
+    std::string out;
+    for (auto &[tag, s] : sets) {
+        std::vector<std::string> cmd{u8(tool(cfg, "invader-edit")), "-t", u8(xsrc), tag};
+        for (auto &[k, v] : s) cmd.insert(cmd.end(), {"-S", k, v});
+        if (run_process(cmd, out) != 0)   // one bad key shouldn't lose the rest
+            for (auto &[k, v] : s) run_process({u8(tool(cfg, "invader-edit")), "-t", u8(xsrc), tag, "-S", k, v}, out);
+    }
+    auto mb = [](size_t b) {
+        char t[32];
+        snprintf(t, sizeof t, b >= 1048576 ? "%.1f MB" : "%.0f KB", b >= 1048576 ? b / 1048576.0 : b / 1024.0);
+        return std::string(t);
+    };
+    if (fitted)
+        job.note("[xbox] fitted " + std::to_string(fitted) + " HUD bitmap" + (fitted == 1 ? "" : "s") +
+                 " to the resolution the Xbox draws " + (fitted == 1 ? "it" : "them") + " at (a texel to a screen pixel; "
+                 "same size on screen): " + mb(hud_before) + " of textures now " + mb(hud_after));
+    if (masks)
+        job.note("[xbox] scaled " + std::to_string(masks) + " weapon screen mask" + (masks == 1 ? "" : "s") +
+                 " (scope surrounds) made for bigger screens to the Xbox's, which draws them a texel to a pixel: "
+                 "they frame the view as made instead of covering the whole screen with the window (" +
+                 mb(mask_before) + " now " + mb(mask_after) + ")");
 }
 
 // ---------------------------------------------------------------- the map's globals
@@ -6067,6 +6311,8 @@ bool prepare_for_xbox(Job &job, std::string &err) {
             job.note("[xbox] converted " + std::to_string(meters) + " HUD meters to the Xbox meter layout so they "
                      "fill and drain with their value (PC meter bitmaps store the fill gradient in alpha)");
     }
+    // Now that each HUD points at the bitmaps it will really draw (PC copies, meter copies), at their sizes.
+    fit_hud_textures(job, xsrc, hud_tags);
     std::map<std::string, std::vector<std::string>> reencoded;   // reason -> sounds
     if (sound_tags.size() > 5) job.log("Re-encoding " + std::to_string(sound_tags.size()) + " sounds for the Xbox...");
     for (auto &rel : sound_tags) {
@@ -7869,6 +8115,7 @@ bool save_lod_view(const LodView &v, const fs::path &file) {
         f << m.tag << "\n" << m.name << "\n" << m.change << "\n" << m.kind << " " << m.undone << " " << m.placed << " " << m.radius;
         for (double c : m.cutoffs) f << " " << c;
         for (int l : m.level) f << " " << l;
+        f << " " << m.trimmed_from << " " << m.as_made;   // (added later: older files don't have them)
         f << "\n";
     }
     f << "end\n";
@@ -7890,14 +8137,18 @@ bool load_lod_view(LodView &out, const fs::path &file) {
         if (!(ss >> m.kind >> m.undone >> m.placed >> m.radius)) return false;
         for (double &c : m.cutoffs) if (!(ss >> c)) return false;
         for (int &l : m.level) if (!(ss >> l)) return false;
+        if (!(ss >> m.trimmed_from >> m.as_made)) { m.trimmed_from = 0; m.as_made = -1; }
     }
     if (!text(line) || line != "end") return false;
     fs::path models = file;
     models += ".models";
     if (!load_previews(v.previews, models)) v.previews.clear();
-    for (auto &m : v.models)
+    for (auto &m : v.models) {
         for (int &l : m.level)
             if (l < -1 || l >= (int)v.previews.size() || (l >= 0 && v.previews[l].tris.empty())) l = -1;
+        int &a = m.as_made;
+        if (a < -1 || a >= (int)v.previews.size() || (a >= 0 && v.previews[a].tris.empty())) a = -1;
+    }
     out = std::move(v);
     return true;
 }

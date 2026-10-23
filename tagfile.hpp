@@ -1,6 +1,6 @@
 // Halo Map Porter - reading Halo CE tag files (HEK, big endian) directly, for the kinds in tag_layouts.inc
-// (structure BSPs, models, scenarios, objects, bitmaps, shaders). Much faster than invader-edit for a tag with
-// thousands of elements (a BSP's 50,000 surfaces), and it reads values invader-edit doesn't print (a BSP's
+// (structure BSPs, models, animations, scenarios, objects, bitmaps, shaders). Much faster than invader-edit for a tag
+// with thousands of elements (a BSP's 50,000 surfaces), and it reads values invader-edit doesn't print (a BSP's
 // visibility data).
 #pragma once
 #include <cstdint>

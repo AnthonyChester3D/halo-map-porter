@@ -21,6 +21,7 @@ namespace lod {
 
 // Bump when what's made changes, so the library makes them again instead of reusing old ones.
 static const char *kVersion = "hmp-lod-1 meshoptimizer-1.3";
+static const char *kTrimVersion = "hmp-trim-2 meshoptimizer-1.3";
 // The versions made: share of the triangles to aim for, and how far (share of the model's size) the shape may move.
 struct Level { double ratio, error; };
 static const Level kLevels[2] = {{0.5, 0.01}, {0.2, 0.025}};
@@ -79,22 +80,39 @@ using Point = std::array<float, 3>;
 // A geometry simplified to `level`: a copy with only the triangles kept and the vertices they use. Its parts (one
 // per shader) are simplified together as one mesh, so where two parts meet they change together (no cracks): their
 // vertices there are copies at the same positions, which the simplifier keeps paired, like a texture seam.
-static TagNode simplify_geometry(const TagNode &geo, const Level &level, double size) {
+// `how`: kLower (lower versions, seen from a distance): texture seams and where parts meet stay paired, hard edges may
+// smooth over. kTop (a most detailed version, seen up close): every texture seam stays a seam (the simplifier may only
+// slide along one, never across), and so does where parts meet; every hard edge left stays as hard (see Hard edges);
+// two-sided surfaces stay as made.
+//
+// Bones: every vertex keeps the bones that move it and how much (it isn't moved, only taken out), and a vertex only
+// goes into one moved exactly as it is, so the triangles left either all move as one piece or are the model's own
+// (where a joint bends, where a wheel meets its axle: those vertices stay). So a character bends as before in every
+// pose, and the shape is off by no more in any pose than at rest.
+// Hard edges (kTop): copies of a vertex that differ only in their normal (the same part, place, texture coordinates and
+// bones: a hard edge, or a model of flat facets) count as one for the simplifier, with their normals averaged, so such
+// models can lose triangles too (a crease still costs what moving the shape does). Each corner left then takes the copy
+// whose normal is nearest its triangle's facing, so the edges left are as hard as made.
+// Layers: a part that repeats another part's triangles exactly, as a layer drawn over it (a character's shield
+// shimmer is its whole body again with the shield's shader; a weapon's hologram over its gauge), isn't simplified on
+// its own: the part below is, and the layer gets the same triangles on its own vertices.
+enum How { kLower, kTop };
+static TagNode simplify_geometry(const TagNode &geo, const Level &level, double size, How how = kLower) {
+    bool top = how != kLower;
     TagNode g = geo;
     std::vector<TagNode> &parts = *tagfile::block(g, "parts");
-    // All the parts' vertices in one list (each remembering its part), and all their triangles.
+    // All the parts' vertices in one list (each remembering its part), and each part's triangles.
     std::vector<size_t> first(parts.size() + 1, 0);
-    std::vector<uint32_t> list;
+    std::vector<std::vector<uint32_t>> own(parts.size());
     for (size_t p = 0; p < parts.size(); p++) {
         size_t n = tagfile::block(parts[p], "uncompressed vertices")->size();
-        for (uint32_t i : strip_to_list(*tagfile::block(parts[p], "triangles"), n)) list.push_back((uint32_t)(first[p] + i));
+        for (uint32_t i : strip_to_list(*tagfile::block(parts[p], "triangles"), n)) own[p].push_back((uint32_t)(first[p] + i));
         first[p + 1] = first[p] + n;
     }
     size_t n = first.back();
-    if (list.size() / 3 < 24 || n == 0) return g;   // too small to be worth it
     std::vector<uint32_t> part_of(n);
     std::vector<float> pos(n * 3), attr(n * 5);
-    std::vector<unsigned> bone(n);
+    std::vector<uint64_t> bone(n);
     for (size_t p = 0; p < parts.size(); p++) {
         auto &V = *tagfile::block(parts[p], "uncompressed vertices");
         for (size_t k = 0; k < V.size(); k++) {
@@ -105,39 +123,155 @@ static TagNode simplify_geometry(const TagNode &geo, const Level &level, double 
             attr[i * 5 + 0] = f32(v, 48);
             attr[i * 5 + 1] = f32(v, 52);
             for (int c = 0; c < 3; c++) attr[i * 5 + 2 + c] = f32(v, 12 + c * 4);
-            unsigned n0 = u16(v, 56), n1 = u16(v, 58);
-            bone[i] = f32(v, 60) >= 0.99f ? n0 : (n0 << 16 | n1);
+            // What moves it: one bone, or two and how much each (in sixteenths).
+            uint64_t n0 = u16(v, 56), n1 = u16(v, 58);
+            float w0 = f32(v, 60);
+            bone[i] = w0 >= 0.99f || n0 == n1 ? n0 : w0 <= 0.01f ? n1 : 1ull << 63 | n0 << 32 | n1 << 8 | (uint64_t)std::lround(w0 * 16);
         }
     }
-    // Texture coordinates and normals count like changes in shape: 2% of the texture like 1% of the model's size,
-    // about 11 degrees of a normal like 1%.
-    const float w[5] = {(float)(size * 0.5), (float)(size * 0.5), (float)(size * 0.05), (float)(size * 0.05),
-                        (float)(size * 0.05)};
-    // Vertices that stay where they are: where pieces moved by different bones meet (a wheel stays apart from the
-    // body). Copies at one position (a model's vertices are mostly copies, along hard edges, texture seams and
-    // where parts meet) stay paired, except along hard edges: those may smooth over, which doesn't show from a
-    // distance.
+    auto at = [&](uint32_t i) { return Point{pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]}; };
+    auto corners = [&](const std::vector<uint32_t> &tris, size_t t) {
+        std::array<Point, 3> k = {at(tris[t]), at(tris[t + 1]), at(tris[t + 2])};
+        std::sort(k.begin(), k.end());
+        return k;
+    };
+
+    // Layers: `layer_of[q]` the part q repeats (-1: none), `to_layer[q]` each of that part's vertices -> q's at its
+    // place, `flipped[q]` whether q's triangles face the other way.
+    std::vector<int> layer_of(parts.size(), -1);
+    std::vector<std::map<uint32_t, uint32_t>> to_layer(parts.size());
+    std::vector<char> flipped(parts.size(), 0);
+    for (size_t q = 1; q < parts.size(); q++)
+        for (size_t p = 0; p < q && layer_of[q] < 0; p++) {
+            if (layer_of[p] >= 0 || own[p].empty() || own[p].size() != own[q].size()) continue;
+            std::map<std::array<Point, 3>, std::vector<size_t>> below;
+            for (size_t t = 0; t + 2 < own[p].size(); t += 3) below[corners(own[p], t)].push_back(t);
+            std::map<uint32_t, uint32_t> map;
+            int facing = 0;   // 1 the same way, 2 the other way, 3 both: not a layer
+            bool ok = true;
+            for (size_t t = 0; ok && t + 2 < own[q].size(); t += 3) {
+                auto it = below.find(corners(own[q], t));
+                if (it == below.end() || it->second.empty()) { ok = false; break; }
+                size_t b = it->second.back();
+                it->second.pop_back();
+                int same = 0;
+                for (int j = 0; j < 3; j++)
+                    for (int k = 0; k < 3; k++)
+                        if (at(own[p][b + j]) == at(own[q][t + k])) {
+                            map.emplace(own[p][b + j], own[q][t + k]);
+                            if (at(own[p][b + (j + 1) % 3]) == at(own[q][t + (k + 1) % 3])) same++;
+                        }
+                facing |= same ? 1 : 2;
+            }
+            if (!ok || facing == 3) continue;
+            layer_of[q] = (int)p;
+            to_layer[q] = std::move(map);
+            flipped[q] = facing == 2;
+        }
+    std::vector<uint32_t> list;
+    for (size_t p = 0; p < parts.size(); p++)
+        if (layer_of[p] < 0) list.insert(list.end(), own[p].begin(), own[p].end());
+    if (list.size() / 3 < 24 || n == 0) return g;   // too small to be worth it
+    std::vector<float> normal(n * 3);
+    for (size_t i = 0; i < n; i++)
+        for (int c = 0; c < 3; c++) normal[i * 3 + c] = attr[i * 5 + 2 + c];
+    std::map<uint32_t, std::vector<uint32_t>> copies_of;   // a vertex standing for copies (hard edges) -> them
+    if (top) {
+        std::map<std::tuple<uint32_t, Point, float, float, uint64_t>, uint32_t> one;
+        for (auto &i : list) {
+            auto key = std::make_tuple(part_of[i], at(i), attr[i * 5], attr[i * 5 + 1], bone[i]);
+            auto [it, fresh] = one.emplace(key, i);
+            auto &c = copies_of[it->second];
+            if (std::find(c.begin(), c.end(), i) == c.end()) c.push_back(i);
+            i = it->second;
+        }
+        for (auto &[r, c] : copies_of) {
+            if (c.size() < 2) continue;
+            double a[3] = {0, 0, 0};
+            for (uint32_t i : c)
+                for (int k = 0; k < 3; k++) a[k] += normal[i * 3 + k];
+            double l = std::sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
+            if (l > 1e-9)
+                for (int k = 0; k < 3; k++) attr[r * 5 + 2 + k] = (float)(a[k] / l);
+        }
+    }
+    // Texture coordinates and normals count like changes in shape. The simplifier weighs a change in them by the
+    // size of the triangles it spans (a change of 1 across a triangle d wide counts like moving it d), so for a most
+    // detailed version they weigh the same whatever the model's size: otherwise a small model's texture could slide
+    // (the Precipice plasma rifle's orange coil, mapped mirrored across its strip, lost its colour at 0.06%).
+    // Lower versions keep the weights they were made with (the LOD library's versions stay valid): 2% of the texture
+    // like 1% of the model's size, about 11 degrees of a normal like 1%.
+    float w[5] = {(float)(size * 0.5), (float)(size * 0.5), (float)(size * 0.05), (float)(size * 0.05),
+                  (float)(size * 0.05)};
+    if (top) {
+        const float weights[5] = {1.0f, 1.0f, 0.15f, 0.15f, 0.15f};
+        std::copy(weights, weights + 5, w);
+    }
+    // Vertices that stay where they are: where pieces moved by different bones meet (a joint, or a wheel and the body:
+    // see Bones above). Copies at one position (a model's vertices are mostly copies, along hard edges, texture seams
+    // and where parts meet) stay paired, except along hard edges (lower versions): those may smooth over, which
+    // doesn't show from a distance.
     std::vector<unsigned char> lock(n, 0);
     for (size_t t = 0; t + 2 < list.size(); t += 3)
         if (bone[list[t]] != bone[list[t + 1]] || bone[list[t]] != bone[list[t + 2]])
             lock[list[t]] = lock[list[t + 1]] = lock[list[t + 2]] = meshopt_SimplifyVertex_Lock;
-    std::map<Point, std::vector<size_t>> at;
-    for (size_t i = 0; i < n; i++) at[{pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]}].push_back(i);
-    for (auto &[pt, vs] : at) {
-        bool keep = false;
-        for (size_t k = 1; k < vs.size() && !keep; k++)
-            keep = part_of[vs[k]] != part_of[vs[0]] || std::fabs(attr[vs[k] * 5] - attr[vs[0] * 5]) > 1e-5f ||
-                   std::fabs(attr[vs[k] * 5 + 1] - attr[vs[0] * 5 + 1]) > 1e-5f;
-        if (keep)
-            for (size_t i : vs) lock[i] |= meshopt_SimplifyVertex_Protect;
+    if (how != kTop) {
+        std::map<Point, std::vector<size_t>> copies;
+        for (size_t i = 0; i < n; i++)
+            if (layer_of[part_of[i]] < 0) copies[at((uint32_t)i)].push_back(i);
+        for (auto &[pt, vs] : copies) {
+            bool keep = false;
+            for (size_t k = 1; k < vs.size() && !keep; k++)
+                keep = (part_of[vs[k]] != part_of[vs[0]] && layer_of[part_of[vs[k]]] < 0 && layer_of[part_of[vs[0]]] < 0) ||
+                       std::fabs(attr[vs[k] * 5] - attr[vs[0] * 5]) > 1e-5f ||
+                       std::fabs(attr[vs[k] * 5 + 1] - attr[vs[0] * 5 + 1]) > 1e-5f;
+            if (keep)
+                for (size_t i : vs) lock[i] |= meshopt_SimplifyVertex_Protect;
+        }
+    }
+    if (top) {
+        // Two-sided surfaces (a fin, a grille, glass: each triangle twice, back to back, on copies of its vertices)
+        // stay as they are: to the simplifier a sheet with no volume, which it could fold away almost for free.
+        std::map<std::array<Point, 3>, int> faces;
+        for (size_t t = 0; t + 2 < list.size(); t += 3) faces[corners(list, t)]++;
+        std::set<Point> sheet;
+        for (auto &[k, c] : faces)
+            if (c > 1) sheet.insert(k.begin(), k.end());
+        if (!sheet.empty())
+            for (size_t i = 0; i < n; i++)
+                if (sheet.count(at((uint32_t)i))) lock[i] = meshopt_SimplifyVertex_Lock;
     }
 
+    // (Sparse when some vertices aren't in the list, a layer's or the copies standing behind one: otherwise the
+    // simplifier counts them as more copies at their place, and a place with too many it never moves.)
+    bool sparse = top || std::find_if(layer_of.begin(), layer_of.end(), [](int l) { return l >= 0; }) != layer_of.end();
     size_t target = std::max<size_t>(3, (size_t)(list.size() / 3 * level.ratio) * 3);
     std::vector<uint32_t> out(list.size());
     float err = 0;
     out.resize(meshopt_simplifyWithAttributes(out.data(), list.data(), list.size(), pos.data(), n, 12, attr.data(), 20, w, 5,
                                               lock.data(), target, (float)(size * level.error),
-                                              meshopt_SimplifyPermissive | meshopt_SimplifyErrorAbsolute, &err));
+                                              (how == kTop ? 0u : (unsigned)meshopt_SimplifyPermissive) |
+                                                  (sparse ? (unsigned)meshopt_SimplifySparse : 0u) |
+                                                  meshopt_SimplifyErrorAbsolute, &err));
+    // Hard edges: each corner takes the copy whose normal is nearest its triangle's facing.
+    if (top)
+        for (size_t t = 0; t + 2 < out.size(); t += 3) {
+            const float *p0 = &pos[out[t] * 3], *p1 = &pos[out[t + 1] * 3], *p2 = &pos[out[t + 2] * 3];
+            float u[3], v[3], f[3];
+            for (int k = 0; k < 3; k++) { u[k] = p1[k] - p0[k]; v[k] = p2[k] - p0[k]; }
+            f[0] = u[1] * v[2] - u[2] * v[1];
+            f[1] = u[2] * v[0] - u[0] * v[2];
+            f[2] = u[0] * v[1] - u[1] * v[0];
+            for (int j = 0; j < 3; j++) {
+                auto it = copies_of.find(out[t + j]);
+                if (it == copies_of.end() || it->second.size() < 2) continue;
+                float best = -1e30f;
+                for (uint32_t c : it->second) {
+                    float d = normal[c * 3] * f[0] + normal[c * 3 + 1] * f[1] + normal[c * 3 + 2] * f[2];
+                    if (d > best) { best = d; out[t + j] = c; }
+                }
+            }
+        }
     // Back into parts: each triangle to its vertices' part (a triangle whose vertices ended up in different parts
     // would be a simplifier mistake: then the geometry stays as it was).
     std::vector<std::vector<uint32_t>> per(parts.size());
@@ -145,6 +279,21 @@ static TagNode simplify_geometry(const TagNode &geo, const Level &level, double 
         uint32_t p = part_of[out[t]];
         if (part_of[out[t + 1]] != p || part_of[out[t + 2]] != p) return geo;
         per[p].insert(per[p].end(), {out[t], out[t + 1], out[t + 2]});
+    }
+    // The layers: their part's triangles again, on their own vertices.
+    for (size_t q = 0; q < parts.size(); q++) {
+        if (layer_of[q] < 0) continue;
+        const std::vector<uint32_t> &below = per[layer_of[q]];
+        for (size_t t = 0; t + 2 < below.size(); t += 3) {
+            uint32_t v[3];
+            for (int j = 0; j < 3; j++) {
+                auto it = to_layer[q].find(below[t + j]);
+                if (it == to_layer[q].end()) return geo;
+                v[j] = it->second;
+            }
+            if (flipped[q]) std::swap(v[1], v[2]);
+            per[q].insert(per[q].end(), {v[0], v[1], v[2]});
+        }
     }
     // (Every part stays, in its place: parts refer to each other by number.)
     std::vector<TagNode> kept;
@@ -234,7 +383,8 @@ bool add_skip(const Settings &settings, const std::string &model_tag, const std:
     }
     std::ofstream out(f, std::ios::binary | std::ios::app);
     if (fresh)
-        out << "# Models Halo Map Porter leaves as they are (no lower-detail versions made, no switch distances given):\r\n"
+        out << "# Models Halo Map Porter leaves as they are (not trimmed, no lower-detail versions made, no switch distances\r\n"
+               "# given):\r\n"
                "# one per line, a tag path or a name. Lines starting with # are notes.\r\n";
     else if (!before.empty() && before.back() != '\n')
         out << "\r\n";
@@ -276,6 +426,171 @@ static std::vector<TagNode> versions(const TagNode &geo, uint32_t checksum, doub
         std::ofstream(file, std::ios::binary) << b;
     }
     return out;
+}
+
+// A line in the library's index.txt, its record of what it holds.
+static void index_line(const Settings &settings, const std::string &model, const std::string &what, const std::string &files) {
+    std::time_t now = std::time(nullptr);
+    char date[16];
+    std::strftime(date, sizeof date, "%Y-%m-%d", std::localtime(&now));
+    bool fresh = !fs::exists(settings.library / "index.txt");
+    std::ofstream idx(settings.library / "index.txt", std::ios::app | std::ios::binary);
+    if (fresh)
+        idx << "# The LOD library: what Halo Map Porter made, one line per model (date, model, triangles: most detailed >\r\n"
+               "# medium > low, or \"trimmed\" as made > now for a lighter most detailed version; its files here). Delete a\r\n"
+               "# file to have it made again.\r\n";
+    idx << date << "\t" << model << "\t" << what << "\t" << files << "\r\n";
+}
+
+// The diagonal of the box around these geometries.
+static double geometries_size(std::vector<TagNode> &geos, const std::set<int> &which) {
+    float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+    for (int g : which)
+        for (auto &p : *tagfile::block(geos[g], "parts"))
+            for (auto &v : *tagfile::block(p, "uncompressed vertices"))
+                for (int k = 0; k < 3; k++) {
+                    float x = f32(v.fixed, k * 4);
+                    lo[k] = std::min(lo[k], x);
+                    hi[k] = std::max(hi[k], x);
+                }
+    if (lo[0] > hi[0]) return 0;
+    return std::sqrt((double)(hi[0] - lo[0]) * (hi[0] - lo[0]) + (double)(hi[1] - lo[1]) * (hi[1] - lo[1]) +
+                     (double)(hi[2] - lo[2]) * (hi[2] - lo[2]));
+}
+
+static const char *kLevelNames[5] = {"super high", "high", "medium", "low", "super low"};
+
+// The most detailed triangles: the regions' first permutations' super high geometries.
+static int top_triangles(std::vector<TagNode> &geos, std::vector<TagNode> &regions) {
+    int n = 0;
+    for (auto &reg : regions) {
+        auto &perms = *tagfile::block(reg, "permutations");
+        int g = perms.empty() ? -1 : (int)tagfile::get_num(perms[0], "super high");
+        if (g >= 0 && g < (int)geos.size()) n += list_triangles(geos[g]);
+    }
+    return n;
+}
+
+// One geometry trimmed: from the library, or made now (and kept there).
+static TagNode trimmed_version(const TagNode &geo, uint32_t checksum, double ratio, double size, double error, How how,
+                               const Settings &settings, bool &from_library, std::string &key) {
+    char params[96];
+    snprintf(params, sizeof params, "|%.4f|%.6g|%d|", ratio, size * error, (int)how);
+    key = hex(fnv(std::string(kTrimVersion) + "|" + std::to_string(checksum) + params + tagfile::write_node(geo)));
+    fs::path file = settings.library.empty() ? fs::path() : settings.library / (key + ".top");
+    if (!file.empty() && fs::exists(file)) {
+        std::ifstream in(file, std::ios::binary);
+        std::string b((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        size_t pos = 8;
+        TagNode n;
+        if (b.compare(0, 8, "HMPTOP1\n") == 0 && tagfile::read_node(b, pos, n) && pos == b.size()) {
+            from_library = true;
+            return n;
+        }
+    }
+    TagNode out = simplify_geometry(geo, Level{ratio, error}, size, how);
+    if (!file.empty()) {
+        std::error_code ec;
+        fs::create_directories(settings.library, ec);
+        std::ofstream(file, std::ios::binary) << "HMPTOP1\n" << tagfile::write_node(out);
+    }
+    return out;
+}
+
+Trim trim_top(const fs::path &model, const TrimSettings &ts, const Settings &settings, const std::string &tag) {
+    Trim r;
+    tagfile::EditTag t;
+    if (!t.load(model)) { r.why = "couldn't be read"; return r; }
+    TagNode &root = t.root();
+    std::vector<TagNode> *geos = tagfile::block(root, "geometries"), *regions = tagfile::block(root, "regions");
+    if (!geos || !regions) { r.why = "not a model"; return r; }
+    r.before = r.after = top_triangles(*geos, *regions);
+    if (r.before <= ts.budget) { r.why = "within its budget"; return r; }
+
+    // Every permutation's most detailed geometry is trimmed by the same share (variants like "~damaged" too), so the
+    // model as a whole comes down to its budget; how far is up to how much each one can lose and still look the same.
+    std::set<int> tops;
+    for (auto &reg : *regions)
+        for (auto &perm : *tagfile::block(reg, "permutations")) {
+            int g = (int)tagfile::get_num(perm, "super high");
+            if (g >= 0 && g < (int)geos->size()) tops.insert(g);
+        }
+    double size = geometries_size(*geos, tops);
+    if (!(size > 0)) { r.why = "has no size"; return r; }
+    double ratio = (double)ts.budget / r.before, error = std::min(ts.max_change, ts.max_units / size);
+    uint32_t checksum = (uint32_t)(long long)tagfile::get_num(root, "node list checksum");
+    std::vector<int> tris(geos->size(), -1);
+    auto count = [&](int g) {
+        if (tris[g] < 0) tris[g] = list_triangles((*geos)[g]);
+        return tris[g];
+    };
+    size_t bytes_before = 0, bytes_after = 0;
+    std::string files;
+    bool any = false;
+    for (int g : tops) {
+        int full = count(g);
+        if (full < 24) continue;
+        bool lib = false;
+        std::string key;
+        TagNode v = trimmed_version((*geos)[g], checksum, ratio, size, error, kTop, settings, lib, key);
+        int n = list_triangles(v);
+        if (n <= 0 || n > full * 0.95) continue;   // (hardly lighter: kept as it was)
+        if (lib) r.from_library = true;
+        else files += (files.empty() ? "" : " ") + key + ".top";
+        bytes_before += geometry_xbox_bytes((*geos)[g]);
+        bytes_after += geometry_xbox_bytes(v);
+        (*geos)[g] = std::move(v);
+        tris[g] = n;
+        any = true;
+    }
+    if (!any) { r.why = "can't lose triangles without changing its shape or how its textures sit"; return r; }
+
+    // A lower level that's now as detailed as the level above it (made for the old, heavier version) draws that one
+    // instead; geometries nothing draws any more are dropped.
+    for (auto &reg : *regions)
+        for (auto &perm : *tagfile::block(reg, "permutations")) {
+            int above = (int)tagfile::get_num(perm, "super high");
+            for (int lv = 1; lv < 5; lv++) {
+                int g = (int)tagfile::get_num(perm, kLevelNames[lv]);
+                if (g < 0 || g >= (int)geos->size() || above < 0 || above >= (int)geos->size()) break;
+                if (g != above && !tops.count(g) && count(g) >= count(above) * 0.9) {
+                    tagfile::set_num(perm, kLevelNames[lv], above);
+                    g = above;
+                }
+                above = g;
+            }
+        }
+    std::vector<int> used(geos->size(), 0);
+    for (auto &reg : *regions)
+        for (auto &perm : *tagfile::block(reg, "permutations"))
+            for (auto lvn : kLevelNames) {
+                int g = (int)tagfile::get_num(perm, lvn);
+                if (g >= 0 && g < (int)geos->size()) used[g] = 1;
+            }
+    if (std::find(used.begin(), used.end(), 0) != used.end()) {
+        std::vector<int> remap(geos->size(), -1);
+        std::vector<TagNode> kept;
+        for (size_t g = 0; g < geos->size(); g++) {
+            if (!used[g]) { bytes_before += geometry_xbox_bytes((*geos)[g]); continue; }
+            remap[g] = (int)kept.size();
+            kept.push_back(std::move((*geos)[g]));
+        }
+        *geos = std::move(kept);
+        for (auto &reg : *regions)
+            for (auto &perm : *tagfile::block(reg, "permutations"))
+                for (auto lvn : kLevelNames) {
+                    int g = (int)tagfile::get_num(perm, lvn);
+                    if (g >= 0 && g < (int)remap.size()) tagfile::set_num(perm, lvn, remap[g]);
+                }
+    }
+    r.after = top_triangles(*geos, *regions);
+    if (!t.save(model)) { r.why = "couldn't be saved"; r.after = r.before; return r; }
+    r.changed = true;
+    r.xbox_bytes_saved = bytes_before > bytes_after ? bytes_before - bytes_after : 0;
+    if (!settings.library.empty() && !files.empty())
+        index_line(settings, tag.empty() ? model.filename().u8string() : tag,
+                   "trimmed " + std::to_string(r.before) + " > " + std::to_string(r.after), files);
+    return r;
 }
 
 Result add_lods(const fs::path &model, const double cutoffs[5], const Settings &settings, const std::string &tag) {
@@ -379,18 +694,10 @@ Result add_lods(const fs::path &model, const double cutoffs[5], const Settings &
     r.level_triangles[0] = any_a ? tris[0] : 0;
     r.level_triangles[1] = any_b ? tris[1] : 0;
     if (!settings.library.empty() && made) {   // what's new in the library
-        std::time_t now = std::time(nullptr);
-        char date[16];
-        std::strftime(date, sizeof date, "%Y-%m-%d", std::localtime(&now));
-        bool fresh = !fs::exists(settings.library / "index.txt");
-        std::ofstream idx(settings.library / "index.txt", std::ios::app | std::ios::binary);
-        if (fresh)
-            idx << "# The LOD library: lower-detail versions Halo Map Porter made, one line per model (date, model, triangles\r\n"
-                   "# most detailed > medium > low, its files here). Delete a file to have it made again.\r\n";
         std::string tris_text = std::to_string(r.triangles);
         for (int k : r.level_triangles)
             if (k) tris_text += " > " + std::to_string(k);
-        idx << date << "\t" << (tag.empty() ? model.filename().u8string() : tag) << "\t" << tris_text << "\t" << files << "\r\n";
+        index_line(settings, tag.empty() ? model.filename().u8string() : tag, tris_text, files);
     }
     return r;
 }

@@ -19,9 +19,13 @@ the free, open-source Halo map compiler, and it can download Invader for you.
   - It gives PC-only weapons Xbox stand-ins, or keeps them with PC animations.
   - It converts Gearbox models, HUDs and sounds, and flattens layered shaders the Xbox can't draw.
 - **Fitting the Xbox.** It works within the Xbox's limits: the 47 MB map file, the 22 MB of tag memory, and a
-  texture memory target (22 / 20 / 18 MB) that the auto-shrinker halves your own textures to meet.
-- **Speed on the Xbox.** It makes lower-detail versions (LODs) of the map's custom models that have none, keeps
-  them in a library so other maps reuse them, gives levels made without portals clusters and portals at their
+  texture memory target (22 / 20 / 18 MB) that the auto-shrinker halves your own textures to meet. HUD textures
+  made for big screens come down to the resolution the Xbox draws them at (the same size on screen, often a
+  sixteenth of the memory), and scope masks are scaled so they frame the Xbox's screen as made.
+- **Speed on the Xbox.** It trims the most detailed version of very dense custom models (a 15,000-triangle beam
+  cannon) so they look the same with far fewer triangles, stores animations as keyframes the way Bungie stored the
+  Xbox's cinematics (about half the tag memory for first-person animations), makes lower-detail versions (LODs) of the map's custom
+  models that have none, keeps them in a library so other maps reuse them, gives levels made without portals clusters and portals at their
   doorways (and can divide up the rooms of levels that have them), makes nearly opaque fog fully opaque so the
   Xbox stops drawing past it, turns off dynamic lights that would have the Xbox redraw most of the level (the kind
   that runs it out of memory), and reports what the Xbox has to draw.

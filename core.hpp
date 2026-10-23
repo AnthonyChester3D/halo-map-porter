@@ -55,6 +55,17 @@ struct Config {
     // (empty: cache_dir/lod_library) so the same model in another map reuses them.
     bool xbox_make_lods = true;
     fs::path lod_library;
+    // The most detailed version of the map's own heavy models made lighter (lod.hpp trim_top), before any LODs are
+    // made from it: 0 as made, 1 trimmed so they look the same (shape kept within 0.25% of the model's size, 0.18% for
+    // characters, 0.12% for first-person weapons), 2 trimmed harder (0.6%, 0.4%, 0.25%: small details may change). Only
+    // models over their kind's budget (vehicles and scenery 4,000 triangles, characters and first-person weapons 3,000,
+    // weapons and items 2,000), and never below it.
+    int xbox_trim_models = 1;
+    // Store the map's animations (its own and the Xbox's it uses) the way Bungie stored the Xbox's cinematics: as
+    // keyframes ("compressed", animcomp.hpp), about half the tag memory for first-person animations, a quarter less
+    // for characters. 0 as made; 1 compress (every bone within the rounding the Xbox's 6-byte rotations make anyway);
+    // 2 compress harder (fast moves can be a few millimetres off).
+    int xbox_compress_animations = 1;
     // Give a level made without portals (one cluster: everything in view is drawn, walls or not) clusters and portals
     // at its doorways and corridors (portals.hpp), when that cuts what the Xbox draws.
     bool xbox_add_portals = true;
@@ -169,14 +180,17 @@ struct LodView {
     struct Model {
         std::string tag;                 // the model tag
         std::string name;                // the object it's drawn for ("mp_boulder_granite_medium")
-        char kind = 's';                 // v vehicle, s scenery (and machines...), w weapon or item
+        char kind = 's';                 // v vehicle, s scenery (and machines...), w weapon or item, f first person
         std::string change;              // "made" (lower-detail versions), "library" (reused from the LOD library),
-                                         // "distances" (switch distances for its own), "stock" (a stock model's)
+                                         // "distances" (switch distances for its own), "stock" (a stock model's),
+                                         // "trimmed" (only its most detailed version made lighter)
         bool undone = false;             // taken out again: the map didn't fit with them
         int placed = 0;                  // how many are on the map (placed, or at weapon/item spawn points)
         double cutoffs[5] = {0, 0, 0, 0, 0};   // switch distances, pixels across (super high, high, medium, low, super low)
         double radius = 0;               // the model's size (world units), for the distances in metres
         int level[5] = {-1, -1, -1, -1, -1};   // each level's drawing in `previews` (levels sharing a version share it)
+        int trimmed_from = 0;            // its most detailed version was trimmed: its triangles as the map made it
+        int as_made = -1;                // and that version's drawing in `previews`
     };
     std::string map_name;
     std::vector<Model> models;
