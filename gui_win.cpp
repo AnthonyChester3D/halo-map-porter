@@ -414,6 +414,7 @@ static void apply_xbox_options(Config &cfg) {
     cfg.xbox_lod_stock_models = checked(ID_X_LODSTOCK);
     cfg.xbox_make_lods = checked(ID_X_MAKELOD);
     cfg.xbox_trim_models = std::clamp(sel(ID_X_TRIM), 0, 2);
+    cfg.xbox_collision = cfg.xbox_trim_models;   // (heavy models: their collision too)
     cfg.xbox_compress_animations = std::clamp(sel(ID_X_ANIM), 0, 2);
     cfg.xbox_add_portals = sel(ID_X_PORTALS) >= 1;
     cfg.xbox_replan_portals = sel(ID_X_PORTALS) == 2;

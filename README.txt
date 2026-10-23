@@ -446,6 +446,62 @@ Levels of detail (LODs)
   First-person arms always come from the Xbox's own globals, so a map's
   custom arms never reach the Xbox.
 
+  Collision ("Heavy models", Xbox tab)
+  Bungie's own first. Most custom vehicles, and the wrecks made from
+  them, are iterations of a stock one: the same skeleton, about the same
+  size. So each part (node) of a custom collision model whose name a
+  stock vehicle's collision also has (the Warthog, Ghost, Scorpion,
+  Banshee, Wraith and Shade, from your Xbox tags) takes Bungie's
+  collision for it, where that sits on the custom model's drawn
+  triangles of that part as well as it sits on Bungie's own model: the
+  collision's distance to what's drawn and what's drawn to the
+  collision, half and nine tenths of each, no more than a quarter (or
+  2 cm) further. Each surface keeps the material of the custom part's
+  nearest own surface (so its damage and hit effects stay), and parts
+  that don't fit, that the stock vehicle doesn't have, or with breakable
+  surfaces keep their own. Only when that's lighter. Coldsnap's
+  swarthog: 13 parts, 486 surfaces now 167. Precipice's damaged chaingun
+  Warthog (scenery): the hull and three suspensions, 390 surfaces now
+  65. Deathtrap's destroyed Banshee is bent out of the Banshee's shape
+  (its struts splay), so it keeps its own.
+  Then dense collision. A biped's movement gathers every surface, edge
+  and corner of the collision within its reach (about 1.5 m), and checks
+  each one against all those it has gathered so far, so a dense
+  collision model costs it the square of its detail. Bungie's densest
+  multiplayer scenery (a rock, the small barricade) keeps that work
+  around 115,000 steps; Deathtrap's pilot chair (416 surfaces, all
+  within reach at once) took 1.2 million, ten times as much, and each
+  biped near it ran several times slower. So the collision of the map's
+  own scenery and devices that cost more than Bungie's densest is made
+  again, the way Bungie made collision for their vehicles (the Warthog's
+  is 202 surfaces for a 2,800-triangle model): a few convex pieces with
+  big flat faces on the model's own planes, sitting just outside it;
+  hollows, gaps and small details filled over (the Warthog's cockpit is
+  a flat floor); nothing thinner than about 4.5 cm, since a thin
+  collider lets a vehicle slice into it and jitter. The pieces are found
+  by cutting the shape wherever its outline would fill the biggest gap,
+  the worst first, and it keeps as many pieces as stay within the
+  budget. When the same surfaces in a leaner BSP are enough, only the
+  BSP is made again (the shape exactly as made). Every new BSP is
+  checked with the engine's own ray test against its surfaces.
+    Leave them as made   Collision left as made.
+    Trim (they look the same)   The default: made again when it costs
+                         more than about 130,000 steps.
+    Trim harder (details change)   ... more than 90,000.
+  Made again: only scenery and machines (what bipeds walk into and
+  vehicles drive into: vehicles meet bipeds and each other as their
+  physics spheres, not their collision models, and controls aren't
+  walked into), never a collision model a vehicle also uses, and never
+  one with two-sided or breakable surfaces. Neither step touches a
+  collision model a character, weapon or item uses (their hit boxes),
+  the Xbox's own, or the level's own (BSP) collision, which matches what
+  you see exactly. The log's [collision] line names each model with its
+  surfaces before and after, the work as a multiple of Bungie's densest,
+  and how far the new surfaces lie from the old (most of that is hollows
+  filled over).
+  Deathtrap: the pilot chair 416 surfaces > 86 in 9 pieces (10.6x >
+  1.0x); the destroyed Banshee 629 > 331 (3.9x > 1.1x).
+
   Animations ("Animations", Xbox tab)
   Animations take tag memory, the Xbox's hard limit (22 MB on every Xbox,
   modded or not). Stored frame by frame, a bone that turns takes 8 bytes
@@ -1239,6 +1295,8 @@ The log lists every automatic change:
   [heavy] Heavy models' most detailed versions were trimmed (see "Heavy
           models" above).
   [anim]  Animations were stored as keyframes (see "Animations" above).
+  [collision] Custom collision took Bungie's own where it fits, or dense
+          scenery collision was made again, simpler (see "Collision" above).
   [lod]   Lower-detail versions were made for models, or models got
           switch distances for theirs (see "Levels of detail" above).
   [portals] A level made without portals got them (see "Portals" above).

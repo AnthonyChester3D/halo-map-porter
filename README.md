@@ -24,7 +24,10 @@ the free, open-source Halo map compiler, and it can download Invader for you.
   sixteenth of the memory), and scope masks are scaled so they frame the Xbox's screen as made.
 - **Speed on the Xbox.** It trims the most detailed version of very dense custom models (a 15,000-triangle beam
   cannon) so they look the same with far fewer triangles, stores animations as keyframes the way Bungie stored the
-  Xbox's cinematics (about half the tag memory for first-person animations), makes lower-detail versions (LODs) of the map's custom
+  Xbox's cinematics (about half the tag memory for first-person animations), gives custom Warthogs (and other stock
+  vehicles' variants and wrecks) Bungie's own collision where it fits them, makes collision of custom scenery that's
+  too dense for bipeds to walk against again the way Bungie made theirs (a few convex pieces with big flat faces:
+  Deathtrap's pilot chair took each biped near it ten times Bungie's densest), makes lower-detail versions (LODs) of the map's custom
   models that have none, keeps them in a library so other maps reuse them, gives levels made without portals clusters and portals at their
   doorways (and can divide up the rooms of levels that have them), makes nearly opaque fog fully opaque so the
   Xbox stops drawing past it, turns off dynamic lights that would have the Xbox redraw most of the level (the kind

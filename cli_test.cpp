@@ -97,6 +97,7 @@ int main(int argc, char **argv) {
     cfg.xbox_make_lods = getenv("XNOLOD") == nullptr;
     if (getenv("XTRIM")) cfg.xbox_trim_models = atoi(getenv("XTRIM"));             // 0 as made, 1 trim, 2 harder
     if (getenv("XANIM")) cfg.xbox_compress_animations = atoi(getenv("XANIM"));     // 0 as made, 1 compress, 2 harder
+    if (getenv("XCOLL")) cfg.xbox_collision = atoi(getenv("XCOLL"));               // 0 as made, 1 simpler, 2 harder
     if (getenv("LODLIB")) cfg.lod_library = getenv("LODLIB");
     if (getenv("XKEEP")) { // comma-separated weapon tags to keep
         std::string w = getenv("XKEEP"), item;

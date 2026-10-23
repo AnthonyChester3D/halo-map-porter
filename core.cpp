@@ -1,6 +1,7 @@
 // Halo Map Porter - conversion engine
 #include "core.hpp"
 #include "animcomp.hpp"
+#include "collision.hpp"
 #include "inflate.hpp"
 #include "lod.hpp"
 #include "perf.hpp"
@@ -3683,6 +3684,172 @@ static void xbox_animations(Job &job, const std::vector<std::string> &deps) {
              size(before) + " of tag memory now " + size(after) + " (the farthest any bone end moves: " + mm + ")");
 }
 
+// Collision of the map's own vehicles, scenery and devices made lighter (collision.hpp).
+// First, Bungie's own where it fits: most custom vehicles and their wrecks are iterations of a stock one (the same
+// skeleton, about the same size), so each part (node) whose name a stock vehicle's collision has takes the stock part,
+// where it sits on this model as well as on Bungie's (the Coldsnap swarthog's 570 surfaces, the Warthog's 202). Only
+// when that's lighter.
+// Then, collision still too dense for bipeds is made again, simpler: a biped's movement gathers every surface, edge
+// and corner within its reach, each checked against all those gathered so far, so a dense shape costs it the square of
+// its detail (Deathtrap's pilot chair, 416 surfaces all in reach at once, cost each biped near it ten times Bungie's
+// densest scenery). Only scenery and machines, which bipeds walk and vehicles drive into (vehicles they meet as physics
+// spheres, controls not at all), and not a collision model a vehicle, character or item also uses.
+// Never a collision model a character, weapon or item uses (their hit boxes), and never the Xbox's own.
+static void xbox_collision(Job &job, const std::vector<std::string> &deps) {
+    const int level = job.cfg.xbox_collision;
+    if (level <= 0 || job.analysis) return;
+    const long budget = level >= 2 ? 90000 : 130000, bungie = 115000;   // (Bungie's densest MP scenery: about 115,000)
+    struct Use { bool placed = true, vehicle = true; std::set<std::string> models; std::string name; };
+    std::map<std::string, Use> uses;   // collision model -> what uses it
+    for (auto &dep : deps) {
+        bool place = has_suffix(dep, ".scenery") || has_suffix(dep, ".device_machine"), vehicle = has_suffix(dep, ".vehicle");
+        bool other = has_suffix(dep, ".biped") || has_suffix(dep, ".weapon") || has_suffix(dep, ".equipment") || has_suffix(dep, ".garbage") ||
+                     has_suffix(dep, ".projectile") || has_suffix(dep, ".device_control") || has_suffix(dep, ".device_light_fixture") ||
+                     has_suffix(dep, ".placeholder");
+        if (!place && !vehicle && !other) continue;
+        fs::path own = job.owner(dep);
+        tagfile::Tag ot;
+        if (own.empty() || !ot.load(own / from_u8(dep))) continue;
+        std::string cm = ot.root().ref("collision model");
+        if (cm.empty()) continue;
+        Use &u = uses[cm];
+        u.placed = u.placed && place;
+        u.vehicle = u.vehicle && (vehicle || place);
+        if (std::string m = ot.root().ref("model"); !m.empty()) u.models.insert(m);
+        if ((place || vehicle) && u.name.empty()) u.name = fs::path(from_u8(dep)).stem().u8string();
+    }
+    // Bungie's vehicles, to fit
+    struct Stock { std::string name; std::vector<coll::NodeBsps> nodes; coll::Rig rig; };
+    std::vector<Stock> stock;
+    if (!job.overlay.empty())
+        for (const char *v : {"warthog", "ghost", "scorpion", "banshee", "wraith", "c gun turret"}) {
+            std::string base = std::string("vehicles/") + v + "/" + v;
+            tagfile::Tag ct, mt;
+            if (!ct.load(job.overlay / from_u8(base + ".model_collision_geometry")) || !mt.load(job.overlay / from_u8(base + ".model"))) continue;
+            Stock st{v, coll::read_nodes(ct.root()), {}};
+            if (coll::read_rig(mt.root(), st.rig)) stock.push_back(std::move(st));
+        }
+    auto times = [&](long work) {   // as a multiple of Bungie's densest
+        char t[32];
+        snprintf(t, sizeof t, "%.1fx", (double)work / bungie);
+        return std::string(t);
+    };
+    std::vector<std::string> fitted, done, left;
+    for (auto &[cm, use] : uses) {
+        if (!use.vehicle) continue;   // (a character's, weapon's or item's too)
+        fs::path own = job.owner(cm);
+        if (own.empty() || own == job.overlay) continue;
+        tagfile::Tag t;
+        tagfile::EditTag ed;
+        if (!t.load(own / from_u8(cm)) || !ed.load(own / from_u8(cm))) continue;
+        std::vector<coll::NodeBsps> nodes = coll::read_nodes(t.root());
+        std::vector<tagfile::TagNode> *enodes = tagfile::block(ed.root(), "nodes");
+        if (!enodes || enodes->size() != nodes.size()) continue;
+        const std::string &name = use.name.empty() ? fs::path(from_u8(cm)).stem().u8string() : use.name;
+        bool changed = false;
+        auto write = [&](size_t i, size_t j, const coll::Bsp &b) {
+            std::vector<tagfile::TagNode> *eb = tagfile::block((*enodes)[i], "bsps");
+            if (!eb || j >= eb->size()) return false;
+            coll::write_bsp((*eb)[j], b);
+            nodes[i].bsps[j] = b;
+            return changed = true;
+        };
+        // Bungie's own, where it fits: the stock vehicle whose collision shares most of this one's parts' names, judged
+        // against every model this collision is drawn with
+        {
+            const Stock *best = nullptr;
+            int best_shared = 0, with_bsps = 0;
+            for (auto &n : nodes) with_bsps += !n.bsps.empty();
+            for (auto &st : stock) {
+                int shared = 0;
+                for (auto &n : nodes)
+                    if (!n.bsps.empty())
+                        for (auto &sn : st.nodes)
+                            if (sn.name == n.name && !sn.bsps.empty()) { shared++; break; }
+                if (shared > best_shared) { best_shared = shared; best = &st; }
+            }
+            if (best && best_shared * 2 >= with_bsps && !use.models.empty()) {
+                std::vector<coll::StockFit> fits;
+                for (auto &m : use.models) {
+                    fs::path mo = job.owner(m);
+                    tagfile::Tag mt;
+                    coll::Rig rig;
+                    if (mo.empty() || !mt.load(mo / from_u8(m)) || !coll::read_rig(mt.root(), rig)) { fits.clear(); break; }
+                    fits.push_back(coll::fit_stock(nodes, rig, best->nodes, best->rig));
+                }
+                size_t before = 0, after = 0;
+                int parts = 0;
+                std::vector<size_t> take;
+                for (size_t i = 0; !fits.empty() && i < nodes.size(); i++) {
+                    bool all = true;
+                    for (auto &f : fits) all = all && !f.bsps[i].empty();
+                    if (!all) continue;
+                    take.push_back(i);
+                    for (auto &b : nodes[i].bsps) before += b.surfaces.size();
+                    for (auto &b : fits[0].bsps[i]) after += b.surfaces.size();
+                }
+                if (!take.empty() && after < before) {
+                    for (size_t i : take) {
+                        for (size_t j = 0; j < nodes[i].bsps.size(); j++) write(i, j, fits[0].bsps[i][j]);
+                        parts++;
+                    }
+                    fitted.push_back(name + " (the " + best->name + "'s on " + std::to_string(parts) + " part" + (parts == 1 ? "" : "s") + ": " +
+                                     std::to_string(before) + " surfaces now " + std::to_string(after) + ")");
+                }
+            }
+        }
+        // still too dense for bipeds: made again (scenery and machines)
+        if (use.placed) {
+            size_t s0 = 0, s1 = 0;
+            long w0 = 0, w1 = 0;
+            int pieces = 0;
+            double moved = 0;
+            bool lightened = false;
+            for (size_t i = 0; i < nodes.size(); i++)
+                for (size_t j = 0; j < nodes[i].bsps.size(); j++) {
+                    const coll::Bsp &b = nodes[i].bsps[j];
+                    if (b.surfaces.empty()) continue;
+                    coll::Bsp o;
+                    coll::Lightened r = coll::lighten(b, budget, o);
+                    if (!r.changed) {
+                        if (r.why != "light enough") left.push_back(name + " (" + times(r.work_before) + "; " + r.why + ")");
+                        continue;
+                    }
+                    if (!write(i, j, o)) continue;
+                    lightened = true;
+                    s0 += r.surfaces_before;
+                    s1 += r.surfaces_after;
+                    w0 = std::max(w0, r.work_before);
+                    w1 = std::max(w1, r.work_after);
+                    pieces += r.pieces;
+                    moved = std::max(moved, r.moved);
+                }
+            if (lightened) {
+                char cmv[32];
+                snprintf(cmv, sizeof cmv, "%.0f cm", moved * 304.8);   // (a world unit is 10 feet)
+                done.push_back(name + " (" + std::to_string(s0) + " surfaces now " + std::to_string(s1) +
+                               (pieces ? " in " + std::to_string(pieces) + " pieces" : " in a leaner BSP") + ", " + times(w0) + " now " + times(w1) +
+                               (pieces ? ", within " + std::string(cmv) + " of before" : "") + ")");
+            }
+        }
+        if (!changed) continue;
+        fs::path dst = editable_owner(job, cm);
+        if (dst.empty() || !ed.save(dst / from_u8(cm))) continue;
+    }
+    auto join = [](const std::vector<std::string> &v) {
+        std::string list;
+        for (size_t i = 0; i < v.size(); i++) list += (i ? "; " : "") + v[i];
+        return list;
+    };
+    if (!fitted.empty())
+        job.note("[collision] gave " + std::to_string(fitted.size()) + " model" + (fitted.size() == 1 ? "" : "s") +
+                 " Bungie's own collision where it sits on them as well as on Bungie's vehicle: " + join(fitted));
+    if (!done.empty())
+        job.note("[collision] made " + std::to_string(done.size()) + " dense scenery collision model" + (done.size() == 1 ? "" : "s") +
+                 " simpler, as Bungie made theirs (a biped's collision work next to it, as a multiple of Bungie's densest scenery): " + join(done));
+    if (!left.empty()) job.note("[collision] left as made: " + join(left));
+}
+
 void xbox_content_passes(Job &job) {
     auto deps = tag_dependencies(job, job.scenario + ".scenario", true);
     flatten_layered_shaders(job, deps);
@@ -3719,6 +3886,7 @@ void xbox_content_passes(Job &job) {
     if (!job.cfg.level_shaders_only) {
         xbox_lods(job, deps);
         xbox_animations(job, deps);
+        xbox_collision(job, deps);
     }
     xbox_lights(job, deps);
     xbox_portals(job);

@@ -66,6 +66,13 @@ struct Config {
     // for characters. 0 as made; 1 compress (every bone within the rounding the Xbox's 6-byte rotations make anyway);
     // 2 compress harder (fast moves can be a few millimetres off).
     int xbox_compress_animations = 1;
+    // Collision of the map's own vehicles, scenery and devices made lighter (collision.hpp): first, parts that match a
+    // stock vehicle's (by name) take Bungie's own collision where it sits on the model as well as on Bungie's (most
+    // custom Warthogs and their wrecks); then scenery and devices still too dense for bipeds to walk against are made
+    // again the way Bungie made theirs: a few convex pieces with big flat faces, just outside the model, gaps and small
+    // details filled over, nothing thin. 0 as made; 1 when one costs more than Bungie's densest (about 130,000 steps of
+    // a biped's collision test); 2 harder (90,000). The window sets it with the heavy-models choice.
+    int xbox_collision = 1;
     // Give a level made without portals (one cluster: everything in view is drawn, walls or not) clusters and portals
     // at its doorways and corridors (portals.hpp), when that cuts what the Xbox draws.
     bool xbox_add_portals = true;
