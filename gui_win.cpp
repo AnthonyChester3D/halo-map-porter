@@ -70,7 +70,7 @@ enum {
     // stock models' unused levels of detail
     ID_X_LODSTOCK,
     // making lower-detail versions, and the LOD library's folder (each *_BROWSE directly follows its edit box)
-    ID_X_MAKELOD, ID_S_LOD_LBL, ID_S_LOD, ID_S_LOD_BROWSE, ID_S_LOD_HINT,
+    ID_X_MAKELOD, ID_S_LOD_LBL, ID_S_LOD, ID_S_LOD_BROWSE, ID_S_LOD_HINT, ID_S_TOUR,
     // portals for levels made without them
     ID_X_PORTALS,
     // the level shaders window
@@ -165,6 +165,7 @@ static void save_settings() {
     ini_set(L"x_w2", std::to_wstring(sel(ID_X_W2)));
     ini_set(L"share", checked(ID_SHARE) ? L"1" : L"0");
     ini_set(L"x_shrink", checked(ID_X_SHRINK) ? L"1" : L"0");
+    ini_set(L"write_tour", checked(ID_S_TOUR) ? L"1" : L"0");
     ini_set(L"x_target", std::to_wstring(std::max(0, sel(ID_X_TARGET))));
     ini_set(L"x_v0", std::to_wstring(sel(ID_X_V0)));
     ini_set(L"x_v1", std::to_wstring(sel(ID_X_V1)));
@@ -399,6 +400,7 @@ static void fill_map_combo(int id, const std::wstring &own, const std::wstring &
 
 static void apply_xbox_options(Config &cfg) {
     cfg.xbox_shrink = checked(ID_X_SHRINK);
+    cfg.write_perf_tour = checked(ID_S_TOUR);
     cfg.xbox_max_mb = sel(ID_X_LIMIT) == 1 ? 115 : 0; // 0 = standard 47 MB
     {
         static const double target[3] = {22, 20, 18};   // the texture memory target: Max, Recommended, Safe
@@ -1860,6 +1862,9 @@ static void create_controls() {
     y += 30;
     add(4, L"STATIC", L"The lower-detail versions the app makes are kept here, so the same model in another map reuses them. "
         L"List models it should leave alone in skip.txt there (one per line).", 0, 190, y, 544, 36, ID_S_LOD_HINT);
+    y += 44;
+    check(4, L"With each Xbox build, write a camera tour for Halo 1 Unlimited's perf log (perf\\tours, beside the map)", 26, y,
+          708, ID_S_TOUR);
 
     // Shared area
     g_log = add(-1, L"EDIT", L"", WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 10, 494, 740, 250, ID_LOG,
@@ -1939,6 +1944,7 @@ static void create_controls() {
     set_check(ID_SHARE, ini_get(L"share", L"1") == L"1");
     set_check(ID_B_SHARE, ini_get(L"share", L"1") == L"1");
     set_check(ID_X_SHRINK, ini_get(L"x_shrink", L"1") == L"1");
+    set_check(ID_S_TOUR, ini_get(L"write_tour", L"0") == L"1");
     {
         int k = _wtoi(ini_get(L"x_target", L"1").c_str());
         SendDlgItemMessageW(g_wnd, ID_X_TARGET, CB_SETCURSEL, k >= 0 && k < 3 ? k : 1, 0);

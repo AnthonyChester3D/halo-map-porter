@@ -77,6 +77,9 @@ struct Config {
     // Small scenery with very detailed collision (perf::kDetailedProp...): its collision left out (players and shots
     // pass through it).
     bool xbox_detailed_props_off = false;
+    // With an Xbox build: a camera tour for Halo 1 Unlimited's perf log (its spawns, busiest and typical views),
+    // written to perf\tours\<map>.txt beside the map.
+    bool write_perf_tour = false;
     // Scenery and devices not drawn once smaller on screen than this many pixels across (their models' smallest
     // switch size raised to it; 0: as the map has them).
     double xbox_scenery_pixels = 0;

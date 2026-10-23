@@ -81,6 +81,10 @@ FIRST-TIME SETUP
        maps are kept (see "Levels of detail" below). Filled in for you;
        change it to share one library between PCs (a synced folder).
 
+   "With each Xbox build, write a camera tour..." (off by default)
+       For testing with Halo 1 Unlimited's perf log (see "Camera tours"
+       below).
+
 3. Your settings are saved automatically.
 
 
@@ -744,6 +748,22 @@ Detailed props (Xbox, "Level..." window)
   detailed small prop, a10's oxygen tank, has 163): players and shots pass
   through them. The window names them; the log's [props] line too.
 
+Camera tours (Xbox, Settings tab)
+  Halo 1 Unlimited's perf log (perf_log = 1 in opence.ini, test build 34
+  and later) can fly the view through a list of spots on a map and measure
+  each one (a T row each), so every run measures the same views and builds,
+  maps and settings compare spot for spot. With the Settings tab's option
+  on, each Xbox build also writes perf\tours\<map>.txt beside the map: up
+  to 4 of its spawns (spread out), the level's 6 busiest views from where
+  players stand (at least 6 units apart), 2 typical ones, and a look around
+  from the middle. Copy it to the perf\tours folder beside the XBE. The log
+  names a map by how the Xbox lists it (a map in the folder "_Unsorted" is
+  _Unsorted_<map>), so rename the file to match the CSV files' name if it
+  differs. It's plain text: reorder, delete or add stops (Halo 1 Unlimited
+  can add your current view to it too). The tour moves the view, not your
+  player: the game's own costs (tick_ms, the obj_* columns) follow where
+  your player stands. The log's [tour] line says where it was written.
+
 Dynamic lights (Xbox)
   A dynamic light (a muzzle flash, an explosion, a map's lightning) lights
   the level by drawing part of it again, twice (diffuse and specular), out
@@ -1106,6 +1126,8 @@ The log lists every automatic change:
           "Weather" above).
   [props] Small props with very detailed collision lost it (see "Detailed
           props" above).
+  [tour]  A camera tour for Halo 1 Unlimited's perf log was written (see
+          "Camera tours" above).
   [lights] Dynamic lights that would have the Xbox draw most of the level
           again were turned off or shrunk (see "Dynamic lights" above).
 

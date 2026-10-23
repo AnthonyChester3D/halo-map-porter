@@ -265,6 +265,7 @@ struct Job {
     fs::path work, fixes;
     fs::path overlay;  // stock tags of target game (optional)
     std::set<std::string> alpha_tested;   // bitmaps a shader alpha-tests (find_alpha_tested: halve_cutout)
+    std::string perf_tour;                // a camera tour for the map (make_perf_tour), written beside it
     fs::path source;   // tags of the map being converted / user's tags
     fs::path user_tags; // build-from-tags: the user's own tags folder (never modified)
     fs::path user_data; // build-from-tags: the user's data folder (scripts, sounds)
@@ -1856,6 +1857,28 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
     run_process({u8(tool(cfg, "invader-info")), u8(output)}, r.info);
     r.ok = true;
     r.output = output;
+    if (job.target == Game::Xbox && !job.perf_tour.empty()) {
+        // Named as Halo 1 Unlimited names the map's logs: its internal name (the file's, lower case), letters, digits
+        // and - kept, anything else _.
+        std::string name = stem;
+        std::transform(name.begin(), name.end(), name.begin(), ::tolower);
+        for (auto &c : name)
+            if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-')) c = '_';
+        name = name.substr(0, 31);
+        fs::path tour = output.parent_path() / "perf" / "tours" / from_u8(name + ".txt");
+        fs::create_directories(tour.parent_path(), ec);
+        std::ofstream tf(tour, std::ios::binary);
+        if (tf << job.perf_tour) {
+            int n = 0;
+            for (size_t i = 0; i < job.perf_tour.size(); i++)
+                if (job.perf_tour[i] == '\n' && i + 1 < job.perf_tour.size() && job.perf_tour[i + 1] != '#' &&
+                    job.perf_tour.compare(i + 1, 5, "start") && job.perf_tour.compare(i + 1, 6, "settle") && job.perf_tour.compare(i + 1, 4, "hold"))
+                    n++;
+            job.note("[tour] wrote a camera tour for Halo 1 Unlimited's perf log (" + std::to_string(n) + " stops): " + u8(tour) +
+                     ". Copy it to perf\\tours beside the XBE. The log names the map by how the Xbox lists it (in a folder "
+                     "\"_Unsorted\": _Unsorted_" + name + "), so rename the file to match the CSV's name if it differs");
+        }
+    }
     r.changes = job.changes;
 
     fs::path reports = cfg.cache_dir / "reports";
@@ -3648,6 +3671,118 @@ void xbox_content_passes(Job &job) {
     }
 }
 
+// A camera tour for Halo 1 Unlimited's perf log (its README_OpenCE_test_34: perf\tours\<map>.txt): the view flies to
+// each stop, waits, measures a few seconds and writes a T row, so every run of a map measures the same views. Stops:
+// up to 4 spawns (spread out, each the farthest from those already picked), the level's 6 busiest views from where
+// players stand (the most level triangles drawn, at least 6 units apart), 2 typical ones (around the median), and a
+// look around from the middle of where players stand. Positions at eye height (0.62 above the floor, as the views
+// are); yaw in degrees, 0 = +x, counterclockwise, as the log's.
+static std::string make_perf_tour(const lshade::Analysis &a, const lshade::Preview &p, const tagfile::Elem &scen, const std::string &title) {
+    struct Stop { double x = 0, y = 0, z = 0, yaw = 0, pitch = 0; bool around = false; std::string label; };
+    auto deg = [](double rad) {
+        double d = std::fmod(rad * 180.0 / 3.14159265358979, 360.0);
+        return d < 0 ? d + 360 : d;
+    };
+    auto dist = [](const Stop &s, const Stop &t) { return std::sqrt((s.x - t.x) * (s.x - t.x) + (s.y - t.y) * (s.y - t.y) + (s.z - t.z) * (s.z - t.z)); };
+    std::vector<Stop> stops;
+    // Spawns
+    std::vector<Stop> spawns;
+    tagfile::Block sl = scen.block("player starting locations");
+    for (size_t i = 0; i < sl.size(); i++) {
+        Stop s;
+        s.x = sl[i].num("position", 0);
+        s.y = sl[i].num("position", 1);
+        s.z = sl[i].num("position", 2) + 0.62;
+        s.yaw = deg(sl[i].num("facing"));
+        spawns.push_back(s);
+    }
+    std::vector<Stop> picked;
+    while (picked.size() < 4 && picked.size() < spawns.size()) {
+        const Stop *best = nullptr;
+        double farthest = -1;
+        for (auto &s : spawns) {
+            double d = picked.empty() ? 0 : 1e9;
+            for (auto &q : picked) d = std::min(d, dist(s, q));
+            if (picked.empty() ? !best : d > farthest) { farthest = d; best = &s; }
+        }
+        if (!best || (!picked.empty() && farthest < 3)) break;
+        picked.push_back(*best);
+        picked.back().label = "spawn " + std::to_string(picked.size());
+    }
+    stops.insert(stops.end(), picked.begin(), picked.end());
+    // Views from where players stand, by level triangles drawn
+    size_t S = a.shaders.size(), n = std::min((size_t)a.views, p.views.size());
+    std::vector<std::pair<double, size_t>> score;
+    for (size_t v = 0; v < n; v++) {
+        double t = v < a.other.size() ? a.other[v] : 0;
+        for (size_t s = 0; s < S && v * S + s < a.drawn.size(); s++) t += a.drawn[v * S + s];
+        score.push_back({t, v});
+    }
+    auto view_stop = [&](size_t v) {
+        Stop s;
+        s.x = p.views[v].eye[0];
+        s.y = p.views[v].eye[1];
+        s.z = p.views[v].eye[2];
+        s.yaw = deg(p.views[v].yaw);
+        s.pitch = -4.6;   // (as the level window's views)
+        return s;
+    };
+    std::vector<Stop> views;
+    auto apart = [&](const Stop &s) {
+        for (auto &q : views) if (dist(s, q) < 6) return false;
+        return true;
+    };
+    std::sort(score.rbegin(), score.rend());
+    for (auto &[t, v] : score) {
+        if (views.size() >= 6) break;
+        Stop s = view_stop(v);
+        if (!apart(s)) continue;
+        s.label = "busiest view " + std::to_string(views.size() + 1);
+        views.push_back(s);
+    }
+    if (!score.empty()) {
+        size_t mid = score.size() / 2, typical = 0;
+        for (size_t k = 0; k < score.size() && typical < 2; k++) {
+            size_t i = (k % 2) ? mid + (k + 1) / 2 : mid - std::min(mid, k / 2);   // (outward from the median)
+            if (i >= score.size()) continue;
+            Stop s = view_stop(score[i].second);
+            if (!apart(s)) continue;
+            s.label = "typical view " + std::to_string(++typical);
+            views.push_back(s);
+        }
+        // a look around from the middle of where players stand
+        double cx = 0, cy = 0, cz = 0;
+        for (size_t v = 0; v < n; v++) { cx += p.views[v].eye[0]; cy += p.views[v].eye[1]; cz += p.views[v].eye[2]; }
+        cx /= n; cy /= n; cz /= n;
+        size_t best = 0;
+        double bd = 1e18;
+        for (size_t v = 0; v < n; v++) {
+            double d = (p.views[v].eye[0] - cx) * (p.views[v].eye[0] - cx) + (p.views[v].eye[1] - cy) * (p.views[v].eye[1] - cy) +
+                       (p.views[v].eye[2] - cz) * (p.views[v].eye[2] - cz);
+            if (d < bd) { bd = d; best = v; }
+        }
+        Stop s = view_stop(best);
+        s.around = true;
+        s.pitch = 0;
+        s.label = "middle, all around";
+        views.push_back(s);
+    }
+    stops.insert(stops.end(), views.begin(), views.end());
+    if (stops.empty()) return "";
+    std::string out = "# Halo 1 Unlimited camera tour v1 (README_OpenCE_test_34.txt) - " + title + ", written by Halo Map Porter\r\n"
+                      "# Its spawns, the level's busiest and typical views from where players stand, and a look around.\r\n"
+                      "# The tour moves the view, not your player: tick_ms and the obj_* columns follow where your player stands.\r\n"
+                      "start 5\r\nsettle 2\r\nhold 3\r\n";
+    char line[160];
+    for (auto &s : stops) {
+        std::string label = s.label.substr(0, 31);
+        if (s.around) snprintf(line, sizeof line, "%.2f %.2f %.2f * %.1f %s\r\n", s.x, s.y, s.z, s.pitch, label.c_str());
+        else snprintf(line, sizeof line, "%.2f %.2f %.2f %.1f %.1f %s\r\n", s.x, s.y, s.z, s.yaw, s.pitch, label.c_str());
+        out += line;
+    }
+    return out;
+}
+
 // The level's reflections (levelshaders.hpp): the Xbox draws a reflecting surface once or twice more than any other,
 // so the ones that show least for what they cost lose their reflection while the level costs more than stock ones
 // (or this map's own picks from the level shaders window). The measurement is kept for that window either way.
@@ -3684,6 +3819,8 @@ void xbox_reflections(Job &job) {
             fs::path f = cfg.cache_dir / "levels" / (fs::path(from_u8(job.scenario)).filename().u8string() + ".lsh");
             if (lshade::save(a, p, f)) job.shaders_file = f;
         }
+        if (cfg.write_perf_tour && !cfg.level_shaders_only && job.perf_tour.empty())   // (the first level: the one a match loads)
+            job.perf_tour = make_perf_tour(a, p, stag.root(), a.map_name);
         std::vector<char> none(a.shaders.size(), 0), drop(a.shaders.size(), 0);
         int reflective = 0;
         for (size_t s = 0; s < a.shaders.size(); s++) {

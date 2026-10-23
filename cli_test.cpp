@@ -120,6 +120,7 @@ int main(int argc, char **argv) {
     if (getenv("XWEATHER")) cfg.xbox_weather = atoi(getenv("XWEATHER"));          // 1 lighter, 2 half, 3 off
     cfg.xbox_rider_ai_off = getenv("XRIDERS") != nullptr;                          // riders without AI
     cfg.xbox_detailed_props_off = getenv("XPROPS") != nullptr;                     // detailed props without collision
+    cfg.write_perf_tour = getenv("XTOUR") != nullptr;                              // a perf log camera tour beside the map
     if (const char *x = getenv("XREFL")) {   // keep | tag,tag,... (the level shaders window's picks)
         std::string w = x, item;
         if (w == "keep") cfg.xbox_drop_reflections = false;
