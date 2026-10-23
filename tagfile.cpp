@@ -197,7 +197,9 @@ static const char *extension_of(const std::string &group) {
         {"proj", "projectile"}, {"scen", "scenery"}, {"mach", "device_machine"}, {"ctrl", "device_control"},
         {"lifi", "device_light_fixture"}, {"plac", "placeholder"}, {"ssce", "sound_scenery"}, {"itmc", "item_collection"},
         {"antr", "model_animations"}, {"coll", "model_collision_geometry"}, {"bitm", "bitmap"}, {"snd!", "sound"},
-        {"effe", "effect"}, {"ligh", "light"}, {"sky ", "sky"}, {"rain", "weather_particle_system"}};
+        {"effe", "effect"}, {"ligh", "light"}, {"sky ", "sky"}, {"rain", "weather_particle_system"}, {"part", "particle"},
+        {"pctl", "particle_system"}, {"cont", "contrail"}, {"deca", "decal"}, {"jpt!", "damage_effect"},
+        {"lens", "lens_flare"}, {"foot", "material_effects"}, {"pphy", "point_physics"}};
     auto it = ext.find(group);
     return it == ext.end() ? nullptr : it->second;
 }

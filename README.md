@@ -19,7 +19,9 @@ the free, open-source Halo map compiler, and it can download Invader for you.
   - It gives PC-only weapons Xbox stand-ins, or keeps them with PC animations.
   - It converts Gearbox models, HUDs and sounds, and flattens layered shaders the Xbox can't draw.
 - **Fitting the Xbox.** It works within the Xbox's limits: the 47 MB map file, the 22 MB of tag memory, and a
-  texture memory target (22 / 20 / 18 MB) that the auto-shrinker halves your own textures to meet. HUD textures
+  texture memory target (22 / 20 / 18 MB) that the auto-shrinker halves your own textures to meet. Before halving
+  anything it packs your bump maps the way Bungie's Xbox maps store theirs (P8, or DXT1 for steep ones: a quarter to an
+  eighth of the memory at full size). HUD textures
   made for big screens come down to the resolution the Xbox draws them at (the same size on screen, often a
   sixteenth of the memory), and scope masks are scaled so they frame the Xbox's screen as made.
 - **Speed on the Xbox.** It trims the most detailed version of very dense custom models (a 15,000-triangle beam
@@ -30,12 +32,17 @@ the free, open-source Halo map compiler, and it can download Invader for you.
   Deathtrap's pilot chair took each biped near it ten times Bungie's densest), makes lower-detail versions (LODs) of the map's custom
   models that have none, keeps them in a library so other maps reuse them, gives levels made without portals clusters and portals at their
   doorways (and can divide up the rooms of levels that have them), makes nearly opaque fog fully opaque so the
-  Xbox stops drawing past it, turns off dynamic lights that would have the Xbox redraw most of the level (the kind
+  Xbox stops drawing past it, draws the map's own sky in fewer layers so it looks the same (Precipice's 2.8 layers per
+  pixel become 1.6, near Bungie's 0.8 to 1.4: still layers on the same dome drawn in one pass, clear parts cut away), gives
+  the map's effects that are busier than Bungie's busiest (particles and sprite area alive at once) just enough fewer
+  particles to match, rewrites model shaders' multipurpose maps in the Xbox's channel order (the PC keeps the reflection
+  mask and team colour mask in other channels, so custom vehicles, weapons and scenery lost their shine on the Xbox),
+  turns off dynamic lights that would have the Xbox redraw most of the level (the kind
   that runs it out of memory), and reports what the Xbox has to draw.
 - **Level window.** It lists the level's reflecting shaders with what each reflection costs and how much of the
   picture it is, and draws the level on your graphics card from where players stand, as made, as converted, or
   with only what dropping reflections loses lit up, with its fog, portals and rooms. Fly through it, keep every
-  reflection (the default) or drop some, set the fog, how small scenery gets before it stops being drawn, and how heavy the rain or snow is.
+  reflection (the default) or drop some, set the fog, how small scenery gets before it stops being drawn, how heavy the rain or snow is, whether the sky keeps its layers, and how busy effects may be.
 - **Weapons & vehicles window.** It shows what each weapon and vehicle costs in tag memory and file size, with a
   3D preview and its seats, groups the pieces a map's scripts make of a vehicle under it, and lets you replace or
   drop them.

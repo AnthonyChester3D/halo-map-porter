@@ -219,9 +219,10 @@ pass, see HUD textures; menu art is left alone):
 - "Stock-like budget (smoothest)", the default: level and sky textures at
   most 512 px, and the level's textures together kept to about 6 MB, like
   stock outdoor maps (Blood Gulch 3.3 MB, Sidewinder 5.3 MB). If the level
-  needs more, bump and detail maps are halved first (not below 128 px),
-  then the biggest color textures. Props, vehicles and effects at most
-  256 px.
+  needs more, the map's own bump maps are first packed into less memory
+  at their size (see "Bump maps" below), then bump and detail maps are
+  halved (not below 128 px), then the biggest color textures. Props,
+  vehicles and effects at most 256 px.
 - "512 max (sharper)": everything at most 512 px, no budget.
 - "1024" / "No limit": for testing.
 How a texture is halved: usually its own next smaller version (its next
@@ -243,7 +244,22 @@ again instead:
 DXT1 textures with see-through pixels stay DXT1 (its 1-bit transparency)
 rather than doubling in size as DXT5.
 Uncompressed textures are also compressed to DXT (a quarter of the memory
-or less). "Lightmaps" scales the map's lightmaps (its baked lighting);
+or less).
+Bump maps: Bungie's Xbox bump maps are palettized (P8): a byte per pixel,
+each one of 256 directions from a palette the Xbox keeps (their PC copies
+are 32-bit, four times the memory). A PC or MCC map's own bump maps are
+32-bit (or DXT5 from MCC's BC7), so when the level is over its budget,
+each of them, biggest first, is packed before anything is halved: into
+P8 or DXT1 (an eighth of 32-bit, half of DXT5), whichever turns its
+pixels least from their own directions. The palette only reaches 53
+degrees from flat, so the steep slopes of Halo 2-style bump maps (curbs,
+grooves) keep closer as DXT1; gentle ones are closer as P8. Either turns
+pixels by a few degrees on average, where halving turned them several
+times as far: New Mombasa Classic's 23 custom bump maps had needed 29
+halvings to fit, now 16 are packed and 6 halvings do. Bump maps a shader
+reads as a specular mask, or that are also used another way, are left
+as they are; a shader that alpha-tests through one keeps its see-through
+pixels. "Lightmaps" scales the map's lightmaps (its baked lighting);
 "Max 256" is like stock maps and the default. 512 looks sharper but costs
 about three times the memory, which big outdoor maps may not have to spare.
 
@@ -252,10 +268,23 @@ Other Xbox fixes (automatic):
   each other (MCC-era holograms, for example) hang the Xbox as soon as
   they come into view, so they're flattened to their base layer. They
   look simpler but work.
-- Looping effects on props (fires, smoke, sparks, burning wrecks): PC and
-  MCC maps often use far more particles than the Xbox can draw smoothly.
-  Each one keeps a quarter of its particles, and very fast-repeating ones
-  repeat a third as often. Stock effects are left alone.
+- Effects busier than Bungie's busiest make fewer particles (see
+  "Effects" below).
+- Shine and team colours on models: a model shader's multipurpose map
+  packs its masks in the colour channels, and the PC and the Xbox read
+  them from different ones. PC: auxiliary mask in red, self-illumination
+  in green, reflection in blue, colour change in alpha. Xbox: reflection
+  in red, self-illumination in green, colour change in blue, auxiliary in
+  alpha. So a PC map's own vehicles, weapons and scenery showed their
+  reflections and team colours in the wrong places on the Xbox, or not at
+  all (Precipice's custom warthog, banshee and focus beam had no shine).
+  Their multipurpose maps are rewritten in the Xbox's order; Bungie's PC
+  textures rewritten this way match their Xbox originals channel by
+  channel. A texture also used another way (a level's base map) gets a
+  rewritten copy for the model shaders. MCC shaders flagged "use xbox
+  multipurpose channel order" are already in it and stay as they are.
+  Converting an Xbox map for Custom Edition does the reverse; for MCC its
+  model shaders get that flag instead.
 
 Flashlight: on Xbox, the flashlight stops working when too many vehicles
 spawn in a match, on stock maps too. In testing, up to 6 Warthogs or 2
@@ -498,7 +527,8 @@ Levels of detail (LODs)
   you see exactly. The log's [collision] line names each model with its
   surfaces before and after, the work as a multiple of Bungie's densest,
   and how far the new surfaces lie from the old (most of that is hollows
-  filled over).
+  filled over); "LODs & collision" draws each one as made and as converted
+  (see "Seeing them" below).
   Deathtrap: the pilot chair 416 surfaces > 86 in 9 pieces (10.6x >
   1.0x); the destroyed Banshee 629 > 331 (3.9x > 1.1x).
 
@@ -566,21 +596,27 @@ Levels of detail (LODs)
   measures maps without them.
 
   Seeing them: after an Xbox conversion that changed any model's levels of
-  detail or trimmed it, "See the LODs" (next to "Open report") lists those
-  models, how many are on the map and their triangles by level. Click one
-  to see each level ("Most detailed", "Medium", "Low"...: drag to turn it,
-  wheel to zoom; "Show the triangles" draws their edges) and roughly how
-  far away the game switches to it, in metres and feet (on a 4:3 screen; a
-  model's size on screen decides it). For a trimmed model, "As the map
-  made it" swaps its most detailed level for the original, to compare.
-  Versions you're happy with need nothing: they're kept in the LOD library
-  and reused every time. "Never make LODs for this model" ("Leave this
-  model as made" for a trimmed one) adds it to skip.txt, so no conversion
-  trims it, makes lower-detail versions or gives switch distances for it
-  again, on this map or any other that uses it (convert the map again to
-  drop what it has now; delete its line from skip.txt to undo). Hover over the button for what
-  it will do to the model shown. It also works after a map that didn't
-  fit: those versions were taken out again, and the list says so.
+  detail, trimmed it or changed its collision, "LODs & collision" (next to
+  "Open report") lists those models, how many are on the map and their
+  triangles by level. Click one to see each level ("Most detailed",
+  "Medium", "Low"...: drag to turn it, wheel to zoom; "Show the triangles"
+  draws their edges) and roughly how far away the game switches to it, in
+  metres and feet (on a 4:3 screen; a model's size on screen decides it).
+  For a trimmed model, "As the map made it" swaps its most detailed level
+  for the original, to compare. For a model whose collision changed, "Its
+  collision" and "Collision as made" draw its collision as converted and
+  as the map made it, each part where the model's rest pose puts it,
+  coloured by material (the same colours in both), each surface outlined;
+  the view stays where you turned it, to flip between them. Versions
+  you're happy with need nothing: they're kept in the LOD library and
+  reused every time. "Never make LODs for this model" ("Leave this model
+  as made" for a trimmed one) adds it to skip.txt, so no conversion trims
+  it, makes lower-detail versions or gives switch distances for it again,
+  on this map or any other that uses it (convert the map again to drop
+  what it has now; delete its line from skip.txt to undo). Hover over the
+  button for what it will do to the model shown. It also works after a map
+  that didn't fit: those versions were taken out again, and the list says
+  so.
 
   The LOD library
   Every version the app makes is kept in the LOD library folder (Settings
@@ -779,9 +815,11 @@ Level reflections, fog, scenery, weather and more: the "Level..." window (Xbox)
   (freeing its memory too); the surface keeps its textures, bump map and
   lightmap. The log's [reflections] line lists the ones dropped.
   The "Level..." button on the Xbox tab shows this for the Convert tab's map
-  (or the Build tab's scenario), with the level's fog, tiny scenery and
-  weather (see "Fog", "Tiny scenery" and "Weather" below). Measuring prepares the map as for a
-  conversion without building it (seconds to a minute).
+  (or the Build tab's scenario), with the level's fog, sky, effects, tiny
+  scenery and weather (see "Fog", "Sky", "Effects", "Tiny scenery" and
+  "Weather" below).
+  Measuring prepares the map as for a conversion without building it
+  (seconds to a minute).
   - When converting: keep every reflection (the default), drop the
     suggested ones (the ones that cost the most passes for how little they
     show, until the level costs about what Sidewinder does: cheaper, but
@@ -820,6 +858,11 @@ Level reflections, fog, scenery, weather and more: the "Level..." window (Xbox)
     across. The picture shows the level only, not its objects.
   - Weather: as made (the default), lighter, half the drops, or off, each
     with the level's own number of drops. The picture doesn't show it.
+  - Sky: drawn in fewer layers, looking the same (the default), or as made
+    (see "Sky" below).
+  - Effects: no busier than Bungie's (the default), lighter (looping ones
+    keep a quarter of their particles), or as made (see "Effects" below).
+    The picture doesn't show effects.
   - Riders: keep the AI of units the scripts sit on other objects (the
     default), or leave them without AI (see "Riders" below).
   - Props: keep the collision of small props whose collision is very
@@ -844,6 +887,66 @@ Fog (Xbox)
   less drawn, foggier), or fully opaque at a distance you type (nearer or
   farther than the map's; not nearer than where its fog starts). The
   map's own skies only; Bungie's levels keep theirs.
+
+Sky (Xbox, "Level..." window)
+  The Xbox draws the sky first in every frame, over the whole view, before
+  the level covers most of it: each of the sky model's parts is a layer of
+  transparent texture blended over the ones before it, a screenful at a
+  time, wherever you look. Bungie's multiplayer skies draw 0.8 to 1.4
+  layers per pixel (Sidewinder 0.8, Blood Gulch 1.1, Carousel 1.4; their
+  densest campaign sky 2.4). Precipice's draws 2.8: a dome, two cloud
+  domes, a horizon haze band, sun rays, a planet, a ring and lightning,
+  each its own layer. By default a conversion draws the map's own skies
+  in fewer layers, so they look the same:
+  - A still layer (none of its textures move) drawn just before another
+    on the same dome (the same triangles seen from the same direction) is
+    drawn in the other's pass: their textures are combined into new ones
+    and the upper layer's moving clouds are kept, so one pass of up to
+    four textures blends what the two did.
+  - Still layers drawn after a dome, where the dome is in front of them
+    (a haze band, sun rays), are drawn in its pass too; what's below the
+    dome's rim stays as it was.
+  - Layers' clear parts (the sky above a haze band, a planet's square's
+    corners) are cut away.
+  Precipice's sky draws 1.6 layers per pixel this way (3.3 looking up,
+  4.7 before), its cloud domes, haze band and sun rays in one pass of
+  four textures, with three new 512 x 512 textures (about 0.5 MB more of
+  texture memory). Drawn in software from views all round, the two match
+  to within a few levels of 255 (the rounding of the new textures'
+  compression). The log's [sky] line says what was drawn together and the
+  layers before and after; the Performance section gives the sky's layers
+  next to Bungie's. "As made" keeps the sky's layers as they are (for
+  comparing on the Xbox). Bungie's skies are left alone.
+
+Effects (Xbox, "Level..." window)
+  Every particle alive is moved and drawn each frame, its sprite blended
+  over what's behind it, and the engine keeps at most 1,024 of them, every
+  effect's together. What a frame pays for is what's alive at once: how
+  many particles, and how much sprite (its radius squared, in square world
+  units). Bungie's busiest Xbox multiplayer effects, measured from their
+  tags:
+  - Made once (a muzzle flash, an impact, an explosion), at its busiest
+    moment: about 200 particles (a charged plasma bolt hitting stone) and
+    188 square units of sprites (the rocket's explosion).
+  - Attached to an object, so it loops while the object exists (a fire on
+    a prop, a beam, a burning wreck), kept alive on average: about 300
+    particles (the teleporters, a beam emitter) and 1,150 square units
+    (the plasma flame on Bungie's scenery, the beam).
+  An effect's cost includes the effects its parts make and those its
+  particles make when they hit something or die. A looping effect only
+  runs while its spot can be seen, so what counts is each one's own cost.
+  By default a conversion leaves the map's own effects as made unless one
+  is busier than those: it then makes just enough fewer particles to fit
+  (each count scaled, at least one where there was one; each particle the
+  same size as before), and the effects it makes alongside keep no more
+  than it does. Precipice's are all within them but one (its green flame
+  costs what Bungie's plasma flame does): kotick_laser_large_explosion
+  draws 10 smoke sprites of radius 9 to 11 units that last 12 seconds
+  (631 square units at once), so it keeps 30% of them (3). "Lighter" also
+  has looping effects on objects keep a quarter of their particles (close
+  to what earlier versions of the app did to all of them); "As made"
+  leaves them all as they are. The log's [effects] line lists the effects
+  changed and the share each keeps. Bungie's effects are left alone.
 
 Tiny scenery (Xbox, "Level..." window)
   Halo 1 has no draw distance for objects, but it draws nothing of a model
@@ -1280,7 +1383,9 @@ The log lists every automatic change:
           was used instead.
   [keep]  You edited a stock tag, so your version was used.
   [xbox]  A conversion made for Xbox (models, HUD, sounds, scripts).
-  [pc]    Xbox models converted back to PC models.
+  [pc]    Xbox models converted back to PC models, and their
+          multipurpose maps put in PC's channel order (MCC: flagged).
+          See "Shine and team colours" above.
   [slots] An Xbox vehicle slot was changed (Xbox tab).
   [xbox-mp] A vehicle or PC weapon was swapped, removed or kept for Xbox.
   [shrink] Textures were halved to fit the Xbox size limit.
@@ -1289,9 +1394,13 @@ The log lists every automatic change:
   [scripts] A script function the target game lacks was replaced, or a
           short that holds the game's time was made a long.
   [bc7]   MCC-only BC7 textures were re-encoded as DXT.
-  [textures] Textures were scaled or compressed like stock Xbox maps.
-  [shaders] Layered transparent shaders were flattened for Xbox.
-  [effects] Looping prop effects were lightened for Xbox.
+  [textures] Textures were scaled or compressed like stock Xbox maps, or
+          bump maps packed into P8 or DXT1 (see "Bump maps" above).
+  [shaders] Layered transparent shaders were flattened for Xbox, or
+          model shaders' multipurpose maps put in the Xbox's channel order
+          (see "Shine and team colours" above).
+  [effects] Effects busier than Bungie's busiest were given fewer
+          particles (see "Effects" above).
   [heavy] Heavy models' most detailed versions were trimmed (see "Heavy
           models" above).
   [anim]  Animations were stored as keyframes (see "Animations" above).
@@ -1303,6 +1412,7 @@ The log lists every automatic change:
   [reflections] Level reflections were dropped, as chosen in the Level
           shaders window (see "Level reflections" above).
   [fog]   The level's fog was made fully opaque (see "Fog" above).
+  [sky]   The map's sky was drawn in fewer layers (see "Sky" above).
   [scenery] Tiny scenery and devices aren't drawn (see "Tiny scenery"
           above).
   [weather] The level's rain or snow was made lighter or turned off (see
@@ -1329,6 +1439,9 @@ report when the map builds): what the Xbox has to draw.
     Prisoner 893 / 2,433, the most of any). A level far above
     those is the likeliest reason a map runs slowly; portals only help
     where walls block the view.
+  - Sky: the layers the Xbox draws per pixel of each of the level's skies,
+    over views all round and in the busiest one (looking up), next to
+    Bungie's multiplayer skies (see "Sky" above).
   - Level shaders: the triangle passes the Xbox draws of the level in a
     typical and a busy view (every surface twice, reflecting ones three or
     four times), as converted and as made, next to Sidewinder's 3,350 /

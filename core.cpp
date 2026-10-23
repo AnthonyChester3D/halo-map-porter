@@ -2,12 +2,14 @@
 #include "core.hpp"
 #include "animcomp.hpp"
 #include "collision.hpp"
+#include "effects.hpp"
 #include "inflate.hpp"
 #include "lod.hpp"
 #include "perf.hpp"
 #include "levelshaders.hpp"
 #include "portals.hpp"
 #include "preview.hpp"
+#include "sky.hpp"
 #include "tagfile.hpp"
 
 #include <algorithm>
@@ -292,6 +294,12 @@ struct Job {
     size_t lod_xbox_bytes = 0;
     std::vector<LodView::Model> lod_changes;   // the models whose levels of detail changed (for the LODs window)
     std::map<std::string, std::string> trim_originals;   // trimmed models (tag) as the map made them, for that window
+    struct CollisionChange {   // a model whose collision changed, for that window too
+        std::string model, name, text;   // its model (tag), the object it's for, how it changed
+        char kind = 's';
+        ModelPreview made, now;          // its collision drawn as made, as converted
+    };
+    std::vector<CollisionChange> collision_changes;
     fs::path shaders_file;                     // the level shaders file (levelshaders.hpp), for the window
     std::string shaders_line;                  // the report's line on the level's shader passes
 
@@ -1096,11 +1104,15 @@ static bool measure_xbox_memory(const fs::path &map, XboxMemoryUse &u) {
 }
 void convert_bc7_textures(Job &job);
 void xbox_content_passes(Job &job);
+void reorder_multipurpose_maps(Job &job, const std::vector<std::string> &deps);
+std::map<std::string, bool> level_bump_maps(Job &job, const std::vector<std::string> &deps);
+std::vector<std::string> tag_dependencies(Job &job, const std::string &tag, bool recursive);
 void xbox_lods(Job &job, const std::vector<std::string> &deps);
 void xbox_portals(Job &job);
 void xbox_lights(Job &job, const std::vector<std::string> &deps);
 void xbox_reflections(Job &job);
 void xbox_fog(Job &job);
+void xbox_sky(Job &job);
 void xbox_scenery(Job &job, const std::vector<std::string> &deps);
 void xbox_weather(Job &job);
 void xbox_props(Job &job);
@@ -1455,6 +1467,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
     if (!job.user_tags.empty() && !job.overlay.empty() && job.target != Game::MCC) keep_user_edits(job);
     if (job.target != Game::MCC) convert_bc7_textures(job);
     if (job.target == Game::Xbox) xbox_content_passes(job);
+    else if (job.from == Game::Xbox) reorder_multipurpose_maps(job, tag_dependencies(job, job.scenario + ".scenario", true));
     place_kept_level_tags(job);
     std::vector<std::string> performance;   // the report's "Performance" section (Xbox)
     if (job.target == Game::Xbox && !job.analysis) {
@@ -1473,7 +1486,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
     // The models whose levels of detail changed, for the LODs window (drawn now, while the made versions are in).
     LodView lod_view;
     fs::path lod_file;
-    if (job.target == Game::Xbox && !job.analysis && !job.lod_changes.empty()) {
+    if (job.target == Game::Xbox && !job.analysis && (!job.lod_changes.empty() || !job.collision_changes.empty())) {
         lod_view = make_lod_view(job, output.stem().u8string());
         lod_file = job.cfg.cache_dir / "lods" / (output.stem().u8string() + ".txt");
         if (save_lod_view(lod_view, lod_file)) r.lods = lod_file;
@@ -2848,6 +2861,294 @@ int xbox_meter_bitmap_tag(const fs::path &p) {
     return converted;
 }
 
+// A model shader's multipurpose map packs four masks in its channels, in an order that differs between the games
+// (Bungie's Xbox tags against Gearbox's PC copies of them, channel by channel; rasterizer_xbox_models.c reads red
+// for the reflection mask, green for self-illumination, blue for the colour change and alpha for the auxiliary mask):
+//   Xbox:            R reflection   G self-illumination   B colour change   A auxiliary
+//   PC (CE, MCC):    R auxiliary    G self-illumination   B reflection      A colour change
+// (MCC's "use xbox multipurpose channel order" flag has it read the Xbox's order.) Rewrites a multipurpose bitmap
+// from one order to the other, every mip level: `to_xbox` from PC's order to the Xbox's, else back. `alpha_matters`:
+// a shader reads the channel that lands in alpha (the auxiliary mask on the Xbox; the colour change on PC); else a
+// format with no alpha keeps its format and the alpha is left opaque. A format that can't hold what lands in its
+// channels becomes one that can (DXT1 with an alpha that matters: DXT5; 8-bit grey: A8R8G8B8). Returns how many of
+// its textures were rewritten (0: none it could), -1 if the tag can't be read.
+int reorder_multipurpose_bitmap_tag(const fs::path &p, bool to_xbox, bool alpha_matters) {
+    std::string b;
+    {
+        std::ifstream f(p, std::ios::binary);
+        b.assign((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    }
+    const size_t S = 64;
+    if (b.size() < S + 108 || b.compare(36, 4, "bitm") != 0) return -1;
+    uint32_t cp = be32(b, S + 28), pp = be32(b, S + 48), nseq = be32(b, S + 84), nbd = be32(b, S + 96);
+    size_t pp_off = S + 108 + (size_t)cp, seq_off = pp_off + pp, o = seq_off + 64 * (size_t)nseq;
+    if (pp_off + pp > b.size() || o > b.size()) return -1;
+    for (uint32_t i = 0; i < nseq; i++) o += 32 * (size_t)be32(b, seq_off + 64 * i + 52);
+    size_t bd_off = o;
+    if (bd_off + 48 * (size_t)nbd != b.size()) return -1;
+    std::string pix = b.substr(pp_off, pp), out_pix;
+    std::vector<uint32_t> offs;
+    for (uint32_t i = 0; i < nbd; i++) offs.push_back(be32(b, bd_off + 48 * i + 24));
+    int done = 0, tag_fmt = -1;
+    for (uint32_t i = 0; i < nbd; i++) {
+        size_t e = bd_off + 48 * i;
+        // Each entry's data runs from its offset to the next entry's (extracted tags store size 0).
+        uint32_t off = offs[i], end = pp;
+        for (auto x : offs)
+            if (x > off && x < end) end = x;
+        if (off > pix.size() || end > pix.size()) return -1;
+        std::string data = pix.substr(off, end - off);
+        int w = be16(b, e + 4), h = be16(b, e + 6), type = be16(b, e + 10), fmt = be16(b, e + 12), flags = be16(b, e + 14);
+        int levels = be16(b, e + 20) + 1;
+        bool ok = type == 0 && !(flags & 8) && w > 0 && h > 0 && fmt != 17 && fmt != 18 && mip_bytes(1, 1, fmt) > 0;
+        // Each level as RGBA, channels moved.
+        std::vector<std::vector<unsigned char>> lv;
+        size_t at = 0;
+        bool opaque = true;   // what lands in alpha is opaque everywhere
+        for (int k = 0; ok && k < levels; k++) {
+            int lw = std::max(1, w >> k), lh = std::max(1, h >> k);
+            size_t n = mip_bytes(lw, lh, fmt);
+            if (at + n > data.size()) { ok = false; break; }
+            std::string d = data.substr(at, n);
+            at += n;
+            std::vector<unsigned char> rgba;
+            if (fmt <= 3) {   // A8 white with alpha, Y8 grey, AY8 grey and alpha alike, A8Y8 grey with alpha
+                rgba.assign((size_t)lw * lh * 4, 255);
+                for (size_t q = 0; q < (size_t)lw * lh; q++) {
+                    unsigned char *c = &rgba[q * 4];
+                    unsigned char y = (unsigned char)d[fmt == 3 ? q * 2 : q];
+                    if (fmt == 0) c[3] = y;
+                    else c[0] = c[1] = c[2] = y;
+                    if (fmt == 2) c[3] = y;
+                    if (fmt == 3) c[3] = (unsigned char)d[q * 2 + 1];
+                }
+            } else if (!decode_level(d, lw, lh, fmt, rgba)) {
+                ok = false;
+                break;
+            }
+            for (size_t q = 0; q < (size_t)lw * lh; q++) {
+                unsigned char *c = &rgba[q * 4], s[4] = {c[0], c[1], c[2], c[3]};
+                if (to_xbox) { c[0] = s[2]; c[1] = s[1]; c[2] = s[3]; c[3] = s[0]; }   // R = PC's B, B = PC's A, A = PC's R
+                else { c[0] = s[3]; c[1] = s[1]; c[2] = s[0]; c[3] = s[2]; }           // R = Xbox's A, B = Xbox's R, A = Xbox's B
+                opaque = opaque && c[3] == 255;
+            }
+            lv.push_back(std::move(rgba));
+        }
+        if (ok) {
+            bool keep_alpha = alpha_matters && !opaque;
+            int nf = fmt;
+            if (fmt <= 3) nf = 11;
+            else if (fmt == 14 && keep_alpha) nf = 16;
+            else if ((fmt == 6 || fmt == 8 || fmt == 10) && keep_alpha) nf = 11;
+            std::string enc;
+            for (int k = 0; k < (int)lv.size(); k++) {
+                int lw = std::max(1, w >> k), lh = std::max(1, h >> k);
+                if (!keep_alpha && (nf == 14 || nf == 6 || nf == 10 || nf == 8))
+                    for (size_t q = 0; q < (size_t)lw * lh; q++) lv[k][q * 4 + 3] = 255;
+                enc += encode_level(lv[k], lw, lh, nf);
+            }
+            enc += data.substr(std::min(at, data.size()));   // (anything after the levels, as it was)
+            data = enc;
+            if (nf != fmt) {
+                put_be16(b, e + 12, (uint16_t)nf);
+                tag_fmt = nf;
+            }
+            done++;
+        }
+        put_be32(b, e + 24, (uint32_t)out_pix.size());
+        put_be32(b, e + 28, (uint32_t)data.size());
+        out_pix += data;
+    }
+    if (!done) return 0;
+    if (tag_fmt >= 0) put_be16(b, S + 2, tag_fmt == 16 ? 2 : 4);   // tag-level format: interpolated alpha / 32-bit colour
+    std::string out = b.substr(0, pp_off) + out_pix + b.substr(pp_off + pp);
+    put_be32(out, S + 48, (uint32_t)out_pix.size());
+    put_be32(out, 40, ~crc32_of(out.data() + 64, out.size() - 64)); // HEK tag checksum
+    std::ofstream(p, std::ios::binary) << out;
+    return done;
+}
+
+// The Xbox's bump maps are palettized (P8): a byte per pixel, picking one of 256 directions from the palette the Xbox
+// sets for every texture stage at startup (rasterizer_xbox.c, global_vector_palette in bitmaps.c; Invader's p8_palette
+// is the same). Bungie's PC copies are 32-bit, a quarter of the memory per pixel for the Xbox's. The first 249 are
+// normals (alpha opaque); the rest are see-through (the last a flat normal).
+static const uint32_t kXboxBumpPalette[256] = {
+    0xFF7A19CC, 0xFF7E19CC, 0xFF8019CC, 0xFF8119CC, 0xFF8519CC, 0xFF742FE2, 0xFF7A2FE2, 0xFF7E2FE2,
+    0xFF802FE2, 0xFF812FE2, 0xFF852FE2, 0xFF8B2FE2, 0xFF6B42ED, 0xFF7442EE, 0xFF7A42EF, 0xFF7E42EF,
+    0xFF8042EF, 0xFF8142EF, 0xFF8542EF, 0xFF8B42EE, 0xFF9442ED, 0xFF6052F2, 0xFF6B52F5, 0xFF7452F6,
+    0xFF7A52F7, 0xFF7E52F7, 0xFF8052F7, 0xFF8152F7, 0xFF8552F7, 0xFF8B52F6, 0xFF9452F5, 0xFF9F52F2,
+    0xFF5260F2, 0xFF6060F7, 0xFF6B60F9, 0xFF7460FB, 0xFF7A60FB, 0xFF7E60FB, 0xFF8060FB, 0xFF8160FB,
+    0xFF8560FB, 0xFF8B60FB, 0xFF9460F9, 0xFF9F60F7, 0xFFAD60F2, 0xFF426BED, 0xFF526BF5, 0xFF606BF9,
+    0xFF6B6BFC, 0xFF746BFD, 0xFF7A6BFD, 0xFF7E6BFD, 0xFF806BFD, 0xFF816BFD, 0xFF856BFD, 0xFF8B6BFD,
+    0xFF946BFC, 0xFF9F6BF9, 0xFFAD6BF5, 0xFFBD6BED, 0xFF2F74E2, 0xFF4274EE, 0xFF5274F6, 0xFF6074FB,
+    0xFF6B74FD, 0xFF7474FE, 0xFF7A74FE, 0xFF7E74FE, 0xFF8074FE, 0xFF8174FE, 0xFF8574FE, 0xFF8B74FE,
+    0xFF9474FD, 0xFF9F74FB, 0xFFAD74F6, 0xFFBD74EE, 0xFFD074E2, 0xFF197ACC, 0xFF2F7AE2, 0xFF427AEF,
+    0xFF527AF7, 0xFF607AFB, 0xFF6B7AFD, 0xFF747AFE, 0xFF7A7AFF, 0xFF7E7AFF, 0xFF807AFF, 0xFF817AFF,
+    0xFF857AFF, 0xFF8B7AFE, 0xFF947AFD, 0xFF9F7AFB, 0xFFAD7AF7, 0xFFBD7AEF, 0xFFD07AE2, 0xFFE57ACC,
+    0xFF197ECC, 0xFF2F7EE2, 0xFF427EEF, 0xFF527EF7, 0xFF607EFB, 0xFF6B7EFD, 0xFF747EFE, 0xFF7A7EFF,
+    0xFF7E7EFF, 0xFF807EFF, 0xFF817EFF, 0xFF857EFF, 0xFF8B7EFE, 0xFF947EFD, 0xFF9F7EFB, 0xFFAD7EF7,
+    0xFFBD7EEF, 0xFFD07EE2, 0xFFE57ECC, 0xFF1980CC, 0xFF2F80E2, 0xFF4280EF, 0xFF5280F7, 0xFF6080FB,
+    0xFF6B80FD, 0xFF7480FE, 0xFF7A80FF, 0xFF7E80FF, 0xFF8080FF, 0xFF8180FF, 0xFF8580FF, 0xFF8B80FE,
+    0xFF9480FD, 0xFF9F80FB, 0xFFAD80F7, 0xFFBD80EF, 0xFFD080E2, 0xFFE580CC, 0xFF1981CC, 0xFF2F81E2,
+    0xFF4281EF, 0xFF5281F7, 0xFF6081FB, 0xFF6B81FD, 0xFF7481FE, 0xFF7A81FF, 0xFF7E81FF, 0xFF8081FF,
+    0xFF8181FF, 0xFF8581FF, 0xFF8B81FE, 0xFF9481FD, 0xFF9F81FB, 0xFFAD81F7, 0xFFBD81EF, 0xFFD081E2,
+    0xFFE581CC, 0xFF1985CC, 0xFF2F85E2, 0xFF4285EF, 0xFF5285F7, 0xFF6085FB, 0xFF6B85FD, 0xFF7485FE,
+    0xFF7A85FF, 0xFF7E85FF, 0xFF8085FF, 0xFF8185FF, 0xFF8585FF, 0xFF8B85FE, 0xFF9485FD, 0xFF9F85FB,
+    0xFFAD85F7, 0xFFBD85EF, 0xFFD085E2, 0xFFE585CC, 0xFF2F8BE2, 0xFF428BEE, 0xFF528BF6, 0xFF608BFB,
+    0xFF6B8BFD, 0xFF748BFE, 0xFF7A8BFE, 0xFF7E8BFE, 0xFF808BFE, 0xFF818BFE, 0xFF858BFE, 0xFF8B8BFE,
+    0xFF948BFD, 0xFF9F8BFB, 0xFFAD8BF6, 0xFFBD8BEE, 0xFFD08BE2, 0xFF4294ED, 0xFF5294F5, 0xFF6094F9,
+    0xFF6B94FC, 0xFF7494FD, 0xFF7A94FD, 0xFF7E94FD, 0xFF8094FD, 0xFF8194FD, 0xFF8594FD, 0xFF8B94FD,
+    0xFF9494FC, 0xFF9F94F9, 0xFFAD94F5, 0xFFBD94ED, 0xFF529FF2, 0xFF609FF7, 0xFF6B9FF9, 0xFF749FFB,
+    0xFF7A9FFB, 0xFF7E9FFB, 0xFF809FFB, 0xFF819FFB, 0xFF859FFB, 0xFF8B9FFB, 0xFF949FF9, 0xFF9F9FF7,
+    0xFFAD9FF2, 0xFF60ADF2, 0xFF6BADF5, 0xFF74ADF6, 0xFF7AADF7, 0xFF7EADF7, 0xFF80ADF7, 0xFF81ADF7,
+    0xFF85ADF7, 0xFF8BADF6, 0xFF94ADF5, 0xFF9FADF2, 0xFF6BBDED, 0xFF74BDEE, 0xFF7ABDEF, 0xFF7EBDEF,
+    0xFF80BDEF, 0xFF81BDEF, 0xFF85BDEF, 0xFF8BBDEE, 0xFF94BDED, 0xFF74D0E2, 0xFF7AD0E2, 0xFF7ED0E2,
+    0xFF80D0E2, 0xFF81D0E2, 0xFF85D0E2, 0xFF8BD0E2, 0xFF7AE5CC, 0xFF7EE5CC, 0xFF80E5CC, 0xFF81E5CC,
+    0xFF85E5CC, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x008080FF,
+};
+
+// A level's bump map made smaller in memory without losing pixels: in the Xbox's own bump format (P8,
+// kXboxBumpPalette: each pixel the palette normal nearest its own, by red and green as Bungie's tools and Invader pick
+// it), or as DXT1, whichever keeps its directions closer (the root mean square of the angle each pixel turns, over its
+// full-size level). The palette reaches 53 degrees from flat, so steep bumps (the edges of curbs and grooves in
+// Halo 2-style normal maps) keep their slopes better as DXT1; gentle ones are closer as P8. Either is a quarter of a
+// 32-bit map's memory or less (P8 a quarter, DXT1 an eighth; DXT1 half a DXT5's), and turns each pixel a few degrees,
+// where halving it would turn them several times as far. With `alpha_tested` (a shader alpha-tests through it: the
+// Xbox's lightmap pass tests the bump map's alpha) a pixel the test drops (alpha under half) stays see-through.
+// `fmt` gets what it became (17 P8, 14 DXT1). Returns how many of its textures were rewritten (0: none could gain),
+// -1 if the tag can't be read.
+int compact_bump_bitmap_tag(const fs::path &p, bool alpha_tested, int *fmt_out = nullptr) {
+    static std::vector<uint8_t> nearest;   // red * 256 + green -> palette entry
+    if (nearest.empty()) {
+        nearest.resize(65536);
+        for (int r = 0; r < 256; r++)
+            for (int g = 0; g < 256; g++) {
+                int best = 0, bd = INT32_MAX;
+                for (int k = 0; k < 249; k++) {
+                    int dr = (int)((kXboxBumpPalette[k] >> 16) & 255) - r, dg = (int)((kXboxBumpPalette[k] >> 8) & 255) - g;
+                    if (dr * dr + dg * dg < bd) { bd = dr * dr + dg * dg; best = k; }
+                }
+                nearest[r * 256 + g] = (uint8_t)best;
+            }
+    }
+    auto p8_of = [&](const unsigned char *c) -> uint8_t { return alpha_tested && c[3] < 128 ? 255 : nearest[c[0] * 256 + c[1]]; };
+    // The angle (degrees, squared) between two encoded normals.
+    auto turn2 = [](const unsigned char *a, const unsigned char *b) {
+        double x[3], y[3], la = 0, lb = 0, d = 0;
+        for (int k = 0; k < 3; k++) {
+            x[k] = a[k] / 127.5 - 1; y[k] = b[k] / 127.5 - 1;
+            la += x[k] * x[k]; lb += y[k] * y[k]; d += x[k] * y[k];
+        }
+        double c = d / (std::sqrt(la * lb) + 1e-12), t = std::acos(std::max(-1.0, std::min(1.0, c))) * 57.29578;
+        return t * t;
+    };
+    std::string b;
+    {
+        std::ifstream f(p, std::ios::binary);
+        b.assign((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    }
+    const size_t S = 64;
+    if (b.size() < S + 108 || b.compare(36, 4, "bitm") != 0) return -1;
+    uint32_t cp = be32(b, S + 28), pp = be32(b, S + 48), nseq = be32(b, S + 84), nbd = be32(b, S + 96);
+    size_t pp_off = S + 108 + (size_t)cp, seq_off = pp_off + pp, o = seq_off + 64 * (size_t)nseq;
+    if (pp_off + pp > b.size() || o > b.size()) return -1;
+    for (uint32_t i = 0; i < nseq; i++) o += 32 * (size_t)be32(b, seq_off + 64 * i + 52);
+    size_t bd_off = o;
+    if (bd_off + 48 * (size_t)nbd != b.size()) return -1;
+    std::string pix = b.substr(pp_off, pp), out_pix;
+    std::vector<uint32_t> offs;
+    for (uint32_t i = 0; i < nbd; i++) offs.push_back(be32(b, bd_off + 48 * i + 24));
+    int done = 0, chosen = 0;
+    for (uint32_t i = 0; i < nbd; i++) {
+        size_t e = bd_off + 48 * i;
+        uint32_t off = offs[i], end = pp;
+        for (auto x : offs)
+            if (x > off && x < end) end = x;
+        if (off > pix.size() || end > pix.size()) return -1;
+        std::string data = pix.substr(off, end - off);
+        int w = be16(b, e + 4), h = be16(b, e + 6), type = be16(b, e + 10), fmt = be16(b, e + 12), flags = be16(b, e + 14);
+        int levels = be16(b, e + 20) + 1;
+        // (normal maps come as 32-bit, 16-bit or block formats; P8 and DXT1 have nothing to gain, grey ones aren't normals)
+        bool ok = type == 0 && !(flags & 8) && w > 0 && h > 0 && fmt != 17 && fmt != 14 && fmt > 3 && mip_bytes(1, 1, fmt) > 0;
+        std::vector<std::vector<unsigned char>> lv;
+        size_t at = 0;
+        for (int k = 0; ok && k < levels; k++) {
+            int lw = std::max(1, w >> k), lh = std::max(1, h >> k);
+            size_t n = mip_bytes(lw, lh, fmt);
+            std::vector<unsigned char> rgba;
+            if (at + n > data.size() || !decode_level(data.substr(at, n), lw, lh, fmt, rgba)) { ok = false; break; }
+            at += n;
+            if (!alpha_tested)
+                for (size_t q = 0; q < (size_t)lw * lh; q++) rgba[q * 4 + 3] = 255;
+            lv.push_back(std::move(rgba));
+        }
+        if (!ok) {
+            put_be32(b, e + 24, (uint32_t)out_pix.size());
+            put_be32(b, e + 28, (uint32_t)data.size());
+            out_pix += data;
+            continue;
+        }
+        // P8 only gains on a 16- or 32-bit map; DXT1 needs sides that are multiples of 4.
+        bool can_p8 = mip_bytes(4, 4, fmt) > 16, can_dxt1 = w % 4 == 0 && h % 4 == 0;
+        double e_p8 = 1e30, e_dxt1 = 1e30;
+        std::string top_dxt1;
+        const auto &top = lv[0];
+        size_t px = (size_t)w * h;
+        if (can_p8) {
+            double sum = 0;
+            for (size_t q = 0; q < px; q++) {
+                if (alpha_tested && top[q * 4 + 3] < 128) continue;
+                uint32_t c = kXboxBumpPalette[nearest[top[q * 4] * 256 + top[q * 4 + 1]]];
+                unsigned char n[3] = {(unsigned char)(c >> 16), (unsigned char)(c >> 8), (unsigned char)c};
+                sum += turn2(&top[q * 4], n);
+            }
+            e_p8 = sum / px;
+        }
+        if (can_dxt1) {
+            top_dxt1 = encode_level(top, w, h, 14);
+            std::vector<unsigned char> back;
+            if (decode_level(top_dxt1, w, h, 14, back)) {
+                double sum = 0;
+                for (size_t q = 0; q < px; q++)
+                    if (!(alpha_tested && top[q * 4 + 3] < 128)) sum += turn2(&top[q * 4], &back[q * 4]);
+                e_dxt1 = sum / px;
+            }
+        }
+        if (!can_p8 && !can_dxt1) {
+            put_be32(b, e + 24, (uint32_t)out_pix.size());
+            put_be32(b, e + 28, (uint32_t)data.size());
+            out_pix += data;
+            continue;
+        }
+        int nf = e_p8 <= e_dxt1 ? 17 : 14;
+        std::string enc;
+        for (int k = 0; k < (int)lv.size(); k++) {
+            int lw = std::max(1, w >> k), lh = std::max(1, h >> k);
+            if (nf == 17)
+                for (size_t q = 0; q < (size_t)lw * lh; q++) enc += (char)p8_of(&lv[k][q * 4]);
+            else
+                enc += k == 0 ? top_dxt1 : encode_level(lv[k], lw, lh, 14);
+        }
+        data = enc;
+        put_be16(b, e + 12, (uint16_t)nf);
+        put_be16(b, e + 14, (uint16_t)(nf == 17 ? ((flags & ~2) | 4) : ((flags & ~4) | 2)));   // palettized / compressed
+        chosen = nf;
+        done++;
+        put_be32(b, e + 24, (uint32_t)out_pix.size());
+        put_be32(b, e + 28, (uint32_t)data.size());
+        out_pix += data;
+    }
+    if (!done) return 0;
+    put_be16(b, S + 6, (uint16_t)(be16(b, S + 6) & ~2));   // (its "disable height map compression" off, as Bungie's)
+    put_be16(b, S + 2, chosen == 17 ? 4 : 0);              // (its format: 32-bit, as Bungie's P8 ones say; or DXT1)
+    std::string out = b.substr(0, pp_off) + out_pix + b.substr(pp_off + pp);
+    put_be32(out, S + 48, (uint32_t)out_pix.size());
+    put_be32(out, 40, ~crc32_of(out.data() + 64, out.size() - 64)); // HEK tag checksum
+    std::ofstream(p, std::ios::binary) << out;
+    if (fmt_out) *fmt_out = chosen;
+    return done;
+}
+
 // DXT textures whose sides aren't multiples of 4 pixels (see block_format) stored as A8R8G8B8 instead,
 // cropped from the decoded blocks, mip levels kept. Returns how many textures need it (`write` false =
 // just count) or did, -1 if the tag can't be read.
@@ -3389,86 +3690,260 @@ void flatten_layered_shaders(Job &job, const std::vector<std::string> &deps) {
                  "e.g. holograms)");
 }
 
-// Looping effects attached to objects (fires, smoke, sparks, wrecks) are the Xbox's main framerate cost
-// on PC/MCC maps: each particle count is cut to a quarter, and very fast-repeating events repeat a third
-// as often. Stock effects are left alone.
-void thin_attached_effects(Job &job, const std::vector<std::string> &deps) {
+// Model shaders' multipurpose maps in the target game's channel order (reorder_multipurpose_bitmap_tag). Xbox
+// output: the map's own multipurpose maps from a PC or MCC map are in PC's order (unless their shaders have MCC's
+// "use xbox multipurpose channel order" flag), and every model shader on the Xbox reads the Xbox's, so they're
+// rewritten; one also used another way (a base map, or by a shader that has the flag) gets a rewritten copy for the
+// shaders that need it. Custom Edition output from an Xbox map: the other way round. MCC output from an Xbox map: the
+// shaders get the flag instead (nothing to rewrite).
+void reorder_multipurpose_maps(Job &job, const std::vector<std::string> &deps) {
+    enum { kToXbox, kToPc, kFlag } mode;
+    if (job.target == Game::Xbox) {
+        if (job.from == Game::Xbox) return;
+        mode = kToXbox;
+    } else {
+        if (job.from != Game::Xbox) return;
+        mode = job.target == Game::MCC ? kFlag : kToPc;
+    }
+    // A tag of the map's own: not the target's stock copy, nor one the app copied from it.
+    auto from_map = [&](const std::string &t) {
+        fs::path own = job.owner(t);
+        if (own.empty() || own == job.overlay) return false;
+        if (own == job.fixes)
+            return fs::exists(job.source / from_u8(t)) || (!job.user_tags.empty() && fs::exists(job.user_tags / from_u8(t)));
+        return true;
+    };
+    struct Use { std::string shader; bool xbox_order = false, aux = false, change_color = false; };
+    std::map<std::string, std::vector<Use>> uses;   // multipurpose map -> model shaders reading it
+    std::set<std::string> other;                     // bitmaps shaders use some other way
+    for (auto &dep : deps) {
+        std::string ext = fs::path(from_u8(dep)).extension().u8string();
+        if (ext.compare(0, 7, ".shader") != 0) continue;
+        fs::path own = job.owner(dep);
+        tagfile::Tag t;
+        if (own.empty() || !t.load(own / from_u8(dep))) continue;
+        tagfile::Elem r = t.root();
+        auto add_other = [&](const std::string &m) { if (!m.empty()) other.insert(m); };
+        if (ext == ".shader_model") {
+            std::string mp = r.ref("multipurpose map");
+            for (const char *f : {"base map", "detail map", "reflection cube map"}) add_other(r.ref(f));
+            if (mp.empty()) continue;
+            Use u;
+            u.shader = dep;
+            // (a stock shader of the target has no such flag: it reads the target's order)
+            u.xbox_order = own != job.overlay && ((long long)r.num("shader model flags") & 64);
+            int mask = (int)r.integer("detail mask");
+            u.aux = mask == 7 || mask == 8;
+            u.change_color = r.integer("change color source") != 0;
+            uses[mp].push_back(u);
+        } else if (ext == ".shader_environment") {
+            for (const char *f : {"base map", "primary detail map", "secondary detail map", "micro detail map", "bump map", "map",
+                                  "reflection cube map"})
+                add_other(r.ref(f));
+        } else {
+            for (const char *blk : {"maps", "maps 4 stage", "maps 2 stage"}) {
+                tagfile::Block mb = r.block(blk);
+                for (size_t i = 0; i < mb.size(); i++) add_other(mb[i].ref("map"));
+            }
+        }
+    }
+    int maps = 0, copies = 0, shaders = 0, flagged = 0;
+    for (auto &[bm, us] : uses) {
+        if (!has_suffix(bm, ".bitmap") || !from_map(bm)) continue;   // the target's own (in its order), or one the app made
+        if (mode == kFlag) {
+            for (auto &u : us) {
+                if (!from_map(u.shader) || u.xbox_order) continue;
+                fs::path ed = editable_owner(job, u.shader);
+                tagfile::EditTag et;
+                if (ed.empty() || !et.load(ed / from_u8(u.shader))) continue;
+                tagfile::set_num(et.root(), "shader model flags", (double)((long long)tagfile::get_num(et.root(), "shader model flags") | 64));
+                if (et.save(ed / from_u8(u.shader))) flagged++;
+            }
+            continue;
+        }
+        // The shaders that read it in the other order than it's in: on the Xbox every one without the flag (with it,
+        // the map is already in the Xbox's order for that shader); on Custom Edition, from an Xbox map, all of them.
+        std::vector<const Use *> need;
+        bool shared = other.count(bm) > 0;
+        for (auto &u : us) {
+            if (mode == kToXbox && u.xbox_order) { shared = true; continue; }
+            need.push_back(&u);
+        }
+        if (need.empty()) continue;
+        bool alpha = false;
+        for (auto *u : need) alpha = alpha || (mode == kToXbox ? u->aux : u->change_color);
+        std::string target = bm;
+        fs::path dir;
+        if (shared) {   // a copy for the shaders that need it
+            target = bm.substr(0, bm.size() - 7) + (mode == kToXbox ? " xbox order" : " pc order") + ".bitmap";
+            fs::path own = job.owner(bm);
+            std::error_code ec;
+            fs::create_directories((job.fixes / from_u8(target)).parent_path(), ec);
+            fs::copy_file(own / from_u8(bm), job.fixes / from_u8(target), fs::copy_options::overwrite_existing, ec);
+            if (ec) continue;
+            dir = job.fixes;
+        } else {
+            dir = editable_owner(job, bm);
+            if (dir.empty()) continue;
+        }
+        if (reorder_multipurpose_bitmap_tag(dir / from_u8(target), mode == kToXbox, alpha) <= 0) {
+            if (shared) { std::error_code ec; fs::remove(dir / from_u8(target), ec); }
+            continue;
+        }
+        maps++;
+        if (!shared) { shaders += (int)need.size(); continue; }
+        copies++;
+        std::string path = target.substr(0, target.size() - 7);
+        std::replace(path.begin(), path.end(), '/', '\\');
+        for (auto *u : need) {
+            fs::path ed = editable_owner(job, u->shader, true);
+            tagfile::EditTag et;
+            if (ed.empty() || !et.load(ed / from_u8(u->shader))) continue;
+            std::string *ref = tagfile::ref_path(et.root(), "multipurpose map");
+            if (!ref) continue;
+            *ref = path;
+            if (et.save(ed / from_u8(u->shader))) shaders++;
+        }
+    }
+    if (flagged)
+        job.note("[pc] flagged " + std::to_string(flagged) + " model shader" + (flagged == 1 ? "" : "s") +
+                 " to read their multipurpose maps in the Xbox's channel order (reflection in red, colour change in blue), "
+                 "as the Xbox map has them");
+    if (!maps) return;
+    std::string n = std::to_string(maps) + " multipurpose map" + (maps == 1 ? "" : "s") + " (" + std::to_string(shaders) +
+                    " model shader" + (shaders == 1 ? "" : "s") + (copies ? ", " + std::to_string(copies) + " of them copies" : "") + ")";
+    if (mode == kToXbox)
+        job.note("[shaders] put " + n + " in the Xbox's channel order: PC keeps the reflection mask in blue and the colour "
+                 "change in alpha, the Xbox reads them from red and blue, so reflections and team colours showed in the wrong "
+                 "places, or not at all");
+    else
+        job.note("[pc] put " + n + " in PC's channel order: the Xbox keeps the reflection mask in red and the colour change "
+                 "in blue, PC reads them from blue and alpha");
+}
+
+// The map's own bitmaps its level's shaders use as bump maps (compact_bump_bitmap_tag can store them smaller), each
+// with whether a shader alpha-tests through it. Not one a shader reads as a specular mask ("bump map is specular
+// mask"), nor one also used some other way, nor Bungie's (already in their Xbox format).
+std::map<std::string, bool> level_bump_maps(Job &job, const std::vector<std::string> &deps) {
+    auto from_map = [&](const std::string &t) {
+        fs::path own = job.owner(t);
+        if (own.empty() || own == job.overlay) return false;
+        if (own == job.fixes)
+            return fs::exists(job.source / from_u8(t)) || (!job.user_tags.empty() && fs::exists(job.user_tags / from_u8(t)));
+        return true;
+    };
+    std::map<std::string, bool> bumps;
+    std::set<std::string> other;
+    for (auto &dep : deps) {
+        std::string ext = fs::path(from_u8(dep)).extension().u8string();
+        if (ext.compare(0, 7, ".shader") != 0) continue;
+        fs::path own = job.owner(dep);
+        tagfile::Tag t;
+        if (own.empty() || !t.load(own / from_u8(dep))) continue;
+        tagfile::Elem r = t.root();
+        auto add_other = [&](const std::string &m) { if (!m.empty()) other.insert(m); };
+        if (ext == ".shader_environment") {
+            int flags = (int)r.integer("shader environment flags");
+            std::string bm = r.ref("bump map");
+            if (!bm.empty()) {
+                if (flags & 2) other.insert(bm);   // (bump map is specular mask)
+                else bumps[bm] = bumps[bm] || (flags & 1);
+            }
+            for (const char *f : {"base map", "primary detail map", "secondary detail map", "micro detail map", "map",
+                                  "reflection cube map"})
+                add_other(r.ref(f));
+        } else if (ext == ".shader_model") {
+            for (const char *f : {"base map", "multipurpose map", "detail map", "reflection cube map"}) add_other(r.ref(f));
+        } else {
+            for (const char *blk : {"maps", "maps 4 stage", "maps 2 stage"}) {
+                tagfile::Block mb = r.block(blk);
+                for (size_t i = 0; i < mb.size(); i++) add_other(mb[i].ref("map"));
+            }
+        }
+    }
+    for (auto it = bumps.begin(); it != bumps.end();)
+        it = !has_suffix(it->first, ".bitmap") || other.count(it->first) || !from_map(it->first) ? bumps.erase(it) : std::next(it);
+    return bumps;
+}
+
+// The map's own effects brought down to Bungie's busiest (effects.hpp): an effect made once (a muzzle flash, an
+// impact, an explosion) at its busiest moment, one attached to an object (a fire on a prop, a beam, a burning wreck)
+// steadily, in particles alive and in the area of their sprites. One past those keeps the share of its particles that
+// fits (its particle counts scaled; at least one where there was one); within them it stays as made. Stock effects are
+// left alone. The level window can instead keep them all as made, or keep a quarter of the particles of every looping
+// effect on an object (the porter's rule before it measured Bungie's).
+static std::string pct(double share) {
+    char b[16];
+    snprintf(b, sizeof b, "%.0f%%", share * 100);
+    return b;
+}
+void cap_effects(Job &job, const std::vector<std::string> &deps) {
+    const int mode = job.cfg.xbox_effects;   // 0 Bungie's limits, 1 as made, 2 lighter
+    if (mode == 1) return;
     static const char *objs[] = {".scenery", ".device_machine", ".device_control", ".device_light_fixture", ".vehicle",
                                  ".biped", ".weapon", ".equipment", ".garbage", ".projectile", ".placeholder",
                                  ".sound_scenery"};
-    std::set<std::string> effects;
+    fx::Find find = [&](const std::string &t) {
+        fs::path o = job.owner(t);
+        return o.empty() ? fs::path() : o / from_u8(t);
+    };
+    // Effects attached to objects (they loop while the object exists).
+    std::set<std::string> attached;
     for (auto &dep : deps) {
         bool obj = false;
         for (auto o : objs) obj = obj || has_suffix(dep, o);
         if (!obj) continue;
         fs::path own = job.owner(dep);
-        if (own.empty() || own == job.overlay) continue;
-        for (auto &l : edit_lines(job, own, dep, {"-G", "attachments[*].type"})) {
-            std::string t = norm_rel(l);
-            if (has_suffix(t, ".effect") && t[0] != '.') effects.insert(t);
+        tagfile::Tag t;
+        if (own.empty() || !t.load(own / from_u8(dep))) continue;
+        tagfile::Block at = t.root().block("attachments");
+        for (size_t i = 0; i < at.size(); i++) {
+            std::string g, e = at[i].ref("type", &g);
+            if (g == "effe" && !e.empty()) attached.insert(e);
         }
     }
-    int thinned = 0;
-    for (auto &fx : effects) {
-        fs::path own = job.owner(fx);
+    fx::Analyzer an(find);
+    fx::Caps caps;
+    std::map<std::string, double> share;   // the map's own effects that keep less than all
+    for (auto &dep : deps) {
+        if (!has_suffix(dep, ".effect")) continue;
+        fs::path own = job.owner(dep);
         if (own.empty() || own == job.overlay) continue;
-        auto ne = edit_lines(job, own, fx, {"-C", "events"});
-        int events = ne.empty() ? 0 : std::atoi(ne[0].c_str());
-        if (events <= 0) continue;
-        std::vector<std::string> q;
-        for (int e = 0; e < events; e++) {
-            q.insert(q.end(), {"-C", "events[" + std::to_string(e) + "].particles"});
-            q.insert(q.end(), {"-G", "events[" + std::to_string(e) + "].duration_bounds"});
-        }
-        auto info = edit_lines(job, own, fx, q);
-        if ((int)info.size() < 2 * events) continue;
-        std::vector<std::string> g;
-        std::vector<int> counts;
-        for (int e = 0; e < events; e++) {
-            int n = std::atoi(info[2 * e].c_str());
-            counts.push_back(n);
-            for (int i = 0; i < n; i++)
-                g.insert(g.end(), {"-G", "events[" + std::to_string(e) + "].particles[" + std::to_string(i) + "].count"});
-        }
-        auto vals = g.empty() ? std::vector<std::string>() : edit_lines(job, own, fx, g);
-        if (vals.size() * 2 != g.size()) continue;
-        std::vector<std::string> sets;
-        size_t vi = 0;
-        for (int e = 0; e < events; e++) {
-            double d0 = 0, d1 = 0;
-            sscanf(info[2 * e + 1].c_str(), "%lf,%lf", &d0, &d1);
-            bool fast = std::max(d0, d1) > 0 && std::max(d0, d1) < 0.2;
-            bool big = false;
-            std::vector<std::pair<double, double>> c;
-            for (int i = 0; i < counts[e]; i++, vi++) {
-                double a = 0, b2 = 0;
-                sscanf(vals[vi].c_str(), "%lf,%lf", &a, &b2);
-                c.push_back({a, b2});
-                big = big || b2 >= 4;
-            }
-            if (!fast && !big) continue;
-            for (int i = 0; i < counts[e]; i++) {
-                int na = std::max(1, (int)std::ceil(c[i].first / 4)), nb = std::max(1, (int)std::ceil(c[i].second / 4));
-                if (c[i].second <= 1) continue;
-                sets.insert(sets.end(), {"-S", "events[" + std::to_string(e) + "].particles[" + std::to_string(i) + "].count",
-                                         std::to_string(na) + "," + std::to_string(nb)});
-            }
-            if (fast) {
-                char buf[64];
-                snprintf(buf, sizeof buf, "%g,%g", d0 * 3, d1 * 3);
-                sets.insert(sets.end(), {"-S", "events[" + std::to_string(e) + "].duration_bounds", buf});
-            }
-        }
-        if (sets.empty()) continue;
-        fs::path ed = editable_owner(job, fx);
-        if (ed.empty()) continue;
-        bool ok = false;
-        edit_lines(job, ed, fx, sets, &ok);
-        if (ok) thinned++;
+        bool loops = attached.count(dep) > 0;
+        double s = fx::keep_share(an.cost(dep), loops, caps);
+        if (mode == 2 && loops) s = std::min(s, 0.25);
+        if (s < 1) share[dep] = s;
     }
-    if (thinned)
-        job.note("[effects] lightened " + std::to_string(thinned) +
-                 " looping effects on props (fires, smoke, sparks) to a quarter of their particles for the Xbox's framerate");
+    // The effects one's parts make alongside it keep no more than it does (they're part of its cost).
+    for (bool more = true; more;) {
+        more = false;
+        for (auto &[e, s] : share)
+            for (auto &c : an.part_effects(e)) {
+                fs::path own = job.owner(c);
+                if (own.empty() || own == job.overlay) continue;
+                auto it = share.find(c);
+                if (it == share.end() || it->second > s + 1e-9) {
+                    share[c] = s;
+                    more = true;
+                }
+            }
+    }
+    std::vector<std::string> done;
+    for (auto &[e, s] : share) {
+        fs::path ed = editable_owner(job, e);
+        if (ed.empty() || !fx::scale_particles(ed / from_u8(e), s)) continue;
+        done.push_back(fs::path(from_u8(e)).stem().u8string() + " " + pct(s));
+    }
+    if (done.empty()) return;
+    std::string list;
+    for (size_t i = 0; i < done.size(); i++) list += (i ? ", " : "") + done[i];
+    if (mode == 2)
+        job.note("[effects] lightened " + std::to_string(done.size()) + " of the map's effects (looping ones on objects to a quarter "
+                 "of their particles, the rest to Bungie's busiest), each keeping this share of its particles: " + list);
+    else
+        job.note("[effects] brought " + std::to_string(done.size()) + " of the map's effects down to Bungie's busiest (made once: 204 "
+                 "particles and 188 square units of sprites at once, the rocket's explosion; looping on an object: 300 particles "
+                 "and 1,150 square units, the plasma flame and beam emitters), each keeping this share of its particles: " + list);
 }
 
 // Xbox maps: keep texture memory close to stock maps. The map's own textures (stock tags, HUD and menu
@@ -3559,7 +4034,7 @@ void cap_texture_sizes(Job &job, const std::vector<std::string> &deps) {
     // level far over that makes it stutter (or drop HUD textures) wherever you can see most of the map.
     // Uncompressed ones are compressed first, then the biggest are halved, bump and detail maps first,
     // until the level fits. Stock level textures count too (each Xbox map has its own copy).
-    int halved = 0;
+    int halved = 0, bumps_p8 = 0, bumps_dxt1 = 0;
     size_t level_before = 0, level_after = 0;
     if (cfg.xbox_level_texture_mb > 0 && cfg.xbox_max_texture > 0) {
         struct Tex { std::string tag; size_t bytes; int side, usage; bool done; };
@@ -3590,18 +4065,34 @@ void cap_texture_sizes(Job &job, const std::vector<std::string> &deps) {
         }
         // level_before is after compression; the budget applies from here.
         size_t budget = (size_t)(cfg.xbox_level_texture_mb * 1048576), total = level_before;
+        std::map<std::string, bool> bumps = level_bump_maps(job, deps);   // the map's own bump maps
+        std::set<std::string> packed_tried;
         while (total > budget) {
             // Bump, detail and vector maps first (down to 128 px), then the biggest color textures
-            // (down to 128 px). Ties go to the widest texture.
+            // (down to 128 px). Ties go to the widest texture. A bump map of the map's own is first stored
+            // smaller without losing pixels (compact_bump_bitmap_tag), and only halved after that.
             Tex *pick = nullptr;
             for (int pass = 0; pass < 2 && !pick; pass++)
                 for (auto &t : tex) {
-                    bool cheap = t.usage == 2 || t.usage == 3 || t.usage == 5;
+                    bool cheap = t.usage == 2 || t.usage == 3 || t.usage == 5 || bumps.count(t.tag);
                     if (t.done || t.side <= 128 || (pass == 0 && !cheap)) continue;
                     if (!pick || t.bytes > pick->bytes || (t.bytes == pick->bytes && t.side > pick->side)) pick = &t;
                 }
             if (!pick) break;
             fs::path ed = editable_owner(job, pick->tag, true);
+            if (!ed.empty() && bumps.count(pick->tag) && packed_tried.insert(pick->tag).second) {
+                int nf = 0;
+                if (compact_bump_bitmap_tag(ed / from_u8(pick->tag), bumps[pick->tag], &nf) > 0) {
+                    int side = 0;
+                    size_t now = bitmap_tag_memory(ed / from_u8(pick->tag), &side);
+                    if (now < pick->bytes) {
+                        total -= pick->bytes - now;
+                        pick->bytes = now;
+                        (nf == 17 ? bumps_p8 : bumps_dxt1)++;
+                        continue;
+                    }
+                }
+            }
             if (ed.empty() || cap_bitmap_tag(ed / from_u8(pick->tag), pick->side / 2, job.alpha_tested.count(pick->tag) > 0) <= 0) {
                 pick->done = true;
                 continue;
@@ -3619,11 +4110,18 @@ void cap_texture_sizes(Job &job, const std::vector<std::string> &deps) {
     if (compressed)
         job.note("[textures] compressed " + std::to_string(compressed) +
                  " uncompressed textures to DXT (a quarter of the memory or less)");
-    if (halved) {
+    if (bumps_p8 || bumps_dxt1)
+        job.note("[textures] packed " + std::to_string(bumps_p8 + bumps_dxt1) + " of the map's bump maps into less memory "
+                 "before halving any textures: " + std::to_string(bumps_p8) + " in the Xbox's own bump format (P8: a byte per "
+                 "pixel from Bungie's palette of 256 directions, as their levels have them), " + std::to_string(bumps_dxt1) +
+                 " as DXT1 (bumps steeper than that palette reaches), whichever turned each one's pixels least (a few "
+                 "degrees; halving turns them several times as far)");
+    if (halved || bumps_p8 || bumps_dxt1) {
         char buf[64];
         snprintf(buf, sizeof buf, "%.1f MB -> %.1f MB", level_before / 1048576.0, level_after / 1048576.0);
-        job.note("[textures] level textures " + std::string(buf) + " (halved the biggest " + std::to_string(halved) +
-                 " times, bump and detail maps first) to stay near stock maps' texture memory");
+        job.note("[textures] level textures " + std::string(buf) + (halved ? " (halved the biggest " + std::to_string(halved) +
+                 " times, bump and detail maps first)" : std::string(" (no texture halved)")) +
+                 " to stay near stock maps' texture memory");
     }
     if (textures)
         job.note("[textures] scaled " + std::to_string(textures) + " of your level textures down to " +
@@ -3695,6 +4193,55 @@ static void xbox_animations(Job &job, const std::vector<std::string> &deps) {
 // densest scenery). Only scenery and machines, which bipeds walk and vehicles drive into (vehicles they meet as physics
 // spheres, controls not at all), and not a collision model a vehicle, character or item also uses.
 // Never a collision model a character, weapon or item uses (their hit boxes), and never the Xbox's own.
+// A collision model drawn for the LODs window: each part's BSP where the model's rest pose puts it, its surfaces
+// coloured by material (the same colour for the same material, as made and as converted), their outlines drawn.
+static ModelPreview collision_drawing(const std::vector<coll::NodeBsps> &nodes, const coll::Rig &rig) {
+    static const uint8_t kColour[][3] = {{192, 80, 77}, {79, 129, 189}, {155, 187, 89}, {128, 100, 162}, {247, 150, 70},
+                                         {75, 172, 198}, {227, 119, 194}, {160, 160, 160}};
+    std::map<int, std::vector<std::vector<std::array<double, 3>>>> by_material;
+    for (auto &n : nodes) {
+        if (n.bsps.empty()) continue;
+        std::array<double, 12> m{1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0};
+        for (size_t i = 0; i < rig.names.size(); i++)
+            if (rig.names[i] == n.name) m = rig.world[i];
+        for (auto &q : coll::polygons(n.bsps[0])) {
+            std::vector<std::array<double, 3>> w;
+            for (auto &p : q.pts) {
+                std::array<double, 3> o;
+                for (int r = 0; r < 3; r++) o[r] = m[9 + r] + m[r * 3] * p[0] + m[r * 3 + 1] * p[1] + m[r * 3 + 2] * p[2];
+                w.push_back(o);
+            }
+            by_material[q.material == 0xFFFF ? -1 : q.material].push_back(w);
+        }
+    }
+    ModelPreview p;
+    for (auto &[mat, polys] : by_material) {
+        ModelPreview::Part part;
+        part.first = (uint32_t)(p.tris.size() / 3);
+        part.texture = (int)p.textures.size();
+        ModelPreview::Texture t;
+        t.w = t.h = 4;
+        const uint8_t *c = kColour[(mat < 0 ? 7 : mat) % 8];
+        for (int k = 0; k < 16; k++) t.rgba.insert(t.rgba.end(), {c[0], c[1], c[2], 255});
+        p.textures.push_back(std::move(t));
+        for (auto &w : polys)
+            for (size_t k = 1; k + 1 < w.size(); k++) {
+                // (Halo's winding: corners clockwise seen from outside, the BSP's counterclockwise)
+                uint32_t base = (uint32_t)(p.pos.size() / 3);
+                for (const auto *v : {&w[0], &w[k + 1], &w[k]}) {
+                    p.pos.insert(p.pos.end(), {(float)(*v)[0], (float)(*v)[1], (float)(*v)[2]});
+                    p.uv.insert(p.uv.end(), {0.5f, 0.5f});
+                }
+                p.tris.insert(p.tris.end(), {base, base + 1, base + 2});
+                // outline: (first, k+1) is the polygon's last edge, (k+1, k) always, (k, first) its first
+                p.edges.push_back((uint8_t)((k + 2 == w.size() ? 1 : 0) | 2 | (k == 1 ? 4 : 0)));
+                part.count++;
+            }
+        p.parts.push_back(part);
+    }
+    return p;
+}
+
 static void xbox_collision(Job &job, const std::vector<std::string> &deps) {
     const int level = job.cfg.xbox_collision;
     if (level <= 0 || job.analysis) return;
@@ -3743,6 +4290,8 @@ static void xbox_collision(Job &job, const std::vector<std::string> &deps) {
         tagfile::EditTag ed;
         if (!t.load(own / from_u8(cm)) || !ed.load(own / from_u8(cm))) continue;
         std::vector<coll::NodeBsps> nodes = coll::read_nodes(t.root());
+        const std::vector<coll::NodeBsps> as_made = nodes;
+        std::string how;   // (for the LODs window)
         std::vector<tagfile::TagNode> *enodes = tagfile::block(ed.root(), "nodes");
         if (!enodes || enodes->size() != nodes.size()) continue;
         const std::string &name = use.name.empty() ? fs::path(from_u8(cm)).stem().u8string() : use.name;
@@ -3793,8 +4342,11 @@ static void xbox_collision(Job &job, const std::vector<std::string> &deps) {
                         for (size_t j = 0; j < nodes[i].bsps.size(); j++) write(i, j, fits[0].bsps[i][j]);
                         parts++;
                     }
-                    fitted.push_back(name + " (the " + best->name + "'s on " + std::to_string(parts) + " part" + (parts == 1 ? "" : "s") + ": " +
-                                     std::to_string(before) + " surfaces now " + std::to_string(after) + ")");
+                    std::string what = "the " + best->name + "'s on " + std::to_string(parts) + " part" + (parts == 1 ? "" : "s") + ": " +
+                                       std::to_string(before) + " surfaces now " + std::to_string(after);
+                    fitted.push_back(name + " (" + what + ")");
+                    how = "Bungie's " + best->name + " collision where it fits, on " + std::to_string(parts) + " part" + (parts == 1 ? "" : "s") +
+                          ": " + std::to_string(before) + " surfaces now " + std::to_string(after) + ".";
                 }
             }
         }
@@ -3827,14 +4379,34 @@ static void xbox_collision(Job &job, const std::vector<std::string> &deps) {
             if (lightened) {
                 char cmv[32];
                 snprintf(cmv, sizeof cmv, "%.0f cm", moved * 304.8);   // (a world unit is 10 feet)
-                done.push_back(name + " (" + std::to_string(s0) + " surfaces now " + std::to_string(s1) +
-                               (pieces ? " in " + std::to_string(pieces) + " pieces" : " in a leaner BSP") + ", " + times(w0) + " now " + times(w1) +
-                               (pieces ? ", within " + std::string(cmv) + " of before" : "") + ")");
+                std::string what = std::to_string(s0) + " surfaces now " + std::to_string(s1) +
+                                   (pieces ? " in " + std::to_string(pieces) + " pieces" : " in a leaner BSP") + ", " + times(w0) + " now " +
+                                   times(w1) + (pieces ? ", within " + std::string(cmv) + " of before" : "");
+                done.push_back(name + " (" + what + ")");
+                how += std::string(how.empty() ? "" : " ") + "Made again for bipeds: " + std::to_string(s0) + " surfaces now " +
+                       std::to_string(s1) + (pieces ? " in " + std::to_string(pieces) + " pieces" : " (a leaner BSP)") +
+                       "; walking into it costs " + times(w0) + " Bungie's densest scenery, now " + times(w1) +
+                       (pieces ? "; within " + std::string(cmv) + " of before" : "") + ".";
             }
         }
         if (!changed) continue;
         fs::path dst = editable_owner(job, cm);
         if (dst.empty() || !ed.save(dst / from_u8(cm))) continue;
+        // for the LODs window: drawn as made and as converted, in the model's rest pose
+        Job::CollisionChange c;
+        c.model = use.models.empty() ? cm : *use.models.begin();
+        c.name = name;
+        c.text = how;
+        c.kind = use.placed ? 's' : 'v';
+        coll::Rig rig;
+        {
+            fs::path mo = use.models.empty() ? fs::path() : job.owner(*use.models.begin());
+            tagfile::Tag mt;
+            if (!mo.empty() && mt.load(mo / from_u8(*use.models.begin()))) coll::read_rig(mt.root(), rig);
+        }
+        c.made = collision_drawing(as_made, rig);
+        c.now = collision_drawing(nodes, rig);
+        job.collision_changes.push_back(std::move(c));
     }
     auto join = [](const std::vector<std::string> &v) {
         std::string list;
@@ -3853,8 +4425,10 @@ static void xbox_collision(Job &job, const std::vector<std::string> &deps) {
 void xbox_content_passes(Job &job) {
     auto deps = tag_dependencies(job, job.scenario + ".scenario", true);
     flatten_layered_shaders(job, deps);
-    deps = tag_dependencies(job, job.scenario + ".scenario", true); // flattened layers drop out
-    thin_attached_effects(job, deps);
+    if (!job.cfg.level_shaders_only) reorder_multipurpose_maps(job, deps);   // (before textures are capped)
+    if (!job.cfg.level_shaders_only) xbox_sky(job);   // (before textures are capped: the ones it makes are capped too)
+    deps = tag_dependencies(job, job.scenario + ".scenario", true); // flattened layers (and layers drawn together) drop out
+    cap_effects(job, deps);
     cap_texture_sizes(job, deps);
     int unaligned = 0, flares = 0;
     for (auto &dep : deps) {
@@ -4646,6 +5220,60 @@ void xbox_fog(Job &job) {
     }
 }
 
+// The map's own skies drawn in fewer layers, looking the same (sky.hpp): a still layer drawn in the pass of the one
+// after it on the same dome, still layers over a dome drawn by it where it's in front of them, and the clear parts
+// of layers cut away. The Xbox draws the whole sky first in every frame, over the whole view, so each layer it saves is
+// a screenful of blending. Bungie's skies are as Bungie made them.
+static std::string layers_text(double v) {
+    char b[32];
+    snprintf(b, sizeof b, "%.1f", v);
+    return b;
+}
+void xbox_sky(Job &job) {
+    if (job.cfg.xbox_sky == 1 || job.analysis) return;
+    std::string scen = job.scenario + ".scenario";
+    fs::path sdir = job.owner(scen);
+    tagfile::Tag stag;
+    if (sdir.empty() || !stag.load(sdir / from_u8(scen))) return;
+    tagfile::Block skies = stag.root().block("skies");
+    sky::Find find = [&](const std::string &t) {
+        fs::path o = job.owner(t);
+        return o.empty() ? fs::path() : o / from_u8(t);
+    };
+    sky::Edit edit = [&](const std::string &t) {
+        if (job.owner(t).empty()) return job.fixes / from_u8(t);   // a new tag
+        fs::path d = editable_owner(job, t);
+        return d.empty() ? fs::path() : d / from_u8(t);
+    };
+    std::set<std::string> done;
+    for (size_t i = 0; i < skies.size(); i++) {
+        std::string s = skies[i].ref("sky");
+        if (s.empty() || !done.insert(s).second) continue;
+        fs::path own = job.owner(s);
+        if (own.empty() || own == job.overlay) continue;
+        tagfile::Tag st;
+        if (!st.load(own / from_u8(s))) continue;
+        std::string model = st.root().ref("model");
+        fs::path mown = model.empty() ? fs::path() : job.owner(model);
+        if (mown.empty() || mown == job.overlay) continue;
+        sky::Lightened r = sky::lighten(s, find, edit);
+        if (!r.changed) continue;
+        std::string what;
+        if (!r.merged.empty()) {
+            what = "drew ";
+            for (size_t k = 0; k < r.merged.size(); k++) what += (k ? "; " : "") + r.merged[k];
+            what += r.merged.size() == 1 ? " in one pass" : " in one pass each";
+        }
+        if (!r.trimmed.empty()) {
+            what += what.empty() ? "cut away the clear parts of " : "; cut away the clear parts of ";
+            for (size_t k = 0; k < r.trimmed.size(); k++) what += (k ? ", " : "") + r.trimmed[k];
+        }
+        job.note("[sky] " + fs::path(from_u8(s)).stem().u8string() + ": " + layers_text(r.before.layers) + " layers drawn per pixel, now " +
+                 layers_text(r.after.layers) + " (" + layers_text(r.before.worst) + " and " + layers_text(r.after.worst) +
+                 " looking up), looking the same (Bungie's multiplayer skies draw 0.8 to 1.4): " + what);
+    }
+}
+
 // Tiny scenery and devices not drawn (the level window's choice): the engine draws nothing of a model smaller on
 // screen than its smallest switch size ("super low", the bounding sphere's pixels across), so that's raised to the
 // choice. A size, not a distance: big things stay drawn as far as anyone can see them, and what goes is specks.
@@ -4836,8 +5464,7 @@ static LodView make_lod_view(Job &job, const std::string &map_name) {
         fs::path o = job.owner(tag);
         return o.empty() ? fs::path() : o / from_u8(tag);
     };
-    for (const LodView::Model &c : job.lod_changes) {
-        LodView::Model m = c;
+    auto add_model = [&](LodView::Model m) {
         m.placed = per_model.count(m.tag) ? per_model[m.tag] : 0;
         fs::path mf = find(m.tag);
         perf::ModelStats ms = mf.empty() ? perf::ModelStats() : perf::model_stats(mf);
@@ -4879,6 +5506,25 @@ static LodView make_lod_view(Job &job, const std::string &map_name) {
                                        (double)(hi[2] - lo[2]) * (hi[2] - lo[2]));
         }
         v.models.push_back(std::move(m));
+    };
+    for (const LodView::Model &c : job.lod_changes) add_model(c);
+    // models whose collision changed: with their other changes, or on their own
+    for (auto &cc : job.collision_changes) {
+        auto it = std::find_if(v.models.begin(), v.models.end(), [&](const LodView::Model &m) { return m.tag == cc.model; });
+        if (it == v.models.end()) {
+            LodView::Model m;
+            m.tag = cc.model;
+            m.name = cc.name;
+            m.kind = cc.kind;
+            m.change = "";
+            add_model(m);
+            it = v.models.end() - 1;
+        }
+        it->collision = cc.text;
+        it->coll_made = (int)v.previews.size();
+        v.previews.push_back(cc.made);
+        it->coll_now = (int)v.previews.size();
+        v.previews.push_back(cc.now);
     }
     return v;
 }
@@ -4919,6 +5565,26 @@ static std::vector<std::string> performance_lines(Job &job) {
     if (!lines.empty())
         lines.push_back("  Stock Xbox maps, typical / busy view (busier than 9 views in 10): Blood Gulch 588 / 2,033, "
                         "Damnation 419 / 2,134, Sidewinder 784 / 2,115, Prisoner (the most) 893 / 2,433.");
+    // Its skies: the Xbox draws a sky's every layer over the whole view first in each frame.
+    {
+        tagfile::Block skies = s.block("skies");
+        std::set<std::string> seen;
+        sky::Find find = [&](const std::string &t) {
+            fs::path o = job.owner(t);
+            return o.empty() ? fs::path() : o / from_u8(t);
+        };
+        for (size_t i = 0; i < skies.size(); i++) {
+            std::string sk = skies[i].ref("sky");
+            if (sk.empty() || !seen.insert(sk).second) continue;
+            sky::Fill f = sky::measure(sk, find);
+            if (!f.ok) continue;
+            char buf[200];
+            snprintf(buf, sizeof buf, "Sky (%s): %.1f layers drawn per pixel, %.1f looking up. ", fs::path(from_u8(sk)).stem().u8string().c_str(),
+                     f.layers, f.worst);
+            lines.push_back(std::string(buf) + "Bungie's multiplayer skies: Sidewinder 0.8 (1.6 looking up), Blood Gulch 1.1 (2.4), "
+                                               "Carousel 1.4 (2.4).");
+        }
+    }
     // Its shaders: every level triangle is drawn twice or more (lightmap, textures, reflections).
     if (!job.shaders_line.empty()) {
         std::istringstream sl(job.shaders_line);
@@ -8073,7 +8739,7 @@ ContentEstimate estimate_contents(const ContentAnalysis &a, const std::map<std::
     return estimate_contents_impl(a, picks);
 }
 static const char *kAnalysisMagic = "HaloMapPorter contents 2";
-static const char kPreviewMagic[8] = {'H', 'M', 'P', 'M', 'O', 'D', 'L', '2'};
+static const char kPreviewMagic[8] = {'H', 'M', 'P', 'M', 'O', 'D', 'L', '3'};   // (2: without edges)
 
 // The items' models, in a file of their own (binary, a few MB; textures stored as DXT1, an eighth of their size).
 static std::string dxt1_of(const ModelPreview::Texture &t) {
@@ -8126,6 +8792,7 @@ static bool save_previews(const std::vector<ModelPreview> &v, const fs::path &fi
             u32((uint32_t)t.h);
             vec(dxt1_of(t));
         }
+        vec(m.edges);
     }
     return (bool)f;
 }
@@ -8133,7 +8800,8 @@ static bool load_previews(std::vector<ModelPreview> &out, const fs::path &file) 
     std::ifstream f(file, std::ios::binary);
     std::string b((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     size_t o = 8;
-    bool ok = b.size() >= 12 && memcmp(b.data(), kPreviewMagic, 8) == 0;
+    bool ok = b.size() >= 12 && memcmp(b.data(), kPreviewMagic, 7) == 0 && (b[7] == '2' || b[7] == '3');
+    const bool with_edges = ok && b[7] == '3';
     auto u32 = [&]() -> uint32_t {
         uint32_t x = 0;
         if (o + 4 > b.size()) { ok = false; return 0; }
@@ -8166,12 +8834,14 @@ static bool load_previews(std::vector<ModelPreview> &out, const fs::path &file) 
             if (ok && t.w > 0 && t.h > 0 && t.w <= 4096 && t.h <= 4096) rgba_of_dxt1(d, t);
             else t.rgba.clear();
         }
+        if (with_edges) vec(m.edges);
         // Indices in range, or the model is left out.
         size_t verts = m.pos.size() / 3;
         bool good = ok && m.uv.size() == verts * 2 && m.tris.size() % 3 == 0;
         for (uint32_t x : m.tris) good = good && x < verts;
         for (auto &p : m.parts) good = good && (uint64_t)p.first + p.count <= m.tris.size() / 3 && p.texture < (int)m.textures.size();
         for (auto &t : m.textures) good = good && t.w > 0 && t.h > 0 && t.rgba.size() == (size_t)t.w * t.h * 4;
+        if (!m.edges.empty() && m.edges.size() != m.tris.size() / 3) m.edges.clear();
         if (!good) m = ModelPreview();
     }
     if (!ok) return false;
@@ -8269,7 +8939,7 @@ bool load_content_analysis(ContentAnalysis &out, const fs::path &file) {
 }
 
 // The LODs window's file (text) and its models (file + ".models").
-static const char *kLodViewMagic = "HaloMapPorter lods 1";
+static const char *kLodViewMagic = "HaloMapPorter lods 2";   // (1: without collision)
 bool save_lod_view(const LodView &v, const fs::path &file) {
     std::error_code ec;
     fs::create_directories(file.parent_path(), ec);
@@ -8283,8 +8953,8 @@ bool save_lod_view(const LodView &v, const fs::path &file) {
         f << m.tag << "\n" << m.name << "\n" << m.change << "\n" << m.kind << " " << m.undone << " " << m.placed << " " << m.radius;
         for (double c : m.cutoffs) f << " " << c;
         for (int l : m.level) f << " " << l;
-        f << " " << m.trimmed_from << " " << m.as_made;   // (added later: older files don't have them)
-        f << "\n";
+        f << " " << m.trimmed_from << " " << m.as_made << " " << m.coll_made << " " << m.coll_now;
+        f << "\n" << m.collision << "\n";
     }
     f << "end\n";
     return (bool)f;
@@ -8295,7 +8965,9 @@ bool load_lod_view(LodView &out, const fs::path &file) {
     auto text = [&](std::string &s) { if (!std::getline(f, s)) return false; if (!s.empty() && s.back() == '\r') s.pop_back(); return true; };
     LodView v;
     size_t n = 0;
-    if (!text(line) || line != kLodViewMagic || !text(v.map_name) || !text(line)) return false;
+    if (!text(line) || (line != kLodViewMagic && line != "HaloMapPorter lods 1")) return false;
+    const bool v2 = line == kLodViewMagic;
+    if (!text(v.map_name) || !text(line)) return false;
     n = std::strtoul(line.c_str(), nullptr, 10);
     if (n > 100000) return false;
     v.models.resize(n);
@@ -8306,6 +8978,7 @@ bool load_lod_view(LodView &out, const fs::path &file) {
         for (double &c : m.cutoffs) if (!(ss >> c)) return false;
         for (int &l : m.level) if (!(ss >> l)) return false;
         if (!(ss >> m.trimmed_from >> m.as_made)) { m.trimmed_from = 0; m.as_made = -1; }
+        if (v2 && (!(ss >> m.coll_made >> m.coll_now) || !text(m.collision))) return false;
     }
     if (!text(line) || line != "end") return false;
     fs::path models = file;
@@ -8314,8 +8987,8 @@ bool load_lod_view(LodView &out, const fs::path &file) {
     for (auto &m : v.models) {
         for (int &l : m.level)
             if (l < -1 || l >= (int)v.previews.size() || (l >= 0 && v.previews[l].tris.empty())) l = -1;
-        int &a = m.as_made;
-        if (a < -1 || a >= (int)v.previews.size() || (a >= 0 && v.previews[a].tris.empty())) a = -1;
+        for (int *a : {&m.as_made, &m.coll_made, &m.coll_now})
+            if (*a < -1 || *a >= (int)v.previews.size() || (*a >= 0 && v.previews[*a].tris.empty())) *a = -1;
     }
     out = std::move(v);
     return true;

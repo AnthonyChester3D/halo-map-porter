@@ -15,6 +15,9 @@ ROOTS = {   # tag extension -> root struct
     'shader_transparent_chicago_extended': 'ShaderTransparentChicagoExtended',
     'shader_transparent_generic': 'ShaderTransparentGeneric', 'effect': 'Effect', 'light': 'Light', 'sky': 'Sky',
     'weather_particle_system': 'WeatherParticleSystem', 'model_collision_geometry': 'ModelCollisionGeometry', 'model_animations': 'ModelAnimations',
+    'particle': 'Particle', 'particle_system': 'ParticleSystem', 'contrail': 'Contrail', 'decal': 'Decal',
+    'damage_effect': 'DamageEffect', 'lens_flare': 'LensFlare', 'material_effects': 'MaterialEffects',
+    'point_physics': 'PointPhysics',
 }
 
 types = {}

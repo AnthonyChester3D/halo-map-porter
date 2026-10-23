@@ -20,7 +20,7 @@ using namespace porter;
 namespace {
 
 enum { IDC_INTRO = 400, IDC_LIST, IDC_VIEW, IDC_LEVEL0, IDC_LEVEL4 = IDC_LEVEL0 + 4, IDC_WIRE, IDC_ASMADE, IDC_ABOUT,
-       IDC_SKIP, IDC_LIBRARY, IDC_CLOSE };
+       IDC_SKIP, IDC_LIBRARY, IDC_CLOSE, IDC_SHOW_MODEL, IDC_SHOW_COLL, IDC_SHOW_COLL_MADE };
 
 struct State {
     HWND wnd = nullptr, list = nullptr, view = nullptr, tips = nullptr;
@@ -33,6 +33,7 @@ struct State {
     int model = -1;               // the model shown
     std::vector<int> levels;      // its drawings, most detailed first (each one's first level, tag order)
     int level = 0;                // the drawing shown (index in `levels`)
+    int show = 0;                 // 0 the model, 1 its collision as converted, 2 its collision as the map made it
 };
 State *St = nullptr;
 
@@ -53,15 +54,18 @@ std::wstring thousands(long long n) {
 const wchar_t *kind_text(char k) {
     return k == 'v' ? L"Vehicle" : k == 'w' ? L"Weapon or item" : k == 'b' ? L"Character" : k == 'f' ? L"First person" : L"Scenery";
 }
+bool lod_changed(const LodView::Model &m) { return !m.change.empty() || m.trimmed_from > 0; }   // (not only its collision)
 std::wstring change_short(const LodView::Model &m) {   // (for the list)
-    std::wstring t = m.change == "made" ? L"Made" : m.change == "library" ? L"From the LOD library"
+    std::wstring t = m.change.empty() ? L"" : m.change == "made" ? L"Made" : m.change == "library" ? L"From the LOD library"
                      : m.change == "stock" ? L"Distances (stock)" : m.change == "trimmed" ? L"" : L"Switch distances";
     if (m.undone) t += L", taken out";
     if (m.trimmed_from > 0) t = t.empty() ? L"Trimmed" : L"Trimmed; " + t;
+    if (!m.collision.empty()) t = t.empty() ? L"Collision" : t + L"; collision";
     return t;
 }
 std::wstring change_text(const LodView::Model &m) {
-    std::wstring t = m.change == "made"      ? L"Lower-detail versions made"
+    std::wstring t = m.change.empty()        ? L""
+                     : m.change == "made"    ? L"Lower-detail versions made"
                      : m.change == "library" ? L"Lower-detail versions (from the LOD library)"
                      : m.change == "stock"   ? L"Switch distances (stock model)"
                      : m.change == "trimmed" ? L""
@@ -99,7 +103,8 @@ bool in_skip(const LodView::Model &m) {
 void update_skip() {
     bool skip = St->model >= 0 && in_skip(St->v.models[St->model]);
     bool trimmed = St->model >= 0 && St->v.models[St->model].trimmed_from > 0;
-    EnableWindow(item(IDC_SKIP), St->model >= 0 && !skip && !St->library.empty());
+    bool lods = St->model >= 0 && lod_changed(St->v.models[St->model]);
+    EnableWindow(item(IDC_SKIP), lods && !skip && !St->library.empty());
     SetWindowTextW(item(IDC_SKIP), skip      ? L"Left as made (in skip.txt)"
                                    : trimmed ? L"Leave this model as made"
                                              : L"Never make LODs for this model");
@@ -110,6 +115,7 @@ const wchar_t *skip_tip() {
     if (St->library.empty()) return L"Set the LOD library folder on the Settings tab first: skip.txt is kept there.";
     if (St->model < 0) return L"Click a model in the list first.";
     const LodView::Model &m = St->v.models[St->model];
+    if (!lod_changed(m)) return L"Only this model's collision changed; skip.txt is for its levels of detail.";
     if (in_skip(m))
         St->tip = W(m.name) + L" is in skip.txt in the LOD library: conversions leave it as the map has it. To undo, "
                   L"click \"Open the LOD library folder\" and delete its line from skip.txt (the line above it names the "
@@ -159,6 +165,15 @@ void add_tips() {
 }
 
 void show_level(int k) {
+    for (int i = 0; i < 3; i++) SendMessageW(item(IDC_SHOW_MODEL + i), BM_SETCHECK, i == St->show ? BST_CHECKED : BST_UNCHECKED, 0);
+    for (int i = 0; i < 5; i++) EnableWindow(item(IDC_LEVEL0 + i), St->show == 0);
+    if (St->model >= 0 && St->show > 0) {   // its collision, as converted or as made
+        const LodView::Model &m = St->v.models[St->model];
+        int p = St->show == 1 ? m.coll_now : m.coll_made;
+        EnableWindow(item(IDC_ASMADE), FALSE);
+        modelview::show(St->view, p >= 0 ? &St->v.previews[p] : nullptr, L"No drawing of its collision.", true);
+        return;
+    }
     if (St->model < 0 || k < 0 || k >= (int)St->levels.size()) {
         modelview::show(St->view, nullptr, L"Click a model to see it here.");
         EnableWindow(item(IDC_ASMADE), FALSE);
@@ -181,6 +196,8 @@ void select_model(int i) {
     for (int i2 = 0; i2 < 5; i2++) ShowWindow(item(IDC_LEVEL0 + i2), SW_HIDE);
     if (i < 0 || i >= (int)St->v.models.size()) {
         St->model = -1;
+        St->show = 0;
+        for (int k = 0; k < 3; k++) EnableWindow(item(IDC_SHOW_MODEL + k), FALSE);
         show_level(-1);
         SetWindowTextW(item(IDC_ABOUT), L"");
         EnableWindow(item(IDC_SKIP), FALSE);
@@ -198,13 +215,18 @@ void select_model(int i) {
         SetWindowTextW(item(IDC_LEVEL0 + (int)k), level_name(St->levels[k]));
         ShowWindow(item(IDC_LEVEL0 + (int)k), SW_SHOW);
     }
-    // A new model starts at the usual view, at its most detailed level.
+    // A new model starts at the usual view, at its most detailed level (or its collision, if that's what was shown
+    // and it has one).
+    bool coll = !m.collision.empty();
+    for (int k = 0; k < 3; k++) EnableWindow(item(IDC_SHOW_MODEL + k), coll);
+    if (!coll) St->show = 0;
     modelview::show(St->view, nullptr, L"");
     show_level(0);
 
     std::wstring t = W(m.name) + L": " + kind_text(m.kind);
     if (m.placed) t += L", " + std::to_wstring(m.placed) + L" on the map";
-    t += L"\r\n" + change_text(m) + L".";
+    if (std::wstring c = change_text(m); !c.empty()) t += L"\r\n" + c + L".";
+    if (coll) t += L"\r\nCollision: " + W(m.collision);
     if (m.undone) t += L" The map didn't fit the Xbox with them, so the map you got doesn't have them.";
     // When each one is drawn: a level is used once the model is smaller on screen than the switch distance of
     // the level above it (tag order: super high, high, medium, low, super low).
@@ -279,6 +301,11 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             show_level(id - IDC_LEVEL0);
             return 0;
         }
+        if (id >= IDC_SHOW_MODEL && id <= IDC_SHOW_COLL_MADE) {
+            St->show = id - IDC_SHOW_MODEL;
+            show_level(St->level);
+            return 0;
+        }
         switch (id) {
         case IDC_WIRE:
             modelview::show_triangles(St->view, SendMessageW(item(IDC_WIRE), BM_GETCHECK, 0, 0) == BST_CHECKED);
@@ -335,9 +362,9 @@ HWND add(const wchar_t *cls, const wchar_t *text, DWORD style, int x, int y, int
 }
 
 void create_controls() {
-    add(L"STATIC", L"The models whose levels of detail this conversion changed, or whose most detailed version it trimmed. "
-                   L"Click one to see each of its levels: the game draws a lower one once the model is far enough away to "
-                   L"look small.",
+    add(L"STATIC", L"The models whose levels of detail, most detailed version or collision this conversion changed. Click one "
+                   L"to see each of its levels (a lower one is drawn once the model is far enough away to look small), or its "
+                   L"collision.",
         SS_NOPREFIX, 16, 12, 1048, 36, IDC_INTRO);
     St->list = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT |
                                LVS_SINGLESEL | LVS_SHOWSELALWAYS, S(16), S(56), S(600), S(480), St->wnd, (HMENU)(INT_PTR)IDC_LIST,
@@ -356,14 +383,18 @@ void create_controls() {
         c.fmt = cols[i].fmt;
         ListView_InsertColumn(St->list, i, &c);
     }
-    St->view = modelview::create(St->wnd, S(632), S(56), S(432), S(320), IDC_VIEW);
+    St->view = modelview::create(St->wnd, S(632), S(56), S(432), S(292), IDC_VIEW);
     SendMessageW(St->view, WM_SETFONT, (WPARAM)St->font, TRUE);
+    // the model or its collision (each part where the model's rest pose puts it, coloured by material, outlined)
+    add(L"BUTTON", L"The model", BS_AUTORADIOBUTTON | BS_PUSHLIKE | WS_GROUP | WS_TABSTOP, 632, 354, 140, 24, IDC_SHOW_MODEL);
+    add(L"BUTTON", L"Its collision", BS_AUTORADIOBUTTON | BS_PUSHLIKE, 776, 354, 140, 24, IDC_SHOW_COLL);
+    add(L"BUTTON", L"Collision as made", BS_AUTORADIOBUTTON | BS_PUSHLIKE, 920, 354, 144, 24, IDC_SHOW_COLL_MADE);
     for (int i = 0; i < 5; i++)   // one per level (as many as the model has)
-        add(L"BUTTON", L"", BS_AUTORADIOBUTTON | BS_PUSHLIKE | (i == 0 ? WS_GROUP | WS_TABSTOP : 0), 632 + i * 87, 382, 84, 26,
+        add(L"BUTTON", L"", BS_AUTORADIOBUTTON | BS_PUSHLIKE | (i == 0 ? WS_GROUP | WS_TABSTOP : 0), 632 + i * 87, 384, 84, 26,
             IDC_LEVEL0 + i);
     add(L"BUTTON", L"Show the triangles", BS_AUTOCHECKBOX | WS_TABSTOP, 632, 414, 200, 22, IDC_WIRE);
     add(L"BUTTON", L"As the map made it", BS_AUTOCHECKBOX | WS_TABSTOP, 840, 414, 224, 22, IDC_ASMADE);
-    add(L"STATIC", L"", SS_NOPREFIX, 632, 440, 432, 96, IDC_ABOUT);
+    add(L"STATIC", L"", SS_NOPREFIX, 632, 440, 432, 100, IDC_ABOUT);
     add(L"BUTTON", L"Never make LODs for this model", WS_TABSTOP, 16, 548, 260, 30, IDC_SKIP);
     add(L"BUTTON", L"Open the LOD library folder", WS_TABSTOP, 288, 548, 220, 30, IDC_LIBRARY);
     add(L"BUTTON", L"Close", WS_TABSTOP | BS_DEFPUSHBUTTON, 948, 548, 116, 30, IDC_CLOSE);
@@ -417,7 +448,7 @@ void show(HWND owner, const std::filesystem::path &file, const std::filesystem::
         x = std::clamp(x, (int)mi.rcWork.left, std::max((int)mi.rcWork.left, (int)mi.rcWork.right - w));
         y = std::clamp(y, (int)mi.rcWork.top, std::max((int)mi.rcWork.top, (int)mi.rcWork.bottom - hgt));
     }
-    std::wstring title = L"Levels of detail - " + W(st.v.map_name);
+    std::wstring title = L"Levels of detail and collision - " + W(st.v.map_name);
     st.wnd = CreateWindowExW(WS_EX_DLGMODALFRAME, L"HMPLods", title.c_str(), style, x, y, w, hgt, owner, nullptr, inst, nullptr);
     create_controls();
     fill_list();

@@ -122,6 +122,18 @@ void draw(const porter::ModelPreview &m, const View &v, int w, int h, std::vecto
                             bl = s[2];
                         }
                         float fr = r * shade, fg = g * shade, fb = bl * shade;
+                        if (t < m.edges.size() && m.edges[t]) {   // a polygon's outline: dark
+                            uint8_t e = m.edges[t];
+                            float d = 1e9f;
+                            if (e & 1) d = std::min(d, w2 * twice / std::max(len2, 1e-6f));   // first to second corner
+                            if (e & 2) d = std::min(d, w0 * twice / std::max(len0, 1e-6f));   // second to third
+                            if (e & 4) d = std::min(d, w1 * twice / std::max(len1, 1e-6f));   // third to first
+                            if (d < 1.6f) {
+                                fr *= 0.25f;
+                                fg *= 0.25f;
+                                fb *= 0.25f;
+                            }
+                        }
                         if (v.wire) {   // near an edge (within a pixel and a bit, at twice the size): a light blue line
                             float d = std::min({w0 * twice / std::max(len0, 1e-6f), w1 * twice / std::max(len1, 1e-6f),
                                                 w2 * twice / std::max(len2, 1e-6f)});

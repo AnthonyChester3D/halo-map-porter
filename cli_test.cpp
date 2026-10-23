@@ -121,6 +121,8 @@ int main(int argc, char **argv) {
     }
     if (getenv("XSCENERY")) cfg.xbox_scenery_pixels = atof(getenv("XSCENERY"));   // pixels across
     if (getenv("XWEATHER")) cfg.xbox_weather = atoi(getenv("XWEATHER"));          // 1 lighter, 2 half, 3 off
+    if (getenv("XSKY")) cfg.xbox_sky = atoi(getenv("XSKY"));                      // 1 the skies as made
+    if (getenv("XFX")) cfg.xbox_effects = atoi(getenv("XFX"));                    // 1 as made, 2 lighter
     cfg.xbox_rider_ai_off = getenv("XRIDERS") != nullptr;                          // riders without AI
     cfg.xbox_detailed_props_off = getenv("XPROPS") != nullptr;                     // detailed props without collision
     cfg.write_perf_tour = getenv("XTOUR") != nullptr;                              // a perf log camera tour beside the map

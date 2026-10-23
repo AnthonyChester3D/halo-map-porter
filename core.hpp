@@ -86,6 +86,12 @@ struct Config {
     int xbox_fog = 0;
     double xbox_fog_scale = 1.0;
     double xbox_fog_distance = 0;
+    // The map's own effects (effects.hpp): 0 brought down to Bungie's busiest where past them; 1 as made; 2 lighter
+    // (looping ones on objects keep a quarter of their particles).
+    int xbox_effects = 0;
+    // The map's own skies (sky.hpp): 0 drawn in fewer layers, looking the same (layers drawn together in one pass, clear
+    // parts cut away); 1 as made.
+    int xbox_sky = 0;
     // The level's rain or snow (perf::weather_lighten): 0 as made, 1 lighter (as dense up close, ending at 5 units), 2
     // half the drops, 3 none.
     int xbox_weather = 0;
@@ -130,6 +136,9 @@ struct ModelPreview {
     std::vector<Part> parts;
     struct Texture { int w = 0, h = 0; std::vector<uint8_t> rgba; };   // top row first
     std::vector<Texture> textures;
+    // Per triangle: which of its edges are a polygon's outline, always drawn (bit 0 its first corner to its second, 1
+    // second to third, 2 third to first). Empty: none (a model; "Show the triangles" draws every triangle's).
+    std::vector<uint8_t> edges;
     int triangles() const { return (int)(tris.size() / 3); }
 };
 
@@ -181,8 +190,9 @@ bool analyze_level_shaders(const Config &cfg, const fs::path &input, Game in_gam
 bool save_content_analysis(const ContentAnalysis &a, const fs::path &file);
 bool load_content_analysis(ContentAnalysis &a, const fs::path &file);
 
-// An Xbox build's models whose levels of detail it changed (lower-detail versions made, or switch distances given),
-// to look at in the "LODs" window: each detail level drawn, and where the game switches to it.
+// An Xbox build's models whose levels of detail it changed (lower-detail versions made, or switch distances given) or
+// whose collision it changed, to look at in the "LODs" window: each detail level drawn, and where the game switches to
+// it; the collision as made and as converted.
 struct LodView {
     struct Model {
         std::string tag;                 // the model tag
@@ -198,6 +208,8 @@ struct LodView {
         int level[5] = {-1, -1, -1, -1, -1};   // each level's drawing in `previews` (levels sharing a version share it)
         int trimmed_from = 0;            // its most detailed version was trimmed: its triangles as the map made it
         int as_made = -1;                // and that version's drawing in `previews`
+        std::string collision;           // its collision changed: how ("" none), e.g. "the Warthog's on 4 parts: ..."
+        int coll_made = -1, coll_now = -1;   // its collision's drawings in `previews`: as the map made it, as converted
     };
     std::string map_name;
     std::vector<Model> models;

@@ -942,6 +942,8 @@ static shadersui::Picks load_shader_picks(const fs::path &input) {
         else if (k == "weather") picks.weather = std::clamp(atoi(v.c_str()), 0, 3);
         else if (k == "riders") picks.riders = atoi(v.c_str()) ? 1 : 0;
         else if (k == "props") picks.props = atoi(v.c_str()) ? 1 : 0;
+        else if (k == "sky") picks.sky = atoi(v.c_str()) ? 1 : 0;
+        else if (k == "effects") picks.effects = std::clamp(atoi(v.c_str()), 0, 2);
         // (an older "scenery" line, a distance, is left out: it popped big things in and out of view)
     }
     return picks;
@@ -951,7 +953,8 @@ static void save_shader_picks(const fs::path &input, const shadersui::Picks &pic
     std::error_code ec;
     shadersui::Picks defaults;
     if (picks.mode == defaults.mode && picks.fog == defaults.fog && picks.tiny_px == defaults.tiny_px &&
-        picks.weather == defaults.weather && picks.riders == defaults.riders && picks.props == defaults.props) {   // (all as by default)
+        picks.weather == defaults.weather && picks.riders == defaults.riders && picks.props == defaults.props &&
+        picks.sky == defaults.sky && picks.effects == defaults.effects) {   // (all as by default)
         fs::remove(p, ec);
         return;
     }
@@ -965,6 +968,8 @@ static void save_shader_picks(const fs::path &input, const shadersui::Picks &pic
     f << "weather\t" << picks.weather << '\n';
     f << "riders\t" << picks.riders << '\n';
     f << "props\t" << picks.props << '\n';
+    f << "sky\t" << picks.sky << '\n';
+    f << "effects\t" << picks.effects << '\n';
 }
 static void apply_shader_picks(Config &cfg, const fs::path &input) {
     shadersui::Picks picks = load_shader_picks(input);
@@ -976,6 +981,8 @@ static void apply_shader_picks(Config &cfg, const fs::path &input) {
     cfg.xbox_weather = picks.weather;
     cfg.xbox_rider_ai_off = picks.riders == 1;
     cfg.xbox_detailed_props_off = picks.props == 1;
+    cfg.xbox_sky = picks.sky;
+    cfg.xbox_effects = picks.effects;
     if (picks.mode == 1) {
         cfg.xbox_reflection_picks_set = true;
         cfg.xbox_reflection_picks = picks.drops;
@@ -1030,6 +1037,8 @@ static void open_shaders() {
         append_log(L"Level choices for " + in.filename().wstring() + L", used when you convert it for the Xbox: " + refl +
                    L"; fog " + fog + L"; scenery " + tiny + L"; weather " +
                    (picks.weather == 1 ? L"lighter" : picks.weather == 2 ? L"half the drops" : picks.weather == 3 ? L"off" : L"as made") +
+                   L"; sky " + (picks.sky ? L"as made" : L"in fewer layers") + L"; effects " +
+                   (picks.effects == 1 ? L"as made" : picks.effects == 2 ? L"lighter" : L"no busier than Bungie's") +
                    (picks.riders ? L"; riders without AI" : L"") + (picks.props ? L"; detailed props without collision" : L"") + L".");
     }
 }
@@ -1882,7 +1891,7 @@ static void create_controls() {
     SendMessageW(g_log, EM_SETLIMITTEXT, 0, 0);
     add(-1, L"BUTTON", L"Open output folder", BS_PUSHBUTTON, 10, 752, 150, 26, ID_OPEN_FOLDER);
     add(-1, L"BUTTON", L"Open report", BS_PUSHBUTTON, 168, 752, 120, 26, ID_OPEN_REPORT);
-    add(-1, L"BUTTON", L"See the LODs", BS_PUSHBUTTON, 296, 752, 120, 26, ID_SEE_LODS);
+    add(-1, L"BUTTON", L"LODs && collision", BS_PUSHBUTTON, 296, 752, 130, 26, ID_SEE_LODS);
     ShowWindow(GetDlgItem(g_wnd, ID_OPEN_FOLDER), SW_HIDE);
     ShowWindow(GetDlgItem(g_wnd, ID_OPEN_REPORT), SW_HIDE);
     ShowWindow(GetDlgItem(g_wnd, ID_SEE_LODS), SW_HIDE);

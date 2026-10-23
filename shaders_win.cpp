@@ -26,7 +26,7 @@ enum {
     IDC_MODE0 = 400, IDC_MODE1, IDC_MODE2, IDC_STATUS, IDC_LIST, IDC_VIEW, IDC_PREV, IDC_NEXT, IDC_BEFORE, IDC_AFTER,
     IDC_CHANGES, IDC_HILITE, IDC_COST, IDC_REMEASURE, IDC_OKB, IDC_CANCELB, IDC_ABOUT, IDC_PORTALS, IDC_FOG_LBL, IDC_FOG,
     IDC_FAR_LBL, IDC_FAR, IDC_FOG_DIST, IDC_FOG_UNITS, IDC_WEATHER_LBL, IDC_WEATHER, IDC_RIDERS_LBL, IDC_RIDERS, IDC_PROPS_LBL,
-    IDC_PROPS,
+    IDC_PROPS, IDC_SKY_LBL, IDC_SKY, IDC_FX_LBL, IDC_FX,
 };
 #define WM_LS_LOG (WM_APP + 60)
 #define WM_LS_DONE (WM_APP + 61)
@@ -298,6 +298,9 @@ void set_row(int row) {
 // own numbers; the last fog choice is a distance typed into the box beside it.
 const double kTiny[] = {0, 4, 8, 12, 16};
 const int kTinyCount = 5;
+// The effects choices, in the order listed, and the Picks::effects each one is.
+const wchar_t *const kEffectsItems[3] = {L"No busier than Bungie's (the default)", L"Lighter (looping ones: a quarter)", L"As made"};
+const int kEffectsPick[3] = {0, 2, 1};
 const double kFogScale[] = {1.0, 1.0, 1.0, 0.75, 0.5, 1.0};   // (by item: automatic, as made, opaque at 1, 3/4, 1/2 of its distance; typed)
 const int kFogOther = 5;
 int fog_item() {
@@ -380,6 +383,7 @@ void fill_weather() {
         L"Half the drops: about " + n(w.half),
         L"Off: no rain or snow (the wind stays)"};
     for (auto &t : items) SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)t.c_str());
+    SendMessageW(c, CB_SETDROPPEDWIDTH, S(540), 0);
     SendMessageW(c, CB_SETCURSEL, std::clamp(St->picks.weather, 0, 3), 0);
 }
 
@@ -668,7 +672,7 @@ void create_controls() {
         IDC_MODE0);
     add(L"BUTTON", L"Drop the ones I tick", BS_AUTORADIOBUTTON, 756, 12, 160, 22, IDC_MODE1);
     add(L"STATIC", L"", 0, 12, 42, 1156, 20, IDC_STATUS);
-    St->list = add(WC_LISTVIEWW, L"", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP, 12, 68, 548, 616, IDC_LIST);
+    St->list = add(WC_LISTVIEWW, L"", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP, 12, 68, 548, 646, IDC_LIST);
     ListView_SetExtendedListViewStyle(St->list, LVS_EX_FULLROWSELECT | LVS_EX_CHECKBOXES | LVS_EX_DOUBLEBUFFER);
     struct Col { const wchar_t *name; int w; } cols[] = {{L"Shader (ticked: reflection goes)", 184}, {L"Extra passes", 84},
                                                         {L"Shows", 52}, {L"Covers", 54}, {L"Triangles", 64}, {L"Suggested", 74}};
@@ -704,16 +708,26 @@ void create_controls() {
         for (auto t : tiny_items) SendMessageW(item(IDC_FAR), CB_ADDSTRING, 0, (LPARAM)t);
     }
     add(L"STATIC", L"Weather:", SS_NOTIFY, 572, 630, 56, 20, IDC_WEATHER_LBL);
-    add(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 630, 626, 538, 300, IDC_WEATHER);
+    add(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 630, 626, 244, 300, IDC_WEATHER);
+    add(L"STATIC", L"Sky:", SS_NOTIFY, 884, 630, 42, 20, IDC_SKY_LBL);
+    add(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 928, 626, 240, 300, IDC_SKY);
+    SendMessageW(item(IDC_SKY), CB_ADDSTRING, 0, (LPARAM)L"Fewer layers (looks the same)");
+    SendMessageW(item(IDC_SKY), CB_ADDSTRING, 0, (LPARAM)L"As made");
+    SendMessageW(item(IDC_SKY), CB_SETCURSEL, std::clamp(St->picks.sky, 0, 1), 0);
     add(L"STATIC", L"Riders:", SS_NOTIFY, 572, 660, 46, 20, IDC_RIDERS_LBL);
     add(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 620, 656, 254, 300, IDC_RIDERS);
     add(L"STATIC", L"Props:", SS_NOTIFY, 884, 660, 42, 20, IDC_PROPS_LBL);
     add(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 928, 656, 240, 300, IDC_PROPS);
-    add(L"BUTTON", L"Measure again", BS_PUSHBUTTON | WS_TABSTOP, 12, 696, 120, 26, IDC_REMEASURE);
+    add(L"STATIC", L"Effects:", SS_NOTIFY, 572, 690, 50, 20, IDC_FX_LBL);
+    add(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 624, 686, 250, 300, IDC_FX);
+    for (auto t : kEffectsItems) SendMessageW(item(IDC_FX), CB_ADDSTRING, 0, (LPARAM)t);
+    for (int i = 0; i < 3; i++)
+        if (kEffectsPick[i] == St->picks.effects) SendMessageW(item(IDC_FX), CB_SETCURSEL, i, 0);
+    add(L"BUTTON", L"Measure again", BS_PUSHBUTTON | WS_TABSTOP, 12, 726, 120, 26, IDC_REMEASURE);
     add(L"STATIC", L"Shows: how much of what you see is its reflection. Covers: how much of the screen it is. Passes: triangles drawn again per view.",
-        0, 140, 700, 740, 20, IDC_ABOUT);
-    add(L"BUTTON", L"OK", BS_DEFPUSHBUTTON | WS_TABSTOP, 966, 696, 96, 26, IDC_OKB);
-    add(L"BUTTON", L"Cancel", BS_PUSHBUTTON | WS_TABSTOP, 1072, 696, 96, 26, IDC_CANCELB);
+        0, 140, 730, 740, 20, IDC_ABOUT);
+    add(L"BUTTON", L"OK", BS_DEFPUSHBUTTON | WS_TABSTOP, 966, 726, 96, 26, IDC_OKB);
+    add(L"BUTTON", L"Cancel", BS_PUSHBUTTON | WS_TABSTOP, 1072, 726, 96, 26, IDC_CANCELB);
     CheckRadioButton(St->wnd, IDC_MODE0, IDC_MODE2, IDC_MODE0 + St->picks.mode);
     CheckRadioButton(St->wnd, IDC_BEFORE, IDC_CHANGES, IDC_AFTER);
     CheckDlgButton(St->wnd, IDC_HILITE, BST_CHECKED);
@@ -787,6 +801,23 @@ void create_controls() {
                                  L"off removes it. The picture doesn't show weather.";
     tip(IDC_WEATHER, weather_tip);
     tip(IDC_WEATHER_LBL, weather_tip);
+    const wchar_t *sky_tip = L"The Xbox draws the sky first in every frame, over the whole view, before the level covers most of "
+                             L"it: each layer of it is a screenful of blending. Bungie's multiplayer skies draw 0.8 to 1.4 layers "
+                             L"per pixel; Precipice's draws 2.8. Fewer layers: layers on the same dome drawn in one pass (their "
+                             L"textures combined; moving clouds keep moving) and clear parts cut away, so the picture stays the "
+                             L"same (Precipice: 1.6). The map's own skies only; the conversion's report gives the numbers.";
+    tip(IDC_SKY, sky_tip);
+    tip(IDC_SKY_LBL, sky_tip);
+    const wchar_t *fx_tip = L"Every particle alive is moved and drawn each frame, and its sprite blended over what's behind it "
+                            L"(the engine keeps at most 1,024, every effect's together). Bungie's busiest Xbox multiplayer "
+                            L"effects: made once (an explosion, an impact), about 200 particles and 188 square units of sprites "
+                            L"at once (the rocket's explosion); looping on an object (a fire, a beam), 300 particles and 1,150 "
+                            L"square units kept alive (the plasma flame). No busier than Bungie's: a map's own effect past "
+                            L"those makes just enough fewer particles to fit (each the same size as before); the rest stay as "
+                            L"made. Lighter: looping ones on objects keep a quarter of their particles too. The map's own "
+                            L"effects only; the conversion's report names them. The picture doesn't show effects.";
+    tip(IDC_FX, fx_tip);
+    tip(IDC_FX_LBL, fx_tip);
     const wchar_t *riders_tip = L"Units the scripts give AI and then attach to another object, like Deathtrap's marines sitting in its "
                                 L"moving warthogs: they can't go anywhere, but their AI still thinks every tick (Deathtrap's 9: 1.5 ms "
                                 L"of each Xbox tick). Without AI they sit where they're attached, as before. Try the map once: a rider "
@@ -918,6 +949,18 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 if (k >= 0 && k <= 3) St->picks.weather = k;
             }
             return 0;
+        case IDC_SKY:
+            if (HIWORD(wp) == CBN_SELCHANGE) {
+                int k = (int)SendMessageW(item(IDC_SKY), CB_GETCURSEL, 0, 0);
+                if (k == 0 || k == 1) St->picks.sky = k;
+            }
+            return 0;
+        case IDC_FX:
+            if (HIWORD(wp) == CBN_SELCHANGE) {
+                int k = (int)SendMessageW(item(IDC_FX), CB_GETCURSEL, 0, 0);
+                if (k >= 0 && k < 3) St->picks.effects = kEffectsPick[k];
+            }
+            return 0;
         case IDC_RIDERS: case IDC_PROPS:
             if (HIWORD(wp) == CBN_SELCHANGE && St->data) {
                 int k = (int)SendMessageW(item(id), CB_GETCURSEL, 0, 0);
@@ -1002,7 +1045,7 @@ bool edit(HWND owner, const std::wstring &title, const std::string &key, Measure
     st.measure = std::move(measure);
     st.picks = picks;
 
-    RECT r{0, 0, S(1180), S(734)};
+    RECT r{0, 0, S(1180), S(764)};
     DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
     AdjustWindowRect(&r, style, FALSE);
     RECT orc;
