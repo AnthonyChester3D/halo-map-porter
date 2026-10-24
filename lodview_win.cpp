@@ -7,7 +7,10 @@
 #include <algorithm>
 #include <cstdio>
 #include <cwctype>
+#include <functional>
+#include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "core.hpp"
@@ -24,8 +27,13 @@ enum { IDC_INTRO = 400, IDC_FILTER_LBL, IDC_FILTER, IDC_LIST, IDC_VIEW, IDC_LEVE
        IDC_LODS_LBL, IDC_LODS, IDC_MED_LBL, IDC_MED, IDC_LOW_LBL, IDC_LOW, IDC_TRIS_LBL, IDC_TOP_LBL, IDC_TOP, IDC_TOPN,
        IDC_TOPN_LBL, IDC_STATUS, IDC_AGAIN };
 
+const UINT WM_UPDATED = WM_APP + 41;   // (the update's thread: done; lParam a Result*)
+
 struct State {
     HWND wnd = nullptr, list = nullptr, view = nullptr, tips = nullptr;
+    fs::path file;                // the LodView shown
+    std::function<Result()> update;   // "Update the map" (runs on a thread of its own)
+    bool updating = false;
     int dpi = 96;
     HFONT font = nullptr, bold = nullptr;
     bool done = false, again = false;
@@ -105,7 +113,13 @@ lod::Settings lib() {
     s.library = St->library;
     return s;
 }
-bool is_stock(const LodView::Model &m) { return m.change == "stock"; }   // (Bungie's: only its switch distances)
+bool is_stock(const LodView::Model &m) { return m.stock || m.change == "stock"; }   // (Bungie's: only its levels of detail)
+std::wstring kind_label(const LodView::Model &m) {   // (for the list)
+    if (!is_stock(m)) return kind_text(m.kind);
+    std::wstring k = kind_text(m.kind);
+    k[0] = (wchar_t)towlower(k[0]);
+    return L"Bungie's " + k;
+}
 
 // A model's choice, short (the list's "Your choice"; empty: automatic).
 std::wstring choice_short(const LodView::Model &m) {
@@ -207,7 +221,7 @@ void save_choice() {
         std::wstring t = choice_short(m);
         ListView_SetItemText(St->list, r, 6, (LPWSTR)t.c_str());
     }
-    std::wstring t = L"Saved for " + W(m.name) + L". \"Convert again\" to see it.";
+    std::wstring t = L"Saved for " + W(m.name) + L". \"Update the map\" puts it in the map (a few seconds).";
     int top = triangles(m.level[0]);
     if (m.trimmed_from > 0) top = m.trimmed_from;
     if (c.lods == 'm' && m.had_lods) t = L"Saved, but " + W(m.name) + L" has lower-detail versions of its own: the app keeps them.";
@@ -277,8 +291,9 @@ void select_model(int i) {
     modelview::show(St->view, nullptr, L"");
     show_level(0);
 
-    std::wstring t = W(m.name) + L": " + kind_text(m.kind);
+    std::wstring t = W(m.name) + L": " + kind_label(m);
     if (m.placed) t += L", " + std::to_wstring(m.placed) + L" on the map";
+    if (is_stock(m)) t += L" (the map gets an edited copy; your Xbox tags stay as they are)";
     if (std::wstring c = change_text(m); !c.empty()) t += L"\r\n" + c + L".";
     if (!m.note.empty()) {
         std::wstring n = W(m.note);
@@ -323,7 +338,7 @@ std::wstring level_triangles(const LodView::Model &m) {
 }
 
 bool shown_by_filter(const LodView::Model &m) {
-    if (St->filter == 1) return !m.had_lods && m.kind != 'f' && !is_stock(m);
+    if (St->filter == 1) return !m.had_lods && m.kind != 'f';
     if (St->filter == 2) return lod_changed(m) || !m.collision.empty();
     return true;
 }
@@ -341,7 +356,7 @@ void fill_list() {
         const LodView::Model &x = St->v.models[a], &y = St->v.models[b];
         switch (St->sort_col) {
         case 0: return _wcsicmp(W(x.name).c_str(), W(y.name).c_str()) < 0;
-        case 1: return wcscmp(kind_text(x.kind), kind_text(y.kind)) < 0;
+        case 1: return kind_label(x) < kind_label(y);
         case 2: return change_short(x) < change_short(y);
         case 4: return x.density < y.density;
         case 5: return x.placed < y.placed;
@@ -360,7 +375,7 @@ void fill_list() {
         lv.pszText = (LPWSTR)name.c_str();
         lv.lParam = (LPARAM)i;
         int row = ListView_InsertItem(l, &lv);
-        std::wstring kind = kind_text(m.kind), change = change_short(m), tris = level_triangles(m),
+        std::wstring kind = kind_label(m), change = change_short(m), tris = level_triangles(m),
                      target = m.density > 0 ? thousands(m.density) : L"", placed = m.placed ? std::to_wstring(m.placed) : L"";
         ListView_SetItemText(l, row, 1, (LPWSTR)kind.c_str());
         ListView_SetItemText(l, row, 2, (LPWSTR)change.c_str());
@@ -384,9 +399,67 @@ void fill_list() {
 }
 
 void close_window(bool again) {
+    if (St->updating) return;   // (the update finishes first)
     save_choice();
     St->again = again;
     St->done = true;
+}
+
+// While the map is updated: nothing to change.
+void enable_all(bool on) {
+    for (int id : {IDC_LIST, IDC_FILTER, IDC_AGAIN, IDC_CLOSE, IDC_LIBRARY}) EnableWindow(item(id), on);
+    if (on) enable_choice();
+    else
+        for (int id : {IDC_LODS, IDC_MED, IDC_LOW, IDC_TOP, IDC_TOPN}) EnableWindow(item(id), FALSE);
+}
+
+// "Update the map": the choices saved, then the map's models done again and the map built again (core.hpp
+// update_xbox_models) on a thread; the list shows the result when it's done.
+void start_update() {
+    if (St->updating) return;
+    save_choice();
+    if (!St->update) return;
+    St->updating = true;
+    enable_all(false);
+    status(L"Updating the map: the models' levels of detail and trims, then the build (a few seconds)...");
+    HWND wnd = St->wnd;
+    std::function<Result()> fn = St->update;
+    std::thread([wnd, fn] {
+        Result *r = new Result(fn());
+        if (!PostMessageW(wnd, WM_UPDATED, 0, (LPARAM)r)) delete r;
+    }).detach();
+}
+
+void finish_update(Result *res) {
+    std::unique_ptr<Result> r(res);
+    St->updating = false;
+    enable_all(true);
+    if (!r->ok && r->lods.empty()) {
+        std::wstring e = W(r->error);
+        if (e.find(L"convert the map again") != std::wstring::npos &&
+            MessageBoxW(St->wnd, (e + L"\n\nConvert it again now?").c_str(), L"Halo Map Porter", MB_YESNO | MB_ICONQUESTION) == IDYES) {
+            close_window(true);
+            return;
+        }
+        status(L"Not updated: " + e);
+        return;
+    }
+    // the list again, from the update's file, the same model shown
+    std::string shown = St->model >= 0 ? St->v.models[St->model].tag : std::string();
+    LodView v;
+    if (load_lod_view(v, r->lods.empty() ? St->file : r->lods)) {
+        select_model(-1);   // (nothing drawn from the old one)
+        St->v = std::move(v);
+        int keep = -1;
+        for (size_t i = 0; i < St->v.models.size(); i++)
+            if (St->v.models[i].tag == shown) keep = (int)i;
+        St->model = keep;
+        fill_list();
+        if (keep >= 0) select_model(keep);
+    }
+    std::wstring t = r->ok ? L"Updated the map" : L"The map didn't build: " + W(r->error);
+    if (r->ok && !r->memory.empty()) t += L" (" + W(r->memory) + L")";
+    status(t + L".");
 }
 
 LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
@@ -485,7 +558,7 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case IDC_AGAIN:
-            close_window(true);
+            start_update();
             return 0;
         case IDC_CLOSE:
         case IDCANCEL:
@@ -496,6 +569,9 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_CLOSE:
         close_window(false);
+        return 0;
+    case WM_UPDATED:
+        finish_update((Result *)lp);
         return 0;
     }
     return DefWindowProcW(h, msg, wp, lp);
@@ -519,7 +595,8 @@ void tip(int id, const wchar_t *text) {
 }
 
 void create_controls() {
-    add(L"STATIC", L"The map's own models, and others this conversion changed. Click one to see each of its levels (a lower "
+    add(L"STATIC", L"The map's own models, Bungie's that have no lower-detail versions, and others this conversion changed. "
+                   L"Click one to see each of its levels (a lower "
                    L"one is drawn once the model is far enough away to look small) or its collision, and choose below what "
                    L"conversions do with it. Click a column's title to sort by it.",
         SS_NOPREFIX, 16, 12, 1148, 36, IDC_INTRO);
@@ -533,8 +610,8 @@ void create_controls() {
                                GetModuleHandleW(nullptr), nullptr);
     SendMessageW(St->list, WM_SETFONT, (WPARAM)St->font, TRUE);
     ListView_SetExtendedListViewStyle(St->list, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP);
-    struct { const wchar_t *t; int w; int fmt; } cols[] = {{L"Model", 140, LVCFMT_LEFT}, {L"Kind", 64, LVCFMT_LEFT},
-                                                          {L"What changed", 112, LVCFMT_LEFT},
+    struct { const wchar_t *t; int w; int fmt; } cols[] = {{L"Model", 124, LVCFMT_LEFT}, {L"Kind", 100, LVCFMT_LEFT},
+                                                          {L"What changed", 96, LVCFMT_LEFT},
                                                           {L"Triangles by level", 136, LVCFMT_LEFT},
                                                           {L"1.5x Bungie", 80, LVCFMT_RIGHT},
                                                           {L"On map", 56, LVCFMT_RIGHT},
@@ -583,7 +660,7 @@ void create_controls() {
 
     add(L"BUTTON", L"Open the LOD library folder", WS_TABSTOP, 16, 650, 220, 30, IDC_LIBRARY);
     add(L"STATIC", L"", SS_NOPREFIX, 248, 650, 630, 34, IDC_STATUS);
-    add(L"BUTTON", L"Convert again", WS_TABSTOP, 888, 650, 150, 30, IDC_AGAIN);
+    add(L"BUTTON", L"Update the map", WS_TABSTOP, 888, 650, 150, 30, IDC_AGAIN);
     add(L"BUTTON", L"Close", WS_TABSTOP | BS_DEFPUSHBUTTON, 1048, 650, 116, 30, IDC_CLOSE);
     for (int i = 0; i < 5; i++) ShowWindow(item(IDC_LEVEL0 + i), SW_HIDE);
     EnableWindow(item(IDC_ASMADE), FALSE);
@@ -593,8 +670,9 @@ void create_controls() {
                                CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, St->wnd, nullptr, GetModuleHandleW(nullptr), nullptr);
     SendMessageW(St->tips, TTM_SETMAXTIPWIDTH, 0, S(380));
     SendMessageW(St->tips, TTM_SETDELAYTIME, TTDT_AUTOPOP, 30000);
-    tip(IDC_LODS, L"As the Xbox tab says: made when \"Make lower-detail versions\" is on and the model has 1,000 triangles or "
-                  L"more.\n\nMake them: made whatever the Xbox tab says, however few triangles it has, aiming at the medium "
+    tip(IDC_LODS, L"As the Xbox tab says: made when \"Make lower-detail versions\" is on (Bungie's models: \"Also make and use "
+                  L"LODs for Bungie's models\") and the model has 1,000 triangles or more, or 300 or more and 5,000 or more on "
+                  L"the map in all.\n\nMake them: made whatever the Xbox tab says, however few triangles it has, aiming at the medium "
                   L"and low triangles you give (the shape may move further to get there; empty: about half and a fifth).\n\n"
                   L"Don't make them: drawn in full at every distance; a model with lower-detail versions of its own gets "
                   L"no switch distances either.\n\nKept in choices.txt in the LOD library, for every map that uses the model.");
@@ -602,14 +680,18 @@ void create_controls() {
                  L"that many triangles, whatever the Xbox tab says (the shape may move up to 5% of the model's size to get "
                  L"there). It starts at 1.5x what Bungie's models of its kind and size have.\n\nKept in choices.txt in the "
                  L"LOD library, for every map that uses the model.");
-    tip(IDC_AGAIN, L"Closes this window and converts the map again, with your choices (the map's tags are kept from the last "
-                   L"time, so it's quicker).");
+    tip(IDC_AGAIN, L"Puts your choices in the map you have: its models' levels of detail and trims are done again on the "
+                   L"tags the conversion prepared, and the map is built again (a few seconds; the rest of the map stays "
+                   L"as converted). The list then shows the map as updated.");
 }
 
 }   // namespace
 
-bool show(HWND owner, const std::filesystem::path &file, const std::filesystem::path &library) {
+bool show(HWND owner, const std::filesystem::path &file, const std::filesystem::path &library,
+          const std::function<porter::Result()> &update) {
     State st;
+    st.file = file;
+    st.update = update;
     if (!load_lod_view(st.v, file)) {
         MessageBoxW(owner, L"The levels of detail of that conversion can't be shown (the file is missing or from another "
                            L"version of the app).", L"Halo Map Porter", MB_ICONINFORMATION);

@@ -190,7 +190,9 @@ int main(int argc, char **argv) {
         }
         return 0;
     }
-    if (mode == "convert") {
+    if (mode == "update") {   // cli_test update <cache>/work/convert/update.txt x x: the LODs window's "Update the map"
+        r = update_xbox_models(cfg, argv[2], log);
+    } else if (mode == "convert") {
         std::string name;
         Game in = detect_game(argv[2], &name);
         std::cout << "Detected " << game_name(in) << " map '" << name << "'\n";

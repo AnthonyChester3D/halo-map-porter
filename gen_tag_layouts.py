@@ -17,7 +17,8 @@ ROOTS = {   # tag extension -> root struct
     'weather_particle_system': 'WeatherParticleSystem', 'model_collision_geometry': 'ModelCollisionGeometry', 'model_animations': 'ModelAnimations',
     'particle': 'Particle', 'particle_system': 'ParticleSystem', 'contrail': 'Contrail', 'decal': 'Decal',
     'damage_effect': 'DamageEffect', 'lens_flare': 'LensFlare', 'material_effects': 'MaterialEffects',
-    'point_physics': 'PointPhysics',
+    'point_physics': 'PointPhysics', 'unicode_string_list': 'UnicodeStringList',
+    'weapon_hud_interface': 'WeaponHUDInterface', 'grenade_hud_interface': 'GrenadeHUDInterface', 'hud_globals': 'HUDGlobals',
 }
 
 types = {}

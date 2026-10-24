@@ -7,11 +7,16 @@
 #include <windows.h>
 
 #include <filesystem>
+#include <functional>
+
+#include "core.hpp"
 
 namespace lodui {
 
 // Modal. `file`: the conversion's LodView (core.hpp, Result::lods); `library`: the LOD library folder (its choices.txt
-// and skip.txt). True when closed with "Convert again".
-bool show(HWND owner, const std::filesystem::path &file, const std::filesystem::path &library);
+// and skip.txt); `update`: "Update the map" (core.hpp update_xbox_models, run on a thread of the window's). True when
+// the map has to be converted again instead (its prepared tags are gone, and you said yes).
+bool show(HWND owner, const std::filesystem::path &file, const std::filesystem::path &library,
+          const std::function<porter::Result()> &update);
 
 }   // namespace lodui

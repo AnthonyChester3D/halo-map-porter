@@ -512,11 +512,13 @@ bool set_choice(const Settings &settings, const std::string &model_tag, const Ch
 }
 
 // The versions of one geometry: from the library, or made now (and kept there).
-// `levels`: what to aim for (kLevels, or the targets chosen in the LODs window: those have keys of their own).
+// `levels`: what to aim for (other than kLevels: keys of their own).
 static std::vector<TagNode> versions(const TagNode &geo, uint32_t checksum, double size, const Level *levels,
                                      const Settings &settings, bool &from_library, std::string &key) {
     std::string key_text = std::string(kVersion) + "|" + std::to_string(checksum) + "|" + tagfile::write_node(geo);
-    if (levels != kLevels) {
+    bool usual = true;
+    for (int i = 0; i < 2; i++) usual = usual && levels[i].ratio == kLevels[i].ratio && levels[i].error == kLevels[i].error;
+    if (!usual) {
         char params[96];
         snprintf(params, sizeof params, "|chosen %.4f %.4f %.4f %.4f", levels[0].ratio, levels[0].error, levels[1].ratio,
                  levels[1].error);
@@ -771,18 +773,36 @@ Result add_lods(const fs::path &model, const double cutoffs[5], const Settings &
     if (!geos || !regions) { r.why = "not a model"; return r; }
     static const char *slots[5] = {"super low", "low", "medium", "high", "super high"};
 
-    // Geometries every detail level of some permutation uses (no lower-detail versions yet).
+    // Geometries to make lower-detail versions of: a permutation's most detailed one when every level draws it (none
+    // yet), or when its lower levels draw another permutation's most detailed geometry (a variant, like one of a
+    // tree's four shapes, drawing the first shape at a distance): that one gets lower levels of its own, so each
+    // variant keeps its shape at every distance.
     std::set<int> single;
-    bool mixed = false;   // a permutation whose levels draw more than one geometry
-    for (auto &reg : *regions)
-        for (auto &perm : *tagfile::block(reg, "permutations")) {
+    std::set<std::pair<size_t, size_t>> own_levels;   // (region, permutation) whose borrowed levels get their own
+    bool mixed = false;   // a permutation with lower-detail versions of its own
+    for (size_t ri = 0; ri < regions->size(); ri++) {
+        auto &perms = *tagfile::block((*regions)[ri], "permutations");
+        std::set<int> tops;
+        for (auto &perm : perms) tops.insert((int)tagfile::get_num(perm, "super high"));
+        for (size_t pi = 0; pi < perms.size(); pi++) {
+            auto &perm = perms[pi];
             int g = (int)tagfile::get_num(perm, "super high");
-            bool same = true;
-            for (auto s : slots) same = same && (int)tagfile::get_num(perm, s) == g;
-            if (same && g >= 0 && g < (int)geos->size()) single.insert(g);
+            bool same = true, borrowed = true;
+            for (auto s : slots) {
+                int l = (int)tagfile::get_num(perm, s);
+                same = same && l == g;
+                borrowed = borrowed && tops.count(l);
+            }
             std::string name = tagfile::get_str(perm, "name");
-            mixed = mixed || (!same && (name.empty() || name[0] != '~'));   // ("~blur": the engine's pick, can switch)
+            bool special = !name.empty() && name[0] == '~';   // ("~blur": the engine's pick, can switch)
+            if (g < 0 || g >= (int)geos->size()) continue;
+            if (same) single.insert(g);
+            else if (borrowed && !special) {
+                single.insert(g);
+                own_levels.insert({ri, pi});
+            } else if (!special) mixed = true;
         }
+    }
     // With no switch distances, the switch distances this sets would also start switching those (a rock's variants
     // drawing another variant's geometry at a distance): leave such a model alone. Permutations the engine picks
     // itself ("~blur", a moving tire) can switch to another's geometry at a distance.
@@ -814,15 +834,19 @@ Result add_lods(const fs::path &model, const double cutoffs[5], const Settings &
                             (double)(hi[2] - lo[2]) * (hi[2] - lo[2]));
     if (!(size > 0)) { r.why = "has no size"; return r; }
 
+    // How far each version may move the shape: about 1.5 pixels where it's first drawn (the model that many pixels
+    // across: the "high" switch distance for the medium version, "medium" for the low one), never less than 1% and
+    // 2.5% of its size (characters, seen from 200 and 80 pixels). Scenery (90 and 30 pixels): 1.7% and 5%; vehicles
+    // (100 and 50) 1.5% and 3%; weapons and items (50 and 25) 3% and 6%.
+    Level levels[2] = {kLevels[0], kLevels[1]};
+    double px[5];
+    for (int i = 0; i < 5; i++) px[i] = no_cutoffs ? cutoffs[i] : tagfile::get_num(root, cutoff_names[i]);
+    if (px[1] > 0) levels[0].error = std::max(kLevels[0].error, std::min(0.06, 1.5 / px[1]));
+    if (px[2] > 0) levels[1].error = std::max(kLevels[1].error, std::min(0.08, 1.5 / px[2]));
     // Chosen targets: every geometry by the same share, allowed to move further (5% and 10% of the model's size) so
     // they get there; a level not chosen as usual.
-    Level levels[2] = {kLevels[0], kLevels[1]};
-    bool chosen = false;
     for (int i = 0; i < 2 && targets && r.triangles > 0; i++)
-        if (targets[i] > 0) {
-            levels[i] = Level{std::min(1.0, (double)targets[i] / r.triangles), i == 0 ? 0.05 : 0.1};
-            chosen = true;
-        }
+        if (targets[i] > 0) levels[i] = Level{std::min(1.0, (double)targets[i] / r.triangles), i == 0 ? 0.05 : 0.1};
     uint32_t checksum = (uint32_t)(long long)tagfile::get_num(root, "node list checksum");
     std::map<int, int> medium, low;   // geometry -> the version used for medium / low and super low
     int base_tris = 0, tris[2] = {0, 0};
@@ -831,7 +855,7 @@ Result add_lods(const fs::path &model, const double cutoffs[5], const Settings &
     for (int g : single) {
         bool lib = false;
         std::string key;
-        std::vector<TagNode> vs = versions((*geos)[g], checksum, size, chosen ? levels : kLevels, settings, lib, key);
+        std::vector<TagNode> vs = versions((*geos)[g], checksum, size, levels, settings, lib, key);
         r.from_library = r.from_library || lib;
         if (!lib) {
             made = true;
@@ -839,8 +863,8 @@ Result add_lods(const fs::path &model, const double cutoffs[5], const Settings &
         }
         int full = list_triangles((*geos)[g]), a = list_triangles(vs[0]), b = list_triangles(vs[1]);
         base_tris += full;
-        // A version is worth adding when it has noticeably fewer triangles than the one above it.
-        bool use_a = a > 0 && a <= full * 0.8, use_b = b > 0 && b <= (use_a ? a : full) * 0.8;
+        // A version is worth adding when it has noticeably fewer triangles (10%) than the one above it.
+        bool use_a = a > 0 && a <= full * 0.9, use_b = b > 0 && b <= (use_a ? a : full) * 0.9;
         int ia = g, ib = g;
         if (use_a) { ia = (int)geos->size(); geos->push_back(vs[0]); r.bytes_added += geometry_bytes(vs[0]); r.xbox_bytes += geometry_xbox_bytes(vs[0]); tris[0] += a; any_a = true; }
         else tris[0] += full;
@@ -852,14 +876,19 @@ Result add_lods(const fs::path &model, const double cutoffs[5], const Settings &
     }
     if (r.bytes_added == 0) { r.why = "couldn't be simplified much (its shape needs most of its triangles)"; return r; }
     if (geos->size() > 256) { r.why = "would have too many geometries"; return r; }
-    for (auto &reg : *regions)
-        for (auto &perm : *tagfile::block(reg, "permutations")) {
+    for (size_t ri = 0; ri < regions->size(); ri++) {
+        auto &perms = *tagfile::block((*regions)[ri], "permutations");
+        for (size_t pi = 0; pi < perms.size(); pi++) {
+            auto &perm = perms[pi];
             int g = (int)tagfile::get_num(perm, "super high");
-            if (!medium.count(g) || (int)tagfile::get_num(perm, "super low") != g) continue;
+            bool own = own_levels.count({ri, pi}) > 0;
+            if (!medium.count(g) || (!own && (int)tagfile::get_num(perm, "super low") != g)) continue;
+            if (own) tagfile::set_num(perm, "high", g);
             tagfile::set_num(perm, "medium", medium[g]);
             tagfile::set_num(perm, "low", low[g]);
             tagfile::set_num(perm, "super low", low[g]);
         }
+    }
     static const char *cut[5] = {"super high detail cutoff", "high detail cutoff", "medium detail cutoff", "low detail cutoff",
                                  "super low detail cutoff"};
     bool none = true;
@@ -868,9 +897,21 @@ Result add_lods(const fs::path &model, const double cutoffs[5], const Settings &
         for (int i = 0; i < 5; i++) tagfile::set_num(root, cut[i], cutoffs[i]);
     if (!t.save(model)) { r.why = "couldn't be saved"; return r; }
     r.changed = true;
-    r.triangles = base_tris;   // (the geometries simplified, most detailed)
-    r.level_triangles[0] = any_a ? tris[0] : 0;
-    r.level_triangles[1] = any_b ? tris[1] : 0;
+    // The model's triangles as the game counts them (each region's first permutation), most detailed, medium, low.
+    int levels_now[3] = {0, 0, 0};
+    for (auto &reg : *regions) {
+        auto &perms = *tagfile::block(reg, "permutations");
+        if (perms.empty()) continue;
+        const char *which[3] = {"super high", "medium", "low"};
+        for (int k = 0; k < 3; k++) {
+            int g = (int)tagfile::get_num(perms[0], which[k]);
+            if (g >= 0 && g < (int)geos->size()) levels_now[k] += list_triangles((*geos)[g]);
+        }
+    }
+    (void)base_tris;
+    r.triangles = levels_now[0];
+    r.level_triangles[0] = any_a ? levels_now[1] : 0;
+    r.level_triangles[1] = any_b ? levels_now[2] : 0;
     if (!settings.library.empty() && made) {   // what's new in the library
         std::string tris_text = std::to_string(r.triangles);
         for (int k : r.level_triangles)

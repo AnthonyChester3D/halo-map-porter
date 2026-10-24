@@ -19,8 +19,8 @@ struct Settings {
 struct Result {
     bool changed = false;
     std::string why;                     // nothing changed: why
-    int triangles = 0;                   // the model's most detailed version (changed: of the geometries simplified)
-    int level_triangles[2] = {0, 0};     // the versions added (medium, low; 0 = not added)
+    int triangles = 0;                   // the model's most detailed version (each region's first permutation)
+    int level_triangles[2] = {0, 0};     // its medium and low versions now (0 = none added)
     size_t bytes_added = 0;              // vertex and triangle data added to the tag
     size_t xbox_bytes = 0;               // what that takes in an Xbox map: tag memory and file (32-byte vertices, strips)
     bool from_library = false;           // reused from the library
@@ -28,7 +28,9 @@ struct Result {
 
 // Adds lower-detail versions to the model tag `model` (.model or .gbxmodel), saved in place: every permutation
 // whose detail levels all use one geometry gets a medium version (about half its triangles, used from the "high"
-// switch distance down) and a low one (about a fifth, from "medium" down). A model with no switch distances gets
+// switch distance down) and a low one (about a fifth, from "medium" down). So does one whose lower levels draw
+// another permutation's most detailed geometry (a variant, like one of a tree's four shapes drawing the first shape at
+// a distance): it gets lower levels of its own, made from its own shape. A model with no switch distances gets
 // `cutoffs` (tag order: super high, high, medium, low, super low; pixels). `tag`: its tag path, for the library's
 // index. `targets`: the model's triangles to aim for, medium and low, instead (0: as above; chosen in the LODs
 // window), allowed to move the shape further to get there.

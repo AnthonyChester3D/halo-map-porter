@@ -437,12 +437,14 @@ Levels of detail (LODs)
   engine asks them for their most detailed version by drawing them as 0
   pixels across, so switch distances would make them use their least
   detailed one.
-  "Also use the lower-detail versions of Bungie's own trees, rocks and
-  plants" (Xbox tab, off by default) does the same for stock models: 36 of
-  the Xbox's models ship with lower-detail versions and no switch
-  distances (also the multiplayer Scorpion). Faster on maps full of
-  scenery, but those models then switch detail where they never did on
-  retail.
+  "Also make and use LODs for Bungie's models" (Xbox tab, off by default)
+  does the same for stock models: 36 of the Xbox's models ship with
+  lower-detail versions and no switch distances (also the multiplayer
+  Scorpion). It also makes lower-detail versions for Bungie's models that
+  have none, as for the map's own (see "Making lower-detail versions"
+  below), on edited copies (your Xbox tags stay as they are). Faster on
+  maps full of scenery, but those models then switch detail where they
+  never did on retail.
 
   Heavy models ("Heavy models", Xbox tab)
   Some custom models are far denser than anything the Xbox shipped with:
@@ -624,26 +626,41 @@ Levels of detail (LODs)
   Many custom models have only one version, so the Xbox draws all of
   their triangles however far away they are. "Make lower-detail versions
   (LODs) when a model has none" (Xbox tab, on by default) makes them for
-  the map's own models with 1,000 triangles or more: a
-  medium version with about half the triangles (used from the "high"
-  switch distance down) and a low one with about a fifth (from "medium"
-  down). It takes out the vertices that change the shape least and keeps
-  every other vertex exactly as it was (position, texture coordinates,
-  normal, bones), the edges where one shader's part meets another (no
-  cracks), and the edges between pieces moved by different bones (a wheel
-  stays separate from the body). A version is only added when it has at
-  least a fifth fewer triangles than the one above it, and a model with
-  no switch distances gets the stock-style ones above.
+  the map's own models with 1,000 triangles or more, or 300 or more and
+  5,000 or more on the map in all (a tree placed many times): a medium
+  version with about half the triangles (used from the "high" switch
+  distance down) and a low one with about a fifth (from "medium" down).
+  It takes out the vertices that change the shape least and keeps every
+  other vertex exactly as it was (position, texture coordinates, normal,
+  bones), the edges where one shader's part meets another (no cracks),
+  and the edges between pieces moved by different bones (a wheel stays
+  separate from the body). Each version may move the shape about 1.5
+  pixels where it's first drawn (the model that many pixels across at its
+  switch distance), and never less than 1% (medium) and 2.5% (low) of
+  the model's size: scenery 1.7% and 5%, vehicles 1.5% and 3%, weapons
+  and items 3% and 6%, characters 1% and 2.5%. A version is only added
+  when it has at least a tenth fewer triangles than the one above it,
+  and a model with no switch distances gets the stock-style ones above.
+  Variants that draw another variant at a distance (Precipice's tall
+  pine has four shapes whose lower levels all drew the first) get lower
+  levels of their own, so each keeps its shape.
   Characters get them too: as when trimming (see Bones above), every
   vertex keeps its bones, so they bend as before at every distance.
-  Left alone: stock models, first-person models, models whose shape
-  needs most of their triangles, and the models listed in skip.txt
-  (below). A model's own choice in the LODs window comes first: made
-  whatever the Xbox tab says and however few triangles it has, aiming at
-  the medium and low triangles you give (allowed to move the shape up to
-  5% and 10% of its size to get there), or not made. The [lod] lines in
-  the log name each model with its triangles, most detailed > medium >
-  low.
+  Left alone: first-person models, models whose shape needs most of their
+  triangles, the models listed in skip.txt (below), and stock models
+  unless "Also make and use LODs for Bungie's models" is ticked. Precipice
+  with it: its pines, tree_pine 522 > 448 > 314 (17 on the map) and
+  tree_pine_tall 541 > 467 > 308 (58), about 0.2 MB of tag memory with
+  Bungie's rocket launcher and monitor. They're already lean (each bough
+  a few flat cards), so it saves little: from the map's 97 spawn points
+  the tall pines are always 30 pixels across or more, so they never get
+  their low version, and the pines draw about 12% fewer triangles in all.
+  A model's own choice in the LODs window comes first: made whatever the
+  Xbox tab says and however few triangles it has, aiming at the medium
+  and low triangles you give (allowed to move the shape up to 5% and 10%
+  of its size to get there), or not made. The [lod] lines in the log name
+  each model with its triangles, most detailed > medium > low, and how
+  many are on the map.
   The versions cost memory: on the Xbox, a model's vertices and triangles
   are part of the 22 MB of tag memory (and of the map file), and the
   [lod] line says how much they add (about 0.5 MB for three big models).
@@ -653,8 +670,9 @@ Levels of detail (LODs)
   measures maps without them.
 
   Seeing them: after an Xbox conversion, "LODs & collision" (next to
-  "Open report") lists the map's own models, changed or not (and stock
-  models whose switch distances or collision it changed): what changed,
+  "Open report") lists the map's own models, changed or not, Bungie's
+  that have no lower-detail versions, and stock models whose switch
+  distances or collision it changed: what changed,
   their triangles by level, 1.5x what Bungie's models of their kind and
   size have, how many are on the map and your choice for them. "Show"
   narrows it to the models made without lower-detail versions, or to
@@ -686,11 +704,19 @@ Levels of detail (LODs)
                          Trim it to a number of triangles (it starts at
                          1.5x Bungie's; the shape may move up to 5% of
                          the model's size to get there).
-  "Convert again" closes the window and converts the map again with
-  them (the map's tags are kept from the last time, so it's quicker).
-  First-person models only have the second; stock models only the first.
-  It also works after a map that didn't fit: the versions made were
-  taken out again, and the list says so.
+  "Update the map" puts them in the map you have, without converting it
+  again: the conversion's prepared tags are kept (in the cache folder's
+  work\convert, until the next conversion), so only the models' levels of
+  detail and trims are done again (with the Xbox tab's "Heavy models" and
+  LOD options as they are now) and the map is built again: the time of
+  the build, a few seconds; the list then shows the map as updated, and
+  the report gets what changed. The rest of the map stays as converted
+  (to change anything else, convert it again). The result is the same
+  map a conversion with those choices makes. First-person models only
+  have the second choice; stock models only the first. It also works
+  after a map that didn't fit: the versions made were taken out again,
+  and the list says so; an update that doesn't fit leaves the map you
+  have as it was.
 
   The LOD library
   Every version the app makes is kept in the LOD library folder (Settings
@@ -1172,6 +1198,23 @@ Custom weapons, vehicles and player model
   the map gets a sheet with both: the Xbox's own icons and controller
   button glyphs first, unchanged, then the map's extra icons (its custom
   weapons'), shrunk to the size the Xbox draws them.
+  Once the map's weapons, items and vehicles are settled (the Xbox's own
+  versions, your replacements, vehicles left out), those extras keep only
+  what's still used: a weapon's or item's pickup name (and a weapon's
+  ammo line after it), a vehicle's and its seats' names, and the icons of
+  the weapons and grenades left. Unused names are left empty (every
+  number stays as it was) and none come after the last one used; the
+  icons kept are cut out of the map's sheet onto a small texture of their
+  own (the pixels exactly as they were), and with none kept the Xbox's
+  own sheet stays as it is. The Xbox's own names and icons all stay.
+  Precipice, with the Xbox's own weapons: 2 of its 92 extra pickup names
+  (the beam cannon's) and none of its 16 extra icons, 6.4 KB of tag
+  memory and 160 KB of textures less; with its own weapons, 1 icon kept,
+  on a 256x64 texture instead of two 256x256 ones. The same goes for the
+  pictures of nav point arrows added from the map ("Nav points" above): only
+  those its arrows use. Everything else a replaced or removed weapon or
+  vehicle brought (its model, animations, sounds, effects) is left out
+  of the map by itself, unless something kept still uses it.
 
 Sounds
   The Xbox only plays Xbox ADPCM sounds: mono 22 kHz, stereo 22 kHz and

@@ -49,10 +49,13 @@ struct Config {
     // HD sniper rifle) for the Xbox originals that every Xbox multiplayer map already carries.
     bool xbox_use_stock_versions = true;
     // Models with lower-detail versions but no switch distances always draw in full; the map's own get stock-style
-    // distances. This also does it for stock Xbox models (36 ship that way, mostly trees, rocks and plants).
+    // distances. This also does it for stock Xbox models (36 ship that way, mostly trees, rocks and plants), and makes
+    // lower-detail versions for Bungie's models that have none, as for the map's own (xbox_make_lods): Precipice's
+    // pine trees, 541 triangles x 58. Edited copies; your Xbox tags stay as they are.
     bool xbox_lod_stock_models = false;
-    // Make lower-detail versions (LODs) for the map's own models that have none (lod.hpp), kept in the LOD library
-    // (empty: cache_dir/lod_library) so the same model in another map reuses them.
+    // Make lower-detail versions (LODs) for the map's own models that have none (lod.hpp): 1,000 triangles or more, or
+    // 300 or more with 5,000 or more on the map in all. Kept in the LOD library (empty: cache_dir/lod_library) so the
+    // same model in another map reuses them.
     bool xbox_make_lods = true;
     fs::path lod_library;
     // The most detailed version of the map's own heavy models made lighter (lod.hpp trim_top), before any LODs are
@@ -193,8 +196,8 @@ bool save_content_analysis(const ContentAnalysis &a, const fs::path &file);
 bool load_content_analysis(ContentAnalysis &a, const fs::path &file);
 
 // An Xbox build's models, to look at in the "LODs" window: the map's own (drawn in the world, or first-person
-// weapons), changed or not, and others whose levels of detail it changed (stock models' switch distances) or whose
-// collision it changed. Each detail level drawn, and where the game switches to it; the collision as made and as
+// weapons), changed or not, Bungie's drawn in the world with no lower-detail versions of their own, and others whose
+// levels of detail it changed (stock models' switch distances) or whose collision it changed. Each detail level drawn, and where the game switches to it; the collision as made and as
 // converted.
 struct LodView {
     struct Model {
@@ -208,6 +211,7 @@ struct LodView {
         std::string note;                // left as made (or partly): why, e.g. "only 640 triangles"
         int density = 0;                 // 1.5x Bungie's triangles for its kind and size (lod.hpp stock_triangles)
         bool had_lods = false;           // the map made it with lower-detail versions of its own
+        bool stock = false;              // Bungie's (the Xbox tags'): its levels of detail can change, nothing else
         bool undone = false;             // taken out again: the map didn't fit with them
         int placed = 0;                  // how many are on the map (placed, or at weapon/item spawn points)
         double cutoffs[5] = {0, 0, 0, 0, 0};   // switch distances, pixels across (super high, high, medium, low, super low)
@@ -219,6 +223,7 @@ struct LodView {
         int coll_made = -1, coll_now = -1;   // its collision's drawings in `previews`: as the map made it, as converted
     };
     std::string map_name;
+    fs::path update;                   // the conversion's file for "Update the map" (update_xbox_models)
     std::vector<Model> models;
     std::vector<ModelPreview> previews;
 };
@@ -271,6 +276,12 @@ Result convert_map(const Config &cfg, const fs::path &input, Game in_game, Game 
 // Build a scenario from a tags folder (e.g. H1A-EK\tags) for a target game. `measure`: as for convert_map.
 Result build_from_tags(const Config &cfg, const fs::path &scenario_file, Game out_game,
                        const fs::path &output, bool share_resources, const Log &log, ContentAnalysis *measure = nullptr);
+
+// "Update the map" (the LODs window): a finished Xbox conversion's (or build's) models done again on the tags it
+// prepared, their levels of detail and trims (the LODs window's choices, the Xbox tab's options in `cfg`), and the map
+// built again: seconds, instead of converting it again. `update`: the file the conversion left (LodView::update).
+// Fails (r.error) when those tags are gone: another conversion or build since.
+Result update_xbox_models(const Config &cfg, const fs::path &update, const Log &log);
 
 // Rewrites HSC script text for the target game (functions/globals it lacks get equivalents or stand-ins).
 std::string convert_script_text(Game target, const std::string &text, std::vector<std::string> *notes);

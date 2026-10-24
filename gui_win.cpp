@@ -1836,7 +1836,7 @@ static void create_controls() {
                {L"Leave them as made", L"Trim (they look the same)", L"Trim harder (details change)",
                 L"Trim to 1.5x Bungie's density"});
     y += 24;
-    check(2, L"Also use LODs of Bungie's trees, rocks and plants (retail didn't)", 26, y, 380, ID_X_LODSTOCK);
+    check(2, L"Also make and use LODs for Bungie's models (retail didn't)", 26, y, 380, ID_X_LODSTOCK);
     label(2, L"Animations:", 410, y - 2, 86, ID_X_ANIM_LBL);
     list_combo(2, 500, y - 2, 234, ID_X_ANIM,
                {L"Leave them as made", L"Compress (they move the same)", L"Compress harder (fast moves drift)"});
@@ -2164,8 +2164,20 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case ID_SEE_LODS:
             if (!g_last_lods.empty()) {
                 Config c = make_config();
-                if (lodui::show(h, fs::path(g_last_lods), !c.lod_library.empty() ? c.lod_library : c.cache_dir / "lod_library") &&
-                    !g_busy) {
+                apply_xbox_options(c);
+                LodView lv;
+                fs::path update = load_lod_view(lv, fs::path(g_last_lods)) ? lv.update : fs::path();
+                // "Update the map": the models done again on the conversion's tags, the map built again; its log lines
+                // go to the log here.
+                auto run_update = [c, update]() -> Result {
+                    post_log("");
+                    Result r = update_xbox_models(c, update, post_log);
+                    post_log(r.ok ? "Updated " + u8(r.output.filename()) : "Not updated: " + r.error);
+                    return r;
+                };
+                bool again = lodui::show(h, fs::path(g_last_lods), !c.lod_library.empty() ? c.lod_library : c.cache_dir / "lod_library",
+                                         update.empty() ? std::function<Result()>() : std::function<Result()>(run_update));
+                if (again && !g_busy) {
                     if (g_last_was_build) start_build();
                     else start_convert(true);
                 }
