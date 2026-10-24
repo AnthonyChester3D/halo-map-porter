@@ -10,9 +10,11 @@
 #include "portals.hpp"
 #include "preview.hpp"
 #include "sky.hpp"
+#include "tagedit.hpp"
 #include "tagfile.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <climits>
 #include <cstdint>
 #include <cstdio>
@@ -22,9 +24,12 @@
 #include <fstream>
 #include <iterator>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <regex>
 #include <set>
 #include <sstream>
+#include <thread>
 #include <unordered_map>
 
 #define STB_VORBIS_HEADER_ONLY
@@ -64,6 +69,23 @@ fs::path from_u8(const std::string &s) { return fs::u8path(s); }
 
 // ---------------------------------------------------------------- processes
 
+// invader-edit, invader-dependency and invader-refactor are done in this process (tagedit.hpp) when they can be:
+// starting the tool costs more than the work, and a conversion asks them hundreds of times. HMP_NO_TAGEDIT set: always
+// run the tools.
+static bool in_process(const std::vector<std::string> &args, std::string &output, int &code) {
+    if (args.empty()) return false;
+    static const bool off = getenv("HMP_NO_TAGEDIT") != nullptr;
+    if (off) return false;
+    std::string exe = fs::path(args[0]).filename().u8string();
+    for (auto &c : exe) c = (char)tolower((unsigned char)c);
+    if (exe.size() > 4 && exe.compare(exe.size() - 4, 4, ".exe") == 0) exe.resize(exe.size() - 4);
+    std::vector<std::string> rest(args.begin() + 1, args.end());
+    if (exe == "invader-edit") return tagedit::run_edit(rest, output, code);
+    if (exe == "invader-dependency") return tagedit::run_dependency(rest, output, code);
+    if (exe == "invader-refactor") return tagedit::run_refactor(rest, output, code);
+    return false;
+}
+
 #ifdef _WIN32
 static std::wstring widen(const std::string &s) {
     if (s.empty()) return L"";
@@ -89,9 +111,17 @@ static std::wstring quote_arg(const std::wstring &a) {
 
 int run_process(const std::vector<std::string> &args, std::string &output) {
     output.clear();
+    {
+        int code;
+        if (in_process(args, output, code)) return code;
+    }
     std::wstring cmd;
     for (auto &a : args) { if (!cmd.empty()) cmd += L' '; cmd += quote_arg(widen(a)); }
 
+    // (one tool started at a time: a tool started while another's pipe is being set up would inherit that pipe, and
+    // its reader would wait for both to finish)
+    static std::mutex start_lock;
+    std::unique_lock<std::mutex> starting(start_lock);
     SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
     HANDLE rd = nullptr, wr = nullptr;
     if (!CreatePipe(&rd, &wr, &sa, 0)) return -1;
@@ -109,6 +139,7 @@ int run_process(const std::vector<std::string> &args, std::string &output) {
     BOOL ok = CreateProcessW(nullptr, buf.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW,
                              nullptr, nullptr, &si, &pi);
     CloseHandle(wr);
+    starting.unlock();
     if (!ok) { CloseHandle(rd); output = "Could not start " + args[0]; return -1; }
     char chunk[4096];
     DWORD n;
@@ -125,6 +156,10 @@ int run_process(const std::vector<std::string> &args, std::string &output) {
 #else
 int run_process(const std::vector<std::string> &args, std::string &output) {
     output.clear();
+    {
+        int code;
+        if (in_process(args, output, code)) return code;
+    }
     std::string cmd;
     for (auto &a : args) {
         std::string q = "'";
@@ -259,6 +294,7 @@ static bool parse_failure(const std::string &log_text, Failure &f) {
 namespace {
 
 int convert_bc7_bitmap_tag(const fs::path &p, bool write);
+int convert_bc7_kept(const Config &cfg, const fs::path &p);
 std::string norm_rel(std::string s);
 std::vector<std::pair<std::string, std::string>> list_values(const Config &cfg, const fs::path &tags, const std::string &tag);
 
@@ -286,6 +322,8 @@ struct Job {
     ContentAnalysis *analysis = nullptr;  // set: measure the map for the weapons & vehicles window instead of converting
     fs::path choices_scenario;            // analysis: the scenario copy the stock choices were added to (backup alongside)
     std::string resources_from;           // convert: where the map's bitmaps.map/sounds.map were read from (for messages)
+    std::vector<fs::path> resource_files; // convert: the bitmaps.map/sounds.map/loc.map files read
+    std::shared_ptr<void> extracted;      // convert: keeps the kept extraction it reads (find_extracted) while it runs
     ContentAnalysis *measure = nullptr;   // convert: measure here too when the map doesn't fit (see convert_map)
     // Models the app made lower-detail versions for, as they were before (to take them out again when the map
     // doesn't fit the Xbox), and what those versions take in the Xbox map.
@@ -884,7 +922,7 @@ struct Job {
         static const std::regex bc7(R"(is BC7 which is not implemented)");
         if (std::regex_search(msg, bc7)) {
             fs::path own = owner(tag);
-            if (!own.empty() && (own == fixes || to_fixes(tag, own)) && convert_bc7_bitmap_tag(fixes / from_u8(tag), true) > 0) {
+            if (!own.empty() && (own == fixes || to_fixes(tag, own)) && convert_bc7_kept(cfg, fixes / from_u8(tag)) > 0) {
                 note("[bc7]  " + tag + ": re-encoded its BC7 textures as DXT");
                 return true;
             }
@@ -1636,9 +1674,24 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
         }
         if (rc == 0 && job.target == Game::Xbox && cfg.xbox_max_mb > 0) {
             // Modded Xbox with a bigger map limit: Invader was told not to check, so check against that limit.
-            std::string sz;
-            run_process({u8(tool(cfg, "invader-info")), "-T", "uncompressed_size", u8(tmp_out)}, sz);
-            double mb = std::atof(sz.c_str()) / 1048576.0;
+            // (the map's header says it: Invader writes the size it decompresses to there)
+            double mb = 0;
+            {
+                std::ifstream hf(tmp_out, std::ios::binary);
+                std::string h(0x800, '\0');
+                hf.read(&h[0], 0x800);
+                auto u32 = [&](size_t o) {
+                    const unsigned char *q = (const unsigned char *)h.data() + o;
+                    return (uint32_t)q[0] | q[1] << 8 | q[2] << 16 | (uint32_t)q[3] << 24;
+                };
+                if (hf.gcount() == 0x800 && h.compare(0, 4, "daeh") == 0 && h.compare(0x7FC, 4, "toof") == 0 && u32(8) >= 0x800)
+                    mb = u32(8) / 1048576.0;
+            }
+            if (mb == 0) {
+                std::string sz;
+                run_process({u8(tool(cfg, "invader-info")), "-T", "uncompressed_size", u8(tmp_out)}, sz);
+                mb = std::atof(sz.c_str()) / 1048576.0;
+            }
             if (mb > cfg.xbox_max_mb) {
                 char buf[160];
                 snprintf(buf, sizeof buf, "\nFATAL ERROR: Map file exceeds maximum size for the target engine when uncompressed "
@@ -1966,10 +2019,12 @@ std::vector<std::pair<std::string, std::string>> list_values(const Config &cfg, 
 
 // Copy a folder tree file by file. (std::filesystem::copy with `recursive` fails with
 // "File exists" on Windows/MinGW when the destination folder already exists.)
+// The files are copied on several threads at once (a map's tags are thousands of small files).
 bool copy_tree(const fs::path &from, const fs::path &to, bool overwrite, std::error_code &ec) {
     ec.clear();
     fs::create_directories(to, ec);
     if (ec) return false;
+    std::vector<std::pair<fs::path, fs::path>> files;
     for (auto it = fs::recursive_directory_iterator(from, ec); !ec && it != fs::recursive_directory_iterator();
          it.increment(ec)) {
         fs::path dst = to / fs::relative(it->path(), from);
@@ -1977,11 +2032,196 @@ bool copy_tree(const fs::path &from, const fs::path &to, bool overwrite, std::er
             fs::create_directories(dst, ec);
         } else if (it->is_regular_file()) {
             if (!overwrite && fs::exists(dst)) continue;
-            fs::copy_file(it->path(), dst, fs::copy_options::overwrite_existing, ec);
+            files.push_back({it->path(), dst});
         }
         if (ec) return false;
     }
-    return !ec;
+    if (ec) return false;
+    std::atomic<size_t> next{0};
+    std::atomic<bool> failed{false};
+    std::mutex err_lock;
+    auto work = [&] {
+        for (size_t i; !failed && (i = next++) < files.size();) {
+            std::error_code e;
+            fs::copy_file(files[i].first, files[i].second, fs::copy_options::overwrite_existing, e);
+            if (e) {
+                std::lock_guard<std::mutex> g(err_lock);
+                if (!failed) ec = e;
+                failed = true;
+            }
+        }
+    };
+    unsigned n = std::clamp(std::thread::hardware_concurrency(), 2u, 8u);
+    if (files.size() < 64) n = 1;
+    std::vector<std::thread> threads;
+    for (unsigned t = 1; t < n; t++) threads.emplace_back(work);
+    work();
+    for (auto &t : threads) t.join();
+    return !failed;
+}
+
+// ---------------------------------------------------------------- results kept between conversions
+
+// Slow steps that turn tags into others the same way every time (re-encoding a sound for the Xbox, a BC7 texture as DXT,
+// compressing a texture, packing a bump map, lightening the sky, measuring the level) keep what they made in
+// cache_dir/results, by a hash of the tags they started from and how they were done; the same tags the next time (the
+// same map converted again, or another map with them) get that copy instead. The least recently used results go
+// first once they take more than kResultsKeptBytes.
+namespace {
+const uintmax_t kResultsKeptBytes = 768ull << 20;
+std::mutex g_results_lock;
+
+uint64_t mix64(uint64_t x) {
+    x ^= x >> 30; x *= 0xbf58476d1ce4e5b9ull;
+    x ^= x >> 27; x *= 0x94d049bb133111ebull;
+    return x ^ (x >> 31);
+}
+uint64_t hash64(const std::string &s, uint64_t seed) {
+    uint64_t h = mix64(seed ^ s.size());
+    size_t i = 0;
+    for (; i + 8 <= s.size(); i += 8) {
+        uint64_t w;
+        memcpy(&w, s.data() + i, 8);
+        h = mix64(h ^ w) * 0x9e3779b97f4a7c15ull;
+    }
+    uint64_t w = 0;
+    memcpy(&w, s.data() + i, s.size() - i);
+    return mix64(h ^ w ^ (uint64_t)(s.size() - i) << 56);
+}
+std::string read_all(const fs::path &p) {
+    std::ifstream f(p, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+}
+bool write_all(const fs::path &p, const std::string &b) {
+    std::ofstream f(p, std::ios::binary | std::ios::trunc);
+    return (bool)f.write(b.data(), (std::streamsize)b.size());
+}
+}   // namespace
+
+// What a result made from `input` by step `what` is kept under (32 hex characters). The app's build goes into it, so
+// a new version of the app makes its results again.
+static std::string result_key(const std::string &what, const std::string &input) {
+    std::string k = std::string(__DATE__ " " __TIME__ "\n") + what + "\n" + input;
+    char hex[40];
+    snprintf(hex, sizeof hex, "%016llx%016llx", (unsigned long long)hash64(k, 0x243f6a8885a308d3ull),
+             (unsigned long long)hash64(k, 0x13198a2e03707344ull));
+    return hex;
+}
+static fs::path results_dir(const Config &cfg) { return cfg.cache_dir / "results"; }
+
+// What's kept under `key` (and the note kept with it). False if there is nothing.
+static bool load_blob(const Config &cfg, const std::string &key, std::string &b, std::string &note) {
+    if (cfg.cache_dir.empty()) return false;
+    fs::path r = results_dir(cfg) / (key + ".tag");
+    std::error_code ec;
+    std::lock_guard<std::mutex> g(g_results_lock);
+    if (!fs::is_regular_file(r, ec)) return false;
+    b = read_all(r);
+    note = read_all(results_dir(cfg) / (key + ".note"));
+    fs::last_write_time(r, fs::file_time_type::clock::now(), ec);   // (recently used)
+    return !b.empty();
+}
+
+// The tag kept under `key` written to `p`, with the note kept with it. False if there is none.
+static bool load_result(const Config &cfg, const std::string &key, const fs::path &p, std::string &note) {
+    std::string b;
+    return load_blob(cfg, key, b, note) && write_all(p, b);
+}
+
+static void store_blob(const Config &cfg, const std::string &key, const std::string &b, const std::string &note);
+
+// Keeps the tag `p` as the result under `key`, with a note (e.g. how many textures it re-encoded).
+static void store_result(const Config &cfg, const std::string &key, const fs::path &p, const std::string &note) {
+    std::string b = read_all(p);
+    if (!b.empty()) store_blob(cfg, key, b, note);
+}
+
+static void store_blob(const Config &cfg, const std::string &key, const std::string &b, const std::string &note) {
+    if (cfg.cache_dir.empty() || b.empty()) return;
+    std::lock_guard<std::mutex> g(g_results_lock);
+    std::error_code ec;
+    fs::path dir = results_dir(cfg);
+    fs::create_directories(dir, ec);
+    fs::path tmp = dir / (key + ".tmp");
+    if (!write_all(tmp, b) || !write_all(dir / (key + ".note"), note)) { fs::remove(tmp, ec); return; }
+    fs::rename(tmp, dir / (key + ".tag"), ec);
+    if (ec) { fs::remove(tmp, ec); return; }
+    // Within the size kept: the least recently used go.
+    std::vector<std::pair<fs::file_time_type, fs::path>> all;
+    uintmax_t total = 0;
+    for (auto it = fs::directory_iterator(dir, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+        if (it->path().extension() != ".tag") continue;
+        std::error_code e;
+        uintmax_t s = it->file_size(e);
+        total += e ? 0 : s;
+        all.push_back({it->last_write_time(e), it->path()});
+    }
+    if (total <= kResultsKeptBytes) return;
+    std::sort(all.begin(), all.end());
+    for (auto &[t, f] : all) {
+        if (total <= kResultsKeptBytes * 3 / 4) break;
+        std::error_code e;
+        uintmax_t s = fs::file_size(f, e);
+        fs::path n = f;
+        n.replace_extension(".note");
+        if (fs::remove(f, e)) total -= s;
+        fs::remove(n, e);
+    }
+}
+
+// Records kept as results: texts, each its length and a newline before it.
+static void put_text(std::string &b, const std::string &s) { b += std::to_string(s.size()) + "\n" + s; }
+static bool get_text(const std::string &b, size_t &pos, std::string &s) {
+    size_t nl = b.find('\n', pos);
+    if (nl == std::string::npos) return false;
+    size_t n = std::strtoull(b.c_str() + pos, nullptr, 10);
+    if (nl + 1 + n > b.size()) return false;
+    s = b.substr(nl + 1, n);
+    pos = nl + 1 + n;
+    return true;
+}
+
+// The identity of one of Invader's tools (its file's size and time), so a result made by an older version is made
+// again.
+static std::string tool_identity(const fs::path &exe) {
+    std::error_code ec;
+    auto size = fs::file_size(exe, ec);
+    auto time = fs::last_write_time(exe, ec);
+    return std::to_string((unsigned long long)size) + "/" + std::to_string((long long)time.time_since_epoch().count());
+}
+
+// A BC7 bitmap tag re-encoded as DXT (convert_bc7_bitmap_tag), kept: how many textures it re-encoded.
+int convert_bc7_kept(const Config &cfg, const fs::path &p) {
+    std::string key = result_key("bc7 as dxt 1", read_all(p)), note;
+    if (load_result(cfg, key, p, note)) return std::atoi(note.c_str());
+    int n = convert_bc7_bitmap_tag(p, true);
+    if (n > 0) store_result(cfg, key, p, std::to_string(n));
+    return n;
+}
+
+// A texture compressed to DXT (compress_color_bitmap_tag) and a bump map packed into less memory
+// (compact_bump_bitmap_tag), kept the same way (the tag as it was then made, and what the step returned; a tag the
+// step left as it was is kept too, so it isn't tried again).
+int compress_color_bitmap_tag(const fs::path &p, bool write);
+int compact_bump_bitmap_tag(const fs::path &p, bool alpha_tested, int *fmt_out);
+static int compress_color_kept(const Config &cfg, const fs::path &p) {
+    std::string key = result_key("compress color 1", read_all(p)), note;
+    if (load_result(cfg, key, p, note)) return std::atoi(note.c_str());
+    int n = compress_color_bitmap_tag(p, true);
+    store_result(cfg, key, p, std::to_string(n));
+    return n;
+}
+static int compact_bump_kept(const Config &cfg, const fs::path &p, bool alpha_tested, int *fmt_out) {
+    std::string key = result_key(std::string("compact bump 1 ") + (alpha_tested ? "alpha tested" : "opaque"), read_all(p)), note;
+    int n = 0, fmt = 0;
+    if (load_result(cfg, key, p, note) && sscanf(note.c_str(), "%d %d", &n, &fmt) == 2) {
+        if (fmt_out) *fmt_out = fmt;
+        return n;
+    }
+    n = compact_bump_bitmap_tag(p, alpha_tested, &fmt);
+    store_result(cfg, key, p, std::to_string(n) + " " + std::to_string(fmt));
+    if (fmt_out) *fmt_out = fmt;
+    return n;
 }
 
 // ---------------------------------------------------------------- sounds
@@ -2161,7 +2401,7 @@ bool sound_has_long_piece(const fs::path &p) {
 }
 
 // Re-encode a sound tag (in `tags`) as Xbox ADPCM. Uses the user's WAVs when available.
-bool reencode_sound_for_xbox(Job &job, const fs::path &tags, const std::string &rel, std::string &why) {
+static bool reencode_sound_now(Job &job, const fs::path &tags, const std::string &rel, std::string &why) {
     const Config &cfg = job.cfg;
     std::string noext = rel.substr(0, rel.size() - 6);
     std::string out;
@@ -2217,6 +2457,21 @@ bool reencode_sound_for_xbox(Job &job, const fs::path &tags, const std::string &
         why = "invader-sound failed: " + out.substr(out.size() > 400 ? out.size() - 400 : 0);
         return false;
     }
+    return true;
+}
+
+// (The re-encoded tag is kept, unless it was made from the user's WAVs: the same sound tag again gets that copy.)
+bool reencode_sound_for_xbox(Job &job, const fs::path &tags, const std::string &rel, std::string &why) {
+    fs::path p = tags / from_u8(rel);
+    std::error_code ec;
+    bool wavs = !job.user_data.empty() && fs::is_directory(job.user_data / from_u8(rel.substr(0, rel.size() - 6)), ec);
+    std::string key, note;
+    if (!wavs) {
+        key = result_key("xbox adpcm sound 1 " + tool_identity(tool(job.cfg, "invader-sound")), read_all(p));
+        if (load_result(job.cfg, key, p, note)) return true;
+    }
+    if (!reencode_sound_now(job, tags, rel, why)) return false;
+    if (!wavs) store_result(job.cfg, key, p, "");
     return true;
 }
 
@@ -3866,6 +4121,205 @@ std::map<std::string, bool> level_bump_maps(Job &job, const std::vector<std::str
     return bumps;
 }
 
+// A new 2D bitmap tag of RGBA8 pixels (w x h, mip levels down to 1x1 by 2x2 averaging), A8R8G8B8, made from `like` (an
+// existing bitmap tag, for the rest of its fields).
+static bool write_rgba_bitmap_tag(const fs::path &like, const fs::path &out, int w, int h, const std::vector<unsigned char> &rgba) {
+    tagfile::EditTag t;
+    if (!t.load(like)) return false;
+    tagfile::TagNode &r = t.root();
+    std::string pix;
+    std::vector<unsigned char> lv = rgba;
+    int cw = w, ch = h, mips = 0;
+    for (;;) {
+        for (size_t i = 0; i < (size_t)cw * ch; i++) {
+            const unsigned char *q = &lv[i * 4];
+            char px[4] = {(char)q[2], (char)q[1], (char)q[0], (char)q[3]};   // B G R A
+            pix.append(px, 4);
+        }
+        if (cw == 1 && ch == 1) break;
+        std::vector<unsigned char> half;
+        box_half(lv, cw, ch, half);
+        lv.swap(half);
+        cw = std::max(1, cw / 2);
+        ch = std::max(1, ch / 2);
+        mips++;
+    }
+    tagfile::set_num(r, "type", 0);
+    tagfile::set_num(r, "encoding format", 4);
+    tagfile::set_num(r, "usage", 1);   // default
+    tagfile::set_num(r, "color plate width", 0);
+    tagfile::set_num(r, "color plate height", 0);
+    if (std::string *cp = tagfile::data(r, "compressed color plate data")) cp->clear();
+    std::string *pp = tagfile::data(r, "processed pixel data");
+    auto *bd = tagfile::block(r, "bitmap data");
+    auto *seq = tagfile::block(r, "bitmap group sequence");
+    if (!pp || !bd || bd->empty()) return false;
+    *pp = pix;
+    bd->resize(1);
+    tagfile::TagNode &e = (*bd)[0];
+    tagfile::set_num(e, "width", w);
+    tagfile::set_num(e, "height", h);
+    tagfile::set_num(e, "depth", 1);
+    tagfile::set_num(e, "type", 0);
+    tagfile::set_num(e, "format", 11);
+    tagfile::set_num(e, "flags", 1);   // power-of-two sides
+    tagfile::set_num(e, "registration point", w / 2, 0);
+    tagfile::set_num(e, "registration point", h / 2, 1);
+    tagfile::set_num(e, "mipmap count", mips);
+    tagfile::set_num(e, "pixel data offset", 0);
+    tagfile::set_num(e, "pixel data size", (double)pix.size());
+    if (seq && seq->size() != 1) seq->clear();
+    if (seq && seq->size() == 1) {
+        tagfile::set_num((*seq)[0], "first bitmap index", 0);
+        tagfile::set_num((*seq)[0], "bitmap count", 1);
+        if (auto *sprites = tagfile::block((*seq)[0], "sprites")) sprites->clear();
+    }
+    std::error_code ec;
+    fs::create_directories(out.parent_path(), ec);
+    return t.save(out);
+}
+
+// Whether a bitmap tag's first texture is opaque all over (alpha 255 at full size). False if it can't be read.
+static bool bitmap_opaque(const fs::path &p) {
+    tagfile::Tag t;
+    if (!t.load(p)) return false;
+    tagfile::Elem r = t.root();
+    tagfile::Block bd = r.block("bitmap data");
+    if (!bd.size()) return false;
+    int w = (int)bd[0].integer("width"), h = (int)bd[0].integer("height"), fmt = (int)bd[0].integer("format");
+    if (fmt == 1 || fmt == 6 || fmt == 10) return true;   // Y8, R5G6B5, X8R8G8B8: no alpha
+    std::string pix = r.data("processed pixel data");
+    size_t off = (size_t)bd[0].integer("pixel data offset"), n = mip_bytes(w, h, fmt);
+    if (!n || off + n > pix.size()) return false;
+    std::string d = pix.substr(off, n);
+    if (fmt == 0 || fmt == 2 || fmt == 3) {   // A8, AY8 (alpha is the value), A8Y8 (alpha the second byte)
+        for (size_t i = 0; i < (size_t)w * h; i++)
+            if ((unsigned char)d[fmt == 3 ? i * 2 + 1 : i] != 255) return false;
+        return true;
+    }
+    std::vector<unsigned char> rgba;
+    if (!decode_level(d, w, h, fmt, rgba)) return false;
+    for (size_t i = 0; i < (size_t)w * h; i++)
+        if (rgba[i * 4 + 3] != 255) return false;
+    return true;
+}
+
+// MCC's compatibility flags the Xbox doesn't read, done the Xbox's way where they can be (the map's own shaders):
+//  - "custom edition blending" on a transparent shader whose framebuffer blend is multiply or double multiply: MCC
+//    then draws it as Custom Edition did (chicago_shader.psh in MCC's mod tools), fading it the wrong way: towards
+//    its own colour as it shows, so where nothing fades it, multiply leaves what's behind as it was (white) and double
+//    multiply draws the average of its colour and white, (1 + c) / 2. The Xbox fades towards those as it fades out
+//    (lerp(1, c, f), lerp(0.5, c, f)). A stage added after its last map gives the Xbox what MCC draws where it's fully
+//    shown (no fog, no fade): white (the stage takes the next map, plain white), or the average with white (it blends in
+//    the next map by that map's alpha, white at half). In fog the two still differ (MCC's darkens, the Xbox's fades).
+//    A shader with four maps already has no stage to spare and stays as made.
+//  - "use alternate normal type blending" on a level shader of the normal type: its detail maps blended by the base
+//    map's alpha (Custom Edition's way, Chimera's map hacks: the Xbox's normal type blends them by the secondary detail
+//    map's alpha). The Xbox's "blended" type does the same blend; its specular mask from the detail maps by the base
+//    alpha, where the normal type's also multiplies by it, so where both detail maps are opaque "blended base
+//    specular" (the base alpha alone) gives the normal type's mask exactly.
+//  - "use alternate bump attenuation" (MCC's bump lighting relative to a flat surface, env_lm_normal.psh:
+//    1 + dot(bump, incident) - dot(incident, up), where the Xbox's is saturate(dot(bump, incident))): a sum the Xbox's
+//    lightmap pass can't do; counted, left as it is.
+void mcc_flags_for_xbox(Job &job, const std::vector<std::string> &deps) {
+    if (job.from == Game::Xbox) return;
+    auto from_map = [&](const std::string &t) {
+        fs::path own = job.owner(t);
+        if (own.empty() || own == job.overlay) return false;
+        if (own == job.fixes)
+            return fs::exists(job.source / from_u8(t)) || (!job.user_tags.empty() && fs::exists(job.user_tags / from_u8(t)));
+        return true;
+    };
+    const std::string white_tag = "halo map porter/white half alpha.bitmap";
+    bool white_made = false;
+    int mul = 0, dmul = 0, full = 0, normal_blended = 0, normal_base_spec = 0, alt_bump = 0;
+    for (auto &dep : deps) {
+        bool chicago = has_suffix(dep, ".shader_transparent_chicago"), env = has_suffix(dep, ".shader_environment");
+        if ((!chicago && !env) || !from_map(dep)) continue;
+        fs::path own = job.owner(dep);
+        tagfile::Tag t;
+        if (!t.load(own / from_u8(dep))) continue;
+        tagfile::Elem r = t.root();
+        if (chicago) {
+            int fb = (int)r.integer("framebuffer blend function"), xf = (int)r.integer("extra flags");
+            if (!(xf & 4) || (fb != 1 && fb != 2)) continue;
+            tagfile::Block mb = r.block("maps");
+            if (mb.size() == 0) continue;
+            if (mb.size() >= 4) { full++; continue; }
+            if (!white_made) {
+                std::string like = mb[0].ref("map");
+                fs::path lo = like.empty() ? fs::path() : job.owner(like);
+                std::vector<unsigned char> px(4 * 4 * 4, 255);
+                for (int i = 0; i < 16; i++) px[i * 4 + 3] = 128;   // white, half alpha
+                if (lo.empty() || !write_rgba_bitmap_tag(lo / from_u8(like), job.fixes / from_u8(white_tag), 4, 4, px)) continue;
+                white_made = true;
+            }
+            fs::path ed = editable_owner(job, dep);
+            tagfile::EditTag et;
+            if (ed.empty() || !et.load(ed / from_u8(dep))) continue;
+            auto *maps = tagfile::block(et.root(), "maps");
+            if (!maps || maps->empty() || maps->size() >= 4) continue;
+            tagfile::TagNode &last = maps->back();
+            // (its "alpha replicate" would read the added map's alpha as its colour; with no map after it, it read nothing)
+            tagfile::set_num(last, "flags", (double)((int)tagfile::get_num(last, "flags") & ~2));
+            tagfile::set_num(last, "color function", fb == 1 ? 1 : 11);   // next map / blend next map alpha
+            tagfile::set_num(last, "alpha function", 0);                   // current
+            // (a copy of its first map, for the reference's bitmap group, with every value set back to none)
+            tagfile::TagNode m = maps->front();
+            for (const char *f : {"flags", "color function", "alpha function", "map u offset", "map v offset", "map rotation",
+                                  "mipmap bias", "u animation source", "u animation function", "u animation period",
+                                  "u animation phase", "u animation scale", "v animation source", "v animation function",
+                                  "v animation period", "v animation phase", "v animation scale", "rotation animation source",
+                                  "rotation animation function", "rotation animation period", "rotation animation phase",
+                                  "rotation animation scale"})
+                tagfile::set_num(m, f, 0);
+            tagfile::set_num(m, "rotation animation center", 0, 0);
+            tagfile::set_num(m, "rotation animation center", 0, 1);
+            tagfile::set_num(m, "map u scale", 1);
+            tagfile::set_num(m, "map v scale", 1);
+            if (std::string *ref = tagfile::ref_path(m, "map")) {
+                std::string path = white_tag.substr(0, white_tag.size() - 7);
+                std::replace(path.begin(), path.end(), '/', '\\');
+                *ref = path;
+            }
+            maps->push_back(m);
+            if (et.save(ed / from_u8(dep))) (fb == 1 ? mul : dmul)++;
+        } else {
+            int flags = (int)r.integer("shader environment flags"), type = (int)r.integer("shader environment type");
+            if (flags & 8) alt_bump++;
+            if (!(flags & 16) || type != 0) continue;
+            bool opaque = true;
+            for (const char *f : {"primary detail map", "secondary detail map"}) {
+                std::string b = r.ref(f);
+                fs::path bo = b.empty() ? fs::path() : job.owner(b);
+                if (!b.empty() && (bo.empty() || !bitmap_opaque(bo / from_u8(b)))) opaque = false;
+            }
+            fs::path ed = editable_owner(job, dep);
+            tagfile::EditTag et;
+            if (ed.empty() || !et.load(ed / from_u8(dep))) continue;
+            tagfile::set_num(et.root(), "shader environment type", opaque ? 2 : 1);
+            if (et.save(ed / from_u8(dep))) (opaque ? normal_base_spec : normal_blended)++;
+        }
+    }
+    if (mul || dmul)
+        job.note("[shaders] drew " + std::to_string(mul + dmul) + " of the map's transparent shaders flagged with MCC's "
+                 "\"custom edition blending\" as MCC draws them where they're fully shown (a stage added after their maps): " +
+                 std::to_string(mul) + " multiply ones leave what's behind as it is, " + std::to_string(dmul) +
+                 " double multiply ones draw the average of their colour and white. In fog they still fade the Xbox's way");
+    if (full)
+        job.note("[shaders] " + std::to_string(full) + " transparent shaders flagged with MCC's \"custom edition blending\" "
+                 "already use all four maps, so they blend the Xbox's way (their multiply darker than in MCC)");
+    if (normal_blended || normal_base_spec)
+        job.note("[shaders] gave " + std::to_string(normal_blended + normal_base_spec) + " level shaders flagged with MCC's "
+                 "\"alternate normal type blending\" the type that blends their detail maps by the base map's alpha, as MCC "
+                 "does: " + std::to_string(normal_base_spec) + " \"blended base specular\" (opaque detail maps: the same "
+                 "specular mask), " + std::to_string(normal_blended) + " \"blended\"");
+    if (alt_bump)
+        job.note("[shaders] " + std::to_string(alt_bump) + " level shaders use MCC's \"alternate bump attenuation\", which "
+                 "the Xbox doesn't have: their bumps are lit the Xbox's way (surfaces lit from a low angle look darker "
+                 "than in MCC, where the flat parts of a bump map are as bright as the lightmap)");
+}
+
 // The map's own effects brought down to Bungie's busiest (effects.hpp): an effect made once (a muzzle flash, an
 // impact, an explosion) at its busiest moment, one attached to an object (a fire on a prop, a beam, a burning wreck)
 // steadily, in particles alive and in the area of their sprites. One past those keeps the share of its particles that
@@ -4022,7 +4476,7 @@ void cap_texture_sizes(Job &job, const std::vector<std::string> &deps) {
                     ? std::min(cfg.xbox_max_object_texture, cfg.xbox_max_texture)
                     : cfg.xbox_max_texture;
         if (!lightmap && cfg.xbox_max_texture > 0) {
-            int c = compress_color_bitmap_tag(own / from_u8(dep), true);
+            int c = compress_color_kept(cfg, own / from_u8(dep));
             if (c > 0) compressed += c;
         }
         if (cap <= 0) continue;
@@ -4054,7 +4508,7 @@ void cap_texture_sizes(Job &job, const std::vector<std::string> &deps) {
             if (usage == 4) continue; // lightmaps have their own setting
             if (compress_color_bitmap_tag(own / from_u8(dep), false) > 0) {
                 fs::path ed = editable_owner(job, dep, true);
-                int c = ed.empty() ? 0 : compress_color_bitmap_tag(ed / from_u8(dep), true);
+                int c = ed.empty() ? 0 : compress_color_kept(cfg, ed / from_u8(dep));
                 if (c > 0) compressed += c;
                 own = job.owner(dep);
             }
@@ -4082,7 +4536,7 @@ void cap_texture_sizes(Job &job, const std::vector<std::string> &deps) {
             fs::path ed = editable_owner(job, pick->tag, true);
             if (!ed.empty() && bumps.count(pick->tag) && packed_tried.insert(pick->tag).second) {
                 int nf = 0;
-                if (compact_bump_bitmap_tag(ed / from_u8(pick->tag), bumps[pick->tag], &nf) > 0) {
+                if (compact_bump_kept(cfg, ed / from_u8(pick->tag), bumps[pick->tag], &nf) > 0) {
                     int side = 0;
                     size_t now = bitmap_tag_memory(ed / from_u8(pick->tag), &side);
                     if (now < pick->bytes) {
@@ -4426,6 +4880,7 @@ void xbox_content_passes(Job &job) {
     auto deps = tag_dependencies(job, job.scenario + ".scenario", true);
     flatten_layered_shaders(job, deps);
     if (!job.cfg.level_shaders_only) reorder_multipurpose_maps(job, deps);   // (before textures are capped)
+    if (!job.cfg.level_shaders_only) mcc_flags_for_xbox(job, deps);
     if (!job.cfg.level_shaders_only) xbox_sky(job);   // (before textures are capped: the ones it makes are capped too)
     deps = tag_dependencies(job, job.scenario + ".scenario", true); // flattened layers (and layers drawn together) drop out
     cap_effects(job, deps);
@@ -4588,6 +5043,44 @@ static std::string make_perf_tour(const lshade::Analysis &a, const lshade::Previ
 // The level's reflections (levelshaders.hpp): the Xbox draws a reflecting surface once or twice more than any other,
 // so the ones that show least for what they cost lose their reflection while the level costs more than stock ones
 // (or this map's own picks from the level shaders window). The measurement is kept for that window either way.
+// lshade::analyze, kept (results kept between conversions): what it measured (its .lsh file) and the tags it read, by
+// content. The same level read from the same tags (the Level window measured it, then the conversion does) is
+// measured once.
+static bool analyze_level_kept(Job &job, const fs::path &bsp, const fs::path &scenario, const lshade::Find &find,
+                               lshade::Analysis &a, lshade::Preview &p, std::string *why) {
+    const std::string key = result_key("level shaders 1", read_all(bsp) + "\n" + read_all(scenario));
+    auto content_key = [&](const fs::path &f) {
+        std::error_code ec;
+        return f.empty() || !fs::is_regular_file(f, ec) ? std::string("-") : result_key("", read_all(f));
+    };
+    fs::path tmp = job.work / "level_kept.lsh";
+    std::string b, note;
+    if (load_blob(job.cfg, key, b, note)) {
+        size_t pos = 0;
+        std::string t, h, n, lsh;
+        bool ok = get_text(b, pos, t) && t == "HMP level 1" && get_text(b, pos, n);
+        for (int k = ok ? std::atoi(n.c_str()) : 0; ok && k > 0; k--)
+            ok = get_text(b, pos, t) && get_text(b, pos, h) && content_key(find(t)) == h;
+        if (ok && get_text(b, pos, lsh) && write_all(tmp, lsh) && lshade::load(a, p, tmp)) return true;
+    }
+    std::map<std::string, std::string> reads;
+    lshade::Find rfind = [&](const std::string &t) {
+        fs::path f = find(t);
+        if (!reads.count(t)) reads[t] = content_key(f);
+        return f;
+    };
+    if (!lshade::analyze(bsp, scenario, rfind, a, p, why)) return false;
+    if (lshade::save(a, p, tmp)) {
+        std::string rec;
+        put_text(rec, "HMP level 1");
+        put_text(rec, std::to_string(reads.size()));
+        for (auto &[t, h] : reads) { put_text(rec, t); put_text(rec, h); }
+        put_text(rec, read_all(tmp));
+        store_blob(job.cfg, key, rec, "");
+    }
+    return true;
+}
+
 void xbox_reflections(Job &job) {
     const Config &cfg = job.cfg;
     if (job.analysis) return;
@@ -4611,7 +5104,7 @@ void xbox_reflections(Job &job) {
         lshade::Analysis a;
         lshade::Preview p;
         std::string why;
-        if (!lshade::analyze(own / from_u8(b), sdir / from_u8(scen), find, a, p, &why)) {
+        if (!analyze_level_kept(job, own / from_u8(b), sdir / from_u8(scen), find, a, p, &why)) {
             job.log("  [reflections] the level" + name + " couldn't be measured: it " + why);
             continue;
         }
@@ -5229,6 +5722,102 @@ static std::string layers_text(double v) {
     snprintf(b, sizeof b, "%.1f", v);
     return b;
 }
+// sky::lighten, kept (results kept between conversions): the tags it read (by content) and wrote, and what it found.
+// The same sky read from the same tags the next time writes what it wrote then.
+static std::string fill_text(const sky::Fill &f) {
+    char b[200];
+    snprintf(b, sizeof b, "%d %.17g %.17g %d %d", f.ok ? 1 : 0, f.layers, f.worst, f.parts, f.triangles);
+    return b;
+}
+static bool fill_of_text(const std::string &t, sky::Fill &f) {
+    int ok = 0;
+    if (sscanf(t.c_str(), "%d %lg %lg %d %d", &ok, &f.layers, &f.worst, &f.parts, &f.triangles) != 5) return false;
+    f.ok = ok != 0;
+    return true;
+}
+static sky::Lightened lighten_kept(Job &job, const std::string &s, const fs::path &file, const sky::Find &find,
+                                   const sky::Edit &edit) {
+    const std::string key = result_key("sky lighten 1\n" + s, read_all(file));
+    auto content_key = [&](const fs::path &p) {
+        std::error_code ec;
+        return p.empty() || !fs::is_regular_file(p, ec) ? std::string("-") : result_key("", read_all(p));
+    };
+    std::string b, note;
+    if (load_blob(job.cfg, key, b, note)) {
+        sky::Lightened r;
+        size_t pos = 0;
+        std::string t, h, n, bytes;
+        bool ok = get_text(b, pos, t) && t == "HMP sky 1";
+        std::vector<std::pair<std::string, std::string>> writes;
+        if (ok && get_text(b, pos, n)) {
+            for (int k = std::atoi(n.c_str()); ok && k > 0; k--)
+                ok = get_text(b, pos, t) && get_text(b, pos, h) && content_key(find(t)) == h;   // (read the same?)
+        } else ok = false;
+        if (ok && get_text(b, pos, n)) {
+            for (int k = std::atoi(n.c_str()); ok && k > 0; k--) {
+                ok = get_text(b, pos, t) && get_text(b, pos, bytes);
+                if (ok) writes.push_back({t, bytes});
+            }
+        } else ok = false;
+        std::string ch, before, after;
+        ok = ok && get_text(b, pos, ch) && get_text(b, pos, before) && get_text(b, pos, after) &&
+             fill_of_text(before, r.before) && fill_of_text(after, r.after);
+        for (auto *list : {&r.merged, &r.trimmed}) {
+            if (!ok || !get_text(b, pos, n)) { ok = false; break; }
+            for (int k = std::atoi(n.c_str()); ok && k > 0; k--) {
+                ok = get_text(b, pos, t);
+                if (ok) list->push_back(t);
+            }
+        }
+        if (ok) {
+            r.changed = ch == "1";
+            for (auto &[w, wb] : writes) {
+                fs::path p = edit(w);
+                std::error_code ec;
+                if (p.empty()) { ok = false; break; }
+                fs::create_directories(p.parent_path(), ec);
+                if (!write_all(p, wb)) { ok = false; break; }
+                r.written.push_back(w);
+            }
+            if (ok) return r;
+        }
+    }
+    // (made now, noting what it reads: a tag read after it was written is what it made, not what it read)
+    std::map<std::string, std::string> reads;
+    std::set<std::string> edited;
+    sky::Find rfind = [&](const std::string &t) {
+        fs::path p = find(t);
+        if (!edited.count(t) && !reads.count(t)) reads[t] = content_key(p);
+        return p;
+    };
+    sky::Edit redit = [&](const std::string &t) {
+        edited.insert(t);
+        return edit(t);
+    };
+    sky::Lightened r = sky::lighten(s, rfind, redit);
+    std::string rec;
+    put_text(rec, "HMP sky 1");
+    put_text(rec, std::to_string(reads.size()));
+    for (auto &[t, h] : reads) { put_text(rec, t); put_text(rec, h); }
+    put_text(rec, std::to_string(r.written.size()));
+    for (auto &w : r.written) {
+        fs::path p = find(w);
+        std::error_code ec;
+        if (p.empty() || !fs::is_regular_file(p, ec)) return r;   // (not kept)
+        put_text(rec, w);
+        put_text(rec, read_all(p));
+    }
+    put_text(rec, r.changed ? "1" : "0");
+    put_text(rec, fill_text(r.before));
+    put_text(rec, fill_text(r.after));
+    for (auto *list : {&r.merged, &r.trimmed}) {
+        put_text(rec, std::to_string(list->size()));
+        for (auto &x : *list) put_text(rec, x);
+    }
+    store_blob(job.cfg, key, rec, "");
+    return r;
+}
+
 void xbox_sky(Job &job) {
     if (job.cfg.xbox_sky == 1 || job.analysis) return;
     std::string scen = job.scenario + ".scenario";
@@ -5256,7 +5845,7 @@ void xbox_sky(Job &job) {
         std::string model = st.root().ref("model");
         fs::path mown = model.empty() ? fs::path() : job.owner(model);
         if (mown.empty() || mown == job.overlay) continue;
-        sky::Lightened r = sky::lighten(s, find, edit);
+        sky::Lightened r = lighten_kept(job, s, own / from_u8(s), find, edit);
         if (!r.changed) continue;
         std::string what;
         if (!r.merged.empty()) {
@@ -5667,7 +6256,7 @@ void convert_bc7_textures(Job &job) {
             if (!job.to_fixes(dep, own)) continue;
             own = job.fixes;
         }
-        int n = convert_bc7_bitmap_tag(own / from_u8(dep), true);
+        int n = convert_bc7_kept(job.cfg, own / from_u8(dep));
         if (n > 0) { tags++; bitmaps += n; }
     }
     if (tags)
@@ -7148,15 +7737,31 @@ bool prepare_for_xbox(Job &job, std::string &err) {
     // Now that each HUD points at the bitmaps it will really draw (PC copies, meter copies), at their sizes.
     fit_hud_textures(job, xsrc, hud_tags);
     std::map<std::string, std::vector<std::string>> reencoded;   // reason -> sounds
+    if (cfg.level_shaders_only) sound_tags.clear();   // (measuring the level: its sounds don't change what's measured)
     if (sound_tags.size() > 5) job.log("Re-encoding " + std::to_string(sound_tags.size()) + " sounds for the Xbox...");
-    for (auto &rel : sound_tags) {
-        std::string why, reason = sound_reencode_reason(xsrc / from_u8(rel));
-        if (reencode_sound_for_xbox(job, xsrc, rel, why)) {
+    {
+        // (several at once: each is its own tag and its own folder of WAVs)
+        std::vector<std::string> list(sound_tags.begin(), sound_tags.end()), reasons(list.size()), whys(list.size());
+        std::vector<char> ok(list.size(), 0);
+        std::atomic<size_t> next{0};
+        auto work = [&] {
+            for (size_t i; (i = next++) < list.size();) {
+                reasons[i] = sound_reencode_reason(xsrc / from_u8(list[i]));
+                ok[i] = reencode_sound_for_xbox(job, xsrc, list[i], whys[i]);
+            }
+        };
+        unsigned n = std::clamp(std::thread::hardware_concurrency(), 1u, 6u);
+        std::vector<std::thread> threads;
+        for (unsigned t = 1; t < n && t < list.size(); t++) threads.emplace_back(work);
+        work();
+        for (auto &t : threads) t.join();
+        for (size_t i = 0; i < list.size(); i++) {
+            if (!ok[i]) {
+                err = "Couldn't re-encode " + list[i] + " for Xbox (" + whys[i] + ").";
+                return false;
+            }
             sounds++;
-            reencoded[reason].push_back(rel);
-        } else {
-            err = "Couldn't re-encode " + rel + " for Xbox (" + why + ").";
-            return false;
+            reencoded[reasons[i]].push_back(list[i]);
         }
     }
     for (auto &[reason, list] : reencoded) {
@@ -7173,6 +7778,7 @@ bool prepare_for_xbox(Job &job, std::string &err) {
     // Dialogue lines can't be split: list the ones still longer than the Xbox loads at once.
     std::vector<std::string> long_dialogue;
     for (auto &e : fs::recursive_directory_iterator(xsrc)) {
+        if (cfg.level_shaders_only) break;
         if (e.path().extension() != ".sound") continue;
         std::string rel = fs::relative(e.path(), xsrc).generic_u8string();
         if (in_overlay(rel)) continue;
@@ -8511,6 +9117,8 @@ fs::path resource_maps_for(Job &job, const fs::path &input, Game in_game, const 
         else for (auto &st : stocks) if (!st.empty() && fs::is_regular_file(st / n, ec)) { src = st; break; }
         if (!src.empty()) from.push_back({n, src});
     }
+    job.resource_files.clear();
+    for (auto &[n, s] : from) job.resource_files.push_back(s / n);
     if (from.empty()) return {};
     auto list_of = [&](const fs::path &d) {
         std::vector<std::string> v;
@@ -8566,6 +9174,157 @@ int scripts_use_cheat_powerups(const std::string &script_text, int script_count)
     return cheat_powerup_use(script_text, script_count);
 }
 
+// ---------------------------------------------------------------- extracted tags, kept
+
+// The last few maps' tags as invader-extract left them (cache_dir/extracted), so converting a map again (the Level
+// and Weapons & vehicles windows measure it first, and settings change between conversions) starts from them instead
+// of extracting it again. An entry is the map's tags (tags/), what the extraction printed, a list of its files as they
+// were (so one changed by mistake is noticed and made again) and the key it was made for: the map file, the
+// bitmaps.map/sounds.map/loc.map it read and Invader's extractor (paths, sizes and times). Only the most recent
+// kExtractedKept are kept.
+namespace {
+const int kExtractedKept = 3;
+std::mutex g_extracted_lock;
+std::map<std::string, int> g_extracted_in_use;   // entry folder -> jobs reading it
+
+struct ExtractedLease {
+    std::string dir;
+    ~ExtractedLease() {
+        std::lock_guard<std::mutex> g(g_extracted_lock);
+        if (--g_extracted_in_use[dir] <= 0) g_extracted_in_use.erase(dir);
+    }
+};
+std::shared_ptr<void> lease_extracted(const fs::path &entry) {
+    auto l = std::make_shared<ExtractedLease>();
+    l->dir = u8(entry);
+    g_extracted_in_use[l->dir]++;   // (g_extracted_lock held by the caller)
+    return l;
+}
+
+std::string file_identity(const fs::path &p) {
+    std::error_code ec;
+    fs::path a = fs::absolute(p, ec);
+    auto size = fs::file_size(p, ec);
+    if (ec) return u8(a) + "\tmissing";
+    auto time = fs::last_write_time(p, ec);
+    return u8(a) + "\t" + std::to_string((unsigned long long)size) + "\t" +
+           std::to_string((long long)time.time_since_epoch().count());
+}
+
+std::string manifest_of(const fs::path &dir) {
+    std::vector<std::string> lines;
+    std::error_code ec;
+    for (auto it = fs::recursive_directory_iterator(dir, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        if (!it->is_regular_file(ec)) continue;
+        auto size = it->file_size(ec);
+        auto time = it->last_write_time(ec);
+        lines.push_back(fs::relative(it->path(), dir, ec).generic_u8string() + "\t" + std::to_string((unsigned long long)size) +
+                        "\t" + std::to_string((long long)time.time_since_epoch().count()));
+    }
+    if (ec) return "?";
+    std::sort(lines.begin(), lines.end());
+    std::string m;
+    for (auto &l : lines) m += l + "\n";
+    return m;
+}
+
+std::string slurp_text(const fs::path &p) {
+    std::ifstream f(p, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+}
+
+fs::path extracted_root(const Config &cfg) { return cfg.cache_dir / "extracted"; }
+
+fs::path entry_for(const Config &cfg, const std::string &key) {
+    uint64_t h = 1469598103934665603ull;
+    for (unsigned char c : key) { h ^= c; h *= 1099511628211ull; }
+    char hex[24];
+    snprintf(hex, sizeof hex, "%016llx", (unsigned long long)h);
+    return extracted_root(cfg) / hex;
+}
+
+// Keeps the most recently used entries (and those in use); removes the rest and any left half made.
+void trim_extracted(const Config &cfg) {
+    std::error_code ec;
+    std::vector<std::pair<long long, fs::path>> entries;
+    for (auto it = fs::directory_iterator(extracted_root(cfg), ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+        if (!it->is_directory(ec)) continue;
+        fs::path p = it->path();
+        if (g_extracted_in_use.count(u8(p))) continue;
+        std::error_code e;
+        if (!fs::exists(p / "key.txt", e)) { fs::remove_all(p, e); continue; }   // (left half made)
+        auto t = fs::last_write_time(p / "used", e);
+        entries.push_back({e ? 0 : (long long)t.time_since_epoch().count(), p});
+    }
+    std::sort(entries.begin(), entries.end(), [](auto &a, auto &b) { return a.first > b.first; });
+    int keep = kExtractedKept - (int)g_extracted_in_use.size();
+    for (size_t i = std::max(0, keep); i < entries.size(); i++) fs::remove_all(entries[i].second, ec);
+}
+
+void mark_used(const fs::path &entry) {
+    std::ofstream(entry / "used", std::ios::binary | std::ios::trunc) << "used";
+}
+}   // namespace
+
+// The extracted tags of `input` from an earlier conversion, if it and what it was read with haven't changed: the
+// folder of its tags (in use by `job` until it ends), and what the extraction printed. Empty if there are none.
+static fs::path find_extracted(Job &job, const std::string &key, std::string &printed) {
+    std::shared_ptr<void> lease;   // (given to the job once the lock is let go: a lease ends under the lock)
+    fs::path entry = entry_for(job.cfg, key);
+    {
+        std::lock_guard<std::mutex> g(g_extracted_lock);
+        std::error_code ec;
+        if (!fs::exists(entry / "key.txt", ec) || slurp_text(entry / "key.txt") != key) return {};
+        if (manifest_of(entry / "tags") != slurp_text(entry / "manifest.txt")) {   // (changed since: made again)
+            if (!g_extracted_in_use.count(u8(entry))) fs::remove_all(entry, ec);
+            return {};
+        }
+        printed = slurp_text(entry / "output.txt");
+        mark_used(entry);
+        lease = lease_extracted(entry);
+    }
+    job.extracted = lease;
+    return entry / "tags";
+}
+
+// Extracts the map with `cmd` (invader-extract's arguments, without -t) into a new entry. Returns its tags folder (in
+// use by `job`), or empty if the extraction failed (`printed` says why).
+static fs::path extract_kept(Job &job, const std::string &key, std::vector<std::string> cmd, std::string &printed) {
+    fs::path entry = entry_for(job.cfg, key), tmp = entry;
+    tmp += ".tmp";
+    std::error_code ec;
+    {
+        std::lock_guard<std::mutex> g(g_extracted_lock);
+        fs::remove_all(tmp, ec);
+        fs::create_directories(tmp / "tags", ec);
+        g_extracted_in_use[u8(tmp)]++;   // (so trimming leaves it alone while it's made)
+    }
+    cmd.insert(cmd.begin() + 1, {"-t", u8(tmp / "tags")});
+    int rc = run_process(cmd, printed);
+    std::shared_ptr<void> lease;   // (given to the job once the lock is let go)
+    fs::path tags;
+    {
+        std::lock_guard<std::mutex> g(g_extracted_lock);
+        if (--g_extracted_in_use[u8(tmp)] <= 0) g_extracted_in_use.erase(u8(tmp));
+        if (rc != 0) { fs::remove_all(tmp, ec); return {}; }
+        std::ofstream(tmp / "output.txt", std::ios::binary) << printed;
+        std::ofstream(tmp / "manifest.txt", std::ios::binary) << manifest_of(tmp / "tags");
+        std::ofstream(tmp / "key.txt", std::ios::binary) << key;   // (last: the entry is complete)
+        mark_used(tmp);
+        fs::path keep = tmp;
+        if (!g_extracted_in_use.count(u8(entry))) {   // (else an older copy is still being read: this one isn't kept)
+            fs::remove_all(entry, ec);
+            fs::rename(tmp, entry, ec);
+            if (!ec) keep = entry;
+        }
+        lease = lease_extracted(keep);
+        if (keep == entry) trim_extracted(job.cfg);
+        tags = keep / "tags";
+    }
+    job.extracted = lease;
+    return tags;
+}
+
 // ---------------------------------------------------------------- public API
 
 static Result convert_map_impl(const Config &cfg, const fs::path &input, Game in_game, Game out_game,
@@ -8580,23 +9339,8 @@ static Result convert_map_impl(const Config &cfg, const fs::path &input, Game in
     job.analysis = an;
     job.measure = measure;
     fresh_work(job, an ? "analyze" : cfg.level_shaders_only ? "shaders" : "convert");
-    job.source = job.work / "source_tags";
     std::error_code ec;
-    fs::create_directories(job.source, ec);
 
-    // Protected maps have their tag names scrambled, so there's nothing usable to extract.
-    {
-        std::string path;
-        run_process({u8(tool(cfg, "invader-info")), "-T", "scenario_path", u8(input)}, path);
-        if (path.find("<protected>") != std::string::npos) {
-            r.error = "This map is protected: its author scrambled its tag names so it can't be taken apart, and the "
-                      "app needs those to rebuild it for another game. Use an unprotected copy of the map (for example "
-                      "the MCC release, or ask the author).";
-            return r;
-        }
-    }
-    log("Extracting tags from " + input.filename().u8string() + "...");
-    std::vector<std::string> cmd{u8(tool(cfg, "invader-extract")), "-t", u8(job.source)};
     // MCC keeps Custom Edition's resource maps (for classic Custom Edition maps) in halo1\maps\custom_edition and its
     // own in halo1\maps. MCC maps need MCC's own, so an MCC maps folder set to custom_edition means the one above it.
     fs::path mcc_dir = cfg.mcc_maps_dir, mcc_ce;
@@ -8620,14 +9364,44 @@ static Result convert_map_impl(const Config &cfg, const fs::path &input, Game in
     if (in_game == Game::CE) stocks = {cfg.ce_dir.empty() ? fs::path() : cfg.ce_dir / "maps", mcc_ce};
     else if (in_game == Game::MCC) stocks = {mcc_dir};
     fs::path res_dir = resource_maps_for(job, input, in_game, stocks);
-    if (!res_dir.empty()) cmd.insert(cmd.end(), {"-m", u8(res_dir)});
-    cmd.push_back(u8(input));
+
+    // The tags as extracted before, if the map (and what it's read with) hasn't changed since.
+    std::string key = "HaloMapPorter extracted 1\n" + std::string(game_name(in_game)) + "\n" + file_identity(input) + "\n" +
+                      file_identity(tool(cfg, "invader-extract")) + "\n";
+    for (auto &f : job.resource_files) key += file_identity(f) + "\n";
     std::string out;
-    if (run_process(cmd, out) != 0) {
-        r.error = "Couldn't extract tags from the map:\n" + out.substr(out.size() > 2000 ? out.size() - 2000 : 0);
-        if (in_game == Game::CE && res_dir.empty())
-            r.error += "\nTip: set your Custom Edition folder in Settings so its bitmaps/sounds.map can be read.";
-        return r;
+    fs::path extracted = find_extracted(job, key, out);
+    if (!extracted.empty()) {
+        log("Reusing the tags extracted from " + input.filename().u8string() + " before (the map hasn't changed)");
+    } else {
+        // Protected maps have their tag names scrambled, so there's nothing usable to extract.
+        std::string path;
+        run_process({u8(tool(cfg, "invader-info")), "-T", "scenario_path", u8(input)}, path);
+        if (path.find("<protected>") != std::string::npos) {
+            r.error = "This map is protected: its author scrambled its tag names so it can't be taken apart, and the "
+                      "app needs those to rebuild it for another game. Use an unprotected copy of the map (for example "
+                      "the MCC release, or ask the author).";
+            return r;
+        }
+        log("Extracting tags from " + input.filename().u8string() + "...");
+        std::vector<std::string> cmd{u8(tool(cfg, "invader-extract"))};
+        if (!res_dir.empty()) cmd.insert(cmd.end(), {"-m", u8(res_dir)});
+        cmd.push_back(u8(input));
+        extracted = extract_kept(job, key, cmd, out);
+        if (extracted.empty()) {
+            r.error = "Couldn't extract tags from the map:\n" + out.substr(out.size() > 2000 ? out.size() - 2000 : 0);
+            if (in_game == Game::CE && res_dir.empty())
+                r.error += "\nTip: set your Custom Edition folder in Settings so its bitmaps/sounds.map can be read.";
+            return r;
+        }
+    }
+    // An Xbox conversion copies the tags before it changes any; the others change them where they are, so they get
+    // a copy of their own.
+    if (out_game == Game::Xbox) {
+        job.source = extracted;
+    } else {
+        job.source = job.work / "source_tags";
+        if (!copy_tree(extracted, job.source, true, ec)) { r.error = "Couldn't copy the map's tags: " + ec.message(); return r; }
     }
     {
         // Textures/sounds whose data wasn't in the resource maps read: stock ones are covered by the target game's own

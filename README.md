@@ -37,6 +37,8 @@ the free, open-source Halo map compiler, and it can download Invader for you.
   the map's effects that are busier than Bungie's busiest (particles and sprite area alive at once) just enough fewer
   particles to match, rewrites model shaders' multipurpose maps in the Xbox's channel order (the PC keeps the reflection
   mask and team colour mask in other channels, so custom vehicles, weapons and scenery lost their shine on the Xbox),
+  draws the map's shaders flagged with MCC's Custom Edition compatibility flags ("custom edition blending", "use
+  alternate normal type blending") the way MCC does where the Xbox can,
   turns off dynamic lights that would have the Xbox redraw most of the level (the kind
   that runs it out of memory), and reports what the Xbox has to draw.
 - **Level window.** It lists the level's reflecting shaders with what each reflection costs and how much of the
@@ -46,6 +48,10 @@ the free, open-source Halo map compiler, and it can download Invader for you.
 - **Weapons & vehicles window.** It shows what each weapon and vehicle costs in tag memory and file size, with a
   3D preview and its seats, groups the pieces a map's scripts make of a vehicle under it, and lets you replace or
   drop them.
+- **Quick to convert again.** The tags taken out of the 3 most recent maps are kept, so the Level window, the
+  Weapons & vehicles window and the conversion take a map apart once; re-encoded sounds and textures, the lighter sky and the level's measurement are kept too;
+  and reading and editing tags, listing what a tag uses and renaming references happen inside the app (the tags
+  come out byte for byte as Invader's tools save them) instead of starting those tools hundreds of times.
 - **Map folders and packs** for the Halo Universal and
   [Halo 1 Unlimited](https://github.com/AnthonyChester3D/halo-1-unlimited) XBEs. These come with map cards
   (preview picture, name, description, players, gametypes and genres), an `order.txt`, and series pictures for
@@ -71,9 +77,11 @@ This uses MinGW-w64: the `x86_64-w64-mingw32` cross compiler on Linux or WSL, or
 Windows (`CXX=g++ CC=gcc WINDRES=windres ./build.sh`). `cli_test.cpp` is a command-line driver for the
 conversion engine, used for testing on Linux.
 
-`tag_layouts.inc` (the tag layouts the app reads directly) is generated from
-[Invader](https://github.com/SnowyMouse/invader)'s tag definitions:
-`python3 gen_tag_layouts.py <invader>/src/tag/hek/definition tag_layouts.inc`.
+`tag_layouts.inc` (the tag layouts the app reads directly) and `tag_defs.inc` (every tag kind as Invader's tools
+read and write it, for `tagedit.cpp`, which does what invader-edit, invader-dependency and invader-refactor do inside
+the app) are generated from [Invader](https://github.com/SnowyMouse/invader)'s tag definitions:
+`python3 gen_tag_layouts.py <invader>/src/tag/hek/definition tag_layouts.inc` and
+`python3 gen_tag_defs.py <invader>/src/tag/hek/definition tag_defs.inc`.
 
 ## License
 

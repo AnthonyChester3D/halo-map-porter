@@ -285,6 +285,30 @@ Other Xbox fixes (automatic):
   multipurpose channel order" are already in it and stay as they are.
   Converting an Xbox map for Custom Edition does the reverse; for MCC its
   model shaders get that flag instead.
+- MCC's compatibility flags: MCC added shader flags that make it draw a
+  shader the way Custom Edition did, for maps made around Custom
+  Edition's look. The Xbox doesn't read them, so a PC or MCC map's own
+  shaders that set them are changed to look that way on the Xbox where
+  they can be:
+  - "Custom edition blending" on a multiply or double multiply
+    transparent shader (dirt, scorch marks, tinted glass): Custom Edition
+    faded these toward their own colour, the Xbox fades them out. Fully
+    shown, Custom Edition's multiply leaves what's behind as it was and
+    its double multiply draws the average of the shader's colour and
+    white. The shader gets one more map stage that draws exactly that (a
+    tiny white texture), so up close they look as in MCC; in fog they
+    still fade the Xbox's way. A shader already using all four maps has
+    no stage to spare and stays as it is.
+  - "Use alternate normal type blending" on a level shader of the normal
+    type: Custom Edition blended its two detail maps by the base map's
+    alpha, the Xbox by the second detail map's. The shader becomes the
+    Xbox's "blended" type, which blends them the same way (or "blended
+    base specular" when both detail maps are opaque, which also keeps its
+    shine the same).
+  - "Use alternate bump attenuation": MCC lights bump maps so their flat
+    parts are as bright as the lightmap; the Xbox's bump lighting darkens
+    surfaces lit from a low angle. The Xbox has no way to do MCC's, so
+    these are only counted in the log.
 
 Flashlight: on Xbox, the flashlight stops working when too many vehicles
 spawn in a match, on stock maps too. In testing, up to 6 Warthogs or 2
@@ -1396,9 +1420,11 @@ The log lists every automatic change:
   [bc7]   MCC-only BC7 textures were re-encoded as DXT.
   [textures] Textures were scaled or compressed like stock Xbox maps, or
           bump maps packed into P8 or DXT1 (see "Bump maps" above).
-  [shaders] Layered transparent shaders were flattened for Xbox, or
-          model shaders' multipurpose maps put in the Xbox's channel order
-          (see "Shine and team colours" above).
+  [shaders] Layered transparent shaders were flattened for Xbox, model
+          shaders' multipurpose maps put in the Xbox's channel order (see
+          "Shine and team colours" above), or shaders with MCC's
+          compatibility flags drawn the Xbox's way (see "MCC's
+          compatibility flags" above).
   [effects] Effects busier than Bungie's busiest were given fewer
           particles (see "Effects" above).
   [heavy] Heavy models' most detailed versions were trimmed (see "Heavy
@@ -1456,6 +1482,31 @@ report when the map builds): what the Xbox has to draw.
 The full report for each build is saved in:
   %LOCALAPPDATA%\HaloMapPorter\reports\
 ("Open report" opens the latest one.)
+
+Converting a map again is quicker than the first time:
+- The tags taken out of a map are kept for the 3 maps converted most
+  recently (in %LOCALAPPDATA%\HaloMapPorter\extracted), so the Level
+  window, the Weapons & vehicles window and the conversion after them
+  take them out of the map once ("Reusing the tags extracted from ...
+  before" in the log). They're taken out again when the map file, the
+  bitmaps.map / sounds.map it reads or Invader changes.
+- The slow steps that turn a tag into another the same way every time
+  keep what they made (in %LOCALAPPDATA%\HaloMapPorter\results, up to
+  768 MB, the least recently used dropped first): sounds re-encoded for
+  the Xbox, MCC textures re-encoded as DXT, textures compressed and bump
+  maps packed, the sky drawn in fewer layers, and the Level window's
+  measurement of the level (the conversion measures the same level
+  again). The same tag (in that map or another one) gets the copy
+  instead. A new version of the app makes them again.
+- Reading and changing values in tags, listing the tags a tag uses and
+  renaming references (what invader-edit, invader-dependency and
+  invader-refactor do) happen inside the app instead of starting
+  Invader's tools hundreds of times per conversion. The tags come out
+  byte for byte as those tools save them; anything they'd do differently
+  (an error, say) still goes to the tool.
+- Several sounds are re-encoded at once, the map's tags are copied on
+  several threads, and the Level window's measuring leaves the map's
+  sounds alone (they don't change what it measures).
 
 
 TROUBLESHOOTING
@@ -1527,9 +1578,10 @@ Map not showing up in Custom Edition
     builds).
 
 Starting fresh
-    Delete %LOCALAPPDATA%\HaloMapPorter (cached tags, work files,
-    reports) and/or %APPDATA%\HaloMapPorter (settings). The app recreates
-    them as needed.
+    Delete %LOCALAPPDATA%\HaloMapPorter (cached tags, the tags kept from
+    recent maps, kept results, work files, reports) and/or
+    %APPDATA%\HaloMapPorter (settings). The app recreates them as
+    needed.
 
 
 LIMITATIONS
