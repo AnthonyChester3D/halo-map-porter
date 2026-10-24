@@ -12,6 +12,7 @@
 #include <iterator>
 #include <map>
 #include <set>
+#include <sstream>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -393,10 +394,134 @@ bool add_skip(const Settings &settings, const std::string &model_tag, const std:
     return (bool)out;
 }
 
+// choices.txt: one line per model, tab separated: its tag path; lower-detail versions ("auto", "none", or "make" and
+// the medium and low triangles, 0 automatic); most detailed version ("auto", "as made", or "trim" and the triangles);
+// then a note ("# name (map)").
+static const char *kChoicesHeader =
+    "# Halo Map Porter: what to do with these models (chosen in the LODs window), for every map that uses them.\r\n"
+    "# One line per model, tab separated: its tag path; lower-detail versions: auto, none, or make and the medium\r\n"
+    "# and low triangles to aim for (0: automatic); its most detailed version: auto, as made, or trim and the\r\n"
+    "# triangles. Lines starting with # are notes.\r\n";
+
+static std::vector<std::string> split_tabs(const std::string &l) {
+    std::vector<std::string> f;
+    for (size_t a = 0;;) {
+        size_t b = l.find('\t', a);
+        std::string x = l.substr(a, b == std::string::npos ? std::string::npos : b - a);
+        while (!x.empty() && (x.back() == ' ' || x.back() == '\r')) x.pop_back();
+        while (!x.empty() && x[0] == ' ') x.erase(0, 1);
+        f.push_back(x);
+        if (b == std::string::npos) break;
+        a = b + 1;
+    }
+    return f;
+}
+
+static std::string tag_key(std::string t) {
+    t = lower(t);
+    std::replace(t.begin(), t.end(), '\\', '/');
+    return t;
+}
+
+Choice choice(const Settings &settings, const std::string &model_tag, const std::string &object_name) {
+    Choice c;
+    if (settings.library.empty()) return c;
+    c.skip = skipped(settings, model_tag, object_name);
+    if (c.skip) c.lods = 'n', c.top = 'k';
+    std::ifstream in(settings.library / "choices.txt", std::ios::binary);
+    std::string l, key = tag_key(model_tag);
+    while (std::getline(in, l)) {
+        if (l.empty() || l[0] == '#') continue;
+        std::vector<std::string> f = split_tabs(l);
+        if (f.size() < 3 || tag_key(f[0]) != key) continue;
+        Choice got;
+        got.skip = c.skip;
+        got.chosen = true;
+        std::istringstream a(lower(f[1])), b(lower(f[2]));
+        std::string w;
+        a >> w;
+        if (w == "none") got.lods = 'n';
+        else if (w == "make") {
+            got.lods = 'm';
+            a >> got.medium >> got.low;
+            got.medium = std::max(0, got.medium);
+            got.low = std::max(0, got.low);
+        }
+        b >> w;
+        if (w == "as") got.top = 'k';
+        else if (w == "trim" && (b >> got.top_triangles) && got.top_triangles > 0) got.top = 't';
+        return got;
+    }
+    return c;
+}
+
+bool set_choice(const Settings &settings, const std::string &model_tag, const Choice &c, const std::string &note) {
+    if (settings.library.empty()) return false;
+    std::error_code ec;
+    fs::create_directories(settings.library, ec);
+    fs::path f = settings.library / "choices.txt";
+    std::vector<std::string> lines;
+    {
+        std::ifstream in(f, std::ios::binary);
+        std::string l;
+        while (std::getline(in, l)) {
+            if (!l.empty() && l.back() == '\r') l.pop_back();
+            lines.push_back(l);
+        }
+    }
+    if (lines.empty()) {
+        std::string h = kChoicesHeader;
+        for (size_t a = 0; a < h.size();) {
+            size_t b = h.find("\r\n", a);
+            lines.push_back(h.substr(a, b - a));
+            a = b + 2;
+        }
+    }
+    std::string key = tag_key(model_tag), line;
+    bool automatic = c.lods == 'a' && c.top == 'a';
+    if (!automatic || skipped(settings, model_tag, "")) {
+        line = model_tag + "\t";
+        if (c.lods == 'n') line += "none";
+        else if (c.lods == 'm') line += "make " + std::to_string(std::max(0, c.medium)) + " " + std::to_string(std::max(0, c.low));
+        else line += "auto";
+        line += "\t";
+        if (c.top == 'k') line += "as made";
+        else if (c.top == 't' && c.top_triangles > 0) line += "trim " + std::to_string(c.top_triangles);
+        else line += "auto";
+        if (!note.empty()) line += "\t# " + note;
+    }
+    bool placed = false;
+    for (size_t i = 0; i < lines.size(); i++) {
+        if (lines[i].empty() || lines[i][0] == '#') continue;
+        std::vector<std::string> fl = split_tabs(lines[i]);
+        if (tag_key(fl[0]) != key) continue;
+        if (!placed && !line.empty()) {
+            lines[i] = line;
+            placed = true;
+        } else {
+            lines.erase(lines.begin() + (long)i);
+            i--;
+        }
+    }
+    if (!placed && !line.empty()) lines.push_back(line);
+    std::string out;
+    for (auto &l : lines) out += l + "\r\n";
+    std::ofstream o(f, std::ios::binary | std::ios::trunc);
+    o << out;
+    return (bool)o;
+}
+
 // The versions of one geometry: from the library, or made now (and kept there).
-static std::vector<TagNode> versions(const TagNode &geo, uint32_t checksum, double size, const Settings &settings, bool &from_library,
-                                     std::string &key) {
+// `levels`: what to aim for (kLevels, or the targets chosen in the LODs window: those have keys of their own).
+static std::vector<TagNode> versions(const TagNode &geo, uint32_t checksum, double size, const Level *levels,
+                                     const Settings &settings, bool &from_library, std::string &key) {
     std::string key_text = std::string(kVersion) + "|" + std::to_string(checksum) + "|" + tagfile::write_node(geo);
+    if (levels != kLevels) {
+        char params[96];
+        snprintf(params, sizeof params, "|chosen %.4f %.4f %.4f %.4f", levels[0].ratio, levels[0].error, levels[1].ratio,
+                 levels[1].error);
+        key_text += params;
+    }
     key = hex(fnv(key_text));
     fs::path file = settings.library.empty() ? fs::path() : settings.library / (key + ".lod");
     std::vector<TagNode> out;
@@ -417,7 +542,7 @@ static std::vector<TagNode> versions(const TagNode &geo, uint32_t checksum, doub
             return got;
         }
     }
-    for (const Level &lv : kLevels) out.push_back(simplify_geometry(geo, lv, size));
+    for (int i = 0; i < 2; i++) out.push_back(simplify_geometry(geo, levels[i], size));
     if (!file.empty()) {
         std::error_code ec;
         fs::create_directories(settings.library, ec);
@@ -459,6 +584,49 @@ static double geometries_size(std::vector<TagNode> &geos, const std::set<int> &w
 }
 
 static const char *kLevelNames[5] = {"super high", "high", "medium", "low", "super low"};
+
+// Bungie's stock models (every object in the Xbox tags: each one's most detailed triangles against the diagonal of the
+// box around them), fitted as a x size^b on a log scale. Their volume doesn't predict them (a sniper rifle is about
+// five times a pistol's length and has less than twice its triangles): Bungie gave each kind a budget that grows
+// slowly with size.
+//   first-person weapons: 2,415 x size^0.234 (pistol 1,558, assault rifle 1,964, sniper rifle 2,236; all within 25%)
+//   weapons and items: 1,105 x size^0.182 (pistol 787, assault rifle 764, sniper rifle 1,380, rocket launcher 1,468;
+//     within 40%; the flag and the energy sword left out)
+//   characters: no trend with size; the main ones about 2,000 (the Chief 2,016, Elite 1,670, Jackal 2,221, Hunter
+//     2,006)
+//   vehicles vary 3x at one size (Ghost 1,034, Warthog 2,798): the line through the most detailed, the Warthog and
+//     the Pelican (4,469), 2,212 x size^0.27 (a vehicle you drive is big on screen)
+//   scenery and devices vary most (a rock 300, the Pelican wreck 4,277): the line 3 in 4 are under, 457 x size^0.30
+double stock_triangles(char kind, double size) {
+    size = std::max(size, 0.01);
+    switch (kind) {
+    case 'f': return 2415 * std::pow(size, 0.234);
+    case 'w': return 1105 * std::pow(size, 0.182);
+    case 'b': return 2000;
+    case 'v': return 2212 * std::pow(size, 0.27);
+    default: return 457 * std::pow(size, 0.30);
+    }
+}
+
+// The diagonal of the box around every permutation's most detailed geometry.
+static double top_size(std::vector<TagNode> &geos, std::vector<TagNode> &regions, std::set<int> *tops_out = nullptr) {
+    std::set<int> tops;
+    for (auto &reg : regions)
+        for (auto &perm : *tagfile::block(reg, "permutations")) {
+            int g = (int)tagfile::get_num(perm, "super high");
+            if (g >= 0 && g < (int)geos.size()) tops.insert(g);
+        }
+    if (tops_out) *tops_out = tops;
+    return geometries_size(geos, tops);
+}
+
+double model_size(const fs::path &model) {
+    tagfile::EditTag t;
+    if (!t.load(model)) return 0;
+    std::vector<TagNode> *geos = tagfile::block(t.root(), "geometries"), *regions = tagfile::block(t.root(), "regions");
+    if (!geos || !regions) return 0;
+    return top_size(*geos, *regions);
+}
 
 // The most detailed triangles: the regions' first permutations' super high geometries.
 static int top_triangles(std::vector<TagNode> &geos, std::vector<TagNode> &regions) {
@@ -505,19 +673,19 @@ Trim trim_top(const fs::path &model, const TrimSettings &ts, const Settings &set
     std::vector<TagNode> *geos = tagfile::block(root, "geometries"), *regions = tagfile::block(root, "regions");
     if (!geos || !regions) { r.why = "not a model"; return r; }
     r.before = r.after = top_triangles(*geos, *regions);
-    if (r.before <= ts.budget) { r.why = "within its budget"; return r; }
+    r.budget = ts.budget;
+    if (ts.density <= 0 && r.before <= ts.budget) { r.why = "within its budget"; return r; }
 
     // Every permutation's most detailed geometry is trimmed by the same share (variants like "~damaged" too), so the
     // model as a whole comes down to its budget; how far is up to how much each one can lose and still look the same.
     std::set<int> tops;
-    for (auto &reg : *regions)
-        for (auto &perm : *tagfile::block(reg, "permutations")) {
-            int g = (int)tagfile::get_num(perm, "super high");
-            if (g >= 0 && g < (int)geos->size()) tops.insert(g);
-        }
-    double size = geometries_size(*geos, tops);
+    double size = top_size(*geos, *regions, &tops);
+    if (ts.density > 0) {
+        r.budget = std::max(1, (int)std::lround(ts.density * stock_triangles(ts.kind, size)));
+        if (r.before <= r.budget * ts.slack) { r.why = "within its budget"; return r; }
+    }
     if (!(size > 0)) { r.why = "has no size"; return r; }
-    double ratio = (double)ts.budget / r.before, error = std::min(ts.max_change, ts.max_units / size);
+    double ratio = (double)r.budget / r.before, error = std::min(ts.max_change, ts.max_units / size);
     uint32_t checksum = (uint32_t)(long long)tagfile::get_num(root, "node list checksum");
     std::vector<int> tris(geos->size(), -1);
     auto count = [&](int g) {
@@ -593,7 +761,8 @@ Trim trim_top(const fs::path &model, const TrimSettings &ts, const Settings &set
     return r;
 }
 
-Result add_lods(const fs::path &model, const double cutoffs[5], const Settings &settings, const std::string &tag) {
+Result add_lods(const fs::path &model, const double cutoffs[5], const Settings &settings, const std::string &tag,
+                const int targets[2]) {
     Result r;
     tagfile::EditTag t;
     if (!t.load(model)) { r.why = "couldn't be read"; return r; }
@@ -645,6 +814,15 @@ Result add_lods(const fs::path &model, const double cutoffs[5], const Settings &
                             (double)(hi[2] - lo[2]) * (hi[2] - lo[2]));
     if (!(size > 0)) { r.why = "has no size"; return r; }
 
+    // Chosen targets: every geometry by the same share, allowed to move further (5% and 10% of the model's size) so
+    // they get there; a level not chosen as usual.
+    Level levels[2] = {kLevels[0], kLevels[1]};
+    bool chosen = false;
+    for (int i = 0; i < 2 && targets && r.triangles > 0; i++)
+        if (targets[i] > 0) {
+            levels[i] = Level{std::min(1.0, (double)targets[i] / r.triangles), i == 0 ? 0.05 : 0.1};
+            chosen = true;
+        }
     uint32_t checksum = (uint32_t)(long long)tagfile::get_num(root, "node list checksum");
     std::map<int, int> medium, low;   // geometry -> the version used for medium / low and super low
     int base_tris = 0, tris[2] = {0, 0};
@@ -653,7 +831,7 @@ Result add_lods(const fs::path &model, const double cutoffs[5], const Settings &
     for (int g : single) {
         bool lib = false;
         std::string key;
-        std::vector<TagNode> vs = versions((*geos)[g], checksum, size, settings, lib, key);
+        std::vector<TagNode> vs = versions((*geos)[g], checksum, size, chosen ? levels : kLevels, settings, lib, key);
         r.from_library = r.from_library || lib;
         if (!lib) {
             made = true;

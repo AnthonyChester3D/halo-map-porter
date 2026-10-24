@@ -5466,29 +5466,75 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
         job.lod_changes.push_back(lm);
         return job.lod_changes.back();
     };
+    // Why something wasn't done to one (the window says so).
+    auto note = [&](const std::string &dep, const std::string &why) {
+        if (job.analysis) return;
+        for (auto &m : job.lod_changes)
+            if (m.tag == dep) m.note += (m.note.empty() ? "" : "; ") + why;
+    };
+
+    // The map's own models (drawn in the world, or first-person weapons), each with its choices (lod.hpp Choice: the
+    // LODs window's, or skip.txt). The window lists them all, changed or not, with what Bungie's of its kind and size
+    // have (x1.5).
+    std::vector<std::string> own_models;
+    std::map<std::string, lod::Choice> chosen;
+    for (auto &dep : deps) {
+        if (!has_suffix(dep, ".model") && !has_suffix(dep, ".gbxmodel")) continue;
+        fs::path own = job.owner(dep);
+        bool fp = first_person.count(dep) > 0;
+        if (own.empty() || own == job.overlay || (!fp && !kinds.count(dep))) continue;
+        own_models.push_back(dep);
+        chosen[dep] = lod::choice(lod_settings, dep, name_of(dep));
+        if (job.analysis) continue;
+        char kind = fp ? 'f' : kinds[dep];
+        LodView::Model &m = record(dep, kind, "");
+        double size = lod::model_size(own / from_u8(dep));
+        if (size > 0) m.density = (int)std::lround(1.5 * lod::stock_triangles(kind, size));
+    }
 
     // 0. Trimming: the most detailed version of the map's own heavy models made lighter (lod.hpp trim_top), first, so
     // the lower-detail versions are made from the lighter one. Also when measuring for the weapons & vehicles window:
     // the map has them so. First-person weapons too (drawn whenever they're held, always in full, and close up: kept
-    // closer to their shape), and characters (they bend as before: lod.cpp, Bones).
-    if (job.cfg.xbox_trim_models > 0) {
-        bool harder = job.cfg.xbox_trim_models >= 2;
+    // closer to their shape), and characters (they bend as before: lod.cpp, Bones). A model's own choice first: kept
+    // as made, or trimmed to the triangles chosen (allowed to move 5% of its size to get there).
+    {
+        const int mode = job.cfg.xbox_trim_models;
+        bool harder = mode >= 2, by_density = false, by_choice = false, by_setting = false;
         std::vector<std::string> trimmed, floor;
         size_t saved = 0;
-        for (auto &dep : deps) {
-            if (!has_suffix(dep, ".model") && !has_suffix(dep, ".gbxmodel")) continue;
+        for (auto &dep : own_models) {
             fs::path own = job.owner(dep);
             bool fp = first_person.count(dep) > 0;
-            if (own.empty() || own == job.overlay || (!fp && !kinds.count(dep))) continue;
-            lod::TrimSettings ts;
+            const lod::Choice &ch = chosen[dep];
             char kind = fp ? 'f' : kinds[dep];
-            ts.budget = kind == 'f' || kind == 'b' ? 3000 : kind == 'w' ? 2000 : 4000;
-            // (first-person weapons are seen closest; characters up close too, and their fingers thin out first)
-            ts.max_change = fp ? (harder ? 0.0025 : 0.0012) : kind == 'b' ? (harder ? 0.004 : 0.0018) : (harder ? 0.006 : 0.0025);
-            ts.max_units = harder ? 0.015 : 0.006;
+            if (ch.top == 'k') {
+                if (!ch.skip) note(dep, "most detailed version kept as made (your choice)");
+                continue;
+            }
+            lod::TrimSettings ts;
+            bool mine = ch.top == 't';
+            if (mine) {
+                ts.budget = ch.top_triangles;
+                ts.max_change = 0.05;
+                ts.max_units = 1;
+            } else if (mode <= 0) {
+                continue;
+            } else if (mode >= 3) {   // 1.5x Bungie's for its kind and size, when over that by a quarter
+                ts.density = 1.5;
+                ts.kind = kind;
+                ts.max_change = 0.01;
+                ts.max_units = 0.03;
+                ts.slack = 1.25;
+            } else {
+                ts.budget = kind == 'f' || kind == 'b' ? 3000 : kind == 'w' ? 2000 : 4000;
+                // (first-person weapons are seen closest; characters up close too, and their fingers thin out first)
+                ts.max_change = fp ? (harder ? 0.0025 : 0.0012) : kind == 'b' ? (harder ? 0.004 : 0.0018) : (harder ? 0.006 : 0.0025);
+                ts.max_units = harder ? 0.015 : 0.006;
+            }
             perf::ModelStats ms = perf::model_stats(own / from_u8(dep));
-            if (!ms.ok || ms.triangles <= ts.budget) continue;
-            if (lod::skipped(lod_settings, dep, name_of(dep))) continue;   // (listed in the LOD library's skip.txt)
+            if (!ms.ok || (ts.density <= 0 && ms.triangles <= ts.budget)) continue;
+            if (ts.density > 0 && ms.triangles <= ts.density * lod::stock_triangles(kind, lod::model_size(own / from_u8(dep))) * ts.slack)
+                continue;   // (within its budget: trim_top would say so too)
             fs::path ed = editable_owner(job, dep);
             if (ed.empty()) continue;
             std::string before;
@@ -5498,12 +5544,15 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
             }
             lod::Trim r = lod::trim_top(ed / from_u8(dep), ts, lod_settings, dep);
             if (!r.changed) {
+                if (r.before <= r.budget * ts.slack) continue;   // (within its budget)
                 floor.push_back(name_of(dep) + " " + thousands(r.before));
+                note(dep, "can't lose triangles without changing its shape or how its textures sit");
                 continue;
             }
             saved += r.xbox_bytes_saved;
             trimmed.push_back(name_of(dep) + " " + thousands(r.before) + " > " + thousands(r.after) +
-                              (r.after > ts.budget * 1.1 ? "" : " (its budget)"));
+                              (mine ? " (your choice)" : r.after > r.budget * 1.1 ? "" : mode >= 3 ? " (its target)" : " (its budget)"));
+            (mine ? by_choice : mode >= 3 ? by_density : by_setting) = true;
             if (!job.analysis) {
                 job.trim_originals[dep] = std::move(before);
                 record(dep, kind, "trimmed").trimmed_from = r.before;
@@ -5513,33 +5562,55 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
             char size[32];
             if (saved >= 1048576) snprintf(size, sizeof size, "%.1f MB", saved / 1048576.0);
             else snprintf(size, sizeof size, "%d KB", (int)((saved + 1023) / 1024));
+            std::string how = by_density ? ", to about 1.5x the triangles Bungie's models of their kind and size have"
+                              : by_setting ? (harder ? ", trimmed harder so small details may change" : ", so they look the same")
+                                           : ", to the triangles chosen in the LODs window";
             job.note("[heavy] made the most detailed version of " + std::to_string(trimmed.size()) +
-                     (trimmed.size() == 1 ? " heavy model" : " heavy models") + " lighter" +
-                     (harder ? ", trimmed harder so small details may change" : ", so they look the same") + " (" + size +
+                     (trimmed.size() == 1 ? " heavy model" : " heavy models") + " lighter" + how + " (" + size +
                      " less of the Xbox's tag memory and map file; triangles as made > now): " + list(trimmed));
         }
         if (!floor.empty())
             job.note("[heavy] left as they are (every triangle shows, or keeps a texture in place): " + list(floor, 4));
     }
 
-    // 1. Making lower-detail versions. Not when measuring for the weapons & vehicles window: it shows what the map
+    // 1. Making lower-detail versions: the Xbox tab's option, or a model's own choice (made with the triangles chosen,
+    // however few it has; or not made). Not when measuring for the weapons & vehicles window: it shows what the map
     // needs to fit, and the conversion takes them out again when they don't fit.
-    if (job.cfg.xbox_make_lods && !job.analysis) {
+    if (!job.analysis) {
         const lod::Settings &ls = lod_settings;
         std::vector<std::string> made, reused, left;
         size_t bytes = 0;
-        for (auto &dep : deps) {
-            if (!has_suffix(dep, ".model") && !has_suffix(dep, ".gbxmodel")) continue;
-            fs::path own = job.owner(dep);
-            if (own.empty() || own == job.overlay || !kinds.count(dep) || first_person.count(dep)) continue;
-            perf::ModelStats ms = perf::model_stats(own / from_u8(dep));
-            if (!ms.ok || ms.lods || ms.triangles < ls.min_triangles) continue;
-            if (ms.borrowed && ms.no_cutoffs()) {   // switch distances would turn its variants into one another
-                left.push_back(name_of(dep) + " (its variants share their lower levels, so they'd change shape at a distance)");
+        for (auto &dep : own_models) {
+            if (first_person.count(dep)) {
+                note(dep, "first person: always drawn in full");
                 continue;
             }
-            if (lod::skipped(ls, dep, name_of(dep))) {
-                left.push_back(name_of(dep) + " (listed in the LOD library's skip.txt)");
+            fs::path own = job.owner(dep);
+            const lod::Choice &ch = chosen[dep];
+            perf::ModelStats ms = perf::model_stats(own / from_u8(dep));
+            if (!ms.ok) continue;
+            if (ms.lods) {
+                for (auto &m : job.lod_changes)
+                    if (m.tag == dep) m.had_lods = true;
+                continue;
+            }
+            bool make = ch.lods == 'm' || (ch.lods == 'a' && job.cfg.xbox_make_lods);
+            if (!make) {
+                if (ch.skip) note(dep, "in skip.txt");
+                else if (ch.lods == 'n') note(dep, "no lower-detail versions (your choice)");
+                else note(dep, "no lower-detail versions (the Xbox tab's option is off)");
+                if (ch.lods == 'n' && job.cfg.xbox_make_lods && ms.triangles >= ls.min_triangles)
+                    left.push_back(name_of(dep) + (ch.skip ? " (listed in the LOD library's skip.txt)" : " (your choice)"));
+                continue;
+            }
+            if (ch.lods != 'm' && ms.triangles < ls.min_triangles) {
+                note(dep, "no lower-detail versions: only " + thousands(ms.triangles) + (ms.triangles == 1 ? " triangle" : " triangles") +
+                              " (made from " + thousands(ls.min_triangles) + ")");
+                continue;
+            }
+            if (ms.borrowed && ms.no_cutoffs()) {   // switch distances would turn its variants into one another
+                left.push_back(name_of(dep) + " (its variants share their lower levels, so they'd change shape at a distance)");
+                note(dep, "no lower-detail versions: its variants share their lower levels, so they'd change shape at a distance");
                 continue;
             }
             fs::path ed = editable_owner(job, dep);
@@ -5551,9 +5622,17 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
                 std::ifstream in(ed / from_u8(dep), std::ios::binary);
                 before.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
             }
-            lod::Result r = lod::add_lods(ed / from_u8(dep), px, ls, dep);
+            lod::Settings s = ls;
+            int targets[2] = {0, 0};
+            if (ch.lods == 'm') {
+                s.min_triangles = 0;
+                targets[0] = ch.medium;
+                targets[1] = ch.low;
+            }
+            lod::Result r = lod::add_lods(ed / from_u8(dep), px, s, dep, targets);
             if (!r.changed) {
                 left.push_back(name_of(dep) + " (" + r.why + ")");
+                note(dep, "no lower-detail versions: " + r.why);
                 continue;
             }
             job.lod_backups.push_back({ed / from_u8(dep), std::move(before)});
@@ -5562,6 +5641,7 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
             std::string l = name_of(dep) + " " + thousands(r.triangles);
             for (int k : r.level_triangles)
                 if (k) l += " > " + thousands(k);
+            if (ch.lods == 'm' && (ch.medium > 0 || ch.low > 0)) l += " (your choice)";
             (r.from_library ? reused : made).push_back(l);
             record(dep, kinds[dep], r.from_library ? "library" : "made");
         }
@@ -5588,7 +5668,8 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
         if (!kinds.count(dep) || first_person.count(dep)) continue;
         perf::ModelStats ms = perf::model_stats(own / from_u8(dep));
         if (!ms.ok || !ms.lods || ms.borrowed || !ms.no_cutoffs()) continue;
-        if (lod::skipped(lod_settings, dep, name_of(dep))) continue;   // (listed in the LOD library's skip.txt)
+        lod::Choice ch = chosen.count(dep) ? chosen[dep] : lod::choice(lod_settings, dep, name_of(dep));
+        if (ch.lods == 'n') continue;   // (none: chosen, or listed in the LOD library's skip.txt)
         fs::path ed = editable_owner(job, dep, stock);
         if (ed.empty()) continue;
         std::vector<std::string> args;
@@ -9713,7 +9794,7 @@ bool load_content_analysis(ContentAnalysis &out, const fs::path &file) {
 }
 
 // The LODs window's file (text) and its models (file + ".models").
-static const char *kLodViewMagic = "HaloMapPorter lods 2";   // (1: without collision)
+static const char *kLodViewMagic = "HaloMapPorter lods 3";   // (1: without collision; 2: without notes)
 bool save_lod_view(const LodView &v, const fs::path &file) {
     std::error_code ec;
     fs::create_directories(file.parent_path(), ec);
@@ -9727,8 +9808,8 @@ bool save_lod_view(const LodView &v, const fs::path &file) {
         f << m.tag << "\n" << m.name << "\n" << m.change << "\n" << m.kind << " " << m.undone << " " << m.placed << " " << m.radius;
         for (double c : m.cutoffs) f << " " << c;
         for (int l : m.level) f << " " << l;
-        f << " " << m.trimmed_from << " " << m.as_made << " " << m.coll_made << " " << m.coll_now;
-        f << "\n" << m.collision << "\n";
+        f << " " << m.trimmed_from << " " << m.as_made << " " << m.coll_made << " " << m.coll_now << " " << m.density << " " << m.had_lods;
+        f << "\n" << m.collision << "\n" << m.note << "\n";
     }
     f << "end\n";
     return (bool)f;
@@ -9739,8 +9820,8 @@ bool load_lod_view(LodView &out, const fs::path &file) {
     auto text = [&](std::string &s) { if (!std::getline(f, s)) return false; if (!s.empty() && s.back() == '\r') s.pop_back(); return true; };
     LodView v;
     size_t n = 0;
-    if (!text(line) || (line != kLodViewMagic && line != "HaloMapPorter lods 1")) return false;
-    const bool v2 = line == kLodViewMagic;
+    if (!text(line) || (line != kLodViewMagic && line != "HaloMapPorter lods 2" && line != "HaloMapPorter lods 1")) return false;
+    const bool v3 = line == kLodViewMagic, v2 = v3 || line == "HaloMapPorter lods 2";
     if (!text(v.map_name) || !text(line)) return false;
     n = std::strtoul(line.c_str(), nullptr, 10);
     if (n > 100000) return false;
@@ -9752,7 +9833,10 @@ bool load_lod_view(LodView &out, const fs::path &file) {
         for (double &c : m.cutoffs) if (!(ss >> c)) return false;
         for (int &l : m.level) if (!(ss >> l)) return false;
         if (!(ss >> m.trimmed_from >> m.as_made)) { m.trimmed_from = 0; m.as_made = -1; }
-        if (v2 && (!(ss >> m.coll_made >> m.coll_now) || !text(m.collision))) return false;
+        if (v2 && !(ss >> m.coll_made >> m.coll_now)) return false;
+        if (v3 && !(ss >> m.density >> m.had_lods)) return false;
+        if (v2 && !text(m.collision)) return false;
+        if (v3 && !text(m.note)) return false;
     }
     if (!text(line) || line != "end") return false;
     fs::path models = file;

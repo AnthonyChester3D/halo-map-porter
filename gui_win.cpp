@@ -89,6 +89,7 @@ static std::vector<int> g_pages[5];   // Convert, Build, Xbox, Map packs, Settin
 static std::atomic<bool> g_busy{false};
 static bool g_out_manual = false;
 static std::wstring g_last_output, g_last_report, g_last_lods;
+static bool g_last_was_build = false;   // (the LODs window's "Convert again": which one)
 static int S(int v) { return MulDiv(v, g_dpi, 96); }
 
 // ---------------------------------------------------------------- strings
@@ -413,8 +414,8 @@ static void apply_xbox_options(Config &cfg) {
     cfg.xbox_keep_all_vehicles = folder_mode() && checked(ID_X_ALLVEH);
     cfg.xbox_lod_stock_models = checked(ID_X_LODSTOCK);
     cfg.xbox_make_lods = checked(ID_X_MAKELOD);
-    cfg.xbox_trim_models = std::clamp(sel(ID_X_TRIM), 0, 2);
-    cfg.xbox_collision = cfg.xbox_trim_models;   // (heavy models: their collision too)
+    cfg.xbox_trim_models = std::clamp(sel(ID_X_TRIM), 0, 3);
+    cfg.xbox_collision = std::min(cfg.xbox_trim_models, 2);   // (heavy models: their collision too)
     cfg.xbox_compress_animations = std::clamp(sel(ID_X_ANIM), 0, 2);
     cfg.xbox_add_portals = sel(ID_X_PORTALS) >= 1;
     cfg.xbox_replan_portals = sel(ID_X_PORTALS) == 2;
@@ -876,6 +877,11 @@ static std::string contents_key(const Config &cfg, const fs::path &in) {
                       cfg.xbox_vehicle_slots[2];
     for (auto &w : cfg.xbox_keep_weapons) key += "|k" + w;
     for (auto &[w, r] : cfg.xbox_weapon_replacements) key += "|r" + w + "=" + r;
+    fs::path lib = !cfg.lod_library.empty() ? cfg.lod_library : cfg.cache_dir / "lod_library";   // (models' choices)
+    for (auto f : {"choices.txt", "skip.txt"}) {
+        auto t = fs::last_write_time(lib / f, ec);
+        key += "|" + std::to_string(ec ? 0LL : (long long)t.time_since_epoch().count());
+    }
     return key;
 }
 
@@ -1043,7 +1049,8 @@ static void open_shaders() {
     }
 }
 
-static void start_convert() {
+// `again`: the LODs window's "Convert again" (the same map and output, so no questions about replacing it).
+static void start_convert(bool again = false) {
     if (card_only()) { save_map_card(); return; }
     fs::path in(get_text(ID_IN)), out(get_text(ID_OUT));
     Game from = combo_game(ID_FROM), to = combo_game(ID_TO);
@@ -1056,17 +1063,18 @@ static void start_convert() {
     std::wstring card_note;
     if (to == Game::Xbox && folder_mode()) {
         if (!check_card_folder(conv_card())) return;
-    } else if (to == Game::Xbox && find_map(out.stem().wstring()) < 0 &&
+    } else if (to == Game::Xbox && !again && find_map(out.stem().wstring()) < 0 &&
         MessageBoxW(g_wnd, (L"\"" + lower(out.stem().wstring()) + L"\" isn't in the " + map_list_name() +
                             L" map list, so the Xbox won't show it in place of a map.\n\nTo replace a map, pick it under "
                             L"\"Xbox name\". Convert under this name anyway?").c_str(),
                     L"Halo Map Porter", MB_YESNO | MB_ICONQUESTION) != IDYES)
         return;
-    if (fs::exists(out) && MessageBoxW(g_wnd, (out.filename().wstring() + L" already exists in that folder. Replace it?").c_str(),
+    if (!again && fs::exists(out) && MessageBoxW(g_wnd, (out.filename().wstring() + L" already exists in that folder. Replace it?").c_str(),
                                       L"Halo Map Porter", MB_YESNO | MB_ICONQUESTION) != IDYES)
         return;
     if (to == Game::Xbox && folder_mode() && !write_card(conv_card_dir(), conv_card_name(), out, card_note)) return;
     save_settings();
+    g_last_was_build = false;
     Config cfg = make_config();
     apply_xbox_options(cfg);
     if (to == Game::Xbox) {
@@ -1108,6 +1116,7 @@ static void start_build() {
             return;
         }
     save_settings();
+    g_last_was_build = true;
     Config cfg = make_config();
     apply_xbox_options(cfg);
     cfg.xbox_replace = load_picks(scen);   // used by the Xbox build only
@@ -1824,7 +1833,8 @@ static void create_controls() {
     check(2, L"Make lower-detail versions (LODs) when a model has none", 26, y, 380, ID_X_MAKELOD);
     label(2, L"Heavy models:", 410, y - 2, 86, ID_X_TRIM_LBL);
     list_combo(2, 500, y - 2, 234, ID_X_TRIM,
-               {L"Leave them as made", L"Trim (they look the same)", L"Trim harder (details change)"});
+               {L"Leave them as made", L"Trim (they look the same)", L"Trim harder (details change)",
+                L"Trim to 1.5x Bungie's density"});
     y += 24;
     check(2, L"Also use LODs of Bungie's trees, rocks and plants (retail didn't)", 26, y, 380, ID_X_LODSTOCK);
     label(2, L"Animations:", 410, y - 2, 86, ID_X_ANIM_LBL);
@@ -1878,8 +1888,8 @@ static void create_controls() {
     edit(4, 190, y, 440, ID_S_LOD);
     button(4, L"Browse...", 638, y - 1, 96, ID_S_LOD_BROWSE);
     y += 30;
-    add(4, L"STATIC", L"The lower-detail versions the app makes are kept here, so the same model in another map reuses them. "
-        L"List models it should leave alone in skip.txt there (one per line).", 0, 190, y, 544, 36, ID_S_LOD_HINT);
+    add(4, L"STATIC", L"The lower-detail versions the app makes are kept here, so the same model in another map reuses them, "
+        L"with your choices for models from the LODs window (choices.txt).", 0, 190, y, 544, 36, ID_S_LOD_HINT);
     y += 44;
     check(4, L"With each Xbox build, write a camera tour for Halo 1 Unlimited's perf log (perf\\tours, beside the map)", 26, y,
           708, ID_S_TOUR);
@@ -1923,7 +1933,7 @@ static void create_controls() {
     set_check(ID_X_ALLVEH, ini_get(L"x_allveh", L"1") == L"1");
     set_check(ID_X_LODSTOCK, ini_get(L"x_lodstock", L"0") == L"1");
     set_check(ID_X_MAKELOD, ini_get(L"x_makelod", L"1") == L"1");
-    SendDlgItemMessageW(g_wnd, ID_X_TRIM, CB_SETCURSEL, std::clamp(_wtoi(ini_get(L"x_trim", L"1").c_str()), 0, 2), 0);
+    SendDlgItemMessageW(g_wnd, ID_X_TRIM, CB_SETCURSEL, std::clamp(_wtoi(ini_get(L"x_trim", L"1").c_str()), 0, 3), 0);
     SendDlgItemMessageW(g_wnd, ID_X_ANIM, CB_SETCURSEL, std::clamp(_wtoi(ini_get(L"x_anim", L"1").c_str()), 0, 2), 0);
     SendDlgItemMessageW(g_wnd, ID_X_PORTALS, CB_SETCURSEL, std::clamp(_wtoi(ini_get(L"x_portals", L"1").c_str()), 0, 2), 0);
     {
@@ -2154,7 +2164,11 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case ID_SEE_LODS:
             if (!g_last_lods.empty()) {
                 Config c = make_config();
-                lodui::show(h, fs::path(g_last_lods), !c.lod_library.empty() ? c.lod_library : c.cache_dir / "lod_library");
+                if (lodui::show(h, fs::path(g_last_lods), !c.lod_library.empty() ? c.lod_library : c.cache_dir / "lod_library") &&
+                    !g_busy) {
+                    if (g_last_was_build) start_build();
+                    else start_convert(true);
+                }
             }
             break;
         }

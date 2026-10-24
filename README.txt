@@ -478,24 +478,53 @@ Levels of detail (LODs)
                          0.25%), at most 0.015 units: much lighter, but
                          small details (a seat, a bumper bar, fingers)
                          can lose their shape up close.
-  Only models over their kind's budget are trimmed, and never below it:
-  vehicles and scenery 4,000 triangles, characters and first-person
-  weapons 3,000, weapons and items 2,000. Stock models and the models in
-  skip.txt are left alone. A model whose triangles all show (a mech made
-  of hundreds of separately textured panels) can't lose many, and the
-  log says so. Lower levels a model already had that are now as detailed
-  as its trimmed top draw the top instead, and versions nothing draws any
-  more are dropped (more memory saved). The lower-detail versions below
-  are then made from the trimmed version. Trimmed versions are kept in
-  the LOD library (.top files) and reused. The log's [heavy] line names
-  each model with its triangles as made > now, and how much tag memory
-  that saved; in the LODs window, "As the map made it" swaps the original
-  back in, to compare.
-  Precipice, as made > trimmed (harder): beam cannon 15,327 > 5,156
-  (2,548), its first-person model 15,331 > 8,203 (5,162), the damaged
-  chaingun warthog 8,580 > 5,435 (3,994), and with "Use the Xbox's own
-  weapons, vehicles and player model" off, its player model 7,483 > 6,543
-  (4,529), which then gets lower-detail versions too.
+    Trim to 1.5x Bungie's density   The lightest. Each model aims at 1.5
+                         times the triangles Bungie's own models of its
+                         kind and size have (below), when it's over that
+                         by more than a quarter. The shape moves at most
+                         1% of the model's size and never more than 0.03
+                         world units (about 9 cm), so a model that can't
+                         get there without visibly changing stops short.
+  The first three trim only models over their kind's budget, and never
+  below it: vehicles and scenery 4,000 triangles, characters and
+  first-person weapons 3,000, weapons and items 2,000. Stock models and
+  the models in skip.txt are left alone, and a model's own choice in the
+  LODs window comes first (see "Seeing them" below). A model whose
+  triangles all show (a mech made of hundreds of separately textured
+  panels) can't lose many, and the log says so. Lower levels a model
+  already had that are now as detailed as its trimmed top draw the top
+  instead, and versions nothing draws any more are dropped (more memory
+  saved). The lower-detail versions below are then made from the trimmed
+  version. Trimmed versions are kept in the LOD library (.top files) and
+  reused. The log's [heavy] line names each model with its triangles as
+  made > now, and how much tag memory that saved; in the LODs window, "As
+  the map made it" swaps the original back in, to compare.
+  Precipice, as made > trimmed (harder; Bungie's density): beam cannon
+  15,327 > 5,156 (2,548; 1,729), its first-person model 15,331 > 8,203
+  (5,162; 3,258), the damaged chaingun warthog 8,580 > 5,435 (3,994;
+  1,973), and with "Use the Xbox's own weapons, vehicles and player
+  model" off, its player model 7,483 > 6,543 (4,529; 3,000), which then
+  gets lower-detail versions too. Tag memory saved: 596 KB (822 KB;
+  1.0 MB).
+  Bungie's density: every stock model's most detailed triangles against
+  its size (the diagonal of the box around it). Volume doesn't predict
+  them: a sniper rifle is about five times a pistol's length and has
+  less than twice its triangles. Bungie gave each kind a budget that
+  grows slowly with size, so the targets (1.5x) are:
+    first-person weapons   about 2,250 for a pistol, 2,800 for a rifle,
+                           3,300 for a sniper rifle (Bungie's: 1,030 to
+                           2,259)
+    weapons and items      about 1,150, 1,350 and 1,550 (Bungie's: 566 to
+                           1,468)
+    characters             3,000 (Bungie's main ones about 2,000,
+                           whatever their size)
+    vehicles               Bungie's vary 3x at one size (the Ghost 1,034,
+                           the Warthog 2,798), so the line through the
+                           most detailed, the Warthog and the Pelican: a
+                           Warthog-sized one about 4,200
+    scenery and devices    the line three in four of Bungie's are under:
+                           a crate about 750, a big tree about 1,500
+  The LODs window shows each model's ("1.5x Bungie").
   First-person arms always come from the Xbox's own globals, so a map's
   custom arms never reach the Xbox.
 
@@ -609,8 +638,12 @@ Levels of detail (LODs)
   vertex keeps its bones, so they bend as before at every distance.
   Left alone: stock models, first-person models, models whose shape
   needs most of their triangles, and the models listed in skip.txt
-  (below). The [lod] lines in the log name each model with its
-  triangles, most detailed > medium > low.
+  (below). A model's own choice in the LODs window comes first: made
+  whatever the Xbox tab says and however few triangles it has, aiming at
+  the medium and low triangles you give (allowed to move the shape up to
+  5% and 10% of its size to get there), or not made. The [lod] lines in
+  the log name each model with its triangles, most detailed > medium >
+  low.
   The versions cost memory: on the Xbox, a model's vertices and triangles
   are part of the 22 MB of tag memory (and of the map file), and the
   [lod] line says how much they add (about 0.5 MB for three big models).
@@ -619,10 +652,14 @@ Levels of detail (LODs)
   and rebuilds, and the log says so. The weapons & vehicles window
   measures maps without them.
 
-  Seeing them: after an Xbox conversion that changed any model's levels of
-  detail, trimmed it or changed its collision, "LODs & collision" (next to
-  "Open report") lists those models, how many are on the map and their
-  triangles by level. Click one to see each level ("Most detailed",
+  Seeing them: after an Xbox conversion, "LODs & collision" (next to
+  "Open report") lists the map's own models, changed or not (and stock
+  models whose switch distances or collision it changed): what changed,
+  their triangles by level, 1.5x what Bungie's models of their kind and
+  size have, how many are on the map and your choice for them. "Show"
+  narrows it to the models made without lower-detail versions, or to
+  those this conversion changed; click a column's title to sort by it
+  (heaviest first to start). Click one to see each level ("Most detailed",
   "Medium", "Low"...: drag to turn it, wheel to zoom; "Show the triangles"
   draws their edges) and roughly how far away the game switches to it, in
   metres and feet (on a 4:3 screen; a model's size on screen decides it).
@@ -633,14 +670,27 @@ Levels of detail (LODs)
   coloured by material (the same colours in both), each surface outlined;
   the view stays where you turned it, to flip between them. Versions
   you're happy with need nothing: they're kept in the LOD library and
-  reused every time. "Never make LODs for this model" ("Leave this model
-  as made" for a trimmed one) adds it to skip.txt, so no conversion trims
-  it, makes lower-detail versions or gives switch distances for it again,
-  on this map or any other that uses it (convert the map again to drop
-  what it has now; delete its line from skip.txt to undo). Hover over the
-  button for what it will do to the model shown. It also works after a map
-  that didn't fit: those versions were taken out again, and the list says
-  so.
+  reused every time.
+  Below the list, what every conversion does with the model shown from
+  now on, on this map or any other that uses it (kept in choices.txt in
+  the LOD library; saved as you change it):
+    Lower-detail versions   As the Xbox tab says; Make them, aiming at a
+                         medium and a low number of triangles (empty:
+                         about half and a fifth), whatever the Xbox tab
+                         says and however few triangles it has; or Don't
+                         make them (drawn in full at every distance; a
+                         model with lower-detail versions of its own,
+                         which the app always keeps, then gets no switch
+                         distances either).
+    Most detailed version   As "Heavy models" says; Keep it as made; or
+                         Trim it to a number of triangles (it starts at
+                         1.5x Bungie's; the shape may move up to 5% of
+                         the model's size to get there).
+  "Convert again" closes the window and converts the map again with
+  them (the map's tags are kept from the last time, so it's quicker).
+  First-person models only have the second; stock models only the first.
+  It also works after a map that didn't fit: the versions made were
+  taken out again, and the list says so.
 
   The LOD library
   Every version the app makes is kept in the LOD library folder (Settings
@@ -654,13 +704,18 @@ Levels of detail (LODs)
     index.txt   One line per model added: date, tag path, triangles (most
                 detailed > medium > low, or "trimmed" as made > now) and
                 its files.
+    choices.txt What to do with a model, chosen in the LODs window: one
+                line per model, tab separated: its tag path; lower-detail
+                versions (auto, none, or make and the medium and low
+                triangles, 0 for automatic); its most detailed version
+                (auto, as made, or trim and the triangles); a note.
+                Delete a line to go back to automatic.
     skip.txt    Models to leave alone (not trimmed, no lower-detail
                 versions made, no switch distances given), one per line: a
                 tag path (vehicles\jet\jet.model) or a name (jet: the
                 model's or its object's). Lines starting with # are
-                ignored. The LODs window's "Never make LODs for this
-                model" or "Leave this model as made" adds to it, or write
-                it yourself.
+                ignored. Write it yourself; a model's line in choices.txt
+                comes first.
   Deleting .lod or .top files (or the whole folder) has them made again
   next time.
   Stock maps are the exception: converting Custom Edition's Blood Gulch,

@@ -59,7 +59,9 @@ struct Config {
     // made from it: 0 as made, 1 trimmed so they look the same (shape kept within 0.25% of the model's size, 0.18% for
     // characters, 0.12% for first-person weapons), 2 trimmed harder (0.6%, 0.4%, 0.25%: small details may change). Only
     // models over their kind's budget (vehicles and scenery 4,000 triangles, characters and first-person weapons 3,000,
-    // weapons and items 2,000), and never below it.
+    // weapons and items 2,000), and never below it. 3: trimmed to 1.5x what Bungie's models of their kind and size have
+    // (lod.hpp stock_triangles), when over it by a quarter, the shape moving at most 1% of the model's size (0.03
+    // units). A model's own choice in the LODs window (lod.hpp Choice) comes first.
     int xbox_trim_models = 1;
     // Store the map's animations (its own and the Xbox's it uses) the way Bungie stored the Xbox's cinematics: as
     // keyframes ("compressed", animcomp.hpp), about half the tag memory for first-person animations, a quarter less
@@ -71,7 +73,7 @@ struct Config {
     // custom Warthogs and their wrecks); then scenery and devices still too dense for bipeds to walk against are made
     // again the way Bungie made theirs: a few convex pieces with big flat faces, just outside the model, gaps and small
     // details filled over, nothing thin. 0 as made; 1 when one costs more than Bungie's densest (about 130,000 steps of
-    // a biped's collision test); 2 harder (90,000). The window sets it with the heavy-models choice.
+    // a biped's collision test); 2 harder (90,000). The window sets it with the heavy-models choice (its 3: 2).
     int xbox_collision = 1;
     // Give a level made without portals (one cluster: everything in view is drawn, walls or not) clusters and portals
     // at its doorways and corridors (portals.hpp), when that cuts what the Xbox draws.
@@ -190,17 +192,22 @@ bool analyze_level_shaders(const Config &cfg, const fs::path &input, Game in_gam
 bool save_content_analysis(const ContentAnalysis &a, const fs::path &file);
 bool load_content_analysis(ContentAnalysis &a, const fs::path &file);
 
-// An Xbox build's models whose levels of detail it changed (lower-detail versions made, or switch distances given) or
-// whose collision it changed, to look at in the "LODs" window: each detail level drawn, and where the game switches to
-// it; the collision as made and as converted.
+// An Xbox build's models, to look at in the "LODs" window: the map's own (drawn in the world, or first-person
+// weapons), changed or not, and others whose levels of detail it changed (stock models' switch distances) or whose
+// collision it changed. Each detail level drawn, and where the game switches to it; the collision as made and as
+// converted.
 struct LodView {
     struct Model {
         std::string tag;                 // the model tag
         std::string name;                // the object it's drawn for ("mp_boulder_granite_medium")
-        char kind = 's';                 // v vehicle, s scenery (and machines...), w weapon or item, f first person
+        char kind = 's';                 // v vehicle, b character, s scenery (and machines...), w weapon or item, f first
+                                         // person
         std::string change;              // "made" (lower-detail versions), "library" (reused from the LOD library),
                                          // "distances" (switch distances for its own), "stock" (a stock model's),
-                                         // "trimmed" (only its most detailed version made lighter)
+                                         // "trimmed" (only its most detailed version made lighter), "" left as made
+        std::string note;                // left as made (or partly): why, e.g. "only 640 triangles"
+        int density = 0;                 // 1.5x Bungie's triangles for its kind and size (lod.hpp stock_triangles)
+        bool had_lods = false;           // the map made it with lower-detail versions of its own
         bool undone = false;             // taken out again: the map didn't fit with them
         int placed = 0;                  // how many are on the map (placed, or at weapon/item spawn points)
         double cutoffs[5] = {0, 0, 0, 0, 0};   // switch distances, pixels across (super high, high, medium, low, super low)

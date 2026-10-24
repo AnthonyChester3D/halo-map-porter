@@ -25,7 +25,9 @@ the free, open-source Halo map compiler, and it can download Invader for you.
   made for big screens come down to the resolution the Xbox draws them at (the same size on screen, often a
   sixteenth of the memory), and scope masks are scaled so they frame the Xbox's screen as made.
 - **Speed on the Xbox.** It trims the most detailed version of very dense custom models (a 15,000-triangle beam
-  cannon) so they look the same with far fewer triangles, stores animations as keyframes the way Bungie stored the
+  cannon) so they look the same with far fewer triangles, or down to 1.5x what Bungie's own models of their kind and
+  size have (measured on every stock model: the beam cannon 15,327 > 1,729, in first person 3,258), lists every model
+  of the map's own so you can choose per model whether it gets LODs and how many triangles each level aims at, stores animations as keyframes the way Bungie stored the
   Xbox's cinematics (about half the tag memory for first-person animations), gives custom Warthogs (and other stock
   vehicles' variants and wrecks) Bungie's own collision where it fits them, makes collision of custom scenery that's
   too dense for bipeds to walk against again the way Bungie made theirs (a few convex pieces with big flat faces:
