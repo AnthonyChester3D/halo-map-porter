@@ -10,6 +10,9 @@
 #include <iostream>
 #include <sstream>
 #include <cstring>
+namespace porter {
+std::string compare_icon_sheets(const std::filesystem::path &a, const std::filesystem::path &b);   // core.cpp (tests)
+}
 using namespace porter;
 
 // XPREVIEW=<folder>: each item's model drawn to <folder>/<name>.ppm (two views side by side), for checking.
@@ -138,6 +141,10 @@ int main(int argc, char **argv) {
     Log log = [](const std::string &s) { std::cout << s << std::endl; };
     std::string mode = argv[1];
     Result r;
+    if (mode == "icons") {   // cli_test icons <sheet.bitmap> <other sheet.bitmap> x: which pictures match
+        std::cout << porter::compare_icon_sheets(argv[2], argv[3]);
+        return 0;
+    }
     if (mode == "traits") {   // cli_test traits <built.map> x x
         MapTraits t;
         std::string err;

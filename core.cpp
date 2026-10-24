@@ -349,7 +349,7 @@ struct Job {
     // What merge_map_globals added to the Xbox's HUD lists from the map's, for trim_pickup_extras to keep only what
     // the map's weapons, items and vehicles still use: the map's lists now used (item_message_text and
     // alternate_icon_text: tag paths, "" none) and how many entries the Xbox's own have; the icon sheet made from the
-    // Xbox's and the map's (shrunk) copy, and how many sequences the Xbox's has.
+    // Xbox's and the map's (shrunk) copy, how many sequences the Xbox's has, and which of the map's follow them.
     struct PickupExtras {
         std::string hud_globals;          // the HUD globals that use them (the Xbox's, edited)
         std::string lists[2];
@@ -357,7 +357,12 @@ struct Job {
         std::string sheet, xbox_sheet_tag;
         fs::path xbox_sheet, map_sheet;
         uint32_t xbox_seqs = 0;
+        std::vector<int> src;             // the map's sequences after the Xbox's (merge_icon_sheets_from)
     } pickup;
+    // The HUD tags' canvas sizes as the map has them (MCC: 1 = 960p, positions and sizes doubled; 0 = 480p), by tag
+    // path; known: read from the map (or your tags), else hud_960 guesses from the stock HUDs.
+    std::map<std::string, int> hud_canvas;
+    bool hud_canvas_known = false;
     fs::path shaders_file;                     // the level shaders file (levelshaders.hpp), for the window
     std::string shaders_line;                  // the report's line on the level's shader passes
 
@@ -3768,23 +3773,104 @@ struct BitmapParts {
     }
 };
 
-// A HUD message icon sheet for the Xbox: the Xbox's own sheet, unchanged (its controller-button glyphs and the
-// stock weapons' icons keep their sequence numbers), followed by the map's sequences from number `from` on
-// (its custom weapons' icons), whose textures are appended. Writes `out`. False if either tag can't be read.
-// `keep`: only those of the map's sequences (the others after the Xbox's are left empty, keeping every number; none
-// after the last kept), with only their pictures: cut out of the map's textures (to whole 4x4 blocks, so compressed
-// ones are copied as they are) and packed onto new, smaller ones, one per pixel format.
-bool merge_icon_sheets(const fs::path &xbox_sheet, const fs::path &map_sheet, uint32_t from, const fs::path &out,
-                       const std::set<uint32_t> *keep = nullptr) {
-    BitmapParts x, m;
-    if (!x.read(xbox_sheet) || !m.read(map_sheet) || from > m.nseq) return false;
-    uint32_t end = m.nseq;   // the map's sequences added: from .. end
-    if (keep) {
-        end = from;
-        for (uint32_t i : *keep)
-            if (i >= from && i < m.nseq) end = std::max(end, i + 1);
+// One of a sheet's pictures (a sequence's first sprite, or its first texture whole), in a form another sheet's can be
+// compared with: how solid each pixel is, fitted into a 24x24 square (centred, its shape kept), less its mean and
+// scaled to length 1. `aspect`: its width over its height. False if it can't be read (or is blank).
+static bool icon_picture(const BitmapParts &b, uint32_t seq, std::vector<float> &v, double &aspect) {
+    if (seq >= b.nseq) return false;
+    auto rf = [&](size_t o) { uint32_t u = be32(b.b, o); float f; memcpy(&f, &u, 4); return f; };
+    int page;
+    double l = 0, r = 1, t = 0, bo = 1;
+    if (b.sprites(seq)) {
+        size_t sp = b.sprite_at(seq);
+        page = (int16_t)be16(b.b, sp);
+        l = rf(sp + 8), r = rf(sp + 12), t = rf(sp + 16), bo = rf(sp + 20);
+    } else {
+        page = (int16_t)be16(b.b, b.seq_off + 64 * (size_t)seq + 32);
     }
-    auto kept = [&](uint32_t i) { return !keep || keep->count(i) > 0; };
+    if (page < 0 || page >= (int)b.nbd) return false;
+    size_t e = b.bd_off + 48 * (size_t)page;
+    int w = be16(b.b, e + 4), h = be16(b.b, e + 6), fmt = be16(b.b, e + 12);
+    uint32_t off = be32(b.b, e + 24);
+    size_t n = mip_bytes(w, h, fmt);
+    if (!n || be16(b.b, e + 10) != 0 || (be16(b.b, e + 14) & 8) || (size_t)off + n > b.pp) return false;
+    std::vector<unsigned char> rgba;
+    if (!decode_level(b.b.substr(b.pp_off + off, n), w, h, fmt, rgba)) return false;
+    int x0 = std::clamp((int)std::floor(l * w), 0, w), x1 = std::clamp((int)std::ceil(r * w), 0, w);
+    int y0 = std::clamp((int)std::floor(t * h), 0, h), y1 = std::clamp((int)std::ceil(bo * h), 0, h);
+    if (x1 - x0 < 2 || y1 - y0 < 2) return false;
+    const int N = 24;
+    aspect = double(x1 - x0) / (y1 - y0);
+    double s = double(N) / std::max(x1 - x0, y1 - y0);
+    double ox = (N - (x1 - x0) * s) / 2, oy = (N - (y1 - y0) * s) / 2;
+    std::vector<double> sum(N * N, 0), cnt(N * N, 0);
+    for (int y = y0; y < y1; y++)
+        for (int x = x0; x < x1; x++) {
+            const unsigned char *q = &rgba[((size_t)y * w + x) * 4];
+            double c;
+            if (fmt <= 2) c = q[0];                                  // A8, Y8, AY8: the one channel
+            else if (fmt == 3) c = q[0] * q[1] / 255.0;              // A8Y8
+            else c = q[3] * std::max({q[0], q[1], q[2]}) / 255.0;    // colour: alpha times brightness
+            int cx = std::clamp((int)(ox + (x - x0 + 0.5) * s), 0, N - 1), cy = std::clamp((int)(oy + (y - y0 + 0.5) * s), 0, N - 1);
+            sum[cy * N + cx] += c;
+            cnt[cy * N + cx] += 1;
+        }
+    v.assign(N * N, 0);
+    double mean = 0;
+    for (int k = 0; k < N * N; k++) mean += v[k] = cnt[k] ? float(sum[k] / cnt[k]) : 0.f;
+    mean /= N * N;
+    double len = 0;
+    for (auto &f : v) len += (f - mean) * (f - mean);
+    if (len < 1e-6) return false;
+    len = std::sqrt(len);
+    for (auto &f : v) f = float((f - mean) / len);
+    return true;
+}
+
+// Whether a picture on one sheet is the same icon as one on another (at another size or in another format): about
+// the same shape, and their pixels alike (correlated). False if either can't be read.
+static bool same_icon(const BitmapParts &a, uint32_t sa, const BitmapParts &b, uint32_t sb) {
+    std::vector<float> va, vb;
+    double ra, rb;
+    if (!icon_picture(a, sa, va, ra) || !icon_picture(b, sb, vb, rb)) return false;
+    if (std::max(ra, rb) / std::min(ra, rb) > 1.3) return false;
+    double c = 0;
+    for (size_t k = 0; k < va.size(); k++) c += va[k] * vb[k];
+    return c > 0.85;
+}
+// For tests: for each of a sheet's sequences, whether the other sheet's at that number is the same icon ('=') or not ('x').
+std::string icon_sheet_matches(const fs::path &a, const fs::path &b) {
+    BitmapParts x, y;
+    if (!x.read(a) || !y.read(b)) return "unreadable";
+    std::string r;
+    for (uint32_t i = 0; i < std::min(x.nseq, y.nseq); i++) {
+        std::vector<float> va, vb;
+        double ra = 0, rb = 0, c = 0;
+        bool ok = icon_picture(x, i, va, ra) && icon_picture(y, i, vb, rb);
+        for (size_t k = 0; ok && k < va.size(); k++) c += va[k] * vb[k];
+        char line[96];
+        snprintf(line, sizeof line, "%u %c aspect %.2f/%.2f correlation %.2f\n", i, same_icon(x, i, y, i) ? '=' : 'x', ra, rb, c);
+        r += line;
+    }
+    return r;
+}
+
+// A HUD message icon sheet for the Xbox: the Xbox's own sheet, unchanged (its controller-button glyphs and the
+// stock weapons' icons keep their sequence numbers), followed by sequences of the map's: the one after the Xbox's
+// last is the map's sequence src[0], the next src[1], and so on (-1: left empty), whose textures are appended.
+// Writes `out`. False if either tag can't be read.
+// `keep` (numbers in the new sheet): only those of the added sequences (the others are left empty, keeping every
+// number; none after the last kept), with only their pictures: cut out of the map's textures (to whole 4x4 blocks,
+// so compressed ones are copied as they are) and packed onto new, smaller ones, one per pixel format.
+bool merge_icon_sheets_from(const fs::path &xbox_sheet, const fs::path &map_sheet, std::vector<int> src,
+                            const fs::path &out, const std::set<uint32_t> *keep = nullptr) {
+    BitmapParts x, m;
+    if (!x.read(xbox_sheet) || !m.read(map_sheet)) return false;
+    for (int &s : src)
+        if (s >= (int)m.nseq) s = -1;
+    auto kept = [&](uint32_t j) { return src[j] >= 0 && (!keep || keep->count(x.nseq + j) > 0); };
+    while (!src.empty() && !kept((uint32_t)src.size() - 1)) src.pop_back();   // (none empty at the end)
+    const uint32_t end = (uint32_t)src.size();
     std::string seqs = x.b.substr(x.seq_off, 64 * (size_t)x.nseq);
     std::string sprs = x.b.substr(x.spr_off, x.bd_off - x.spr_off);
     std::string bds = x.b.substr(x.bd_off, 48 * (size_t)x.nbd);
@@ -3806,8 +3892,9 @@ bool merge_icon_sheets(const fs::path &xbox_sheet, const fs::path &map_sheet, ui
     std::vector<Piece> pieces;
     bool cut = keep != nullptr;
     if (cut) {
-        for (uint32_t i = from; i < end && cut; i++) {
-            if (!kept(i)) continue;
+        for (uint32_t j = 0; j < end && cut; j++) {
+            if (!kept(j)) continue;
+            const uint32_t i = (uint32_t)src[j];
             size_t so = m.sprite_at(i);
             for (uint32_t k = 0; k < m.sprites(i); k++) {
                 size_t sp = so + 32 * (size_t)k;
@@ -3816,7 +3903,7 @@ bool merge_icon_sheets(const fs::path &xbox_sheet, const fs::path &map_sheet, ui
                 size_t e = m.bd_off + 48 * (size_t)bi;
                 int w = be16(m.b, e + 4), h = be16(m.b, e + 6), fmt = be16(m.b, e + 12), a = block_format(fmt) ? 4 : 1;
                 if (!mip_bytes(w, h, fmt) || be16(m.b, e + 10) != 0) { cut = false; break; }   // (2D textures, known formats)
-                Piece p{i, k, bi, 0, 0, 0, 0};
+                Piece p{j, k, bi, 0, 0, 0, 0};
                 p.x0 = std::max(0, (int)std::floor(rf(m.b, sp + 8) * w) / a * a);
                 p.x1 = std::min(w, ((int)std::ceil(rf(m.b, sp + 12) * w) + a - 1) / a * a);
                 p.y0 = std::max(0, (int)std::floor(rf(m.b, sp + 16) * h) / a * a);
@@ -3895,8 +3982,9 @@ bool merge_icon_sheets(const fs::path &xbox_sheet, const fs::path &map_sheet, ui
         auto use = [&](int bi) {
             if (bi >= 0 && bi < (int)m.nbd && !remap.count(bi)) remap[bi] = 0;
         };
-        for (uint32_t i = from; i < end; i++) {
-            if (!kept(i)) continue;
+        for (uint32_t j = 0; j < end; j++) {
+            if (!kept(j)) continue;
+            const uint32_t i = (uint32_t)src[j];
             int16_t first = (int16_t)be16(m.b, m.seq_off + 64 * (size_t)i + 32), count = (int16_t)be16(m.b, m.seq_off + 64 * (size_t)i + 34);
             for (int k = 0; first >= 0 && k < count; k++) use(first + k);
             size_t so = m.sprite_at(i);
@@ -3923,15 +4011,16 @@ bool merge_icon_sheets(const fs::path &xbox_sheet, const fs::path &map_sheet, ui
         return bi;
     };
 
-    for (uint32_t i = from; i < end; i++) {
-        std::string sq = m.b.substr(m.seq_off + 64 * (size_t)i, 64);
-        if (!kept(i)) {   // left empty: no pictures
+    for (uint32_t j = 0; j < end; j++) {
+        std::string sq = src[j] >= 0 ? m.b.substr(m.seq_off + 64 * (size_t)src[j], 64) : std::string(64, '\0');
+        if (!kept(j)) {   // left empty: no pictures
             put_be16(sq, 32, 0xFFFF);
             put_be16(sq, 34, 0);
             put_be32(sq, 52, 0);
             seqs += sq;
             continue;
         }
+        const uint32_t i = (uint32_t)src[j];
         size_t so = m.sprite_at(i);
         int first_out = -1;
         for (uint32_t k = 0; k < m.sprites(i); k++) {
@@ -3940,7 +4029,7 @@ bool merge_icon_sheets(const fs::path &xbox_sheet, const fs::path &map_sheet, ui
             if (cut) {
                 const Piece *p = nullptr;
                 for (auto &q : pieces)
-                    if (q.seq == i && q.k == k) p = &q;
+                    if (q.seq == j && q.k == k) p = &q;
                 if (p) {
                     size_t e = m.bd_off + 48 * (size_t)p->page;
                     int w = be16(m.b, e + 4), h = be16(m.b, e + 6);
@@ -3974,7 +4063,7 @@ bool merge_icon_sheets(const fs::path &xbox_sheet, const fs::path &map_sheet, ui
     const size_t S = 64;
     std::string o = x.b.substr(0, x.pp_off) + x.b.substr(x.pp_off, x.pp) + mpix + seqs + sprs + bds;
     put_be32(o, S + 48, x.pp + (uint32_t)mpix.size());
-    put_be32(o, S + 84, x.nseq + (end - from));
+    put_be32(o, S + 84, x.nseq + end);
     put_be32(o, S + 96, x.nbd + added_bd);
     put_be32(o, 40, ~crc32_of(o.data() + 64, o.size() - 64));
     std::error_code ec;
@@ -3982,6 +4071,19 @@ bool merge_icon_sheets(const fs::path &xbox_sheet, const fs::path &map_sheet, ui
     std::ofstream f(out, std::ios::binary | std::ios::trunc);
     f << o;
     return (bool)f;
+}
+// The same, adding the map's sequences from number `from` on, in order (`keep`: the map's numbers).
+bool merge_icon_sheets(const fs::path &xbox_sheet, const fs::path &map_sheet, uint32_t from, const fs::path &out,
+                       const std::set<uint32_t> *keep = nullptr) {
+    BitmapParts x, m;
+    if (!x.read(xbox_sheet) || !m.read(map_sheet) || from > m.nseq) return false;
+    std::vector<int> src;
+    for (uint32_t i = from; i < m.nseq; i++) src.push_back((int)i);
+    std::set<uint32_t> k;
+    if (keep)
+        for (uint32_t i : *keep)
+            if (i >= from) k.insert(x.nseq + (i - from));
+    return merge_icon_sheets_from(xbox_sheet, map_sheet, src, out, keep ? &k : nullptr);
 }
 
 // Re-encode a .bitmap tag's uncompressed 16/32-bit color textures (2D and sprite sheets) as DXT1, or DXT5
@@ -6639,7 +6741,7 @@ void convert_bc7_textures(Job &job) {
 
 std::string norm_rel(std::string s) {
     std::replace(s.begin(), s.end(), '\\', '/');
-    while (!s.empty() && (s.back() == '\r' || s.back() == ' ')) s.pop_back();
+    while (!s.empty() && (s.back() == '\r' || s.back() == '\n' || s.back() == ' ')) s.pop_back();
     return s;
 }
 
@@ -7373,6 +7475,48 @@ static bool ends_with(const std::string &s, const std::string &suf) {
     return s.size() >= suf.size() && s.compare(s.size() - suf.size(), suf.size(), suf) == 0;
 }
 
+// The HUD tags' canvas sizes, read from an MCC map itself (Invader's extraction leaves the field out: it's unused on
+// Halo PC). Each HUD tag (unit, weapon and grenade HUD interfaces, HUD globals) has one: 960p (1) lays it out on a
+// canvas twice the Xbox's screen size, 480p (0) on one the Xbox's size. Nothing is known if the map can't be read.
+void read_hud_canvases(Job &job, const fs::path &map) {
+    std::ifstream f(map, std::ios::binary);
+    std::string h(0x800, '\0');
+    if (!f.read(&h[0], (std::streamsize)h.size())) return;
+    auto u32 = [](const std::string &b, size_t o) -> uint32_t {
+        if (o + 4 > b.size()) return 0;
+        const unsigned char *p = (const unsigned char *)b.data() + o;
+        return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24;
+    };
+    std::error_code ec;
+    if (h.compare(0, 4, "daeh") != 0 || u32(h, 4) != 13 || u32(h, 8) != fs::file_size(map, ec)) return;   // (MCC, not compressed)
+    uint32_t tdo = u32(h, 0x10), tds = u32(h, 0x14);
+    if (tds < 0x28 || tds > (256u << 20)) return;
+    std::string d(tds, '\0');
+    f.seekg(tdo);
+    if (!f.read(&d[0], (std::streamsize)d.size())) return;
+    uint32_t base = u32(d, 0) - 0x28, count = u32(d, 12);
+    auto at = [&](uint32_t p) -> size_t { return p >= base && p - base < tds ? p - base : std::string::npos; };
+    size_t arr = at(u32(d, 0));
+    if (arr == std::string::npos || count > 65535 || arr + (size_t)count * 32 > d.size()) return;
+    std::map<std::string, int> canvas;
+    for (uint32_t i = 0; i < count; i++) {
+        size_t e = arr + (size_t)i * 32;
+        std::string cls{d[e + 3], d[e + 2], d[e + 1], d[e]};
+        const char *ext = cls == "unhi" ? "unit_hud_interface" : cls == "wphi" ? "weapon_hud_interface" :
+                          cls == "grhi" ? "grenade_hud_interface" : cls == "hudg" ? "hud_globals" : nullptr;
+        if (!ext) continue;
+        size_t name = at(u32(d, e + 16)), data = at(u32(d, e + 20));
+        size_t field = data == std::string::npos ? data : data + (cls == "wphi" ? 62 : 2);
+        if (name == std::string::npos || field == std::string::npos || field + 2 > d.size()) continue;
+        size_t z = d.find('\0', name);
+        if (z == std::string::npos) continue;
+        canvas[norm_rel(d.substr(name, z - name)) + "." + ext] = (unsigned char)d[field] | (unsigned char)d[field + 1] << 8;
+    }
+    if (canvas.empty()) return;
+    job.hud_canvas = std::move(canvas);
+    job.hud_canvas_known = true;
+}
+
 // Is the map's HUD laid out for MCC? MCC draws the HUD on a canvas twice the Xbox's size: its HUD tags
 // (343's copies of the stock ones too) have every position doubled, and its stock HUD sheets are 4x the
 // Xbox's resolution, flagged "half hud scale". Compare a stock HUD that both tag sets have. `tags` must be the
@@ -7425,33 +7569,128 @@ static std::string hud_element_bitmap(const std::map<std::string, std::string> &
     return k.empty() ? "" : vals.at(k);
 }
 
-// The map's own HUD tags, sized and placed for the Xbox:
-//  - "use high res scale" (on an element) and "half hud scale" / "force hud use highres scale" (on the bitmap
-//    it draws) each halve an element on PC and MCC (once, whichever is set). The Xbox ignores both, so the
-//    element's scale is halved. (fit_hud_textures then shrinks bitmaps drawn smaller than they're made.)
-//  - MCC's double-size canvas: positions are halved, and so are the sizes of elements drawing the map's
-//    bitmaps (numbers use the Xbox's own digits, which are already the right size). Elements MCC anchors to
-//    the screen centre get an offset from the HUD's top-left corner instead.
-void convert_hud_layout(Job &job, const fs::path &xsrc, const std::vector<std::string> &hud_tags) {
+// Whether a HUD tag is laid out on MCC's 960p canvas (read_hud_canvases): as the map has it when that's known,
+// else `guess` (mcc_hud_layout, from the stock HUDs).
+static bool hud_960(const Job &job, const std::string &tag, bool guess) {
+    if (!job.hud_canvas_known) return guess;
+    auto it = job.hud_canvas.find(tag);
+    return it != job.hud_canvas.end() && it->second == 1;
+}
+
+// The size (texels) of the picture a HUD element draws: its sequence's first sprite, or that sequence's first
+// texture whole. False if the bitmap can't be read.
+static bool hud_picture_size(const fs::path &file, int seq, double &w, double &h) {
+    BitmapParts b;
+    if (!b.read(file) || !b.nbd) return false;
+    if (seq < 0 || seq >= (int)b.nseq) seq = 0;
+    auto rf = [&](size_t o) { uint32_t u = be32(b.b, o); float f; memcpy(&f, &u, 4); return (double)f; };
+    int page = 0;
+    double l = 0, r = 1, t = 0, bo = 1;
+    if (seq < (int)b.nseq && b.sprites((uint32_t)seq)) {
+        size_t sp = b.sprite_at((uint32_t)seq);
+        page = (int16_t)be16(b.b, sp);
+        l = rf(sp + 8), r = rf(sp + 12), t = rf(sp + 16), bo = rf(sp + 20);
+    } else if (seq < (int)b.nseq) {
+        page = (int16_t)be16(b.b, b.seq_off + 64 * (size_t)seq + 32);
+    }
+    if (page < 0 || page >= (int)b.nbd) page = 0;
+    size_t e = b.bd_off + 48 * (size_t)page;
+    w = (r - l) * be16(b.b, e + 4);
+    h = (bo - t) * be16(b.b, e + 6);
+    return w > 0 && h > 0;
+}
+
+// HUD anchors: the Xbox's five, then MCC's four (top centre, bottom centre, left centre, right centre).
+static const char *const kHudAnchors[9] = {"top_left", "top_right", "bottom_left", "bottom_right", "center",
+                                           "top_center", "bottom_center", "left_center", "right_center"};
+static const char *const kHudAnchorWords[9] = {"top left", "top right", "bottom left", "bottom right", "centre",
+                                               "top centre", "bottom centre", "left centre", "right centre"};
+// The anchor an enum field has (`key` "anchor" -> "anchor.top_left" = "*"): 0-8 as kHudAnchors, -1 "from parent"
+// (an element of a weapon HUD drawn from its HUD's anchor) or none.
+static int hud_anchor_of(const std::map<std::string, std::string> &vals, const std::string &key) {
+    for (int i = 0; i < 9; i++) {
+        auto it = vals.find(key + "." + kHudAnchors[i]);
+        if (it != vals.end() && it->second == "*") return i;
+    }
+    return -1;
+}
+
+// The map's own HUD tags, sized and placed for the Xbox (its 640x480 screen, a texel to a pixel at scale 1):
+//  - A HUD laid out on a 480p canvas (Halo PC's, and most MCC tags': read_hud_canvases) is placed as it is.
+//    "Use high res scale" (on an element) and "half hud scale" / "force hud use highres scale" (on the bitmap it
+//    draws) each halve an element (once, whichever is set); the Xbox ignores them, so the element's scale is halved.
+//  - One on MCC's 960p canvas has every position halved and every element drawing a bitmap half the size (a
+//    quarter with "half hud scale"); "use high res scale" changes nothing there.
+//    (fit_hud_textures then shrinks bitmaps drawn smaller than they're made.)
+//  - MCC's anchors at the middle of an edge (top centre, bottom centre, left centre, right centre) are the Xbox
+//    corner (or centre) beside them, each element's offset moved so it lands where MCC puts it on a full screen. A
+//    weapon HUD's elements anchored apart from their HUD (MCC's per-element anchors: a visor's pieces along the top
+//    and bottom of the screen) go into copies of the HUD, one per anchor, chained after it as its child HUDs (the
+//    Xbox draws the whole chain, each from its own anchor), so they stay at their edges on a split screen too.
+// Copies made are added to `hud_tags`.
+void convert_hud_layout(Job &job, const fs::path &xsrc, std::vector<std::string> &hud_tags) {
     if (hud_tags.empty()) return;
     const Config &cfg = job.cfg;
-    const bool mcc = mcc_hud_layout(job, !job.user_tags.empty() ? job.user_tags : job.source);
+    const bool guess = mcc_hud_layout(job, !job.user_tags.empty() ? job.user_tags : job.source);
     auto in_overlay = [&](const std::string &rel) { return !job.overlay.empty() && fs::exists(job.overlay / from_u8(rel)); };
     std::string out;
+    // Your own tags keep the canvas size (Invader's extraction doesn't): read it from them when any has 960p.
+    if (!job.hud_canvas_known && !job.user_tags.empty()) {
+        std::map<std::string, int> canvas;
+        bool any = false;
+        for (auto &tag : hud_tags) {
+            tagfile::Tag t;
+            if (!t.load(xsrc / from_u8(tag))) continue;
+            int c = (int)t.root().integer("canvas size");
+            canvas[tag] = c;
+            any = any || c == 1;
+        }
+        if (any) job.hud_canvas = canvas, job.hud_canvas_known = true;
+    }
 
-    struct Elem { std::string base, bitmap; bool flag; };
-    std::map<std::string, std::vector<std::pair<std::string, std::string>>> kvs;
-    std::map<std::string, std::vector<Elem>> elems;
+    struct Elem {
+        std::string base, bitmap;
+        bool flag = false;
+        int seq = 0;
+        std::string anchor_key;   // the field of the anchor it's drawn from ("" = fixed: the motion sensor, crosshairs)
+        bool own = false;         // anchor_key is the element's own (a weapon HUD's per-element anchor)
+    };
     std::map<std::string, bool> half;   // bitmap -> flagged "half hud scale" / "force hud use highres scale"
-    for (auto &tag : hud_tags) {
+    int scaled = 0, high_res = 0, moved = 0, anchored = 0, copies = 0, tags960 = 0, tags480 = 0;
+    std::vector<std::string> made;
+    for (size_t ti = 0, n0 = hud_tags.size(); ti < n0; ti++) {
+        const std::string tag = hud_tags[ti];
+        const std::string ext = fs::path(from_u8(tag)).extension().u8string();
+        const bool unit = ext == ".unit_hud_interface", weapon = ext == ".weapon_hud_interface";
+        const bool c960 = hud_960(job, tag, guess);
+        (c960 ? tags960 : tags480)++;
         auto kv = list_values(cfg, xsrc, tag);
         std::map<std::string, std::string> vals(kv.begin(), kv.end());
+        std::vector<Elem> elems;
         for (auto &[key, v] : kv) {
             const std::string suffix = "scaling_flags.use_high_res_scale";
             if (!ends_with(key, suffix)) continue;
-            Elem e{key.substr(0, key.size() - suffix.size()), "", v == "1"};
+            Elem e;
+            e.base = key.substr(0, key.size() - suffix.size());
+            e.flag = v == "1";
             e.bitmap = norm_rel(hud_element_bitmap(vals, e.base));
             if (!e.bitmap.empty() && !ends_with(e.bitmap, ".bitmap")) e.bitmap += ".bitmap";
+            auto sq = vals.find(e.base + "sequence_index");
+            e.seq = sq == vals.end() ? 0 : std::atoi(sq->second.c_str());
+            if (unit) {
+                if (e.base.rfind("motion_sensor_", 0) == 0) e.anchor_key = "";            // (always the bottom left)
+                else if (e.base.rfind("overlays[", 0) == 0) e.anchor_key = "auxiliary_overlay_anchor";
+                else e.anchor_key = "anchor";
+            } else if (weapon) {
+                std::smatch m;
+                static const std::regex in_overlay_elem(R"(^(overlay_elements\[\d+\]\.)overlays\[\d+\]\.$)");
+                if (e.base.rfind("crosshairs[", 0) == 0) e.anchor_key = "";               // (always the centre)
+                else if (std::regex_match(e.base, m, in_overlay_elem)) e.anchor_key = m[1].str() + "anchor", e.own = true;
+                else e.anchor_key = e.base + "anchor", e.own = true;
+                if (e.own && !vals.count(e.anchor_key + ".from_parent")) e.anchor_key = "anchor", e.own = false;
+            } else {
+                e.anchor_key = "anchor";
+            }
             if (!e.bitmap.empty() && !half.count(e.bitmap)) {
                 fs::path dir = in_overlay(e.bitmap) ? job.overlay : xsrc;   // the copy the build uses
                 bool f = false;
@@ -7462,72 +7701,192 @@ void convert_hud_layout(Job &job, const fs::path &xsrc, const std::vector<std::s
                 }
                 half[e.bitmap] = f;
             }
-            elems[tag].push_back(e);
+            elems.push_back(e);
         }
-        kvs[tag] = std::move(kv);
-    }
 
-    int scaled = 0, high_res = 0, moved = 0, centred = 0;
-    for (auto &tag : hud_tags) {
-        auto &kv = kvs[tag];
-        std::map<std::string, std::string> vals(kv.begin(), kv.end());
         std::vector<std::pair<std::string, std::string>> sets;
-        std::set<std::string> centre;   // element bases MCC anchors to the screen centre
-        std::string anchor = vals.count("anchor.top_left") && vals["anchor.top_left"] == "*" ? "top_left" : "";
-        for (auto &e : elems[tag]) {
+        auto num = [&](const std::string &k, double dflt) {
+            auto it = vals.find(k);
+            return it == vals.end() ? dflt : std::atof(it->second.c_str());
+        };
+        // Sizes.
+        std::map<std::string, double> scale_now;   // element base -> its width and height scale once set
+        for (auto &e : elems) {
             double factor = 1;
             if (e.flag) {
                 sets.push_back({e.base + "scaling_flags.use_high_res_scale", "0"});
                 high_res++;
             }
             if (!e.bitmap.empty()) {
-                if (mcc) factor *= 0.5;
-                if (e.flag || half[e.bitmap]) factor *= 0.5;
-            } else if (e.flag) {
+                if (c960) factor = half[e.bitmap] ? 0.25 : 0.5;
+                else if (e.flag || half[e.bitmap]) factor = 0.5;
+            } else if (e.flag && !c960) {
                 factor = 0.5;
+            }
+            for (auto s : {"width_scale", "height_scale"}) {
+                double v = num(e.base + s, 1);
+                if (v == 0) v = 1;
+                scale_now[e.base + s] = v * factor;
             }
             if (factor != 1) {
                 bool any = false;
-                for (auto s : {"width_scale", "height_scale"}) {
-                    auto it = vals.find(e.base + s);
-                    if (it == vals.end()) continue;
-                    double v = std::atof(it->second.c_str());
-                    if (v == 0) v = 1;
-                    sets.push_back({e.base + s, std::to_string(v * factor)});
-                    any = true;
-                }
+                for (auto s : {"width_scale", "height_scale"})
+                    if (vals.count(e.base + s)) {
+                        sets.push_back({e.base + s, std::to_string(scale_now[e.base + s])});
+                        any = true;
+                    }
                 if (any) scaled++;
             }
-            if (mcc && vals.count(e.base + "anchor.center") && vals[e.base + "anchor.center"] == "*" && anchor == "top_left")
-                centre.insert(e.base);
         }
-        if (mcc)
-            for (auto &[key, v] : kv) {
-                if (!ends_with(key, "anchor_offset")) continue;
-                int x = 0, y = 0;
-                if (sscanf(v.c_str(), "%d,%d", &x, &y) != 2) continue;
-                std::string base = key.substr(0, key.size() - 13);
-                if (centre.count(base)) {   // centre of MCC's 1280x960 canvas, from the top-left corner
-                    x += 640;
-                    y += 480;
-                    sets.push_back({base + "anchor", "from_parent"});
-                    centred++;
-                }
-                sets.push_back({key, std::to_string((int)std::lround(x / 2.0)) + "," + std::to_string((int)std::lround(y / 2.0))});
+        // Positions: halved from a 960p canvas.
+        std::map<std::string, std::pair<int, int>> offset;   // element base -> its offset once set
+        for (auto &[key, v] : kv) {
+            if (!ends_with(key, "anchor_offset")) continue;
+            int x = 0, y = 0;
+            if (sscanf(v.c_str(), "%d,%d", &x, &y) != 2) continue;
+            if (c960) {
+                x = (int)std::lround(x / 2.0), y = (int)std::lround(y / 2.0);
+                sets.push_back({key, std::to_string(x) + "," + std::to_string(y)});
                 moved++;
             }
-        if (sets.empty()) continue;
-        std::vector<std::string> cmd{u8(tool(cfg, "invader-edit")), "-t", u8(xsrc), tag};
-        for (auto &[k, v] : sets) cmd.insert(cmd.end(), {"-S", k, v});
-        if (run_process(cmd, out) != 0)   // one bad key shouldn't lose the rest
-            for (auto &[k, v] : sets) run_process({u8(tool(cfg, "invader-edit")), "-t", u8(xsrc), tag, "-S", k, v}, out);
+            offset[key.substr(0, key.size() - 13)] = {x, y};
+        }
+        // Anchors: each element's MCC anchor as an Xbox one, its offset moved to match.
+        std::map<int, std::vector<size_t>> groups;   // Xbox anchor -> the elements drawn from it
+        std::map<std::string, int> field_to;         // an interface anchor field -> the Xbox anchor it becomes
+        for (size_t i = 0; i < elems.size(); i++) {
+            Elem &e = elems[i];
+            if (e.anchor_key.empty()) continue;
+            int a = hud_anchor_of(vals, e.anchor_key);
+            if (a < 0 && e.own) a = hud_anchor_of(vals, "anchor");   // from its HUD's
+            if (a < 0) a = 0;
+            int x = a;
+            if (a >= 5) {
+                double w = 0, h = 0;
+                fs::path dir = !e.bitmap.empty() && in_overlay(e.bitmap) ? job.overlay : xsrc;
+                if (!e.bitmap.empty() && hud_picture_size(dir / from_u8(e.bitmap), e.seq, w, h)) {
+                    w *= scale_now[e.base + "width_scale"];
+                    h *= scale_now[e.base + "height_scale"];
+                }
+                auto it = offset.find(e.base);
+                if (it != offset.end()) {
+                    auto [ox, oy] = it->second;
+                    double nx = ox;
+                    switch (a) {
+                    case 5: x = 0; nx = 320 + ox - w / 2; break;   // top centre: from the top left
+                    case 6: x = 2; nx = 320 + ox - w / 2; break;   // bottom centre: from the bottom left
+                    case 7: x = 4; nx = ox + w / 2 - 320; break;   // left centre: from the centre
+                    case 8: x = 4; nx = 320 - ox - w / 2; break;   // right centre: from the centre
+                    }
+                    sets.push_back({e.base + "anchor_offset", std::to_string((int)std::lround(nx)) + "," + std::to_string(oy)});
+                } else {
+                    x = a == 5 ? 0 : a == 6 ? 2 : 4;
+                }
+                anchored++;
+            }
+            if (!e.own) field_to[e.anchor_key] = x;
+            groups[x].push_back(i);
+        }
+        if (!weapon) {   // one anchor for all (the unit HUD's auxiliary overlays have their own)
+            for (auto &[field, x] : field_to)
+                if (hud_anchor_of(vals, field) != x) sets.push_back({field, kHudAnchors[x]});
+        }
+        if (!sets.empty()) {
+            std::vector<std::string> cmd{u8(tool(cfg, "invader-edit")), "-t", u8(xsrc), tag};
+            for (auto &[k, v] : sets) cmd.insert(cmd.end(), {"-S", k, v});
+            if (run_process(cmd, out) != 0)   // one bad key shouldn't lose the rest
+                for (auto &[k, v] : sets) run_process({u8(tool(cfg, "invader-edit")), "-t", u8(xsrc), tag, "-S", k, v}, out);
+        }
+        if (!weapon) continue;
+
+        // A weapon HUD: drawn from one anchor, its own; elements anchored apart go into chained copies.
+        int own_anchor = hud_anchor_of(vals, "anchor");
+        if (own_anchor < 0) own_anchor = 0;
+        bool apart = false;
+        for (auto &e : elems)
+            if (e.own && hud_anchor_of(vals, e.anchor_key) >= 0) apart = true;
+        if (!apart && own_anchor < 5) continue;
+        tagfile::EditTag et;
+        if (!et.load(xsrc / from_u8(tag))) continue;
+        // The groups in order: the HUD keeps the one drawn from its own anchor (or else the first), the rest are copies.
+        int keep = groups.count(own_anchor < 5 ? own_anchor : -1) ? own_anchor : groups.empty() ? 0 : groups.begin()->first;
+        std::vector<int> order{keep};
+        for (auto &[x, list] : groups)
+            if (x != keep) order.push_back(x);
+        // Which element (block, index) is in which group.
+        static const std::regex where(R"(^(static_elements|meter_elements|number_elements|overlay_elements)\[(\d+)\]\.)");
+        static const std::map<std::string, const char *> block_names = {
+            {"static_elements", "static elements"}, {"meter_elements", "meter elements"},
+            {"number_elements", "number elements"}, {"overlay_elements", "overlay elements"}};
+        std::map<std::pair<std::string, int>, int> group_of;
+        for (auto &[x, list] : groups)
+            for (size_t i : list) {
+                std::smatch m;
+                if (std::regex_search(elems[i].base, m, where)) group_of[{m[1].str(), std::atoi(m[2].str().c_str())}] = x;
+            }
+        const std::string stem = tag.substr(0, tag.size() - ext.size());
+        std::string *child = tagfile::ref_path(et.root(), "child hud");
+        if (!child) continue;
+        const std::string last_child = *child;
+        std::vector<std::pair<std::string, tagfile::EditTag>> outs;   // (path, tag) for the HUD, then each copy
+        for (size_t gi = 0; gi < order.size(); gi++) {
+            tagfile::EditTag t = et;
+            tagfile::TagNode &r = t.root();
+            tagfile::set_num(r, "anchor", order[gi]);
+            for (auto &[blk, name] : block_names) {
+                std::vector<tagfile::TagNode> *b = tagfile::block(r, name);
+                if (!b) continue;
+                std::vector<tagfile::TagNode> kept;
+                for (size_t k = 0; k < b->size(); k++) {
+                    auto g = group_of.find({blk, (int)k});
+                    if ((g == group_of.end() ? keep : g->second) != order[gi]) continue;
+                    kept.push_back((*b)[k]);
+                    tagfile::set_num(kept.back(), "anchor", 0);   // from its HUD's
+                }
+                *b = kept;
+            }
+            if (gi > 0) {   // a copy: only those elements (the crosshairs and the screen effect stay in the HUD)
+                for (auto name : {"crosshairs", "screen effect"})
+                    if (auto *b = tagfile::block(r, name)) b->clear();
+            }
+            std::string path = gi == 0 ? tag : stem + "_" + std::string(kHudAnchors[order[gi]]) + ext;
+            outs.push_back({path, std::move(t)});
+        }
+        bool ok = true;
+        for (size_t gi = 0; gi < outs.size() && ok; gi++) {
+            tagfile::TagNode &r = outs[gi].second.root();
+            std::string *c = tagfile::ref_path(r, "child hud");
+            if (!c) { ok = false; break; }
+            if (gi + 1 < outs.size()) {
+                std::string next = outs[gi + 1].first.substr(0, outs[gi + 1].first.size() - ext.size());
+                std::replace(next.begin(), next.end(), '/', '\\');
+                *c = next;
+                if (r.fixed.size() >= 4) r.fixed.replace(0, 4, "wphi");   // (the reference's tag group)
+            } else {
+                *c = last_child;
+            }
+        }
+        for (size_t gi = outs.size(); gi-- > 0 && ok;) {   // (the copies first: the HUD then refers to tags that exist)
+            fs::path f = xsrc / from_u8(outs[gi].first);
+            std::error_code ec;
+            fs::create_directories(f.parent_path(), ec);
+            ok = outs[gi].second.save(f);
+            if (ok && gi > 0) made.push_back(outs[gi].first);
+        }
+        if (ok) copies += (int)outs.size() - 1;
     }
-    if (mcc)
-        job.note("[xbox] this map's HUD is laid out for MCC's double-size HUD: halved " + std::to_string(moved) +
-                 " HUD positions and resized " + std::to_string(scaled) + " HUD elements to the Xbox's" +
-                 (centred ? " (" + std::to_string(centred) + " anchored to the screen centre now count from the corner)" : ""));
+    for (auto &m : made) hud_tags.push_back(m);
+    if (tags960)
+        job.note("[xbox] " + std::to_string(tags960) + " of this map's HUDs are laid out for MCC's double-size HUD: halved " +
+                 std::to_string(moved) + " HUD positions and resized " + std::to_string(scaled) + " HUD elements to the Xbox's");
     else if (high_res || scaled)
-        job.note("[xbox] converted " + std::to_string(std::max(high_res, scaled)) + " HUD elements from PC high-res scaling");
+        job.note("[xbox] converted " + std::to_string(std::max(high_res, scaled)) + " HUD elements from high-res scaling "
+                 "(drawn at half size on Halo PC and MCC)");
+    if (anchored || copies)
+        job.note("[xbox] placed " + std::to_string(anchored) + " HUD elements anchored where the Xbox has no anchor (the middle "
+                 "of a screen edge) from the corner or centre beside it" +
+                 (copies ? ", and put the elements of weapon HUDs anchored apart from their HUD into " + std::to_string(copies) +
+                               " copies of those HUDs chained after them, each drawn from its own anchor" : ""));
 }
 
 // The map's own HUD bitmaps at the resolution the Xbox shows them. The Xbox draws its HUD on a 640x480 screen,
@@ -7869,39 +8228,85 @@ void merge_map_globals(Job &job, const fs::path &xsrc) {
                     job.pickup.xbox_count[li] = xc;
                 }
             }
-            // Pickup icons: when the map's icon sheet has more than the Xbox's, use a sheet with both: the Xbox's
-            // own icons and button glyphs first, then the map's extra icons, shrunk to the size the Xbox draws.
+            // Pickup icons: when the map's icon sheet has more than the Xbox's, or other pictures at the numbers the
+            // map's own weapon and grenade HUDs use (a sheet laid out its own way), use a sheet with both: the Xbox's
+            // own icons and button glyphs first, then the map's extra icons, then the map's own pictures for those
+            // numbers (the map's HUDs pointed at them), shrunk to the size the Xbox draws.
             std::string mi = norm_rel(mhv["icon_bitmap"]), xi = norm_rel(xhv["icon_bitmap"]);
             if (!mi.empty() && !xi.empty() && fs::exists(xsrc / from_u8(mi)) && fs::exists(job.overlay / from_u8(xi))) {
-                auto seqs = [&](const fs::path &dir, const std::string &t) {
-                    std::string c;
-                    run_process({u8(tool(cfg, "invader-edit")), "-t", u8(dir), t, "-C", "bitmap_group_sequence"}, c);
-                    return std::atoi(c.c_str());
-                };
-                int mc = seqs(xsrc, mi), xc = seqs(job.overlay, xi);
-                if (mc > xc && xc > 0) {
+                BitmapParts mb, xb;
+                int mc = mb.read(xsrc / from_u8(mi)) ? (int)mb.nseq : 0, xc = xb.read(job.overlay / from_u8(xi)) ? (int)xb.nseq : 0;
+                // The map's own weapon and grenade HUDs (not the Xbox's: those use its sheet) and the icons they show.
+                std::map<std::string, int> huds;   // tag -> its icon number
+                if (mc > 0 && xc > 0)
+                    for (auto &e : fs::recursive_directory_iterator(xsrc)) {
+                        std::string ext = e.path().extension().u8string();
+                        if (ext != ".weapon_hud_interface" && ext != ".grenade_hud_interface") continue;
+                        std::string rel = fs::relative(e.path(), xsrc).generic_u8string();
+                        if (in_overlay(rel)) continue;
+                        tagfile::Tag t;
+                        if (!t.load(e.path())) continue;
+                        long long q = t.root().integer("messaging information sequence index");
+                        if (q >= 0 && q < mc) huds[rel] = (int)q;
+                    }
+                std::vector<int> own;   // the map's numbers below the Xbox's count that show another picture than the Xbox's
+                {
+                    std::set<int> seen;
+                    for (auto &[rel, q] : huds)
+                        if (q < xc && !seen.count(q)) {
+                            seen.insert(q);
+                            if (!same_icon(mb, (uint32_t)q, xb, (uint32_t)q)) own.push_back(q);
+                        }
+                }
+                if (mc > xc || !own.empty()) {
                     bool flagged = false;
                     for (auto k : {"flags.half_hud_scale", "flags.force_hud_use_highres_scale"}) {
                         std::string v;
                         run_process({u8(tool(cfg, "invader-edit")), "-t", u8(xsrc), mi, "-G", k}, v);
                         flagged = flagged || v.rfind("1", 0) == 0;
                     }
-                    int want = (flagged ? 1 : 0) + (mcc_hud_layout(job, !job.user_tags.empty() ? job.user_tags : job.source) ? 1 : 0);
+                    // Halvings to the Xbox's size: its HUD globals' canvas (MCC's 960p doubles everything), and the
+                    // icons' high-res scale (the HUD globals' message placement, or the sheet's own flags).
+                    bool hg_flag = mhv["scaling_flags.use_high_res_scale"] == "1";
+                    int want = hud_960(job, norm_rel(mhg), mcc_hud_layout(job, !job.user_tags.empty() ? job.user_tags : job.source))
+                                   ? 1 + (flagged ? 1 : 0) : (flagged || hg_flag ? 1 : 0);
                     fs::path tmp = job.work / "map_icons.bitmap";
                     std::error_code ec;
                     fs::copy_file(xsrc / from_u8(mi), tmp, fs::copy_options::overwrite_existing, ec);
                     int got = !ec && want ? shrink_hud_bitmap_tag(tmp, want) : 0;
                     std::string merged = xi.substr(0, xi.size() - 7) + "_with_map.bitmap";
+                    std::vector<int> src;
+                    for (int q = xc; q < mc; q++) src.push_back(q);
+                    std::map<int, int> renumber;   // the map's number -> the new sheet's
+                    for (int q : own) {
+                        renumber[q] = xc + (int)src.size();
+                        src.push_back(q);
+                    }
                     if (!ec && got == want && !in_overlay(merged) &&
-                        merge_icon_sheets(job.overlay / from_u8(xi), tmp, (uint32_t)xc, xsrc / from_u8(merged)) &&
+                        merge_icon_sheets_from(job.overlay / from_u8(xi), tmp, src, xsrc / from_u8(merged)) &&
                         job.edit(xhg, "icon_bitmap", merged)) {
-                        what.push_back("its " + std::to_string(mc - xc) + " extra pickup icons (added after the Xbox's own)");
+                        int pointed = 0;
+                        for (auto &[rel, q] : huds) {
+                            auto it = renumber.find(q);
+                            if (it == renumber.end()) continue;
+                            fs::path own_dir = fs::exists(job.fixes / from_u8(rel)) ? job.fixes : xsrc;
+                            tagfile::EditTag t;
+                            if (t.load(own_dir / from_u8(rel)) &&
+                                tagfile::set_num(t.root(), "messaging information sequence index", it->second) &&
+                                t.save(own_dir / from_u8(rel)))
+                                pointed++;
+                        }
+                        if (mc > xc) what.push_back("its " + std::to_string(mc - xc) + " extra pickup icons (added after the Xbox's own)");
+                        if (pointed)
+                            what.push_back("its own pickup icons for " + std::to_string(pointed) + " of its weapons and grenades " +
+                                           "(its icon sheet is laid out its own way: they showed the Xbox's pictures at those numbers)");
                         job.pickup.hud_globals = norm_rel(xhg);
                         job.pickup.sheet = merged;
                         job.pickup.xbox_sheet_tag = xi;
                         job.pickup.xbox_sheet = job.overlay / from_u8(xi);
                         job.pickup.map_sheet = tmp;
                         job.pickup.xbox_seqs = (uint32_t)xc;
+                        job.pickup.src = src;
                     }
                 }
             }
@@ -8079,7 +8484,7 @@ static void trim_pickup_extras(Job &job, const fs::path &xsrc) {
         fs::path sheet = job.owner(px.sheet);
         if ((sheet == job.fixes || sheet == xsrc) && was.read(sheet / from_u8(px.sheet)) && xb.read(px.xbox_sheet)) {
             for (uint32_t i : icons)
-                if (i >= px.xbox_seqs && i < was.nseq) keep.insert(i);
+                if (i >= px.xbox_seqs && i < was.nseq && i - px.xbox_seqs < px.src.size()) keep.insert(i);
             bool done = false;
             uint32_t pixels = was.pp;
             if (keep.empty()) {   // none of the map's: the Xbox's own sheet
@@ -8087,13 +8492,13 @@ static void trim_pickup_extras(Job &job, const fs::path &xsrc) {
                 pixels = xb.pp;
             } else {
                 BitmapParts now;
-                done = merge_icon_sheets(px.xbox_sheet, px.map_sheet, px.xbox_seqs, sheet / from_u8(px.sheet), &keep) &&
+                done = merge_icon_sheets_from(px.xbox_sheet, px.map_sheet, px.src, sheet / from_u8(px.sheet), &keep) &&
                        now.read(sheet / from_u8(px.sheet));
                 if (done) pixels = now.pp;
             }
             if (done) {
                 texture_bytes += was.pp > pixels ? was.pp - pixels : 0;
-                what.push_back(std::to_string(keep.size()) + " of its " + std::to_string(was.nseq - px.xbox_seqs) + " extra pickup icons");
+                what.push_back(std::to_string(keep.size()) + " of its " + std::to_string(px.src.size()) + " pickup icons");
             }
         }
     }
@@ -8104,6 +8509,82 @@ static void trim_pickup_extras(Job &job, const fs::path &xsrc) {
     snprintf(saved, sizeof saved, "%.1f KB less tag memory, %.0f KB less of the map's textures", tag_bytes / 1024.0, texture_bytes / 1024.0);
     job.note("[xbox-mp] kept only the pickup names and icons the map's weapons, items and vehicles still use: " + list + " (" +
              saved + ")");
+}
+
+// With the map's own weapons and player (not the Xbox's own versions), its first-person arms too: the globals'
+// hands (the Xbox's otherwise: merge_map_globals keeps the Xbox's globals). A weapon's first-person animations find
+// the hands' bones by name, and one whose animations miss any of them isn't drawn, so the map's arms are used unless
+// fewer of the map's weapons would be drawn with them than with the Xbox's. After the models are converted (the
+// map's hands are an Xbox model by then).
+static void use_map_first_person_hands(Job &job, const fs::path &xsrc) {
+    const Config &cfg = job.cfg;
+    if (cfg.xbox_use_stock_versions || job.overlay.empty()) return;
+    const std::string g = "globals/globals.globals", key = "first_person_interface[0].first_person_hands";
+    struct Source {   // (the tags as the build will have them: the map's own are the Xbox copies by now)
+        Job &job;
+        fs::path was;
+        ~Source() { job.source = was; }
+    } source{job, job.source};
+    job.source = xsrc;
+    fs::path gdir = job.owner(g);
+    if (gdir.empty() || !fs::exists(xsrc / from_u8(g))) return;
+    auto get = [&](const fs::path &dir) {
+        std::string v;
+        run_process({u8(tool(cfg, "invader-edit")), "-t", u8(dir), g, "-G", key}, v);
+        v = norm_rel(v);
+        if (!v.empty() && fs::path(from_u8(v)).extension().empty()) v += ".model";
+        return v;
+    };
+    std::string mh = get(xsrc), xh = get(gdir);
+    if (mh.empty() || mh == xh || fs::exists(job.overlay / from_u8(mh)) || !fs::exists(xsrc / from_u8(mh))) return;
+    auto bones = [&](const std::string &tag) {
+        std::set<std::string> r;
+        fs::path own = job.owner(tag);
+        tagfile::Tag t;
+        if (own.empty() || !t.load(own / from_u8(tag))) return r;
+        tagfile::Block n = t.root().block("nodes");
+        for (size_t i = 0; i < n.size(); i++) r.insert(n[i].str("name"));
+        return r;
+    };
+    std::set<std::string> mb = bones(mh), xb = xh.empty() ? std::set<std::string>() : bones(xh);
+    if (mb.empty()) return;
+    int with_map = 0, with_xbox = 0, weapons = 0;
+    if (mb != xb) {   // other bones: count the weapons each set of arms works with
+        std::set<std::string> deps;
+        for (const std::string root : {job.scenario + ".scenario", g}) {
+            std::vector<std::string> cmd{u8(tool(cfg, "invader-dependency")), "-r"};
+            for (auto &d : job.dirs()) cmd.insert(cmd.end(), {"-t", u8(d)});
+            cmd.push_back(root);
+            std::string out;
+            run_process(cmd, out);
+            std::istringstream ss(out);
+            std::string l;
+            while (std::getline(ss, l)) deps.insert(norm_rel(l));
+        }
+        for (auto &dep : deps) {
+            if (fs::path(from_u8(dep)).extension() != ".weapon") continue;
+            fs::path own = job.owner(dep);
+            tagfile::Tag t;
+            if (own.empty() || !t.load(own / from_u8(dep))) continue;
+            std::string anim = t.root().ref("first person animations");
+            if (anim.empty()) continue;
+            std::set<std::string> nodes = bones(anim);
+            if (nodes.empty()) continue;
+            weapons++;
+            with_map += std::includes(nodes.begin(), nodes.end(), mb.begin(), mb.end());
+            with_xbox += !xb.empty() && std::includes(nodes.begin(), nodes.end(), xb.begin(), xb.end());
+        }
+        if (with_map < with_xbox) {
+            job.note("[xbox-mp] kept the Xbox's first-person arms: the map's (" + mh + ") have other bones, and only " +
+                     std::to_string(with_map) + " of the " + std::to_string(weapons) + " weapons' first-person animations "
+                     "move them (" + std::to_string(with_xbox) + " move the Xbox's)");
+            return;
+        }
+    }
+    if (!job.edit(g, key, mh)) return;
+    std::string why = mb == xb ? "" : " (" + std::to_string(with_map) + " of its " + std::to_string(weapons) +
+                                          " weapons' first-person animations move them)";
+    job.note("[xbox-mp] using the map's own first-person arms (" + mh + ") with its own weapons and player" + why);
 }
 
 bool prepare_for_xbox(Job &job, std::string &err) {
@@ -8174,6 +8655,7 @@ bool prepare_for_xbox(Job &job, std::string &err) {
         return false;
     }
     if (gbx) job.note("[xbox] converted " + std::to_string(gbx) + " Gearbox models to Xbox models");
+    use_map_first_person_hands(job, xsrc);
 
     // The map's own HUDs (PC high-res scaling, MCC's double-size layout) and Ogg sounds (Xbox can't play them)
     int sounds = 0;
@@ -9694,6 +10176,9 @@ fs::path resource_maps_for(Job &job, const fs::path &input, Game in_game, const 
 
 } // namespace
 
+// For tests (cli_test icons): icon_sheet_matches.
+std::string compare_icon_sheets(const fs::path &a, const fs::path &b) { return icon_sheet_matches(a, b); }
+
 int scripts_use_cheat_powerups(const std::string &script_text, int script_count) {
     return cheat_powerup_use(script_text, script_count);
 }
@@ -9861,6 +10346,7 @@ static Result convert_map_impl(const Config &cfg, const fs::path &input, Game in
     Job job(cfg, log, out_game);
     job.from = in_game;
     job.analysis = an;
+    if (in_game == Game::MCC && out_game == Game::Xbox && !an) read_hud_canvases(job, input);
     job.measure = measure;
     fresh_work(job, an ? "analyze" : cfg.level_shaders_only ? "shaders" : "convert");
     std::error_code ec;

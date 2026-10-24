@@ -19,6 +19,7 @@ ROOTS = {   # tag extension -> root struct
     'damage_effect': 'DamageEffect', 'lens_flare': 'LensFlare', 'material_effects': 'MaterialEffects',
     'point_physics': 'PointPhysics', 'unicode_string_list': 'UnicodeStringList',
     'weapon_hud_interface': 'WeaponHUDInterface', 'grenade_hud_interface': 'GrenadeHUDInterface', 'hud_globals': 'HUDGlobals',
+    'unit_hud_interface': 'UnitHUDInterface',
 }
 
 types = {}

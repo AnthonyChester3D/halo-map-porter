@@ -527,8 +527,8 @@ Levels of detail (LODs)
     scenery and devices    the line three in four of Bungie's are under:
                            a crate about 750, a big tree about 1,500
   The LODs window shows each model's ("1.5x Bungie").
-  First-person arms always come from the Xbox's own globals, so a map's
-  custom arms never reach the Xbox.
+  First-person arms (the map's own with "Use the Xbox's own weapons,
+  vehicles and player model" unticked, see below) are left as made.
 
   Collision ("Heavy models", Xbox tab)
   Bungie's own first. Most custom vehicles, and the wrecks made from
@@ -1190,14 +1190,26 @@ Custom weapons, vehicles and player model
   map's content: its grenades (e.g. custom grenade types), its weapon list
   (what the gametype weapon options use) and its multiplayer player model,
   whose weapons are the ones players spawn with, plus its own fall damage
-  and player tuning. The rest of the globals (menus, fonts, multiplayer
-  sounds) stay the Xbox's. Either way, if the map has longer weapon and
+  and player tuning, and its first-person arms. (Each weapon's first-person
+  animations find the arms' bones by name, and a weapon whose animations
+  miss one isn't drawn: the map's arms are used unless fewer of the map's
+  weapons would be drawn with them than with the Xbox's. CMT's arms have
+  the Xbox's bones; they take about 0.1 MB more of the Xbox's memory.)
+  The rest of the globals (menus, fonts, multiplayer sounds) stay the
+  Xbox's. Either way, if the map has longer weapon and
   vehicle name lists than the Xbox (its custom weapons' pickup names, its
   vehicles' names), the Xbox uses the map's lists.
   Pickup icons: if the map's icon sheet has more icons than the Xbox's,
-  the map gets a sheet with both: the Xbox's own icons and controller
-  button glyphs first, unchanged, then the map's extra icons (its custom
-  weapons'), shrunk to the size the Xbox draws them.
+  or its own weapons' and grenades' HUDs show other pictures than the
+  Xbox's at the icon numbers they use (a sheet laid out its own way, like
+  CMT's: its pistol is number 4, the Xbox's sniper rifle), the map gets a
+  sheet with both: the Xbox's own icons and controller button glyphs
+  first, unchanged, then the map's extra icons (its custom weapons'), then
+  the map's own pictures for those numbers, with its HUDs pointed at them.
+  The pictures are compared, so a sheet that only adds to the stock one
+  (Custom Edition's) keeps using the Xbox's. They're shrunk to the size the
+  Xbox draws them (half, for icons the map's HUD globals draw at "high
+  res scale").
   Once the map's weapons, items and vehicles are settled (the Xbox's own
   versions, your replacements, vehicles left out), those extras keep only
   what's still used: a weapon's or item's pickup name (and a weapon's
@@ -1208,9 +1220,9 @@ Custom weapons, vehicles and player model
   own (the pixels exactly as they were), and with none kept the Xbox's
   own sheet stays as it is. The Xbox's own names and icons all stay.
   Precipice, with the Xbox's own weapons: 2 of its 92 extra pickup names
-  (the beam cannon's) and none of its 16 extra icons, 6.4 KB of tag
-  memory and 160 KB of textures less; with its own weapons, 1 icon kept,
-  on a 256x64 texture instead of two 256x256 ones. The same goes for the
+  (the beam cannon's) and 2 of its 24 icons, 6.4 KB of tag memory and
+  144 KB of textures less; with its own weapons, the icons they use, on
+  one 256x256 texture instead of two 512x512 ones. The same goes for the
   pictures of nav point arrows added from the map ("Nav points" above): only
   those its arrows use. Everything else a replaced or removed weapon or
   vehicle brought (its model, animations, sounds, effects) is left out
@@ -1225,27 +1237,46 @@ Sounds
   for the Xbox to load at once.
 
 HUDs from MCC maps
-  MCC draws the HUD on a canvas twice the Xbox's size: its HUD tags place
-  everything at double the Xbox's positions, and its HUD bitmaps are drawn
-  at half size ("half hud scale"). The Xbox ignores that flag, so MCC HUDs
-  used to come out twice as big. The app now halves the map's own HUDs'
-  positions and sizes (and halves again elements whose bitmaps MCC draws
-  at half size), and places elements MCC anchors to the screen centre
-  (scopes) from the HUD's corner instead. It tells an MCC HUD from a
-  Custom Edition one by comparing the stock assault rifle HUD with the
-  Xbox's. The textures themselves are then fitted (see HUD textures).
+  Each MCC HUD tag has a canvas size, read from the map itself (extracted
+  tags lose it). On "960p" (343's own HUD tags) everything is placed at
+  double the Xbox's positions and drawn at half size ("half hud scale" on
+  its bitmaps halves it again), so the app halves the positions and sizes.
+  On "480p" (most mods' HUDs, CMT's included) the positions are the Xbox's
+  already, and as on Halo PC an element with "use high res scale" (or
+  drawing a bitmap with "half hud scale") is drawn at half size, so only
+  those elements are halved. (Without the map, e.g. from your own tags,
+  an MCC HUD is told from a Custom Edition one by comparing the stock
+  assault rifle HUD with the Xbox's.)
+  MCC also anchors HUDs to the middle of a screen edge (top centre,
+  bottom centre, left centre, right centre), which the Xbox doesn't have:
+  an anchor it doesn't know draws from the screen's centre with its size
+  unset, so the element lands in the middle or not at all (CMT's shield
+  and health bar). Those elements are drawn from the corner (or centre)
+  beside the anchor, their offsets moved so they land where MCC puts them
+  on a full screen: top centre and bottom centre from the left corners
+  (still right on a two-player split screen, which is as wide), left and
+  right centre from the centre. And MCC lets each element of a weapon HUD
+  have its own anchor (CMT's visor: pieces along the top and bottom of the
+  screen, in a HUD anchored to the centre), where the Xbox draws a whole
+  HUD from one: the elements anchored apart go into copies of the HUD, one
+  per anchor (e.g. visor_bottom_left), chained after it as its child HUDs.
+  The Xbox draws the whole chain, each from its own corner, so they stay
+  at their edges on a split screen too.
+  Ammo and grenade counts use the Xbox's own digits (as do its own HUDs),
+  at the Xbox's size: smaller than MCC draws a map's own digits.
+  The textures themselves are then fitted (see HUD textures).
 
 HUD textures
   The Xbox draws the HUD on a 640x480 screen, one texel to a pixel at
   scale 1. HUDs made for big screens draw big textures at a fraction of
-  that: an MCC tagset like CMT's draws its 512x512 sheets at a quarter,
-  so 15 of every 16 texels never reach the screen, and with no mipmaps
-  the thin lines that do break up into dashes. For every bitmap of the
+  that: an MCC tagset like CMT's draws its 512x512 sheets at half, so 3
+  of every 4 texels never reach the screen, and with no mipmaps the thin
+  lines that do break up into dashes. For every bitmap of the
   map's own that only HUD elements draw, the app halves the texture while
   every element still draws it at no more than a texel to a pixel, and
   doubles those elements' scales: the same size on screen, the lines
   whole again, and a quarter of the memory per halving. (Precipice with
-  CMT's weapons: 23 HUD bitmaps, 12.6 MB of textures down to 1.4 MB.)
+  CMT's weapons: 14 HUD bitmaps, 9.5 MB of textures down to 2.4 MB.)
   Bitmaps a HUD also uses some other way (a multitexture overlay's map),
   or that anything besides HUDs uses, are left alone.
   Scope masks (a weapon HUD's screen effect mask: the dark surround of a

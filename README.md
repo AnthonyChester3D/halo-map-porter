@@ -17,13 +17,14 @@ the free, open-source Halo map compiler, and it can download Invader for you.
 - **Xbox output.**
   - It swaps the map's copies of stock weapons, vehicles and the player for the Xbox originals.
   - It gives PC-only weapons Xbox stand-ins, or keeps them with PC animations.
-  - It converts Gearbox models, HUDs and sounds, and flattens layered shaders the Xbox can't draw.
+  - It converts Gearbox models, HUDs (MCC's layouts and edge anchors too) and sounds, and flattens layered shaders the
+    Xbox can't draw.
 - **Fitting the Xbox.** It works within the Xbox's limits: the 47 MB map file, the 22 MB of tag memory, and a
   texture memory target (22 / 20 / 18 MB) that the auto-shrinker halves your own textures to meet. Before halving
   anything it packs your bump maps the way Bungie's Xbox maps store theirs (P8, or DXT1 for steep ones: a quarter to an
   eighth of the memory at full size). HUD textures
   made for big screens come down to the resolution the Xbox draws them at (the same size on screen, often a
-  sixteenth of the memory), and scope masks are scaled so they frame the Xbox's screen as made.
+  quarter of the memory or less), and scope masks are scaled so they frame the Xbox's screen as made.
 - **Speed on the Xbox.** It trims the most detailed version of very dense custom models (a 15,000-triangle beam
   cannon) so they look the same with far fewer triangles, or down to 1.5x what Bungie's own models of their kind and
   size have (measured on every stock model: the beam cannon 15,327 > 1,729, in first person 3,258), lists every model
