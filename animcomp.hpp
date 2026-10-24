@@ -52,8 +52,12 @@ std::vector<double> levers(const Clip &c, const std::vector<int> &parent, double
 // 0.0001 world units of its frames (the 6-byte rotations themselves round to about that), and no bone end (world_error)
 // more than 0.0003 units further off than the rounding alone puts it; 2: 0.2 degrees / 0.0004, 0.002 units. Tighter
 // tolerances are tried before an animation is left as it is, as it also is if it would come out no smaller.
+// Overlays are never compressed, and compressed ones whose frames are still in the tag get them back (at any level):
+// the engine plays an overlay by a value (a vehicle's velocity, steering and suspension, a rider's acceleration)
+// blending compressed rotations only at whole frames, so they'd snap from frame to frame.
 struct GraphResult {
     int animations = 0, compressed = 0;   // uncompressed animations before; compressed now
+    int overlays_restored = 0;            // compressed overlays given back their frames (any level, 0 too)
     size_t before = 0, after = 0;         // their data in a map (frame info, default data, frames / the compressed data)
     double worst = 0;                     // the largest world_error of those compressed
 };

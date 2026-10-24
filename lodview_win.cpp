@@ -25,14 +25,17 @@ namespace {
 enum { IDC_INTRO = 400, IDC_FILTER_LBL, IDC_FILTER, IDC_LIST, IDC_VIEW, IDC_LEVEL0, IDC_LEVEL4 = IDC_LEVEL0 + 4, IDC_WIRE,
        IDC_ASMADE, IDC_ABOUT, IDC_LIBRARY, IDC_CLOSE, IDC_SHOW_MODEL, IDC_SHOW_COLL, IDC_SHOW_COLL_MADE, IDC_GROUP,
        IDC_LODS_LBL, IDC_LODS, IDC_MED_LBL, IDC_MED, IDC_LOW_LBL, IDC_LOW, IDC_TRIS_LBL, IDC_TOP_LBL, IDC_TOP, IDC_TOPN,
-       IDC_TOPN_LBL, IDC_STATUS, IDC_AGAIN };
+       IDC_TOPN_LBL, IDC_STATUS, IDC_AGAIN, IDC_REDO };
 
 const UINT WM_UPDATED = WM_APP + 41;   // (the update's thread: done; lParam a Result*)
+const UINT WM_REDONE = WM_APP + 42;    // ("Make it again"'s thread: done; lParam a Result*)
 
 struct State {
     HWND wnd = nullptr, list = nullptr, view = nullptr, tips = nullptr;
     fs::path file;                // the LodView shown
     std::function<Result()> update;   // "Update the map" (runs on a thread of its own)
+    std::function<Result(const std::string &)> redo;   // "Make it again" (the same)
+    bool built = true;            // the map has been built (else "Build the map")
     bool updating = false;
     int dpi = 96;
     HFONT font = nullptr, bold = nullptr;
@@ -176,6 +179,7 @@ void enable_choice() {
     for (int id : {IDC_TOP_LBL, IDC_TOP}) EnableWindow(item(id), top);
     EnableWindow(item(IDC_TOPN), top && ti == 2);
     EnableWindow(item(IDC_TOPN_LBL), top);
+    EnableWindow(item(IDC_REDO), m && (bool)St->redo && !St->updating && (lods || top));
 }
 
 // The shown model's choice into the controls.
@@ -221,7 +225,9 @@ void save_choice() {
         std::wstring t = choice_short(m);
         ListView_SetItemText(St->list, r, 6, (LPWSTR)t.c_str());
     }
-    std::wstring t = L"Saved for " + W(m.name) + L". \"Update the map\" puts it in the map (a few seconds).";
+    std::wstring t = L"Saved for " + W(m.name) + L". " +
+                     (St->redo ? L"\"Make it again\" shows it now; " : L"") + L"\"" + (St->built ? L"Update" : L"Build") +
+                     L" the map\" puts it in the map.";
     int top = triangles(m.level[0]);
     if (m.trimmed_from > 0) top = m.trimmed_from;
     if (c.lods == 'm' && m.had_lods) t = L"Saved, but " + W(m.name) + L" has lower-detail versions of its own: the app keeps them.";
@@ -410,7 +416,7 @@ void enable_all(bool on) {
     for (int id : {IDC_LIST, IDC_FILTER, IDC_AGAIN, IDC_CLOSE, IDC_LIBRARY}) EnableWindow(item(id), on);
     if (on) enable_choice();
     else
-        for (int id : {IDC_LODS, IDC_MED, IDC_LOW, IDC_TOP, IDC_TOPN}) EnableWindow(item(id), FALSE);
+        for (int id : {IDC_LODS, IDC_MED, IDC_LOW, IDC_TOP, IDC_TOPN, IDC_REDO}) EnableWindow(item(id), FALSE);
 }
 
 // "Update the map": the choices saved, then the map's models done again and the map built again (core.hpp
@@ -421,13 +427,29 @@ void start_update() {
     if (!St->update) return;
     St->updating = true;
     enable_all(false);
-    status(L"Updating the map: the models' levels of detail and trims, then the build (a few seconds)...");
+    status(St->built ? L"Updating the map: the models' levels of detail and trims, then the build..."
+                     : L"Building the map: the models' levels of detail and trims, then the build...");
     HWND wnd = St->wnd;
     std::function<Result()> fn = St->update;
     std::thread([wnd, fn] {
         Result *r = new Result(fn());
         if (!PostMessageW(wnd, WM_UPDATED, 0, (LPARAM)r)) delete r;
     }).detach();
+}
+
+// The list again, from the window's file (or `file`), the same model shown.
+void reload(const fs::path &file) {
+    std::string shown = St->model >= 0 ? St->v.models[St->model].tag : std::string();
+    LodView v;
+    if (!load_lod_view(v, file.empty() ? St->file : file)) return;
+    select_model(-1);   // (nothing drawn from the old one)
+    St->v = std::move(v);
+    int keep = -1;
+    for (size_t i = 0; i < St->v.models.size(); i++)
+        if (St->v.models[i].tag == shown) keep = (int)i;
+    St->model = keep;
+    fill_list();
+    if (keep >= 0) select_model(keep);
 }
 
 void finish_update(Result *res) {
@@ -444,22 +466,50 @@ void finish_update(Result *res) {
         status(L"Not updated: " + e);
         return;
     }
-    // the list again, from the update's file, the same model shown
-    std::string shown = St->model >= 0 ? St->v.models[St->model].tag : std::string();
-    LodView v;
-    if (load_lod_view(v, r->lods.empty() ? St->file : r->lods)) {
-        select_model(-1);   // (nothing drawn from the old one)
-        St->v = std::move(v);
-        int keep = -1;
-        for (size_t i = 0; i < St->v.models.size(); i++)
-            if (St->v.models[i].tag == shown) keep = (int)i;
-        St->model = keep;
-        fill_list();
-        if (keep >= 0) select_model(keep);
-    }
-    std::wstring t = r->ok ? L"Updated the map" : L"The map didn't build: " + W(r->error);
+    reload(r->lods);
+    std::wstring t = r->ok ? (St->built ? L"Updated the map" : L"Built the map") : L"The map didn't build: " + W(r->error);
+    if (r->ok) St->built = true;
+    SetWindowTextW(item(IDC_AGAIN), St->built ? L"Update the map" : L"Build the map");
     if (r->ok && !r->memory.empty()) t += L" (" + W(r->memory) + L")";
     status(t + L".");
+}
+
+// "Make it again": the shown model's choice saved, then that model alone done again on the conversion's tags (core.hpp
+// redo_model_lods) on a thread, and its levels drawn again. The map isn't built.
+void start_redo() {
+    if (St->updating || St->model < 0 || !St->redo) return;
+    save_choice();
+    St->updating = true;
+    enable_all(false);
+    const LodView::Model &m = St->v.models[St->model];
+    status(L"Making " + W(m.name) + L" again with its choice...");
+    HWND wnd = St->wnd;
+    std::function<Result(const std::string &)> fn = St->redo;
+    std::string tag = m.tag;
+    std::thread([wnd, fn, tag] {
+        Result *r = new Result(fn(tag));
+        if (!PostMessageW(wnd, WM_REDONE, 0, (LPARAM)r)) delete r;
+    }).detach();
+}
+
+void finish_redo(Result *res) {
+    std::unique_ptr<Result> r(res);
+    St->updating = false;
+    enable_all(true);
+    if (!r->ok) {
+        std::wstring e = W(r->error);
+        if (e.find(L"convert the map again") != std::wstring::npos &&
+            MessageBoxW(St->wnd, (e + L"\n\nConvert it again now?").c_str(), L"Halo Map Porter", MB_YESNO | MB_ICONQUESTION) == IDYES) {
+            close_window(true);
+            return;
+        }
+        status(L"Not made again: " + e);
+        return;
+    }
+    std::string name = St->model >= 0 ? St->v.models[St->model].name : std::string();
+    reload(r->lods);
+    status(L"Made " + W(name) + L" again: its levels above. Not in the map yet: \"" + (St->built ? L"Update" : L"Build") +
+           L" the map\" puts every model's choice in it.");
 }
 
 LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
@@ -560,6 +610,9 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case IDC_AGAIN:
             start_update();
             return 0;
+        case IDC_REDO:
+            start_redo();
+            return 0;
         case IDC_CLOSE:
         case IDCANCEL:
             close_window(false);
@@ -572,6 +625,9 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_UPDATED:
         finish_update((Result *)lp);
+        return 0;
+    case WM_REDONE:
+        finish_redo((Result *)lp);
         return 0;
     }
     return DefWindowProcW(h, msg, wp, lp);
@@ -659,12 +715,16 @@ void create_controls() {
     for (int id : {IDC_MED, IDC_LOW}) SendMessageW(item(id), EM_SETCUEBANNER, TRUE, (LPARAM)L"auto");
 
     add(L"BUTTON", L"Open the LOD library folder", WS_TABSTOP, 16, 650, 220, 30, IDC_LIBRARY);
-    add(L"STATIC", L"", SS_NOPREFIX, 248, 650, 630, 34, IDC_STATUS);
-    add(L"BUTTON", L"Update the map", WS_TABSTOP, 888, 650, 150, 30, IDC_AGAIN);
+    add(L"STATIC", L"", SS_NOPREFIX, 248, 650, 470, 34, IDC_STATUS);
+    add(L"BUTTON", L"Make it again", WS_TABSTOP, 728, 650, 150, 30, IDC_REDO);
+    add(L"BUTTON", St->built ? L"Update the map" : L"Build the map", WS_TABSTOP, 888, 650, 150, 30, IDC_AGAIN);
+    if (!St->redo) ShowWindow(item(IDC_REDO), SW_HIDE);
     add(L"BUTTON", L"Close", WS_TABSTOP | BS_DEFPUSHBUTTON, 1048, 650, 116, 30, IDC_CLOSE);
     for (int i = 0; i < 5; i++) ShowWindow(item(IDC_LEVEL0 + i), SW_HIDE);
     EnableWindow(item(IDC_ASMADE), FALSE);
     if (St->library.empty()) status(L"Set the LOD library folder on the Settings tab to keep choices for models.");
+    else if (!St->built)
+        status(L"Prepared: the map isn't built yet. Choose what each model gets, \"Make it again\" to see it, then \"Build the map\".");
 
     St->tips = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT,
                                CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, St->wnd, nullptr, GetModuleHandleW(nullptr), nullptr);
@@ -680,18 +740,24 @@ void create_controls() {
                  L"that many triangles, whatever the Xbox tab says (the shape may move up to 5% of the model's size to get "
                  L"there). It starts at 1.5x what Bungie's models of its kind and size have.\n\nKept in choices.txt in the "
                  L"LOD library, for every map that uses the model.");
-    tip(IDC_AGAIN, L"Puts your choices in the map you have: its models' levels of detail and trims are done again on the "
-                   L"tags the conversion prepared, and the map is built again (a few seconds; the rest of the map stays "
-                   L"as converted). The list then shows the map as updated.");
+    tip(IDC_AGAIN, L"Puts your choices in the map: its models' levels of detail and trims are done again on the tags the "
+                   L"conversion prepared, and the map is built (the rest of the map stays as converted). The list then shows "
+                   L"the map as built.");
+    tip(IDC_REDO, L"Makes the model shown again with its choice above (its lower-detail versions and trim, from the model as "
+                  L"the map made it), and shows its levels here: a moment, without building the map. Try triangle counts "
+                  L"until it looks right, then \"Update the map\" (or \"Build the map\") puts every model's choice in the map.");
 }
 
 }   // namespace
 
 bool show(HWND owner, const std::filesystem::path &file, const std::filesystem::path &library,
-          const std::function<porter::Result()> &update) {
+          const std::function<porter::Result()> &update, const std::function<porter::Result(const std::string &)> &redo,
+          bool built) {
     State st;
     st.file = file;
     st.update = update;
+    st.redo = redo;
+    st.built = built;
     if (!load_lod_view(st.v, file)) {
         MessageBoxW(owner, L"The levels of detail of that conversion can't be shown (the file is missing or from another "
                            L"version of the app).", L"Halo Map Porter", MB_ICONINFORMATION);

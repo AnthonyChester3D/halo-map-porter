@@ -340,6 +340,9 @@ struct Job {
     std::set<fs::path> model_created;   // (copies xbox_lods made in fixes: taken out again rather than restored)
     bool update = false;
     bool optimize = false;   // update: the conversion built with Invader's --optimize
+    std::string only_model;  // xbox_lods: this model alone (the LODs window's "Make again")
+    bool had_picks = false;  // update: the conversion used weapons & vehicles picks
+    bool textures_fitted = false;   // the texture memory target was tried (once is enough: "Update the map" keeps it)
     struct CollisionChange {   // a model whose collision changed, for that window too
         std::string model, name, text;   // its model (tag), the object it's for, how it changed
         char kind = 's';
@@ -1081,7 +1084,7 @@ std::string tag_path_noext(const fs::path &rel) {
 }
 
 bool prepare_for_xbox(Job &job, std::string &err);
-size_t shrink_textures_to_fit(Job &job, size_t needed, int &count);
+size_t shrink_textures_to_fit(Job &job, size_t needed, int &count, bool hard = true);
 void restrict_to_xbox_mp(Job &job, const fs::path &xsrc);
 bool drop_kept_vehicles(Job &job);
 void use_stock_versions(Job &job, const fs::path &xsrc);
@@ -1511,6 +1514,141 @@ void place_kept_level_tags(Job &job) {
 
 int untyped_script_nodes(const Job &job, const fs::path &map);
 
+// What "Update the map" (and the LODs window's "Make again", and the weapons & vehicles window measuring the
+// prepared tags) need, kept with the work folder: the tag folders, the scenario and output, what xbox_lods was given,
+// and the models it changed as they were (each in originals/).
+static void save_update(Job &job, const fs::path &output, const fs::path &lods, bool share, bool optimized) {
+    std::error_code ec;
+    fs::path dir = job.work / "originals";
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+    std::ostringstream f;
+    f << "HaloMapPorter update 1\n";
+    auto line = [&](const char *k, const std::string &v) { f << k << "\t" << v << "\n"; };
+    line("work", u8(job.work));
+    line("fixes", u8(job.fixes));
+    line("overlay", u8(job.overlay));
+    line("source", u8(job.source));
+    line("user_tags", u8(job.user_tags));
+    line("scenario", job.scenario);
+    line("output", u8(output));
+    line("lods", u8(lods));
+    line("share", share ? "1" : "0");
+    line("optimized", optimized ? "1" : "0");
+    line("from", std::to_string((int)job.from));
+    line("picks", (job.update ? job.had_picks : !job.cfg.xbox_replace.empty()) ? "1" : "0");
+    line("textures_fitted", job.textures_fitted ? "1" : "0");
+    for (auto &a : job.extra) line("extra", a);
+    for (auto &d : job.lod_deps) line("dep", d);
+    int n = 0;
+    for (auto &[file, bytes] : job.model_originals) {
+        std::string blob = std::to_string(n++) + ".bin";
+        std::ofstream(dir / blob, std::ios::binary) << bytes;
+        f << "orig\t" << u8(file) << "\t" << blob << "\n";
+    }
+    for (auto &file : job.model_created) line("made", u8(file));
+    f << "end\n";
+    std::ofstream(job.work / "update.txt", std::ios::binary | std::ios::trunc) << f.str();
+}
+
+// A conversion's update.txt (save_update) read into `job` (job.update set). False (`err`) when it, or the tags it
+// names, are gone (another conversion or build since).
+struct UpdateFile { std::string scenario; fs::path output, lods; bool share = false, picks = false; };
+static bool load_update(Job &job, const fs::path &file, UpdateFile &u, std::string &err) {
+    const char *gone = "The tags the conversion prepared are gone (another conversion or build since): convert the map again.";
+    std::ifstream f(file, std::ios::binary);
+    std::string l;
+    if (!std::getline(f, l) || (l != "HaloMapPorter update 1" && l != "HaloMapPorter update 1\r")) { err = gone; return false; }
+    job.update = true;
+    bool end = false;
+    while (std::getline(f, l)) {
+        if (!l.empty() && l.back() == '\r') l.pop_back();
+        if (l == "end") { end = true; break; }
+        size_t t = l.find('\t');
+        if (t == std::string::npos) continue;
+        std::string k = l.substr(0, t), v = l.substr(t + 1);
+        if (k == "work") job.work = from_u8(v);
+        else if (k == "fixes") job.fixes = from_u8(v);
+        else if (k == "overlay") job.overlay = from_u8(v);
+        else if (k == "source") job.source = from_u8(v);
+        else if (k == "user_tags") job.user_tags = from_u8(v);
+        else if (k == "scenario") u.scenario = v;
+        else if (k == "output") u.output = from_u8(v);
+        else if (k == "lods") u.lods = from_u8(v);
+        else if (k == "share") u.share = v == "1";
+        else if (k == "optimized") job.optimize = v == "1";
+        else if (k == "from") job.from = (Game)std::atoi(v.c_str());
+        else if (k == "picks") u.picks = job.had_picks = v == "1";
+        else if (k == "textures_fitted") job.textures_fitted = v == "1";
+        else if (k == "extra") job.extra.push_back(v);
+        else if (k == "dep") job.lod_deps.push_back(v);
+        else if (k == "made") job.model_created.insert(from_u8(v));
+        else if (k == "orig") {
+            size_t t2 = v.find('\t');
+            if (t2 == std::string::npos) { err = gone; return false; }
+            std::ifstream b(job.work / "originals" / from_u8(v.substr(t2 + 1)), std::ios::binary);
+            if (!b) { err = gone; return false; }
+            job.model_originals[from_u8(v.substr(0, t2))] =
+                std::string((std::istreambuf_iterator<char>(b)), std::istreambuf_iterator<char>());
+        }
+    }
+    if (!end || u.scenario.empty() || u.output.empty() || !fs::exists(job.fixes) || !fs::exists(job.source) ||
+        !fs::exists(job.source / from_u8(u.scenario + ".scenario")) || (!job.overlay.empty() && !fs::exists(job.overlay))) {
+        err = gone;
+        return false;
+    }
+    for (auto &[p, b] : job.model_originals)
+        if (!fs::exists(p.parent_path())) { err = gone; return false; }
+    job.scenario = u.scenario;
+    return true;
+}
+
+// A LodView's drawings kept only where a model refers to them (renumbered), so one drawn again doesn't keep the old.
+static void compact_lod_view(LodView &v) {
+    std::map<int, int> keep;
+    auto use = [&](int &i) {
+        if (i < 0 || i >= (int)v.previews.size()) { i = -1; return; }
+        auto it = keep.find(i);
+        if (it == keep.end()) it = keep.emplace(i, (int)keep.size()).first;
+        i = it->second;
+    };
+    for (auto &m : v.models) {
+        for (int &k : m.level) use(k);
+        use(m.as_made);
+        use(m.coll_made);
+        use(m.coll_now);
+    }
+    std::vector<ModelPreview> p(keep.size());
+    for (auto &[from, to] : keep) p[(size_t)to] = std::move(v.previews[(size_t)from]);
+    v.previews = std::move(p);
+}
+
+// A model's collision as the window had it (its text and drawings: they come from the conversion, which "Update the
+// map" and "Make again" don't redo), carried into `now` from `before`.
+static void keep_collision(LodView &now, const LodView &before) {
+    for (auto &b : before.models) {
+        if (b.collision.empty()) continue;
+        auto it = std::find_if(now.models.begin(), now.models.end(), [&](const LodView::Model &m) { return m.tag == b.tag; });
+        if (it == now.models.end()) {
+            LodView::Model m = b;
+            for (int &k : m.level) k = -1;
+            m.as_made = -1;
+            now.models.push_back(m);
+            it = now.models.end() - 1;
+        }
+        it->collision = b.collision;
+        it->coll_made = it->coll_now = -1;
+        if (b.coll_made >= 0 && b.coll_made < (int)before.previews.size()) {
+            it->coll_made = (int)now.previews.size();
+            now.previews.push_back(before.previews[(size_t)b.coll_made]);
+        }
+        if (b.coll_now >= 0 && b.coll_now < (int)before.previews.size()) {
+            it->coll_now = (int)now.previews.size();
+            now.previews.push_back(before.previews[(size_t)b.coll_now]);
+        }
+    }
+}
+
 Result run_build(Job &job, const std::string &scenario, const fs::path &output, bool share) {
     job.scenario = scenario;
     Result r;
@@ -1561,9 +1699,12 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
     // The models whose levels of detail changed, for the LODs window (drawn now, while the made versions are in).
     LodView lod_view;
     fs::path lod_file;
-    if (job.target == Game::Xbox && !job.analysis && (!job.lod_changes.empty() || !job.collision_changes.empty())) {
+    if (job.target == Game::Xbox && !job.analysis &&
+        (!job.lod_changes.empty() || !job.collision_changes.empty() || cfg.xbox_prepare_only)) {
         lod_view = make_lod_view(job, output.stem().u8string());
         lod_file = job.cfg.cache_dir / "lods" / (output.stem().u8string() + ".txt");
+        LodView before;
+        if (job.update && load_lod_view(before, lod_file)) keep_collision(lod_view, before);   // (not redone)
         if (save_lod_view(lod_view, lod_file)) r.lods = lod_file;
     }
 
@@ -1578,37 +1719,16 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
         const bool &optimized;
         ~KeepUpdate() {
             if (job.target != Game::Xbox || job.analysis || job.lod_deps.empty() || job.cfg.level_shaders_only) return;
-            std::error_code ec;
-            fs::path dir = job.work / "originals";
-            fs::remove_all(dir, ec);
-            fs::create_directories(dir, ec);
-            std::ostringstream f;
-            f << "HaloMapPorter update 1\n";
-            auto line = [&](const char *k, const std::string &v) { f << k << "\t" << v << "\n"; };
-            line("work", u8(job.work));
-            line("fixes", u8(job.fixes));
-            line("overlay", u8(job.overlay));
-            line("source", u8(job.source));
-            line("user_tags", u8(job.user_tags));
-            line("scenario", job.scenario);
-            line("output", u8(output));
-            line("lods", u8(lods));
-            line("share", share ? "1" : "0");
-            line("optimized", optimized ? "1" : "0");
-            line("from", std::to_string((int)job.from));
-            for (auto &a : job.extra) line("extra", a);
-            for (auto &d : job.lod_deps) line("dep", d);
-            int n = 0;
-            for (auto &[file, bytes] : job.model_originals) {
-                std::string blob = std::to_string(n++) + ".bin";
-                std::ofstream(dir / blob, std::ios::binary) << bytes;
-                f << "orig\t" << u8(file) << "\t" << blob << "\n";
-            }
-            for (auto &file : job.model_created) line("made", u8(file));
-            f << "end\n";
-            std::ofstream(job.work / "update.txt", std::ios::binary | std::ios::trunc) << f.str();
+            save_update(job, output, lods, share, optimized);
         }
     } keep_update{job, output, lod_file, share, optimized};
+    if (job.target == Game::Xbox && !job.analysis && !job.lod_deps.empty() && !cfg.level_shaders_only)
+        r.update = job.work / "update.txt";
+    if (cfg.xbox_prepare_only && job.target == Game::Xbox && !job.analysis) {   // (as far as the LODs window)
+        job.log("Prepared for the LODs window: the map isn't built yet (the window's \"Build the map\" builds it).");
+        r.ok = true;
+        return r;
+    }
     auto make_cmd = [&] {
         std::vector<std::string> cmd{u8(tool(cfg, "invader-build")), "-g", game_engine(job.target), "-H"};
         if (optimized) cmd.push_back("-O");
@@ -1795,12 +1915,14 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
                     else snprintf(buf, sizeof buf, "; target %.0f MB (the map leaves less than 1 MB of tag memory free)", target);
                     r.memory += buf;
                 }
+                // (the conversion's own build tried already: "Update the map" keeps its textures as they are, rather
+                // than halving them again each time it's used)
                 if (target > 0 && use.texture_mb > budget + 0.05) {
-                    if (cfg.xbox_shrink && texture_rounds < 6 && !texture_hopeless) {
+                    if (cfg.xbox_shrink && texture_rounds < 6 && !texture_hopeless && !job.textures_fitted) {
                         size_t need = (size_t)((use.texture_mb - budget) * 1048576.0) + 256 * 1024;
                         int n = 0;
                         g_cutout_textures = 0;
-                        size_t saved = shrink_textures_to_fit(job, need, n);
+                        size_t saved = shrink_textures_to_fit(job, need, n, false);
                         if (saved > 0) {
                             texture_rounds++;
                             snprintf(buf, sizeof buf, "[textures] %.1f MB of textures is over the %.1f MB target; halved %d of "
@@ -1817,6 +1939,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
                              : texture_rounds ? " even with your textures shrunk" : "; your own textures can't shrink further");
                     texture_warning = buf;
                 }
+                job.textures_fitted = true;   // (as far as it goes)
             }
         }
         if (rc == 0) break;
@@ -2932,7 +3055,7 @@ size_t shrink_bitmap_tag(const fs::path &p, bool write, bool alpha_tested = fals
 }
 
 // Halve the map's own (non-stock) textures, largest first, until `needed` bytes are saved.
-size_t shrink_textures_to_fit(Job &job, size_t needed, int &count);
+size_t shrink_textures_to_fit(Job &job, size_t needed, int &count, bool hard);
 
 // MCC (H1A-EK) can store textures as BC7, which Xbox and Custom Edition don't support. Both BC7 and
 // DXT store 4x4-pixel blocks, so each block is decoded and re-encoded on its own: as DXT5, or as DXT1
@@ -4739,8 +4862,10 @@ void cap_effects(Job &job, const std::vector<std::string> &deps) {
 
 // Xbox maps: keep texture memory close to stock maps. The map's own textures (stock tags, HUD and menu
 // art are left alone) are compressed if they're uncompressed 32-bit, and capped: the level and sky at
-// xbox_max_texture (512, like stock maps), props/vehicles/effects at xbox_max_object_texture (256),
-// lightmaps at xbox_max_lightmap.
+// xbox_max_texture (512, like stock maps); an object's own textures (its model's, and a weapon's first-person
+// model's) as large as Bungie's for its kind: vehicles, weapons, characters and scenery at xbox_max_texture (512,
+// their largest), their bump, detail and cube maps at 256, small items (equipment, garbage, projectiles) at 256;
+// everything else (effects, decals, particles) at xbox_max_object_texture (256); lightmaps at xbox_max_lightmap.
 // The bitmaps whose alpha a shader alpha-tests (a pixel drawn only where it's over half): a model shader's base map
 // unless it's "not alpha tested" or an alpha-blended decal, an environment shader's base map when "alpha tested", a
 // transparent shader's first map when "alpha tested" (rasterizer_xbox_models.c, _environment.c,
@@ -4775,6 +4900,44 @@ static void find_alpha_tested(Job &job, const std::vector<std::string> &deps) {
     }
 }
 
+// The map's objects' own textures (their models', a weapon's first-person model's, the map's own first-person
+// arms'), by kind: the largest side Bungie's Xbox textures of the kind have (vehicles, weapons, first-person
+// weapons, characters and scenery up to 512, their bump and detail maps up to 128; ammo and other pickups up to
+// 256; effects mostly up to 256), and whether they're seen up close (vehicles, characters, weapons, first person).
+struct ModelTexture { int cap = 0; bool close = false; };
+static std::string map_first_person_hands(Job &job);
+static std::map<std::string, ModelTexture> model_textures(Job &job, const std::vector<std::string> &deps) {
+    static const std::tuple<const char *, int, bool> kinds[] = {
+        {".vehicle", 512, true}, {".biped", 512, true}, {".weapon", 512, true}, {".scenery", 512, false},
+        {".device_machine", 512, false}, {".device_control", 512, false}, {".device_light_fixture", 512, false},
+        {".equipment", 256, false}, {".garbage", 256, false}, {".projectile", 256, false}};
+    std::map<std::string, ModelTexture> models, out;
+    auto add = [](std::map<std::string, ModelTexture> &m, const std::string &k, int cap, bool close) {
+        ModelTexture &t = m[k];
+        t.cap = std::max(t.cap, cap);
+        t.close = t.close || close;
+    };
+    for (auto &dep : deps)
+        for (auto &[ext, cap, close] : kinds) {
+            if (!has_suffix(dep, ext)) continue;
+            fs::path own = job.owner(dep);
+            if (own.empty()) break;
+            std::string m = perf::object_model(own / from_u8(dep));
+            if (!m.empty()) add(models, m, cap, close);
+            if (std::string(ext) == ".weapon") {
+                std::string fp = perf::weapon_first_person_model(own / from_u8(dep));
+                if (!fp.empty()) add(models, fp, cap, true);
+            }
+            break;
+        }
+    std::string hands = map_first_person_hands(job);
+    if (!hands.empty()) add(models, hands, 512, true);
+    for (auto &[m, t] : models)
+        for (auto &x : tag_dependencies(job, m, true))
+            if (has_suffix(x, ".bitmap")) add(out, x, t.cap, t.close);
+    return out;
+}
+
 void cap_texture_sizes(Job &job, const std::vector<std::string> &deps) {
     const Config &cfg = job.cfg;
     find_alpha_tested(job, deps);
@@ -4790,7 +4953,9 @@ void cap_texture_sizes(Job &job, const std::vector<std::string> &deps) {
                 if (bsp) level.insert(x);
             }
         }
-    int textures = 0, objects = 0, lightmaps = 0, compressed = 0;
+    std::map<std::string, ModelTexture> model_cap;   // the map's objects' own textures (model_textures)
+    if (cfg.xbox_max_object_texture > 0 && cfg.xbox_max_texture > 0) model_cap = model_textures(job, deps);
+    int textures = 0, objects = 0, lightmaps = 0, compressed = 0, model_textures = 0;
     for (auto &dep : deps) {
         if (!has_suffix(dep, ".bitmap")) continue;
         fs::path own = job.owner(dep);
@@ -4806,19 +4971,30 @@ void cap_texture_sizes(Job &job, const std::vector<std::string> &deps) {
             f.read(&head[0], (std::streamsize)head.size());
             if (f.gcount() < (std::streamsize)head.size()) continue;
         }
-        bool lightmap = be16(head, 64 + 4) == 4; // usage: light map
+        const int usage = be16(head, 64 + 4), type = be16(head, 64);
+        bool lightmap = usage == 4; // usage: light map
         bool object = !world.count(dep);
         int cap = lightmap ? cfg.xbox_max_lightmap
                 : (object && cfg.xbox_max_object_texture > 0 && cfg.xbox_max_texture > 0)
                     ? std::min(cfg.xbox_max_object_texture, cfg.xbox_max_texture)
                     : cfg.xbox_max_texture;
+        bool model = false;
+        if (!lightmap && object && cfg.xbox_max_object_texture > 0 && cfg.xbox_max_texture > 0) {
+            auto it = model_cap.find(dep);
+            if (it != model_cap.end()) {
+                // an object's own texture: its kind's size (bump, detail and vector maps, and cube maps, smaller)
+                int c = usage == 2 || usage == 3 || usage == 5 || type == 2 ? std::min(it->second.cap, 256) : it->second.cap;
+                cap = std::min(std::max(cap, c), cfg.xbox_max_texture);
+                model = true;
+            }
+        }
         if (!lightmap && cfg.xbox_max_texture > 0) {
             int c = compress_color_kept(cfg, own / from_u8(dep));
             if (c > 0) compressed += c;
         }
         if (cap <= 0) continue;
         int n = cap_bitmap_tag(own / from_u8(dep), cap, job.alpha_tested.count(dep) > 0);
-        if (n > 0) (lightmap ? lightmaps : object && cap < cfg.xbox_max_texture ? objects : textures) += n;
+        if (n > 0) (lightmap ? lightmaps : model ? model_textures : object && cap < cfg.xbox_max_texture ? objects : textures) += n;
     }
     // Level texture budget: stock outdoor maps use about 3-6 MB of level textures (Blood Gulch 3.3 MB,
     // Sidewinder 5.3 MB, not counting lightmaps). The Xbox loads textures as they come into view, and a
@@ -4917,8 +5093,13 @@ void cap_texture_sizes(Job &job, const std::vector<std::string> &deps) {
     if (textures)
         job.note("[textures] scaled " + std::to_string(textures) + " of your level textures down to " +
                  std::to_string(cfg.xbox_max_texture) + " px (largest side), like stock Xbox maps");
+    if (model_textures)
+        job.note("[textures] scaled " + std::to_string(model_textures) + " textures of the map's vehicles, weapons, characters, " +
+                 "scenery and items down to the largest Bungie's of their kind have (" + std::to_string(cfg.xbox_max_texture) +
+                 " px; bump, detail and cube maps and small items 256 px), so the Xbox doesn't stutter loading them as " +
+                 "they come into view");
     if (objects)
-        job.note("[textures] scaled " + std::to_string(objects) + " prop/vehicle/effect textures down to " +
+        job.note("[textures] scaled " + std::to_string(objects) + " effect and other object textures down to " +
                  std::to_string(std::min(cfg.xbox_max_object_texture, cfg.xbox_max_texture)) +
                  " px, so the Xbox doesn't stutter loading them as they come into view");
     if (lightmaps)
@@ -4938,8 +5119,7 @@ void cap_texture_sizes(Job &job, const std::vector<std::string> &deps) {
 // the Xbox's it uses (copied to fixes). Also when measuring for the weapons & vehicles window: the map has them so.
 static void xbox_animations(Job &job, const std::vector<std::string> &deps) {
     const int level = job.cfg.xbox_compress_animations;
-    if (level <= 0) return;
-    int graphs = 0, anims = 0, stock = 0;
+    int graphs = 0, anims = 0, stock = 0, restored = 0;
     size_t before = 0, after = 0;
     double worst = 0;
     for (auto &dep : deps) {
@@ -4948,9 +5128,11 @@ static void xbox_animations(Job &job, const std::vector<std::string> &deps) {
         tagfile::EditTag ed;
         if (own.empty() || !ed.load(own / from_u8(dep))) continue;
         animcomp::GraphResult r = animcomp::compress_graph(ed.root(), level);
-        if (!r.compressed) continue;
+        if (!r.compressed && !r.overlays_restored) continue;
         fs::path dst = editable_owner(job, dep, true);
         if (dst.empty() || !ed.save(dst / from_u8(dep))) continue;
+        restored += r.overlays_restored;
+        if (!r.compressed) continue;
         graphs++;
         anims += r.compressed;
         before += r.before;
@@ -4958,6 +5140,10 @@ static void xbox_animations(Job &job, const std::vector<std::string> &deps) {
         worst = std::max(worst, r.worst);
         if (own == job.overlay) stock++;
     }
+    if (restored)
+        job.note("[anim] gave " + std::to_string(restored) + " compressed overlay animations their frames back: the Xbox " +
+                 "blends a compressed overlay's turns only at whole frames when it plays one by a value (a vehicle's " +
+                 "velocity, steering and suspension, a rider's acceleration), so they snapped from pose to pose");
     if (!graphs) return;
     auto size = [](size_t b) {
         char t[32];
@@ -5213,13 +5399,43 @@ static void xbox_collision(Job &job, const std::vector<std::string> &deps) {
     if (!left.empty()) job.note("[collision] left as made: " + join(left));
 }
 
-void xbox_content_passes(Job &job) {
+// The map's own first-person arms (use_map_first_person_hands), if the globals the build uses have them: the
+// model's tag path, or "" (the Xbox's own, or none).
+static std::string map_first_person_hands(Job &job) {
+    const std::string g = "globals/globals.globals";
+    fs::path gd = job.owner(g);
+    if (gd.empty() || job.overlay.empty()) return "";
+    std::string v;
+    run_process({u8(tool(job.cfg, "invader-edit")), "-t", u8(gd), g, "-G", "first_person_interface[0].first_person_hands"}, v);
+    v = norm_rel(v);
+    if (v.empty()) return "";
+    if (fs::path(from_u8(v)).extension().empty()) v += ".model";
+    fs::path own = job.owner(v);
+    return own.empty() || own == job.overlay ? "" : v;
+}
+
+// The scenario's tags, and the map's own first-person arms' (the globals' only other content of the map's own: the
+// passes below treat them as the weapons' first-person models are, their shaders and textures included).
+static std::vector<std::string> content_dependencies(Job &job) {
     auto deps = tag_dependencies(job, job.scenario + ".scenario", true);
+    std::string hands = map_first_person_hands(job);
+    if (!hands.empty()) {
+        std::set<std::string> have(deps.begin(), deps.end());
+        std::vector<std::string> more = tag_dependencies(job, hands, true);
+        more.push_back(hands);
+        for (auto &d : more)
+            if (have.insert(d).second) deps.push_back(d);
+    }
+    return deps;
+}
+
+void xbox_content_passes(Job &job) {
+    auto deps = content_dependencies(job);
     flatten_layered_shaders(job, deps);
     if (!job.cfg.level_shaders_only) reorder_multipurpose_maps(job, deps);   // (before textures are capped)
     if (!job.cfg.level_shaders_only) mcc_flags_for_xbox(job, deps);
     if (!job.cfg.level_shaders_only) xbox_sky(job);   // (before textures are capped: the ones it makes are capped too)
-    deps = tag_dependencies(job, job.scenario + ".scenario", true); // flattened layers (and layers drawn together) drop out
+    deps = content_dependencies(job); // flattened layers (and layers drawn together) drop out
     cap_effects(job, deps);
     cap_texture_sizes(job, deps);
     int unaligned = 0, flares = 0;
@@ -5852,6 +6068,7 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
         fs::path own = job.owner(dep);
         bool fp = first_person.count(dep) > 0;
         if (own.empty() || own == job.overlay || (!fp && !kinds.count(dep))) continue;
+        if (!job.only_model.empty() && dep != job.only_model) continue;
         own_models.push_back(dep);
         chosen[dep] = lod::choice(lod_settings, dep, name_of(dep));
         if (job.analysis) continue;
@@ -5868,6 +6085,7 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
         if (!has_suffix(dep, ".model") && !has_suffix(dep, ".gbxmodel")) continue;
         fs::path own = job.owner(dep);
         if (own.empty() || own != job.overlay || !kinds.count(dep) || first_person.count(dep)) continue;
+        if (!job.only_model.empty() && dep != job.only_model) continue;
         stock_models.push_back(dep);
         chosen[dep] = lod::choice(lod_settings, dep, name_of(dep));
     }
@@ -6064,6 +6282,7 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
         bool stock = own == job.overlay;
         if (stock && !job.cfg.xbox_lod_stock_models) continue;
         if (!kinds.count(dep) || first_person.count(dep)) continue;
+        if (!job.only_model.empty() && dep != job.only_model) continue;
         perf::ModelStats ms = perf::model_stats(own / from_u8(dep));
         if (!ms.ok || !ms.lods || ms.borrowed || !ms.no_cutoffs()) continue;
         lod::Choice ch = chosen.count(dep) ? chosen[dep] : lod::choice(lod_settings, dep, name_of(dep));
@@ -8498,7 +8717,7 @@ static void trim_pickup_extras(Job &job, const fs::path &xsrc) {
             }
             if (done) {
                 texture_bytes += was.pp > pixels ? was.pp - pixels : 0;
-                what.push_back(std::to_string(keep.size()) + " of its " + std::to_string(px.src.size()) + " pickup icons");
+                what.push_back(std::to_string(keep.size()) + " of the " + std::to_string(px.src.size()) + " pickup icons added from its sheet");
             }
         }
     }
@@ -8825,32 +9044,39 @@ bool prepare_for_xbox(Job &job, std::string &err) {
     return true;
 }
 
-size_t shrink_textures_to_fit(Job &job, size_t needed, int &count) {
-    const Config &cfg = job.cfg;
+// The map's own textures halved until `needed` bytes are saved (the map file's limit, or the texture memory
+// target): the ones that save most first, but what's seen up close (vehicles, characters, weapons, first-person
+// weapons and arms: model_textures) only after everything else, and never HUD or menu art (fitted to the screen).
+// Not `hard` (the texture target, which a map may go over): the close-up ones only if that gets it there.
+size_t shrink_textures_to_fit(Job &job, size_t needed, int &count, bool hard) {
     // Only textures the map actually uses.
-    std::string out;
-    std::vector<std::string> cmd{u8(tool(cfg, "invader-dependency")), "-r"};
-    for (auto &d : job.dirs()) cmd.insert(cmd.end(), {"-t", u8(d)});
-    cmd.push_back(job.scenario + ".scenario");
-    run_process(cmd, out);
-    std::vector<std::pair<size_t, std::string>> cands;
-    std::istringstream ss(out);
-    std::string dep;
-    while (std::getline(ss, dep)) {
-        dep = norm_rel(dep);
-        if (dep.size() < 7 || dep.compare(dep.size() - 7, 7, ".bitmap") != 0) continue;
+    std::vector<std::string> deps = content_dependencies(job);
+    std::map<std::string, ModelTexture> kinds = model_textures(job, deps);
+    struct Cand { bool close; size_t saves; std::string tag; };
+    std::vector<Cand> cands;
+    for (auto &dep : deps) {
+        if (!has_suffix(dep, ".bitmap")) continue;
         if (fs::exists(job.fixes / from_u8(dep))) continue;
         if (!job.overlay.empty() && fs::exists(job.overlay / from_u8(dep))) continue; // stock: leave alone
+        std::string l = "/" + dep;
+        for (auto &c : l) c = (char)tolower((unsigned char)c);
+        if (l.find("/ui/") != std::string::npos || l.find("/hud") != std::string::npos) continue; // HUD and menus
         fs::path p = job.source / from_u8(dep);
         if (!fs::exists(p)) continue;
         size_t s = shrink_bitmap_tag(p, false);
-        if (s) cands.push_back({s, dep});
+        auto k = kinds.find(dep);
+        if (s) cands.push_back({k != kinds.end() && k->second.close, s, dep});
     }
-    std::sort(cands.rbegin(), cands.rend());
+    std::sort(cands.begin(), cands.end(), [](const Cand &a, const Cand &b) {
+        return a.close != b.close ? !a.close : a.saves != b.saves ? a.saves > b.saves : a.tag < b.tag;
+    });
+    size_t rest = 0, close = 0;
+    for (auto &c : cands) (c.close ? close : rest) += c.saves;
+    const bool spare_close = !hard && rest < needed && rest + close < needed;   // (it can't get there either way)
     size_t saved = 0;
     for (auto &c : cands) {
-        if (saved >= needed) break;
-        saved += shrink_bitmap_tag(job.source / from_u8(c.second), true, job.alpha_tested.count(c.second) > 0);
+        if (saved >= needed || (c.close && spare_close)) break;
+        saved += shrink_bitmap_tag(job.source / from_u8(c.tag), true, job.alpha_tested.count(c.tag) > 0);
         count++;
     }
     return saved;
@@ -10513,53 +10739,67 @@ std::string convert_script_text(Game target, const std::string &text, std::vecto
 namespace porter {
 Result update_xbox_models(const Config &cfg, const fs::path &file, const Log &log) {
     Result r;
-    const char *gone = "The tags the conversion prepared are gone (another conversion or build since): convert the map again.";
-    std::ifstream f(file, std::ios::binary);
-    std::string l;
-    if (!std::getline(f, l) || l != "HaloMapPorter update 1") { r.error = gone; return r; }
     Job job(cfg, log, Game::Xbox);
-    job.update = true;
-    std::string scenario;
-    fs::path output, lods;
-    bool share = false, end = false;
-    while (std::getline(f, l)) {
-        if (!l.empty() && l.back() == '\r') l.pop_back();
-        if (l == "end") { end = true; break; }
-        size_t t = l.find('\t');
-        if (t == std::string::npos) continue;
-        std::string k = l.substr(0, t), v = l.substr(t + 1);
-        if (k == "work") job.work = from_u8(v);
-        else if (k == "fixes") job.fixes = from_u8(v);
-        else if (k == "overlay") job.overlay = from_u8(v);
-        else if (k == "source") job.source = from_u8(v);
-        else if (k == "user_tags") job.user_tags = from_u8(v);
-        else if (k == "scenario") scenario = v;
-        else if (k == "output") output = from_u8(v);
-        else if (k == "lods") lods = from_u8(v);
-        else if (k == "share") share = v == "1";
-        else if (k == "optimized") job.optimize = v == "1";
-        else if (k == "from") job.from = (Game)std::atoi(v.c_str());
-        else if (k == "extra") job.extra.push_back(v);
-        else if (k == "dep") job.lod_deps.push_back(v);
-        else if (k == "made") job.model_created.insert(from_u8(v));
-        else if (k == "orig") {
-            size_t t2 = v.find('\t');
-            if (t2 == std::string::npos) { r.error = gone; return r; }
-            std::ifstream b(job.work / "originals" / from_u8(v.substr(t2 + 1)), std::ios::binary);
-            if (!b) { r.error = gone; return r; }
-            job.model_originals[from_u8(v.substr(0, t2))] =
-                std::string((std::istreambuf_iterator<char>(b)), std::istreambuf_iterator<char>());
+    UpdateFile u;
+    if (!load_update(job, file, u, r.error)) return r;
+    bool built = fs::exists(u.output);
+    log(std::string(built ? "Updating " : "Building ") + u.output.filename().u8string() +
+        " (the models' levels of detail and trims; everything else as converted)");
+    return run_build(job, u.scenario, u.output, u.share);
+}
+
+Result redo_model_lods(const Config &cfg, const fs::path &view_file, const std::string &model, const Log &log) {
+    Result r;
+    LodView v;
+    if (!load_lod_view(v, view_file)) { r.error = "The LODs window's file can't be read: convert the map again."; return r; }
+    Job job(cfg, log, Game::Xbox);
+    UpdateFile u;
+    if (!load_update(job, v.update, u, r.error)) return r;
+    // The model as the map made it (and a copy made of Bungie's taken out again), then done again on its own.
+    std::error_code ec;
+    for (auto &[file, bytes] : job.model_originals)
+        if (ends_with(file.generic_u8string(), "/" + model) && !job.model_created.count(file))
+            std::ofstream(file, std::ios::binary | std::ios::trunc) << bytes;
+    for (auto it = job.model_created.begin(); it != job.model_created.end();)
+        if (ends_with(it->generic_u8string(), "/" + model)) {
+            fs::remove(*it, ec);
+            job.model_originals.erase(*it);
+            it = job.model_created.erase(it);
+        } else {
+            ++it;
+        }
+    log("Making " + model + " again (its trim and lower-detail versions, with its choice now)...");
+    std::vector<std::string> deps = job.lod_deps;
+    job.only_model = model;
+    xbox_lods(job, deps);
+    save_update(job, u.output, u.lods, u.share, job.optimize);
+    // Its entry in the window, drawn again (its collision as the conversion had it).
+    LodView now = make_lod_view(job, v.map_name);
+    auto old = std::find_if(v.models.begin(), v.models.end(), [&](const LodView::Model &m) { return m.tag == model; });
+    auto made = std::find_if(now.models.begin(), now.models.end(), [&](const LodView::Model &m) { return m.tag == model; });
+    if (made != now.models.end()) {
+        LodView::Model m = *made;
+        size_t base = v.previews.size();
+        for (auto &p : now.previews) v.previews.push_back(std::move(p));
+        for (int &k : m.level)
+            if (k >= 0) k += (int)base;
+        if (m.as_made >= 0) m.as_made += (int)base;
+        m.coll_made = m.coll_now = -1;
+        if (old != v.models.end()) {
+            m.collision = old->collision;
+            m.coll_made = old->coll_made;
+            m.coll_now = old->coll_now;
+            *old = m;
+        } else {
+            v.models.push_back(m);
         }
     }
-    if (!end || scenario.empty() || output.empty() || !fs::exists(job.fixes) || !fs::exists(job.source) ||
-        !fs::exists(job.source / from_u8(scenario + ".scenario")) || (!job.overlay.empty() && !fs::exists(job.overlay))) {
-        r.error = gone;
-        return r;
-    }
-    for (auto &[p, b] : job.model_originals)
-        if (!fs::exists(p.parent_path())) { r.error = gone; return r; }
-    log("Updating " + output.filename().u8string() + " (the models' levels of detail and trims; everything else as converted)");
-    return run_build(job, scenario, output, share);
+    compact_lod_view(v);
+    if (!save_lod_view(v, view_file)) { r.error = "The LODs window's file can't be written."; return r; }
+    r.ok = true;
+    r.lods = view_file;
+    r.update = v.update;
+    return r;
 }
 
 Result convert_map(const Config &cfg, const fs::path &input, Game in_game, Game out_game,
@@ -11044,6 +11284,35 @@ bool analyze_level_shaders(const Config &cfg_in, const fs::path &input, Game in_
                                         : convert_map_impl(cfg, input, in_game, Game::Xbox, dummy, false, log, nullptr);
     if (!r.ok) { error = r.error.empty() ? "The map couldn't be measured." : r.error; return false; }
     file = r.shaders;
+    return true;
+}
+
+bool measure_prepared(const Config &cfg_in, const fs::path &update, ContentAnalysis &out, const Log &log) {
+    Config cfg = cfg_in;
+    cfg.xbox_replace.clear();
+    cfg.xbox_prepare_only = false;
+    out = ContentAnalysis();
+    Job job(cfg, log, Game::Xbox);
+    UpdateFile u;
+    std::string err;
+    if (!load_update(job, update, u, err)) { out.error = err; return false; }
+    if (u.picks) { out.error = "The conversion used your weapons & vehicles picks."; return false; }
+    job.optimize = false;   // (the window works out what Invader's optimize option saves itself)
+    log("Measuring the map for the weapons & vehicles window, from the tags the conversion prepared...");
+    // As the window measures a map (the models as the conversion trimmed them, without lower-detail versions), under
+    // the scenario's own name; then the scenario as the conversion had it (the Xbox's weapons and vehicles are added
+    // to its palettes to be measured as replacements).
+    job.analysis = &out;
+    fs::path dummy = job.work / "measure" / (fs::path(from_u8(u.scenario)).filename().u8string() + ".map");
+    Result r = run_build(job, u.scenario, dummy, u.share);
+    std::error_code ec;
+    fs::path bak = job.work / "choices_backup.scenario";
+    if (!job.choices_scenario.empty() && fs::exists(bak)) fs::copy_file(bak, job.choices_scenario, fs::copy_options::overwrite_existing, ec);
+    fs::remove_all(job.work / "measure", ec);
+    if (!r.ok) {
+        out.error = r.error.empty() ? "The map couldn't be measured." : r.error;
+        return false;
+    }
     return true;
 }
 

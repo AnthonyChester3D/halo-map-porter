@@ -449,7 +449,7 @@ GraphResult compress_graph(tagfile::TagNode &root, int level) {
     using namespace tagfile;
     GraphResult r;
     std::vector<TagNode> *anims = block(root, "animations"), *nodes = block(root, "nodes");
-    if (!anims || level < 1) return r;
+    if (!anims) return r;
     std::vector<int> parent;
     if (nodes)
         for (auto &n : *nodes) parent.push_back((int)(int16_t)(uint16_t)get_num(n, "parent node index"));
@@ -457,7 +457,33 @@ GraphResult compress_graph(tagfile::TagNode &root, int level) {
                  scale = level >= 2 ? 0.002 : 0.0005, slack = level >= 2 ? 0.002 : 0.0003;
     for (auto &e : *anims) {
         int flags = (int)get_num(e, "flags");
-        if (flags & 1) continue;
+        if (get_num(e, "type") == 1) {
+            // An overlay stays (or goes back to) its frames: the engine blends a compressed overlay's rotations only at
+            // whole frames when it plays one by a value (overlay_animation_apply_continuous: a vehicle's velocity,
+            // steering and suspension, a rider's acceleration), so they snap from one frame to the next as the value
+            // moves (a hovering Ghost jitters between its leaning poses). A compressed one whose frames are still in
+            // the tag (MCC's) has them back; one without them is left as it is.
+            std::string *fd = data(e, "frame data"), *def = data(e, "default data");
+            size_t off = (size_t)get_num(e, "offset to compressed data");
+            if ((flags & 1) && fd && def && off > 0 && off <= fd->size()) {
+                Clip c;
+                c.frames = (int)get_num(e, "frame count");
+                c.nodes = (int)get_num(e, "node count");
+                for (int k = 0; k < 2; k++) {
+                    c.rot[k] = (uint32_t)get_num(e, "node rotation flag data", k);
+                    c.tr[k] = (uint32_t)get_num(e, "node transform flag data", k);
+                    c.sc[k] = (uint32_t)get_num(e, "node scale flag data", k);
+                }
+                if (c.nodes <= 64 && decode_tag_frames(*def, fd->substr(0, off), c)) {
+                    fd->resize(off);
+                    set_num(e, "flags", flags & ~1);
+                    set_num(e, "offset to compressed data", 0);
+                    r.overlays_restored++;
+                }
+            }
+            continue;
+        }
+        if ((flags & 1) || level < 1) continue;
         Clip c;
         c.frames = (int)get_num(e, "frame count");
         c.nodes = (int)get_num(e, "node count");

@@ -99,6 +99,7 @@ int main(int argc, char **argv) {
     cfg.xbox_lod_stock_models = getenv("XLODSTOCK") != nullptr;
     cfg.xbox_make_lods = getenv("XNOLOD") == nullptr;
     if (getenv("XTRIM")) cfg.xbox_trim_models = atoi(getenv("XTRIM"));             // 0 as made, 1 trim, 2 harder, 3 density
+    cfg.xbox_prepare_only = getenv("XPREPARE") != nullptr;   // as far as the LODs window
     if (getenv("XANIM")) cfg.xbox_compress_animations = atoi(getenv("XANIM"));     // 0 as made, 1 compress, 2 harder
     if (getenv("XCOLL")) cfg.xbox_collision = atoi(getenv("XCOLL"));               // 0 as made, 1 simpler, 2 harder
     if (getenv("LODLIB")) cfg.lod_library = getenv("LODLIB");
@@ -197,8 +198,18 @@ int main(int argc, char **argv) {
         }
         return 0;
     }
+    if (mode == "measured") {   // cli_test measured <cache>/work/convert/update.txt x x: weapons & vehicles from the prepared tags
+        ContentAnalysis an;
+        if (!measure_prepared(cfg, argv[2], an, log)) { std::cout << "FAILED: " << an.error << "\n"; return 1; }
+        printf("used %.3f MB (optimize saves %.3f), limit %.2f; file %.2f MB (limit %.0f); fixed %.3f; tags %zu roots %zu\n",
+               an.used_mb, an.optimize_saves_mb, an.limit_mb, an.file_mb, an.file_limit_mb, an.fixed_mb, an.tags.size(), an.roots.size());
+        print_items(an);
+        return 0;
+    }
     if (mode == "update") {   // cli_test update <cache>/work/convert/update.txt x x: the LODs window's "Update the map"
         r = update_xbox_models(cfg, argv[2], log);
+    } else if (mode == "redo") {   // cli_test redo <lods view file> <model tag> x: the LODs window's "Make again"
+        r = redo_model_lods(cfg, argv[2], argv[3], log);
     } else if (mode == "convert") {
         std::string name;
         Game in = detect_game(argv[2], &name);

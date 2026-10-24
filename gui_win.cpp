@@ -75,6 +75,7 @@ enum {
     ID_X_PORTALS,
     // the level shaders window
     ID_X_SHADERS,
+    ID_X_LODS,
     // portals: a choice of three (was a tick box)
     ID_X_PORTALS_LBL,
 };
@@ -89,6 +90,10 @@ static std::vector<int> g_pages[5];   // Convert, Build, Xbox, Map packs, Settin
 static std::atomic<bool> g_busy{false};
 static bool g_out_manual = false;
 static std::wstring g_last_output, g_last_report, g_last_lods;
+// The last Xbox conversion's (or build's) prepared tags (Result::update) and what they were made from (prepared_key):
+// the weapons & vehicles window measures them instead of preparing the map again, and the LODs window opens on them.
+static std::wstring g_last_update;
+static std::string g_last_update_key;
 static bool g_last_was_build = false;   // (the LODs window's "Convert again": which one)
 static int S(int v) { return MulDiv(v, g_dpi, 96); }
 
@@ -759,11 +764,18 @@ static void on_input_chosen() {
 }
 
 // ---------------------------------------------------------------- jobs
-struct Done { bool ok; std::wstring msg, output, report, lods; };
+struct Done {
+    bool ok;
+    std::wstring msg, output, report, lods, update;
+    std::string key;          // prepared_key of what was converted (with `update`)
+    bool open_lods = false;   // prepared for the LODs window: open it
+};
 
-static void finish(const Result &r, const std::string &what) {
-    auto *d = new Done{r.ok, L"", W(u8(r.output)), W(u8(r.report)), W(u8(r.lods))};
-    if (r.ok) {
+static void finish(const Result &r, const std::string &what, const std::string &key = "", bool open_lods = false) {
+    auto *d = new Done{r.ok, L"", W(u8(r.output)), W(u8(r.report)), W(u8(r.lods)), W(u8(r.update)), key, open_lods};
+    if (r.ok && open_lods) {
+        d->msg = W("DONE: " + what + ". The map isn't built yet: the LODs window's \"Build the map\" builds it.");
+    } else if (r.ok) {
         std::ostringstream s;
         s << "DONE: " << what << " -> " << u8(r.output) << "\n   " << r.changes.size() << " automatic fixes, "
           << r.warnings.size() << " warnings. Report: " << u8(r.report);
@@ -867,7 +879,7 @@ static bool contents_input(fs::path &in, Game &game) {
 
 // What changes a map's contents (the weapons & vehicles window's measurement): the input file and the Xbox tab's
 // content options.
-static std::string contents_key(const Config &cfg, const fs::path &in) {
+static std::string contents_key(const Config &cfg, const fs::path &in, bool with_choices = true) {
     std::error_code ec;
     auto mt = fs::last_write_time(in, ec);
     std::string key = N(lower(in.wstring())) + "|" + std::to_string((long long)mt.time_since_epoch().count()) + "|" +
@@ -879,11 +891,16 @@ static std::string contents_key(const Config &cfg, const fs::path &in) {
     for (auto &[w, r] : cfg.xbox_weapon_replacements) key += "|r" + w + "=" + r;
     fs::path lib = !cfg.lod_library.empty() ? cfg.lod_library : cfg.cache_dir / "lod_library";   // (models' choices)
     for (auto f : {"choices.txt", "skip.txt"}) {
+        if (!with_choices) break;
         auto t = fs::last_write_time(lib / f, ec);
         key += "|" + std::to_string(ec ? 0LL : (long long)t.time_since_epoch().count());
     }
     return key;
 }
+
+// What a conversion's prepared tags were made from: the input and the Xbox tab's options, but not the models' choices
+// (the windows that use the tags do the models again with the choices as they are then).
+static std::string prepared_key(const Config &cfg, const fs::path &in) { return contents_key(cfg, in, false); }
 
 // A convert/build for the Xbox that didn't fit was measured for the window as well: keep that, and say so.
 static void keep_measurement(Result &r, const std::string &key, const std::shared_ptr<ContentAnalysis> &m) {
@@ -892,6 +909,88 @@ static void keep_measurement(Result &r, const std::string &key, const std::share
     if (!r.ok)
         r.error += "\nThe Xbox tab's \"Weapons & vehicles...\" window has already measured this map: it shows what each "
                    "weapon and vehicle costs and what you could replace them with.";
+}
+
+static void apply_shader_picks(Config &cfg, const fs::path &input);
+
+// The map a conversion's prepared tags build to (its update.txt's "output" line; empty if it can't be read).
+static fs::path update_output(const fs::path &update) {
+    std::ifstream f(update, std::ios::binary);
+    std::string l;
+    while (std::getline(f, l)) {
+        if (!l.empty() && l.back() == '\r') l.pop_back();
+        if (l.rfind("output\t", 0) == 0) return fs::u8path(l.substr(7));
+    }
+    return {};
+}
+
+// The Xbox tab's "LODs...": the LODs window on the last conversion of this map with these options; if there isn't one,
+// the map is first prepared as far as the window (no map built: the window's "Build the map" builds it).
+static void open_lods() {
+    fs::path in;
+    Game game;
+    if (!contents_input(in, game)) {
+        MessageBoxW(g_wnd, L"Pick a map on the Convert tab (or a scenario on the Build tab) first.", L"Halo Map Porter",
+                    MB_ICONINFORMATION);
+        return;
+    }
+    if (g_busy) {
+        MessageBoxW(g_wnd, L"Wait for the conversion to finish first.", L"Halo Map Porter", MB_ICONINFORMATION);
+        return;
+    }
+    save_settings();
+    Config cfg = make_config();
+    apply_xbox_options(cfg);
+    std::string pkey = prepared_key(cfg, in);
+    if (!g_last_lods.empty() && !g_last_update.empty() && g_last_update_key == pkey && fs::exists(fs::path(g_last_lods)) &&
+        fs::exists(fs::path(g_last_update))) {
+        PostMessageW(g_wnd, WM_COMMAND, ID_SEE_LODS, 0);
+        return;
+    }
+    // Where "Build the map" will put it: the Convert tab's "Save as", or the Build tab's Xbox folder.
+    fs::path out;
+    bool build = game == Game::Unknown;
+    if (!build) {
+        out = fs::path(get_text(ID_OUT));
+        if (out.empty()) { MessageBoxW(g_wnd, L"Choose where to save the converted map first.", L"Halo Map Porter", MB_ICONINFORMATION); return; }
+        if (fs::exists(out) && fs::exists(in) && fs::equivalent(in, out)) {
+            MessageBoxW(g_wnd, L"The output would overwrite the input map. Pick a different output file.", L"Halo Map Porter", MB_ICONWARNING);
+            return;
+        }
+    } else {
+        fs::path folder(get_text(ID_B_XBOX_OUT));
+        if (folder.empty() || !fs::is_directory(folder)) {
+            MessageBoxW(g_wnd, L"Choose an existing output folder for the Xbox on the Build tab first.", L"Halo Map Porter", MB_ICONINFORMATION);
+            return;
+        }
+        std::wstring name = chosen_map(ID_B_XBOX_NAME);
+        if (name.empty()) name = in.stem().wstring();
+        out = folder / (name + L".map");
+        if (folder_mode()) {
+            mapcard::Card card = build_card();
+            if (!card.folder.empty()) out = folder / W(card.folder) / (build_map_name() + L".map");
+        }
+    }
+    // A map folder (Halo Universal XBE) gets its card now, as a conversion's does (the map built later goes in it).
+    std::wstring card_note;
+    if (folder_mode()) {
+        if (!build && (!check_card_folder(conv_card()) || !write_card(conv_card_dir(), conv_card_name(), out, card_note))) return;
+        if (build && (!check_card_folder(build_card()) || !write_card(build_card_dir(), build_map_name(), out, card_note))) return;
+    }
+    g_last_was_build = build;
+    cfg.xbox_replace = load_picks(in);
+    apply_shader_picks(cfg, in);
+    cfg.xbox_prepare_only = true;
+    bool share = checked(build ? ID_B_SHARE : ID_SHARE);
+    set_busy(true);
+    SetWindowTextW(g_log, L"");
+    append_log(L"Preparing " + in.filename().wstring() + L" for the LODs window (the map is built from there)");
+    if (!card_note.empty()) append_log(card_note);
+    std::thread([=] {
+        Result r = build ? build_from_tags(cfg, in, Game::Xbox, out, share, post_log)
+                         : convert_map(cfg, in, game, Game::Xbox, out, share, post_log);
+        finish(r, "Prepared " + in.filename().u8string() + " for the LODs window", pkey, true);
+    }).detach();
 }
 
 static void open_contents() {
@@ -911,9 +1010,18 @@ static void open_contents() {
     apply_xbox_options(cfg);
     std::string key = contents_key(cfg, in);
     auto picks = load_picks(in);
+    // The last conversion of this map, with these options: measured from the tags it prepared (seconds), not by
+    // preparing the map again.
+    fs::path prepared = !g_last_update.empty() && g_last_update_key == prepared_key(cfg, in) ? fs::path(g_last_update) : fs::path();
     bool ok = contentsui::edit_picks(
         g_wnd, L"Weapons & vehicles - " + in.filename().wstring(), key,
-        [cfg, in, game](ContentAnalysis &a, const Log &log) { return analyze_xbox_contents(cfg, in, game, a, log); }, picks);
+        [cfg, in, game, prepared](ContentAnalysis &a, const Log &log) {
+            if (!prepared.empty() && fs::exists(prepared)) {
+                if (measure_prepared(cfg, prepared, a, log)) return true;
+                log("(" + a.error + " Preparing the map again to measure it.)");
+            }
+            return analyze_xbox_contents(cfg, in, game, a, log);
+        }, picks);
     if (ok) {
         save_picks(in, picks);
         append_log(picks.empty() ? L"Weapons & vehicles: no picks for " + in.filename().wstring() + L"."
@@ -1087,6 +1195,7 @@ static void start_convert(bool again = false) {
     append_log(L"Converting " + in.filename().wstring() + L": " + W(game_name(from)) + L" -> " + W(game_name(to)));
     if (!card_note.empty()) append_log(card_note);
     std::string key = to == Game::Xbox ? contents_key(cfg, in) : std::string();
+    std::string pkey = to == Game::Xbox ? prepared_key(cfg, in) : std::string();
     std::string lkey = to == Game::Xbox ? shaders_key(cfg, in) : std::string();
     fs::path card_dir = to == Game::Xbox && folder_mode() ? conv_card_dir() : fs::path();
     std::string card_name = N(conv_card_name());
@@ -1097,7 +1206,7 @@ static void start_convert(bool again = false) {
         if (!lkey.empty()) shadersui::remember(lkey, r.shaders);
         if (r.ok && !card_dir.empty())
             if (std::string t = card_traits(cfg, card_dir, card_name, out, out.parent_path()); !t.empty()) post_log(t);
-        finish(r, std::string("Converted to ") + game_name(to));
+        finish(r, std::string("Converted to ") + game_name(to), pkey);
     }).detach();
 }
 
@@ -1138,13 +1247,14 @@ static void start_build() {
     set_busy(true);
     SetWindowTextW(g_log, L"");
     if (!xbox_note.empty()) append_log(xbox_note);
-    std::string key = contents_key(cfg, scen), lkey = shaders_key(cfg, scen);
+    std::string key = contents_key(cfg, scen), lkey = shaders_key(cfg, scen), pkey = prepared_key(cfg, scen);
     fs::path card_dir = xbox_folder.empty() ? fs::path() : build_card_dir();
     std::string card_name = N(build_map_name());
     std::thread([=] {
         Result last;
         std::string summary;
         bool all_ok = true;
+        fs::path xbox_update;
         for (auto &t : targets) {
             post_log(std::string("=== ") + game_name(t.first) + " ===");
             std::wstring name = scen.stem().wstring();
@@ -1154,6 +1264,7 @@ static void start_build() {
             auto m = t.first == Game::Xbox ? std::make_shared<ContentAnalysis>() : nullptr;
             Result r = build_from_tags(cfg, scen, t.first, out, share, post_log, m.get());
             keep_measurement(r, key, m);
+            if (t.first == Game::Xbox) xbox_update = r.update;
             if (t.first == Game::Xbox) shadersui::remember(lkey, r.shaders);
             if (r.ok && t.first == Game::Xbox && !card_dir.empty())
                 if (std::string tr = card_traits(cfg, card_dir, card_name, out, out.parent_path()); !tr.empty()) post_log(tr);
@@ -1167,7 +1278,8 @@ static void start_build() {
             if (!r.ok) last.error = r.error;
         }
         last.ok = all_ok;
-        finish(last, all_ok ? "Build finished" : "Build");
+        last.update = xbox_update;
+        finish(last, all_ok ? "Build finished" : "Build", pkey);
     }).detach();
 }
 
@@ -1845,7 +1957,8 @@ static void create_controls() {
     list_combo(2, 90, y - 2, 430, ID_X_PORTALS,
                {L"Leave every level's as they are", L"Add them to levels made without any, so walls hide what's behind",
                 L"Also divide up the rooms of levels that have them, when that draws less"});
-    button(2, L"Level...", 534, y - 4, 200, ID_X_SHADERS);
+    button(2, L"Level...", 534, y - 4, 96, ID_X_SHADERS);
+    button(2, L"LODs...", 638, y - 4, 96, ID_X_LODS);
 
     // Map packs page
     create_pack_page();
@@ -2085,6 +2198,9 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case ID_X_SHADERS:
             if (code == BN_CLICKED) open_shaders();
             break;
+        case ID_X_LODS:
+            if (code == BN_CLICKED) open_lods();
+            break;
         case ID_X_MAPLIST:
             if (code == CBN_SELCHANGE) {
                 on_map_list_changed();
@@ -2175,8 +2291,13 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                     post_log(r.ok ? "Updated " + u8(r.output.filename()) : "Not updated: " + r.error);
                     return r;
                 };
-                bool again = lodui::show(h, fs::path(g_last_lods), !c.lod_library.empty() ? c.lod_library : c.cache_dir / "lod_library",
-                                         update.empty() ? std::function<Result()>() : std::function<Result()>(run_update));
+                fs::path view = fs::path(g_last_lods);
+                auto run_redo = [c, view](const std::string &model) -> Result { return redo_model_lods(c, view, model, post_log); };
+                bool again = lodui::show(h, view, !c.lod_library.empty() ? c.lod_library : c.cache_dir / "lod_library",
+                                         update.empty() ? std::function<Result()>() : std::function<Result()>(run_update),
+                                         update.empty() ? std::function<Result(const std::string &)>()
+                                                        : std::function<Result(const std::string &)>(run_redo),
+                                         update.empty() || fs::exists(update_output(update)));
                 if (again && !g_busy) {
                     if (g_last_was_build) start_build();
                     else start_convert(true);
@@ -2212,6 +2333,9 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         g_last_lods = d->lods;   // (a map that didn't fit too: see what was made)
         ShowWindow(GetDlgItem(h, ID_SEE_LODS), d->lods.empty() ? SW_HIDE : SW_SHOW);
+        g_last_update = d->update;
+        g_last_update_key = d->update.empty() ? std::string() : d->key;
+        if (d->ok && d->open_lods && !d->lods.empty()) PostMessageW(h, WM_COMMAND, ID_SEE_LODS, 0);
         update_invader_status();
         update_conv_hint();
         if (!d->ok) MessageBeep(MB_ICONWARNING);

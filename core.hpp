@@ -120,6 +120,10 @@ struct Config {
     std::set<std::string> xbox_reflection_picks;
     // Only measure the level's shaders (no build): Result::shaders is the file for the level shaders window.
     bool level_shaders_only = false;
+    // Xbox: convert (or build) only as far as the LODs window: the tags prepared, the models' levels of detail made,
+    // the window's file and "Update the map"'s written (Result::lods, Result::update), but no map built. The window's
+    // "Build the map" ("Update the map") builds it from there.
+    bool xbox_prepare_only = false;
     // Custom weapons with no Xbox original: empty = keep them, else an Xbox weapon name (e.g. "sniper rifle").
     std::string xbox_other_weapons;
     // Largest side for the map's own world textures (stock Xbox maps stay at 512) and for lightmaps.
@@ -234,6 +238,7 @@ struct Result {
     bool ok = false;
     fs::path lods;                     // an Xbox build: its LodView, when it changed any model's levels of detail
     fs::path shaders;                  // an Xbox build: its level shaders (levelshaders.hpp, for the window)
+    fs::path update;                   // an Xbox build: the file it kept for "Update the map" (and the other windows)
     std::string memory;                // an Xbox build: its tag memory and texture memory, for the log and report
     std::string error;                 // human readable reason when !ok
     std::vector<std::string> changes;  // automatic fixes
@@ -282,6 +287,17 @@ Result build_from_tags(const Config &cfg, const fs::path &scenario_file, Game ou
 // built again: seconds, instead of converting it again. `update`: the file the conversion left (LodView::update).
 // Fails (r.error) when those tags are gone: another conversion or build since.
 Result update_xbox_models(const Config &cfg, const fs::path &update, const Log &log);
+
+// The LODs window's "Make again": one model (`model`, its tag path) done again on the tags a conversion prepared (the
+// LodView `view_file`'s), from the model as the map made it: its trim and lower-detail versions with its choice now
+// (choices.txt) and the Xbox tab's options in `cfg`, and its entry in the window's file drawn again. The map isn't
+// built ("Update the map" builds it, the model as it is now). Fails (r.error) when those tags are gone.
+Result redo_model_lods(const Config &cfg, const fs::path &view_file, const std::string &model, const Log &log);
+
+// The weapons & vehicles window's measurement made from the tags a conversion (or build) prepared (`update`:
+// Result::update), instead of preparing the map again: false (out.error) when they're gone, or the conversion used
+// weapons & vehicles picks (the window measures the map as it is). Leaves the tags as the conversion had them.
+bool measure_prepared(const Config &cfg, const fs::path &update, ContentAnalysis &out, const Log &log);
 
 // Rewrites HSC script text for the target game (functions/globals it lacks get equivalents or stand-ins).
 std::string convert_script_text(Game target, const std::string &text, std::vector<std::string> *notes);

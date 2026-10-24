@@ -203,7 +203,12 @@ and what's between them goes to textures for that map (Blood Gulch leaves
 13.7 MB free, a big port with a heavy BSP 1 MB or less). If the textures
 come out over, "Shrink textures to fit" halves the map's own textures,
 biggest first, and builds again until they fit; with it off, the build
-warns. The log and the report show the figures, e.g.:
+warns. Textures seen up close (vehicles, characters, weapons and their
+first-person models, the first-person arms) are halved only after
+everything else, and only when that gets the map to the target (a map
+far over it keeps them sharp rather than blurring them for nothing).
+HUD art is never halved (it's fitted to the screen, see HUD textures).
+"Update the map" keeps the textures as the conversion left them. The log and the report show the figures, e.g.:
   Xbox memory: tag memory 10.1 MB of 22 (tag data 7.6 MB, BSP 2.5 MB);
   textures 22.2 MB; target 20 MB + 11.9 MB of free tag memory (OpenCE
   lends it) = 31.9 MB
@@ -221,8 +226,14 @@ pass, see HUD textures; menu art is left alone):
   stock outdoor maps (Blood Gulch 3.3 MB, Sidewinder 5.3 MB). If the level
   needs more, the map's own bump maps are first packed into less memory
   at their size (see "Bump maps" below), then bump and detail maps are
-  halved (not below 128 px), then the biggest color textures. Props,
-  vehicles and effects at most 256 px.
+  halved (not below 128 px), then the biggest color textures. Objects
+  get the largest Bungie's own of their kind have: a vehicle's,
+  character's, weapon's (first-person model too), the first-person arms'
+  and scenery's textures at most 512 px (their bump, detail and cube maps
+  256), ammo and other pickups 256; effects, decals and anything else
+  256. (It used to cap every object's textures at 256, half what Bungie's
+  vehicles and weapons have: a vehicle made with 1024 or 2048 textures
+  came out a quarter or an eighth of its size, and looked it.)
 - "512 max (sharper)": everything at most 512 px, no budget.
 - "1024" / "No limit": for testing.
 How a texture is halved: usually its own next smaller version (its next
@@ -614,11 +625,19 @@ Levels of detail (LODs)
   is left as made. The tags keep their frames as made too, with the
   keyframes after them (as Bungie's tools save them); the map keeps only
   the keyframes. Animations already stored as keyframes (some of an MCC
-  tagset's are) are left as they are. The log's [anim] line gives the tag
+  tagset's are) are left as they are.
+  Overlays are never stored as keyframes: the engine plays some of them by
+  a value rather than frame by frame (a vehicle's velocity, steering and
+  suspension, a rider's acceleration: the frame comes from how fast it's
+  going), and for a compressed one it blends the turns only at whole
+  frames, so the pose snapped from one frame to the next as the value
+  moved (a hovering Ghost jittered between its leaning poses while it sat
+  still). A compressed overlay whose frames are still in the tag (an MCC
+  tagset's) gets them back, whatever the setting. The log's [anim] line gives the tag
   memory before and after, and the farthest any bone end moved.
   Blood Gulch (the Xbox's own animations): tag memory 8.1 MB > 7.6 MB
-  (harder 7.5 MB). Precipice with its own weapons: 1.4 MB of animations >
-  853 KB. Posing a bone from keyframes takes the Xbox a little more work
+  (harder 7.5 MB). Precipice with its own weapons: 1.1 MB of animations >
+  674 KB. Posing a bone from keyframes takes the Xbox a little more work
   than reading a stored frame (finding its two keyframes and blending
   them).
 
@@ -704,10 +723,14 @@ Levels of detail (LODs)
                          Trim it to a number of triangles (it starts at
                          1.5x Bungie's; the shape may move up to 5% of
                          the model's size to get there).
-  "Update the map" puts them in the map you have, without converting it
-  again: the conversion's prepared tags are kept (in the cache folder's
-  work\convert, until the next conversion), so only the models' levels of
-  detail and trims are done again (with the Xbox tab's "Heavy models" and
+  "Make it again" makes the model shown again with its choice (from the
+  model as the map made it) and draws its levels in the window, in a
+  moment and without building the map: change the triangles until it
+  looks right.
+  "Update the map" puts every model's choice in the map you have, without
+  converting it again: the conversion's prepared tags are kept (in the
+  cache folder's work\convert, until the next conversion), so only the
+  models' levels of detail and trims are done again (with the Xbox tab's "Heavy models" and
   LOD options as they are now) and the map is built again: the time of
   the build, a few seconds; the list then shows the map as updated, and
   the report gets what changed. The rest of the map stays as converted
@@ -717,6 +740,14 @@ Levels of detail (LODs)
   after a map that didn't fit: the versions made were taken out again,
   and the list says so; an update that doesn't fit leaves the map you
   have as it was.
+  "LODs..." (Xbox tab, beside "Level...") opens the window before any map
+  is built: on the last conversion of the map with the Xbox tab as it is,
+  or else the map is prepared as far as the window (the tags, the models'
+  levels of detail and trims; no build, so it takes about a third of a
+  conversion) and the window opens on that. Its button then says "Build
+  the map": the first build, from the tags prepared, with every model's
+  choice. (Precipice: 28 s prepared, a model made again in under a
+  second, built in 60 s, the same map a 2-minute conversion makes.)
 
   The LOD library
   Every version the app makes is kept in the LOD library folder (Settings
@@ -873,7 +904,10 @@ Weapons & vehicles window (Xbox)
   its pieces with it, and Keep brings them back; a piece can also go on its
   own (Keep or None).
   Measuring takes about as long as a conversion (the app prepares the map and
-  builds a test copy, then reads back what each part takes). A conversion for
+  builds a test copy, then reads back what each part takes), unless the map
+  was just converted (or prepared for the LODs window) with the Xbox tab as
+  it is and no picks: then it's measured from the tags that conversion
+  prepared, in seconds (Precipice: 13 s instead of a minute). A conversion for
   the Xbox that doesn't fit (memory or file size) measures the map on the way,
   from the tags it already prepared, so the window opens right away after it
   (this happens when no picks are set yet; with picks, the earlier measurement

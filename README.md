@@ -29,8 +29,9 @@ the free, open-source Halo map compiler, and it can download Invader for you.
   cannon) so they look the same with far fewer triangles, or down to 1.5x what Bungie's own models of their kind and
   size have (measured on every stock model: the beam cannon 15,327 > 1,729, in first person 3,258), lists every model
   of the map's own (and Bungie's without LODs) so you can choose per model whether it gets LODs and how many triangles
-  each level aims at, and puts those choices in the map in seconds ("Update the map": only the models are done again on
-  the conversion's prepared tags, then the map is rebuilt), stores animations as keyframes the way Bungie stored the
+  each level aims at (before any map is built if you like, each model made again in a moment to see it), and puts those
+  choices in the map in seconds ("Update the map": only the models are done again on the conversion's prepared tags,
+  then the map is rebuilt), stores animations as keyframes the way Bungie stored the
   Xbox's cinematics (about half the tag memory for first-person animations), gives custom Warthogs (and other stock
   vehicles' variants and wrecks) Bungie's own collision where it fits them, makes collision of custom scenery that's
   too dense for bipeds to walk against again the way Bungie made theirs (a few convex pieces with big flat faces:
