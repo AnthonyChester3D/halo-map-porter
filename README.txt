@@ -754,7 +754,8 @@ Levels of detail (LODs)
   and the list says so; an update that doesn't fit leaves the map you
   have as it was.
   "LODs..." (Xbox tab, beside "Level...") opens the window before any map
-  is built: on the last conversion of the map with the Xbox tab as it is,
+  is built, for the map the Xbox tab's "Map" names (see "Which map the
+  Xbox tab's windows are for"): on the last conversion of it with the Xbox tab as it is,
   or else the map is prepared as far as the window (the tags, the models'
   levels of detail and trims; no build, so it takes about a third of a
   conversion) and the window opens on that. Its button then says "Build
@@ -890,10 +891,24 @@ The map's own level
   object names, help text) are always the map's, even for a modded stock
   level (levels\test\bloodgulch, levels\a10...). The log says "[keep]".
 
+Which map the Xbox tab's windows are for ("Map", Xbox tab)
+  The Weapons & vehicles, Level and LODs windows work on one map: the
+  Convert tab's map or the Build tab's scenario, whichever "Map" at the top
+  of the Xbox tab shows. The rest of the Xbox tab applies to both tabs.
+  "Map" follows what you do, not which tab you last looked at (clicking
+  through the tabs changes nothing): picking a map on the Convert tab, or
+  converting one for the Xbox, makes it the Convert tab's; picking a
+  scenario on the Build tab, or building with Xbox ticked, makes it the
+  Build tab's. Choose either in the list yourself at any time; the app
+  remembers it. When the tab chosen has no map, the other tab's is used.
+  What you pick in the windows is saved per map (or scenario) and used
+  whenever that one is converted or built for the Xbox, so switching back
+  and forth loses nothing.
+
 Weapons & vehicles window (Xbox)
   The "Weapons & vehicles..." button on the Xbox tab lists every weapon and
-  vehicle a player can get on the map (the Convert tab's map, or the Build
-  tab's scenario), with:
+  vehicle a player can get on the map (the one "Map" shows: the Convert
+  tab's map, or the Build tab's scenario), with:
   - where the map uses it (spawn points, placed, starting weapon, spawn
     weapon, weapon list / vehicle slot);
   - Memory: how much of the Xbox's 22 MB of tag memory replacing it with
@@ -969,8 +984,8 @@ Level reflections, fog, scenery, weather and more: the "Level..." window (Xbox)
   Dropping a reflection sets its brightnesses to 0 and removes its cube map
   (freeing its memory too); the surface keeps its textures, bump map and
   lightmap. The log's [reflections] line lists the ones dropped.
-  The "Level..." button on the Xbox tab shows this for the Convert tab's map
-  (or the Build tab's scenario), with the level's fog, sky, effects, tiny
+  The "Level..." button on the Xbox tab shows this for the map "Map" shows
+  (the Convert tab's map or the Build tab's scenario), with the level's fog, sky, effects, tiny
   scenery and weather (see "Fog", "Sky", "Effects", "Tiny scenery" and
   "Weather" below).
   Measuring prepares the map as for a conversion without building it

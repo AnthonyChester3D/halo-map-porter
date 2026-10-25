@@ -78,6 +78,8 @@ enum {
     ID_X_LODS,
     // portals: a choice of three (was a tick box)
     ID_X_PORTALS_LBL,
+    // which map the Xbox tab's windows are for: the Convert tab's or the Build tab's
+    ID_X_FOR_LBL, ID_X_FOR, ID_X_FOR_HINT,
 };
 
 #define WM_APP_LOG (WM_APP + 1)
@@ -152,6 +154,10 @@ static const struct { int id; const wchar_t *key; } kSaved[] = {
 
 static int sel(int id);
 static std::wstring chosen_map(int id);
+static void set_xbox_for(int which);
+static void update_xbox_for();
+static bool convert_map_set();
+static bool build_scenario_set();
 
 static void save_settings() {
     for (auto &s : kSaved) ini_set(s.key, get_text(s.id));
@@ -710,9 +716,18 @@ static void on_conv_name_chosen() {
     update_conv_hint();
 }
 
+static std::wstring g_last_scen = L"\x1";
+
 static void refresh_build_names() {
     g_build_own = lower(fs::path(get_text(ID_SCEN)).stem().wstring());
     fill_map_combo(ID_B_XBOX_NAME, g_build_own, chosen_map(ID_B_XBOX_NAME));
+    // a scenario picked (not just the box losing focus): the Xbox tab's windows are for it now
+    std::wstring s = get_text(ID_SCEN);
+    if (s != g_last_scen) {
+        g_last_scen = s;
+        if (build_scenario_set()) set_xbox_for(1);
+        else update_xbox_for();
+    }
 }
 
 // The Standard/Expanded choice changed: refill both name lists, keeping the picks that still exist.
@@ -762,6 +777,9 @@ static void on_input_chosen() {
     }
     g_out_manual = false;
     update_out_path();
+    // a map picked: the Xbox tab's windows are for it now
+    if (g != Game::Unknown) set_xbox_for(0);
+    else update_xbox_for();
 }
 
 // ---------------------------------------------------------------- jobs
@@ -865,17 +883,48 @@ static void save_picks(const fs::path &input, const std::map<std::string, std::s
     for (auto &[from, to] : picks) f << from << '\t' << to << '\n';
 }
 
-// The map the weapons & vehicles window is for: the Convert tab's map, else the Build tab's scenario.
+// Which map the Xbox tab's windows (weapons & vehicles, level, LODs) are for: 0 the Convert tab's, 1 the Build tab's.
+// It follows what you do with a map, never which tab you look at: picking a map on the Convert tab (or converting one
+// for the Xbox) makes it the Convert tab's, picking a scenario on the Build tab (or building one for the Xbox) the Build
+// tab's, and the Xbox tab's "Map" list picks either. When the chosen tab has no map, the other's is used.
+static int g_x_for = 0;
+static bool g_loading = true;   // (filling the boxes from the last session isn't picking a map)
+static bool convert_map_set() { fs::path p(get_text(ID_IN)); return !p.empty() && fs::exists(p); }
+static bool build_scenario_set() { fs::path p(get_text(ID_SCEN)); return !p.empty() && fs::exists(p); }
+static int xbox_for() {
+    bool c = convert_map_set(), b = build_scenario_set();
+    if (g_x_for == 1 ? b : c) return g_x_for;
+    return c ? 0 : b ? 1 : g_x_for;
+}
+static void update_xbox_for() {
+    HWND c = GetDlgItem(g_wnd, ID_X_FOR);
+    if (!c) return;
+    fs::path in(get_text(ID_IN)), scen(get_text(ID_SCEN));
+    std::wstring a = L"Convert tab: " + (convert_map_set() ? in.filename().wstring() : std::wstring(L"(no map picked)")),
+                 b = L"Build tab: " + (build_scenario_set() ? scen.filename().wstring() : std::wstring(L"(no scenario picked)"));
+    SendMessageW(c, CB_RESETCONTENT, 0, 0);
+    SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)a.c_str());
+    SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)b.c_str());
+    SendMessageW(c, CB_SETCURSEL, xbox_for(), 0);
+}
+static void set_xbox_for(int which) {
+    if (g_loading) return;
+    g_x_for = which;
+    ini_set(L"x_for", std::to_wstring(which));
+    update_xbox_for();
+}
+
+// The map the Xbox tab's windows are for (xbox_for): the Convert tab's map, or the Build tab's scenario.
 static bool contents_input(fs::path &in, Game &game) {
-    in = fs::path(get_text(ID_IN));
-    if (!in.empty() && fs::exists(in)) {
+    if (xbox_for() == 0) {
+        in = fs::path(get_text(ID_IN));
         game = combo_game(ID_FROM);
         if (game == Game::Unknown || game == Game::Xbox) game = detect_game(in);
-        return true;
+        return convert_map_set();
     }
     in = fs::path(get_text(ID_SCEN));
     game = Game::Unknown;
-    return !in.empty() && fs::exists(in);
+    return build_scenario_set();
 }
 
 // What changes a map's contents (the weapons & vehicles window's measurement): the input file and the Xbox tab's
@@ -1201,6 +1250,7 @@ static void start_convert(bool again = false) {
     if (to == Game::Xbox && folder_mode() && !write_card(conv_card_dir(), conv_card_name(), out, card_note)) return;
     save_settings();
     g_last_was_build = false;
+    if (to == Game::Xbox) set_xbox_for(0);
     Config cfg = make_config();
     apply_xbox_options(cfg);
     if (to == Game::Xbox) {
@@ -1244,6 +1294,7 @@ static void start_build() {
         }
     save_settings();
     g_last_was_build = true;
+    if (checked(ID_B_XBOX)) set_xbox_for(1);
     Config cfg = make_config();
     apply_xbox_options(cfg);
     cfg.xbox_replace = load_picks(scen);   // used by the Xbox build only
@@ -1901,29 +1952,34 @@ static void create_controls() {
         0, 292, y + 5, 440, 20, ID_BUILD_HINT);
 
     // Xbox page
-    y = 48;
+    y = 44;
+    label(2, L"Map:", 26, y, 60, ID_X_FOR_LBL);
+    list_combo(2, 90, y - 1, 330, ID_X_FOR, {L"Convert tab", L"Build tab"});
+    add(2, L"STATIC", L"The windows below open on this map; the other options apply to both tabs.", 0, 432, y - 3, 302,
+        34, ID_X_FOR_HINT);
+    y += 32;
     check(2, L"Shrink textures to fit:", 26, y, 168, ID_X_SHRINK);
     list_combo(2, 196, y - 1, 194, ID_X_TARGET, {L"22 MB - Max", L"20 MB - Recommended", L"18 MB - Safe"});
     label(2, L"Size limit:", 410, y, 70, ID_X_LIMIT_LBL);
     list_combo(2, 484, y - 1, 250, ID_X_LIMIT, {L"Standard Xbox (47 MB)", L"Big maps (115 MB, modded Xbox)"});
-    y += 32;
+    y += 30;
     label(2, L"Map names:", 26, y, 140, ID_X_MAPLIST_LBL);
     list_combo(2, 170, y, 220, ID_X_MAPLIST,
                {L"Standard (13 stock maps)", L"Expanded map pack (27 maps)", L"Map folders (Halo Universal XBE)"});
     add(2, L"STATIC", L"Which names the \"Xbox name\" lists offer. The map you port takes the name of the map it replaces.",
         0, 410, y, 324, 36, ID_X_MAPLIST_HINT);
-    y += 36;
+    y += 34;
     check(2, L"Use the Xbox's own weapons, vehicles and player model instead of the map's custom copies (much smaller)",
           26, y, 708, ID_X_STOCK);
-    y += 30;
+    y += 27;
     label(2, L"Max texture size:", 26, y, 140, ID_X_TEX_LBL);
     list_combo(2, 170, y, 220, ID_X_TEX, {L"Stock-like budget (smoothest)", L"512 max (sharper)", L"1024", L"No limit"});
     label(2, L"Lightmaps:", 410, y, 70, ID_X_LM_LBL);
     list_combo(2, 484, y, 250, ID_X_LM, {L"Keep their size", L"Max 512", L"Max 256 (like stock maps)"});
-    y += 32;
+    y += 29;
     add(2, L"STATIC", L"Vehicle slots - the Xbox only spawns these three. The gametype's vehicle options pick them by slot:",
         0, 26, y, 708, 20, ID_X_VLBL);
-    y += 24;
+    y += 22;
     {
         std::vector<const wchar_t *> v;
         for (auto &c : kVehicleChoices) v.push_back(c.label);
@@ -1932,15 +1988,15 @@ static void create_controls() {
         for (int i = 0; i < 3; i++) {
             label(2, names[i], 46, y, 120, lids[i]);
             list_combo(2, 170, y, 220, vids[i], v);
-            y += 30;
+            y += 27;
         }
     }
-    check(2, L"Keep every vehicle (Halo Universal XBE)", 410, y - 88, 324, ID_X_ALLVEH);
-    add(2, L"STATIC", L"", 0, 410, y - 62, 324, 58, ID_X_VHINT);
+    check(2, L"Keep every vehicle (Halo Universal XBE)", 410, y - 79, 324, ID_X_ALLVEH);
+    add(2, L"STATIC", L"", 0, 410, y - 55, 324, 54, ID_X_VHINT);
     y += 2;
     add(2, L"STATIC", L"Weapons Xbox multiplayer doesn't have:", 0, 26, y, 480, 20, ID_X_WLBL);
     button(2, L"Weapons && vehicles...", 534, y - 4, 200, ID_X_CONTENTS);
-    y += 24;
+    y += 22;
     {
         std::vector<const wchar_t *> w;
         for (auto &c : kWeaponChoices) w.push_back(c.label);
@@ -1948,10 +2004,10 @@ static void create_controls() {
         list_combo(2, 170, y, 220, ID_X_W0, w);
         add(2, L"STATIC", L"Kept weapons get the PC pickup animations and icons automatically.", 0, 410, y + 3, 324, 40,
             ID_X_WHINT);
-        y += 29;
+        y += 27;
         label(2, L"Fuel rod gun:", 46, y, 120, ID_X_W1_LBL);
         list_combo(2, 170, y, 220, ID_X_W1, w);
-        y += 29;
+        y += 27;
         std::vector<const wchar_t *> o = w;
         o[0] = L"Keep them";
         label(2, L"Other custom ones:", 46, y, 124, ID_X_W2_LBL);
@@ -1959,7 +2015,7 @@ static void create_controls() {
         add(2, L"STATIC", L"e.g. a custom tagset's beam rifle. Replacing them saves memory on big maps.", 0, 410, y - 2, 324, 36,
             ID_X_W2_HINT);
     }
-    y += 32;
+    y += 30;
     check(2, L"Make lower-detail versions (LODs) when a model has none", 26, y, 380, ID_X_MAKELOD);
     label(2, L"Heavy models:", 410, y - 2, 86, ID_X_TRIM_LBL);
     list_combo(2, 500, y - 2, 234, ID_X_TRIM,
@@ -2127,6 +2183,10 @@ static void create_controls() {
     SendDlgItemMessageW(g_wnd, ID_TO, CB_SETCURSEL, (int)Game::Xbox, 0);
     if (!get_text(ID_IN).empty()) on_input_chosen();
     else update_out_path();
+    g_x_for = ini_get(L"x_for", L"0") == L"1" ? 1 : 0;
+    g_last_scen = get_text(ID_SCEN);
+    g_loading = false;
+    update_xbox_for();
     update_invader_status();
 
     Config c = make_config();
@@ -2172,7 +2232,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         switch (id) {
         case ID_IN_BROWSE: {
             auto f = pick_file(get_text(ID_IN), L"Halo maps (*.map)\0*.map\0All files\0*.*\0", false, L"map");
-            if (!f.empty()) { set_text(ID_IN, f); on_input_chosen(); }
+            if (!f.empty()) { set_text(ID_IN, f); on_input_chosen(); if (detect_game(fs::path(f)) != Game::Unknown) set_xbox_for(0); }   // (even the same map again)
             break;
         }
         case ID_IN:
@@ -2212,6 +2272,9 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             break;
         case ID_X_CONTENTS:
             if (code == BN_CLICKED) open_contents();
+            break;
+        case ID_X_FOR:
+            if (code == CBN_SELCHANGE) set_xbox_for(sel(ID_X_FOR) == 1 ? 1 : 0);
             break;
         case ID_X_SHADERS:
             if (code == BN_CLICKED) open_shaders();
@@ -2267,7 +2330,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             std::wstring start = get_text(ID_SCEN);
             if (start.empty() && !get_text(ID_S_EK).empty()) start = (fs::path(get_text(ID_S_EK)) / L"tags").wstring();
             auto f = pick_file(start, L"Scenario tags (*.scenario)\0*.scenario\0", false, L"scenario");
-            if (!f.empty()) { set_text(ID_SCEN, f); refresh_build_names(); }
+            if (!f.empty()) { set_text(ID_SCEN, f); refresh_build_names(); if (build_scenario_set()) set_xbox_for(1); }
             break;
         }
         case ID_B_MCC_BROWSE: case ID_B_CE_BROWSE: case ID_S_CE_BROWSE: case ID_S_MCC_BROWSE:
