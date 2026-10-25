@@ -27,7 +27,10 @@ struct ModelStats {
                                  // distances, it would turn into that one at a distance)
     double cutoff[5] = {};
     int triangles = 0, lowest_triangles = 0;
-    bool no_cutoffs() const { return !cutoff[0] && !cutoff[1] && !cutoff[2] && !cutoff[3] && !cutoff[4]; }
+    // No switch distances: super high, high, medium and low all 0, so the engine always draws the most detailed
+    // version. (Super low isn't a switch: it's the size below which nothing is drawn. Set on its own, as Deathtrap's
+    // phone booth has it at 35, it only makes the model vanish.)
+    bool no_switches() const { return !cutoff[0] && !cutoff[1] && !cutoff[2] && !cutoff[3]; }
 };
 ModelStats model_stats(const std::filesystem::path &model);
 

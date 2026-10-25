@@ -389,6 +389,15 @@ game, the app rewrites the map's scripts for that game:
     result (like sv_say, which posts a chat message on PC servers) are
     removed, true/false checks return false, numbers return 0, and
     distance checks return "far away".
+  - Xbox: a continuous script that only tests players against trigger
+    volumes, each one every tick (Deathtrap's kill volume: 16 players'
+    tests, 30 times a second, a good part of its 0.6 ms of script time a
+    frame), first waits until any player is in one of its volumes, with
+    (sleep_until (volume_test_objects <volume> (players)) 5): one test
+    every 5 ticks while nobody is in it, the player-by-player tests only
+    once someone is. Halo's scripts have no loops (no for or while; a
+    continuous script is the loop, run once a tick), so this is the cheap
+    way: the most a player in the volume waits is a sixth of a second.
 The log lists every change as [scripts] lines with how many times it
 happened, so you can check that nothing important was lost.
 
@@ -451,8 +460,11 @@ Levels of detail (LODs)
   The app gives the map's own models that have lower-detail versions but
   no switch distances ones like Bungie's (vehicles 200/100/50/20/0,
   characters 280/200/80/30/0, scenery 300/90/30/5/0, weapons and items
-  100/50/25/10/0 pixels; super low stays 0, so nothing disappears). The
-  log lists them as [lod] lines. First-person models are left alone: the
+  100/50/25/10/0 pixels; super low stays 0, or what the model has, so
+  nothing new disappears). A model with only a super low size counts as
+  having no switch distances: it still always draws its most detailed
+  version (see "Tiny scenery" for what happens to that size). The log
+  lists them as [lod] lines. First-person models are left alone: the
   engine asks them for their most detailed version by drawing them as 0
   pixels across, so switch distances would make them use their least
   detailed one.
@@ -1136,6 +1148,15 @@ Tiny scenery (Xbox, "Level..." window)
   skips everything. Halo 1 Unlimited counts every model at half its size
   in widescreen (to pay for the wider view), so there things go at twice
   the size chosen.
+  Some custom models set a super low size but no switch distances
+  (Deathtrap's phone booth: 0/0/0/0/35). They only ever draw their most
+  detailed version, so that size does nothing but make them vanish, and
+  the Xbox's 480 lines make everything fewer pixels across than a PC's
+  screen does: the booth went about 13 units away (6.5 in widescreen).
+  On Xbox builds the app lowers such a size on the map's scenery and
+  devices to the "Hide scenery" choice, or to 0 (drawn at any distance)
+  when that's off, and lists them in the log's [scenery] lines. Models
+  with switch distances of their own keep their sizes.
 
 Weather (Xbox, "Level..." window)
   Rain and snow cost the Xbox's processor every frame, wherever you are,
@@ -1176,6 +1197,22 @@ Detailed props (Xbox, "Level..." window)
   detailed small prop, a10's oxygen tank, has 163): players and shots pass
   through them. The window names them; the log's [props] line too.
 
+Lights (Xbox, "Level..." window)
+  Dynamic lights on the objects the map places are always on: Deathtrap's
+  three warthogs each carry a headlight (radius 3.5). Each one in view
+  has the Xbox draw the level and the objects around it again, twice:
+  once for its light (diffuse) and once for its shine (specular, which
+  reaches further). Measured with Halo 1 Unlimited's perf log, Deathtrap's
+  slowest views had two in view: those passes took about 3.4 ms of each
+  frame (the shine 2.4 of it), and setting the lights up 1.2 ms more.
+  - Keep them (as made, the default).
+  - No specular: the light stays, without its shine: about 70% of its
+    passes' cost goes.
+  - Off: no light; a lens flare stays (Deathtrap's headlights still glow).
+  The window lists the lights and how many of the map's objects carry
+  one: attached to them, or made by an effect attached to them. The log's
+  [lights] line names them.
+
 Camera tours (Xbox, Settings tab)
   Halo 1 Unlimited's perf log (perf_log = 1 in opence.ini, test build 34
   and later) can fly the view through a list of spots on a map and measure
@@ -1192,6 +1229,31 @@ Camera tours (Xbox, Settings tab)
   player: the game's own costs (tick_ms, the obj_* columns) follow where
   your player stands. The log's [tour] line says where it was written.
 
+Perf logs (Settings tab)
+  "Read perf logs..." reads Halo 1 Unlimited's perf logs (perf_log = 1 in
+  opence.ini; a CSV a map session, in the perf folder beside the XBE) and
+  writes in the log, and in <log>_report.txt beside it:
+  - the frame rate: how much of the time it held 30 fps, how slow the
+    rest was;
+  - what limits it, second by second: the processor drawing, the
+    processor running the game's ticks, or the graphics chip (a second
+    is the chip's when the processor waited for it or the chip was busy
+    92% of the time or more);
+  - the graphics chip's work a frame, read in the slow seconds (at 30 fps
+    its busy share also counts its wait for the screen's refresh:
+    Sidewinder, a stock map that runs smoothly, shows 81%);
+  - for the slow seconds: the processor's time a frame and how far over a
+    30 fps frame it is, drawing's biggest parts and a game tick's, the
+    costliest objects, and what's on screen (objects, triangles, lights,
+    particles) next to the seconds at 30 fps;
+  - what to try: the app's options that go after the biggest costs (the
+    Level window's Lights, Effects, Weather, Riders, Hide scenery, the
+    LODs window, portals);
+  - with a camera tour (T rows), each view: its frame time, what limits
+    it and its three biggest costs.
+  Pick several logs (Ctrl or Shift) to compare them: side by side, and
+  their tours view for view (<first log>_compared.txt).
+
 Dynamic lights (Xbox)
   A dynamic light (a muzzle flash, an explosion, a map's lightning) lights
   the level by drawing part of it again, twice (diffuse and specular), out
@@ -1206,13 +1268,38 @@ Dynamic lights (Xbox)
   takes thousands.
   So a light of the map's own that would take more than one pass can,
   where the map places it, is turned off ("dynamic" off: the engine makes
-  no light for it; a lens flare stays). The engine can't light only
-  players and vehicles: every light it makes lights the level too. What
-  made the light still plays (Deathtrap's thunder). A light the map doesn't
+  no light for it; a lens flare stays). A light an effect makes is
+  dynamic whatever its tag says (Deathtrap's lightning is three effects'
+  lights), so it's taken out of those effects instead. The engine can't
+  light only players and vehicles: every light it makes lights the level
+  too. What made the light still plays (Deathtrap's thunder). A light the map doesn't
   place (a custom weapon's explosion: where it goes off isn't known) is
   kept to Bungie's biggest, radius 15 (the Scorpion shell's explosion).
   The log's [lights] line lists them. There's no option: those lights
   don't run on the Xbox as they are.
+
+Materials' see-through parts (Xbox)
+  A material either draws solid, cuts holes where its texture's alpha is
+  low (alpha-tested: leaves, grates, fences), or blends with what's behind
+  it (glass, smoke; drawn after everything else, sorted, without hiding
+  what's behind it, which costs more). The Xbox cuts a pixel out unless
+  its alpha is above half. Every Xbox conversion checks the map's own
+  materials against the alpha their textures actually have:
+  - Alpha-tested, but nothing in the texture is see-through (no alpha, or
+    all of it above half): the test never cuts anything, so it's turned
+    off (one less test each time the surface is drawn, and in its shadow).
+    Deathtrap: the tires, turret, barrel, horn, airfield, bulletin board,
+    fan, tree trunks and treelines.
+  - Alpha-tested, but 1% or less of the texture's alpha reaches half, and
+    hardly any of it is fully clear: the Xbox would leave the surface out
+    entirely, while Halo PC and MCC draw it (Deathtrap's two grate
+    materials, MCC BC7 textures whose alpha stays between 6% and 55%). They
+    are drawn solid instead.
+  Noted only, since they look as made either way: alpha-tested materials
+  that hardly draw but are mostly clear, blended materials whose first
+  texture has nothing see-through (they could be solid) and blended ones
+  whose first texture is a clean cut-out (alpha-testing would be cheaper).
+  The log's [materials] lines name them.
 
 Content nobody can get (Xbox)
   Xbox maps have only 22 MB for level geometry and other tag data,
@@ -1681,8 +1768,12 @@ The log lists every automatic change:
   [shrink] Textures were halved to fit the Xbox size limit.
   [textures] (also) Textures were halved to fit the texture memory target;
           cut-outs kept as solid, or a faded next version averaged instead.
-  [scripts] A script function the target game lacks was replaced, or a
-          short that holds the game's time was made a long.
+  [scripts] A script function the target game lacks was replaced, a
+          short that holds the game's time was made a long, or a kill
+          volume script made to wait until a player is in its volume.
+  [materials] Materials whose alpha test never cut anything, or would cut
+          out the whole surface on the Xbox, were fixed; blended ones that
+          could be cheaper are named (see "Materials' see-through parts").
   [bc7]   MCC-only BC7 textures were re-encoded as DXT.
   [textures] Textures were scaled or compressed like stock Xbox maps, or
           bump maps packed into P8 or DXT1 (see "Bump maps" above).
@@ -1705,8 +1796,9 @@ The log lists every automatic change:
           shaders window (see "Level reflections" above).
   [fog]   The level's fog was made fully opaque (see "Fog" above).
   [sky]   The map's sky was drawn in fewer layers (see "Sky" above).
-  [scenery] Tiny scenery and devices aren't drawn (see "Tiny scenery"
-          above).
+  [scenery] Tiny scenery and devices aren't drawn, or models whose own
+          super low size only hid them are drawn further (see "Tiny
+          scenery" above).
   [weather] The level's rain or snow was made lighter or turned off (see
           "Weather" above).
   [props] Small props with very detailed collision lost it (see "Detailed
@@ -1714,7 +1806,9 @@ The log lists every automatic change:
   [tour]  A camera tour for Halo 1 Unlimited's perf log was written (see
           "Camera tours" above).
   [lights] Dynamic lights that would have the Xbox draw most of the level
-          again were turned off or shrunk (see "Dynamic lights" above).
+          again were turned off or shrunk (see "Dynamic lights" above), or
+          the map's objects' lights lost their shine or were turned off
+          (the Level window's "Lights").
 
 Warnings (for example "There are 1/16 Slayer spawns") don't stop the
 build. They point at things worth checking in your map.

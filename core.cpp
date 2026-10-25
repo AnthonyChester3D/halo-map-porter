@@ -1178,10 +1178,12 @@ std::vector<std::string> tag_dependencies(Job &job, const std::string &tag, bool
 void xbox_lods(Job &job, const std::vector<std::string> &deps);
 void xbox_portals(Job &job);
 void xbox_lights(Job &job, const std::vector<std::string> &deps);
+void xbox_materials(Job &job, const std::vector<std::string> &deps);
 void xbox_reflections(Job &job);
 void xbox_fog(Job &job);
 void xbox_sky(Job &job);
 void xbox_scenery(Job &job, const std::vector<std::string> &deps);
+void xbox_scenery_sizes(Job &job, const std::vector<std::string> &deps);
 void xbox_weather(Job &job);
 void xbox_props(Job &job);
 static int g_cutout_textures = 0;   // cut-out textures halve_cutout made smaller (for the log)
@@ -1669,7 +1671,9 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
         std::vector<std::string> deps = job.lod_deps;
         job.model_originals.clear();
         job.model_created.clear();
+        xbox_scenery_sizes(job, deps);
         xbox_lods(job, deps);
+        xbox_scenery(job, deps);   // (its copies were taken out above with the levels of detail's)
     } else {
         keep_map_level_tags(job);
         std::string err;
@@ -5594,6 +5598,8 @@ void xbox_content_passes(Job &job) {
         job.note("[xbox] removed the reflections from " + std::to_string(flares) +
                  " lens flares that have no bitmap to draw them with");
     if (!job.cfg.level_shaders_only) {
+        xbox_materials(job, deps);
+        xbox_scenery_sizes(job, deps);   // (before the levels of detail, xbox_scenery after them)
         xbox_lods(job, deps);
         xbox_animations(job, deps);
         xbox_collision(job, deps);
@@ -5849,8 +5855,11 @@ void xbox_reflections(Job &job) {
 // once, high above the level) takes nearly all of it and stops the Xbox; made smaller, it no longer reaches anything
 // it could be seen on, yet still takes thousands. So a light that takes more than one pass can (kMostOfLevel) where
 // the map places it goes: its "dynamic" flag off, so the engine makes no light for it (one with a lens flare keeps
-// that). A light the map doesn't place (a weapon's or projectile's effects: where it goes off isn't known) is kept
-// to Bungie's biggest radius (the Scorpion shell's explosion, 15).
+// that; one an effect makes is dynamic whatever its flag, so it's taken out of the effect). A light the map doesn't
+// place (a weapon's or projectile's effects: where it goes off isn't known) is kept to Bungie's biggest radius (the
+// Scorpion shell's explosion, 15). The rest of the lights on the map's objects, always on (Deathtrap's warthogs'
+// headlights: about 3.4 ms of a frame with two in view, and 1.2 ms setting the lights up), are the level window's
+// choice (Config::xbox_object_lights).
 static std::string fmt_num(double v) {   // 25, 8.9
     char b[32];
     snprintf(b, sizeof b, "%.1f", v);
@@ -5879,6 +5888,9 @@ void xbox_lights(Job &job, const std::vector<std::string> &deps) {
     }
     // The lights each object makes: attached directly, or through an attached effect.
     std::map<std::string, std::vector<std::string>> lights_of;
+    // The effects that make each light: an effect's lights are dynamic whatever their flag says (effects.c makes them
+    // with light_new_unattached), so one goes by taking it out of those effects (a radius of 0 is built as 1).
+    std::map<std::string, std::set<std::string>> effect_made;
     auto lights_for = [&](const std::string &object) -> const std::vector<std::string> & {
         auto it = lights_of.find(object);
         if (it != lights_of.end()) return it->second;
@@ -5898,7 +5910,10 @@ void xbox_lights(Job &job, const std::vector<std::string> &deps) {
                 for (size_t e = 0; e < ev.size(); e++) {
                     tagfile::Block parts = ev[e].block("parts");
                     for (size_t k = 0; k < parts.size(); k++)
-                        if (std::string l = parts[k].ref("type"); has_suffix(l, ".light")) out.push_back(l);
+                        if (std::string l = parts[k].ref("type"); has_suffix(l, ".light")) {
+                            out.push_back(l);
+                            effect_made[l].insert(a);
+                        }
                 }
             }
         }
@@ -5922,8 +5937,34 @@ void xbox_lights(Job &job, const std::vector<std::string> &deps) {
             }
         }
     }
-    std::string removed, shrunk;
-    int n_removed = 0, n_shrunk = 0, n_flares = 0;
+    // Takes a light out of the map's own effects that make it (their events' parts). False if one can't be changed.
+    auto drop_from_effects = [&](const std::string &light) {
+        auto em = effect_made.find(light);
+        if (em == effect_made.end()) return true;
+        std::string ref = light.substr(0, light.size() - 6);   // (no extension, '\\' separators)
+        std::replace(ref.begin(), ref.end(), '/', '\\');
+        bool all = true;
+        for (auto &fx : em->second) {
+            fs::path ed = editable_owner(job, fx);
+            tagfile::EditTag et;
+            if (ed.empty() || !et.load(ed / from_u8(fx))) { all = false; continue; }
+            if (auto *ev = tagfile::block(et.root(), "events"))
+                for (auto &e : *ev)
+                    if (auto *parts = tagfile::block(e, "parts"))
+                        parts->erase(std::remove_if(parts->begin(), parts->end(), [&](tagfile::TagNode &pn) {
+                                         std::string *r = tagfile::ref_path(pn, "type");
+                                         auto low = [](std::string x) {
+                                             for (auto &c : x) c = (char)tolower((unsigned char)c);
+                                             return x;
+                                         };
+                                         return r && low(*r) == low(ref);
+                                     }), parts->end());
+            all = et.save(ed / from_u8(fx)) && all;
+        }
+        return all;
+    };
+    std::string removed, shrunk, object_lights;
+    int n_removed = 0, n_shrunk = 0, n_flares = 0, n_object_lights = 0;
     for (auto &dep : deps) {
         if (!has_suffix(dep, ".light")) continue;
         fs::path own = job.owner(dep);
@@ -5932,7 +5973,7 @@ void xbox_lights(Job &job, const std::vector<std::string> &deps) {
         if (!lt.load(own / from_u8(dep))) continue;
         tagfile::Elem l = lt.root();
         long long flags = (long long)l.num("flags");
-        if (!(flags & 1)) continue;   // (not dynamic: only a lens flare, or for the lightmaps)
+        if (!(flags & 1) && !effect_made.count(dep)) continue;   // (not dynamic: only a lens flare, or for the lightmaps)
         double r = l.num("radius"), scale = std::max(1.0, l.num("radius modifer", 1));
         if (r <= 0) continue;
         std::string name = fs::path(from_u8(dep)).stem().u8string();
@@ -5945,12 +5986,27 @@ void xbox_lights(Job &job, const std::vector<std::string> &deps) {
                     least = std::min(least, g);
                     if (g > most) { most = g; of = lv.surface_count; }
                 }
-            if (most <= kMostOfLevel) continue;
+            if (most <= kMostOfLevel) {
+                // Always on where the map has them: the level window's choice (Config::xbox_object_lights).
+                const int mode = job.cfg.xbox_object_lights;
+                if (mode != 1 && mode != 2) continue;
+                if (mode == 1 && (flags & 2)) continue;   // (no specular already)
+                fs::path ed = editable_owner(job, dep);
+                if (ed.empty()) continue;
+                tagfile::EditTag et;
+                if (!et.load(ed / from_u8(dep))) continue;
+                bool ok = mode == 1 ? tagfile::set_num(et.root(), "flags", (double)(flags | 2))
+                                    : tagfile::set_num(et.root(), "flags", (double)(flags & ~1LL));
+                if (!ok || !et.save(ed / from_u8(dep)) || (mode == 2 && !drop_from_effects(dep))) continue;
+                n_object_lights++;
+                object_lights += (object_lights.empty() ? "" : ", ") + name + " (" + std::to_string(it->second.size()) + " placed)";
+                continue;
+            }
             fs::path ed = editable_owner(job, dep);
             if (ed.empty()) continue;
             tagfile::EditTag et;
             if (!et.load(ed / from_u8(dep)) || !tagfile::set_num(et.root(), "flags", (double)(flags & ~1LL)) ||
-                !et.save(ed / from_u8(dep)))
+                !et.save(ed / from_u8(dep)) || !drop_from_effects(dep))
                 continue;
             n_removed++;
             if (!l.ref("lens flare").empty()) n_flares++;
@@ -5979,6 +6035,145 @@ void xbox_lights(Job &job, const std::vector<std::string> &deps) {
     if (n_shrunk)
         job.note("[lights] shrank " + std::to_string(n_shrunk) + (n_shrunk == 1 ? " dynamic light" : " dynamic lights") +
                  " of the map's weapons or effects to Bungie's biggest (radius 15, the Scorpion shell's explosion): " + shrunk);
+    if (n_object_lights)
+        job.note("[lights] " + std::string(job.cfg.xbox_object_lights == 1 ? "no specular for " : "turned off ") +
+                 std::to_string(n_object_lights) + (n_object_lights == 1 ? " dynamic light" : " dynamic lights") +
+                 " on the map's objects (each one in view had the Xbox draw what's around it again, " +
+                 (job.cfg.xbox_object_lights == 1 ? "for its diffuse light and again for its shine; the shine pass is gone" :
+                                                    "twice; a lens flare stays") + "): " + object_lights);
+}
+
+// ---- Materials whose alpha doesn't match how they use it
+// An alpha-tested surface (a shader_environment with "alpha tested"; a shader_model unless "not alpha tested" or "alpha
+// blended decal") draws a pixel on the Xbox only where its base map's alpha is above half (rasterizer_xbox: alpha
+// reference 0x7F, "greater"); a blended one (shader_transparent_*) is drawn with the see-through surfaces, sorted, not
+// hiding what's behind it. Fixed, as the map looks elsewhere:
+// - alpha-tested with nothing see-through in the texture (no alpha, or all of it above half): the test never cuts a
+//   pixel, so it's turned off (one less test each time it's drawn, and in the shadows);
+// - alpha-tested where almost nothing reaches half (1% or less) and next to nothing is clear: the Xbox would leave the
+//   surface out, while Halo PC and MCC draw it (Deathtrap's tech grates, MCC BC7 textures whose alpha stays between
+//   6% and 55%): drawn solid instead (alpha test off; any fully clear specks are filled in).
+// Noted only (they look as made either way): alpha-tested ones that hardly draw but are mostly clear, and blended ones
+// whose first map has nothing see-through (could be solid) or is a cut-out (could be alpha-tested, which is cheaper).
+struct AlphaShare {
+    bool ok = false;
+    long long px = 0, pass = 0, clear = 0, soft = 0;   // pass: above half; clear: 8/255 or less; soft: between, not clear
+};
+
+static AlphaShare texture_alpha(const fs::path &file) {
+    AlphaShare a;
+    tagfile::Tag t;
+    if (!t.load(file)) return a;
+    tagfile::Elem r = t.root();
+    std::string pix = r.data("processed pixel data");
+    tagfile::Block bd = r.block("bitmap data");
+    for (size_t i = 0; i < bd.size(); i++) {
+        tagfile::Elem b = bd[i];
+        if (b.integer("type") != 0) continue;   // (2D textures)
+        int w = (int)b.integer("width"), h = (int)b.integer("height"), fmt = (int)b.integer("format");
+        size_t off = (size_t)b.integer("pixel data offset"), n = mip_bytes(w, h, fmt);
+        if (!n || w <= 0 || h <= 0 || off + n > pix.size()) return AlphaShare();
+        std::vector<unsigned char> rgba;
+        if (!decode_level(pix.substr(off, n), w, h, fmt, rgba)) return AlphaShare();
+        for (size_t k = 0; k < (size_t)w * h; k++) {
+            unsigned al = fmt == 0 || fmt == 2 ? rgba[k * 4] : fmt == 3 ? rgba[k * 4 + 1] : fmt == 1 ? 255u : rgba[k * 4 + 3];
+            a.px++;
+            if (al > 127) a.pass++;
+            if (al <= 8) a.clear++;
+            else if (al < 247) a.soft++;
+        }
+        a.ok = true;
+    }
+    return a;
+}
+
+void xbox_materials(Job &job, const std::vector<std::string> &deps) {
+    if (job.analysis) return;
+    std::map<std::string, AlphaShare> seen;
+    auto alpha_of = [&](const std::string &bm) {
+        auto it = seen.find(bm);
+        if (it != seen.end()) return it->second;
+        fs::path own = job.owner(bm);
+        return seen[bm] = own.empty() ? AlphaShare() : texture_alpha(own / from_u8(bm));
+    };
+    auto pct = [](long long a, long long b) {
+        char t[16];
+        snprintf(t, sizeof t, "%.0f%%", b ? 100.0 * a / b : 0.0);
+        if (a && b && 100.0 * a / b < 0.5) snprintf(t, sizeof t, "under 1%%");
+        return std::string(t);
+    };
+    std::vector<std::string> untested, solid, hardly, blend_none, blend_cut;
+    for (auto &dep : deps) {
+        const bool env = has_suffix(dep, ".shader_environment"), model = has_suffix(dep, ".shader_model");
+        const bool chicago = has_suffix(dep, ".shader_transparent_chicago"), generic = has_suffix(dep, ".shader_transparent_generic"),
+                   extended = has_suffix(dep, ".shader_transparent_chicago_extended");
+        if (!env && !model && !chicago && !generic && !extended) continue;
+        fs::path own = job.owner(dep);
+        if (own.empty() || own == job.overlay) continue;   // (Bungie's are as Bungie made them)
+        tagfile::Tag st;
+        if (!st.load(own / from_u8(dep))) continue;
+        tagfile::Elem r = st.root();
+        const std::string name = fs::path(from_u8(dep)).stem().u8string();
+        if (env || model) {
+            const char *field = env ? "shader environment flags" : "shader model flags";
+            const int f = (int)r.integer(field);
+            const bool tested = env ? (f & 1) != 0 : !(f & 4) && !(f & 8);
+            std::string bm = r.ref("base map");
+            if (!tested || bm.empty()) continue;
+            AlphaShare a = alpha_of(bm);
+            if (!a.ok || !a.px) continue;
+            const bool cuts_nothing = a.pass == a.px;
+            const bool hardly_draws = a.pass * 100 <= a.px;
+            if (!cuts_nothing && !(hardly_draws && a.clear * 10 <= a.px)) {
+                if (hardly_draws) hardly.push_back(name + " (" + pct(a.pass, a.px) + " drawn, " + pct(a.clear, a.px) + " clear)");
+                continue;
+            }
+            fs::path ed = editable_owner(job, dep);
+            if (ed.empty()) continue;
+            tagfile::EditTag et;
+            if (!et.load(ed / from_u8(dep)) || !tagfile::set_num(et.root(), field, (double)(env ? (f & ~1) : (f | 4))) ||
+                !et.save(ed / from_u8(dep)))
+                continue;
+            if (cuts_nothing) untested.push_back(name);
+            else solid.push_back(name + " (" + pct(a.pass, a.px) + " would draw" + (a.clear ? ", " + pct(a.clear, a.px) + " clear" : "") + ")");
+            continue;
+        }
+        if ((int)r.integer("framebuffer blend function") != 0) continue;   // (alpha blend; add, multiply... don't use alpha so)
+        tagfile::Block maps = r.block(extended ? "maps 4 stage" : "maps");
+        if (extended && !maps.size()) maps = r.block("maps 2 stage");
+        std::string bm = maps.size() ? maps[0].ref("map") : "";
+        if (bm.empty()) continue;
+        AlphaShare a = alpha_of(bm);
+        if (!a.ok || !a.px) continue;
+        if (a.pass == a.px && !a.soft) blend_none.push_back(name);
+        else if (a.clear && a.soft * 25 <= a.px) blend_cut.push_back(name);
+    }
+    auto list = [](const std::vector<std::string> &v) {
+        std::string s;
+        for (size_t i = 0; i < v.size() && i < 12; i++) s += (i ? ", " : "") + v[i];
+        if (v.size() > 12) s += " and " + std::to_string(v.size() - 12) + " more";
+        return s;
+    };
+    auto count = [](size_t n, const char *one, const char *many) { return std::to_string(n) + " " + (n == 1 ? one : many); };
+    if (!solid.empty())
+        job.note("[materials] " + count(solid.size(), "alpha-tested material", "alpha-tested materials") +
+                 " would draw almost nothing on the Xbox (it draws a pixel only where the alpha is above half; Halo PC and MCC "
+                 "draw them): drawn solid instead, alpha test off: " + list(solid));
+    if (!untested.empty())
+        job.note("[materials] alpha test off for " + count(untested.size(), "material", "materials") +
+                 " whose textures have nothing see-through (it never cut a pixel; one less test each time they're drawn, "
+                 "shadows too): " + list(untested));
+    if (!hardly.empty())
+        job.note("[materials] " + count(hardly.size(), "alpha-tested material", "alpha-tested materials") +
+                 " hardly draw on the Xbox, left as made (much of their texture is clear): " + list(hardly));
+    if (!blend_none.empty())
+        job.note("[materials] " + count(blend_none.size(), "blended material has", "blended materials have") +
+                 (blend_none.size() == 1 ? " nothing see-through in its first map" : " nothing see-through in their first map") +
+                 " (drawn with the see-through surfaces, sorted, though " + (blend_none.size() == 1 ? "it" : "they") +
+                 " could be solid; left as made): " + list(blend_none));
+    if (!blend_cut.empty())
+        job.note("[materials] " + count(blend_cut.size(), "blended material's", "blended materials'") +
+                 " first map is a cut-out (fully clear or solid; alpha-testing would be cheaper; left as made): " + list(blend_cut));
 }
 
 // A level made without portals is one cluster: the Xbox draws everything of it in view, walls or not. Its rooms and
@@ -6412,13 +6607,15 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
         if (!kinds.count(dep) || first_person.count(dep)) continue;
         if (!job.only_model.empty() && dep != job.only_model) continue;
         perf::ModelStats ms = perf::model_stats(own / from_u8(dep));
-        if (!ms.ok || !ms.lods || ms.borrowed || !ms.no_cutoffs()) continue;
+        if (!ms.ok || !ms.lods || ms.borrowed || !ms.no_switches()) continue;
         lod::Choice ch = chosen.count(dep) ? chosen[dep] : lod::choice(lod_settings, dep, name_of(dep));
         if (ch.lods == 'n') continue;   // (none: chosen, or listed in the LOD library's skip.txt)
         fs::path ed = editable(dep, stock);
         if (ed.empty()) continue;
         std::vector<std::string> args;
-        for (int i = 0; i < 5; i++) args.insert(args.end(), {"-S", keys[i], std::to_string(cut_for(dep)->px[i])});
+        for (int i = 0; i < 4; i++) args.insert(args.end(), {"-S", keys[i], std::to_string(cut_for(dep)->px[i])});
+        // (super low: its own when it has one, e.g. the Level window's tiny scenery)
+        args.insert(args.end(), {"-S", keys[4], std::to_string(std::max<double>(ms.cutoff[4], cut_for(dep)->px[4]))});
         {
             std::ifstream in(ed / from_u8(dep), std::ios::binary);
             keep_original(ed / from_u8(dep), std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>()));
@@ -6695,24 +6892,13 @@ void xbox_sky(Job &job) {
     }
 }
 
-// Tiny scenery and devices not drawn (the level window's choice): the engine draws nothing of a model smaller on
-// screen than its smallest switch size ("super low", the bounding sphere's pixels across), so that's raised to the
-// choice. A size, not a distance: big things stay drawn as far as anyone can see them, and what goes is specks.
-// (The engine measures an object's size from how far ahead of the camera it is, not how far away, so a cutoff at a
-// distance pops things in and out at the screen's edges as the camera turns: Bungie's own scenery never vanishes.
-// Halo 1 Unlimited halves every size in widescreen, so there things go at twice the size.) Vehicles, characters and
-// weapons are left alone (players need to see them).
-void xbox_scenery(Job &job, const std::vector<std::string> &deps) {
-    const double px = job.cfg.xbox_scenery_pixels;
-    if (px <= 0 || job.analysis) return;
+// The scenery and devices the map places: their models -> the largest bounding radius of the objects drawing them.
+static std::map<std::string, double> placed_scenery_models(Job &job) {
+    std::map<std::string, double> models;
     std::string scen = job.scenario + ".scenario";
     fs::path sdir = job.owner(scen);
     tagfile::Tag st;
-    if (sdir.empty() || !st.load(sdir / from_u8(scen))) return;
-    std::set<std::string> first_person;
-    std::map<std::string, std::string> names;
-    std::map<std::string, char> kinds = model_kinds(job, deps, first_person, names);
-    std::set<std::string> models;   // the scenery and devices the map places
+    if (sdir.empty() || !st.load(sdir / from_u8(scen))) return models;
     for (auto &[o, n] : object_counts(job, st.root())) {
         if (!(has_suffix(o, ".scenery") || has_suffix(o, ".device_machine") || has_suffix(o, ".device_control") ||
               has_suffix(o, ".device_light_fixture")))
@@ -6721,29 +6907,99 @@ void xbox_scenery(Job &job, const std::vector<std::string> &deps) {
         tagfile::Tag ot;
         if (own.empty() || !ot.load(own / from_u8(o))) continue;
         std::string m = ot.root().ref("model");
-        if (!m.empty()) models.insert(m);
+        if (!m.empty()) models[m] = std::max(models[m], ot.root().num("bounding radius"));
     }
+    return models;
+}
+
+// A model's editable copy for the scenery passes, a new copy in fixes noted like xbox_lods' (Update the map and Make
+// again take it out before redoing the levels of detail: a copy of Bungie's model there would count as the map's own).
+static fs::path scenery_editable(Job &job, const std::string &m, bool stock_too) {
+    bool was = fs::exists(job.fixes / from_u8(m));
+    fs::path ed = editable_owner(job, m, stock_too);
+    if (!was && !ed.empty() && ed == job.fixes && !job.analysis) job.model_created.insert(job.fixes / from_u8(m));
+    return ed;
+}
+
+static std::string short_list(const std::vector<std::string> &v, size_t most = 10) {
+    std::string l;
+    for (size_t i = 0; i < v.size() && i < most; i++) l += (i ? ", " : "") + v[i];
+    if (v.size() > most) l += " and " + std::to_string(v.size() - most) + " more";
+    return l;
+}
+
+// Scenery and devices whose own smallest size only hides them: a model with a super low size but no switch distances
+// (Deathtrap's phone booth: 0/0/0/0/35) only ever draws its most detailed version, so that size does nothing but make
+// it vanish, and on the Xbox's 480 lines that's much nearer than on a PC's screen (the 1-unit booth at 35 pixels:
+// about 13 units away, 6.5 in widescreen). Lowered to the level window's tiny scenery size (0, drawn at any distance,
+// when that's off). The map's own models (Bungie's never do this). Before the levels of detail, which keep a model's
+// super low when they give it switch distances.
+void xbox_scenery_sizes(Job &job, const std::vector<std::string> &deps) {
+    const double px = std::max(0.0, job.cfg.xbox_scenery_pixels);
+    if (job.analysis) return;
+    std::set<std::string> first_person;
+    std::map<std::string, std::string> names;
+    std::map<std::string, char> kinds = model_kinds(job, deps, first_person, names);
+    std::vector<std::string> lowered;
+    for (auto &[m, radius] : placed_scenery_models(job)) {
+        if (!kinds.count(m) || kinds[m] != 's' || first_person.count(m)) continue;
+        fs::path own = job.owner(m);
+        if (own.empty() || own == job.overlay) continue;
+        perf::ModelStats ms = perf::model_stats(own / from_u8(m));
+        if (!ms.ok || !ms.no_switches() || ms.cutoff[4] <= px) continue;
+        fs::path ed = scenery_editable(job, m, false);
+        if (ed.empty()) continue;
+        bool ok = false;
+        edit_lines(job, ed, m, {"-S", "super_low_detail_cutoff", std::to_string(px)}, &ok);
+        if (!ok) continue;
+        // Where its own size hid it: 457 x the diameter / the pixels (lodview_win.cpp's distance).
+        double units = radius > 0 ? 457.0 * 2 * radius / ms.cutoff[4] : 0;
+        char at[96] = "";
+        if (units > 0) snprintf(at, sizeof at, ": gone from about %.*f units, %.*f in widescreen", units < 10 ? 1 : 0, units,
+                                units < 20 ? 1 : 0, units / 2);
+        lowered.push_back((names.count(m) ? names[m] : fs::path(from_u8(m)).stem().u8string()) + " (" +
+                          fmt_num(ms.cutoff[4]) + " px" + at + ")");
+    }
+    if (!lowered.empty())
+        job.note("[scenery] " + std::to_string(lowered.size()) +
+                 (lowered.size() == 1 ? " scenery or device model had" : " scenery and device models had") +
+                 " a smallest size (\"super low\") but no switch distances, so it only hid " +
+                 (lowered.size() == 1 ? "it" : "them") + ", much nearer on the Xbox's 480 lines than on a PC; " +
+                 (px > 0 ? "lowered to the Level window's " + fmt_num(px) + " pixels" : std::string("now drawn at any distance")) +
+                 ": " + short_list(lowered));
+}
+
+// Tiny scenery and devices not drawn (the level window's choice): the engine draws nothing of a model smaller on
+// screen than its smallest switch size ("super low", the bounding sphere's pixels across), so that's raised to the
+// choice. A size, not a distance: big things stay drawn as far as anyone can see them, and what goes is specks.
+// (The engine measures an object's size from how far ahead of the camera it is, not how far away, so a cutoff at a
+// distance pops things in and out at the screen's edges as the camera turns: Bungie's own scenery never vanishes.
+// Halo 1 Unlimited halves every size in widescreen, so there things go at twice the size.) Vehicles, characters and
+// weapons are left alone (players need to see them). After the levels of detail (a copy of Bungie's model this
+// makes would count as the map's own there), and again when they're redone.
+void xbox_scenery(Job &job, const std::vector<std::string> &deps) {
+    const double px = job.cfg.xbox_scenery_pixels;
+    if (px <= 0 || job.analysis) return;
+    std::set<std::string> first_person;
+    std::map<std::string, std::string> names;
+    std::map<std::string, char> kinds = model_kinds(job, deps, first_person, names);
     std::vector<std::string> done;
-    for (auto &m : models) {
+    for (auto &[m, radius] : placed_scenery_models(job)) {
         if (!kinds.count(m) || kinds[m] != 's' || first_person.count(m)) continue;
         fs::path own = job.owner(m);
         if (own.empty()) continue;
         perf::ModelStats ms = perf::model_stats(own / from_u8(m));
         if (!ms.ok || ms.cutoff[4] >= px) continue;
-        fs::path ed = editable_owner(job, m, own == job.overlay);
+        fs::path ed = scenery_editable(job, m, own == job.overlay);
         if (ed.empty()) continue;
         bool ok = false;
         edit_lines(job, ed, m, {"-S", "super_low_detail_cutoff", std::to_string(px)}, &ok);
         if (ok) done.push_back((names.count(m) ? names[m] : fs::path(from_u8(m)).stem().u8string()));
     }
-    if (!done.empty()) {
-        std::string list;
-        for (size_t i = 0; i < done.size() && i < 10; i++) list += (i ? ", " : "") + done[i];
-        if (done.size() > 10) list += " and " + std::to_string(done.size() - 10) + " more";
+    if (!done.empty())
         job.note("[scenery] scenery and devices aren't drawn once smaller on screen than " + fmt_num(px) + " pixels across (" +
                  fmt_num(px * 2) + " in widescreen; " + std::to_string(done.size()) + (done.size() == 1 ? " model's" : " models'") +
-                 " smallest switch size raised to it): " + list);
-    }
+                 " smallest switch size raised to it): " + short_list(done));
 }
 
 // The level's rain or snow, lighter (the level window's choice: perf::weather_lighten). The engine moves, clips and
@@ -7032,7 +7288,7 @@ static std::vector<std::string> performance_lines(Job &job) {
     for (auto &[m, x] : models) {
         if (!x.st.ok) continue;
         if (!x.st.lods && x.st.triangles >= 500) full.push_back({(long long)x.st.triangles * x.placed, m});
-        else if (x.st.lods && !x.st.borrowed && x.st.no_cutoffs()) unused.push_back({(long long)x.st.triangles * x.placed, m});
+        else if (x.st.lods && !x.st.borrowed && x.st.no_switches()) unused.push_back({(long long)x.st.triangles * x.placed, m});
     }
     std::sort(full.rbegin(), full.rend());
     std::sort(unused.rbegin(), unused.rend());
@@ -7371,6 +7627,23 @@ struct ScriptConverter {
     // (Config::xbox_rider_ai_off).
     bool rider_ai_off = false;
     std::set<std::string> riders;
+    // Continuous scripts that only test players against trigger volumes, each player every tick (Deathtrap's kill
+    // volume: 16 players' tests, every tick): they first wait, testing every 5 ticks, until any player is in one
+    // (Xbox). The static scripts that are just "player N" ((unit (list_get (players) N))).
+    bool poll_volumes = false;
+    std::set<std::string> player_scripts;
+    static bool player_expr(const hsc::Node &n) {   // (unit (list_get (players) N)) or (list_get (players) N)
+        if (!n.list || n.kids.empty() || n.kids[0].list) return false;
+        std::string h = hsc::lower(n.kids[0].atom);
+        if (h == "unit" && n.kids.size() == 2) return player_expr(n.kids[1]);
+        return h == "list_get" && n.kids.size() == 3 && n.kids[1].list && n.kids[1].kids.size() == 1 && !n.kids[1].kids[0].list &&
+               hsc::lower(n.kids[1].kids[0].atom) == "players" && !n.kids[2].list && !n.kids[2].str &&
+               n.kids[2].atom.find_first_not_of("0123456789") == std::string::npos;
+    }
+    bool is_player(const hsc::Node &n) const {
+        if (player_expr(n)) return true;
+        return n.list && n.kids.size() == 1 && !n.kids[0].list && player_scripts.count(hsc::lower(n.kids[0].atom));
+    }
 
     static std::string default_value(const std::string &type) {
         static const std::map<std::string, std::string> defaults{
@@ -7407,6 +7680,8 @@ struct ScriptConverter {
                 std::string type = hsc::lower(n.kids[1].atom);
                 size_t at = (type == "static" || type == "stub") ? 3 : 2;
                 if (n.kids.size() > at) name = &n.kids[at];
+                if (type == "static" && n.kids.size() == at + 2 && !n.kids[at].list && player_expr(n.kids[at + 1]))
+                    player_scripts.insert(hsc::lower(n.kids[at].atom));
                 if (at == 3 && !n.kids[2].list) ret = hsc::lower(n.kids[2].atom);
             }
             if (name && name->list && !name->kids.empty()) {
@@ -7480,6 +7755,42 @@ struct ScriptConverter {
         };
         if (n.kids.empty() || n.kids[0].list || n.kids[0].str) return rebuild("");
         std::string head = hsc::lower(n.kids[0].atom);
+        // (script continuous <name> (if (volume_test_object <volume> <player>) ...) ...) -> waits first until any player
+        // is in one of its volumes, testing every 5 ticks
+        if (poll_volumes && head == "script" && n.kids.size() >= 4 && !n.kids[1].list && hsc::lower(n.kids[1].atom) == "continuous" &&
+            !n.kids[2].list) {
+            std::vector<std::string> vols;
+            bool ok = true;
+            for (size_t k = 3; k < n.kids.size() && ok; k++) {
+                const hsc::Node &c = n.kids[k];
+                ok = c.list && c.kids.size() == 3 && !c.kids[0].list && hsc::lower(c.kids[0].atom) == "if";
+                if (!ok) break;
+                const hsc::Node &t = c.kids[1];
+                ok = t.list && t.kids.size() == 3 && !t.kids[0].list && hsc::lower(t.kids[0].atom) == "volume_test_object" &&
+                     !t.kids[1].list && !t.kids[1].str && is_player(t.kids[2]);
+                if (ok && std::find(vols.begin(), vols.end(), t.kids[1].atom) == vols.end()) vols.push_back(t.kids[1].atom);
+            }
+            if (ok && !vols.empty() && vols.size() <= 8) {
+                std::string gate = vols.size() == 1 ? "(volume_test_objects " + vols[0] + " (players))" : "(or";
+                if (vols.size() > 1) {
+                    for (auto &v : vols) gate += " (volume_test_objects " + v + " (players))";
+                    gate += ")";
+                }
+                std::string r = s.substr(n.b, n.kids[3].b - n.b) + "(sleep_until " + gate + " 5)\n    ";
+                size_t pos = n.kids[3].b;
+                for (size_t k = 3; k < n.kids.size(); k++) {
+                    r += s.substr(pos, n.kids[k].b - pos) + emit(s, n.kids[k]);
+                    pos = n.kids[k].e;
+                }
+                std::string list;
+                for (auto &v : vols) list += (list.empty() ? "" : ", ") + v;
+                auto &f = fixes[n.kids[2].atom];
+                f.first++;
+                f.second = "tests each player against " + list + " only once one of them is in it (checked every 5 ticks, "
+                           "a sixth of a second), not every player every tick";
+                return r + s.substr(pos, n.e - pos);
+            }
+        }
         // (ai_attach <a rider> <encounter>) -> nothing: it sits on another object without thinking
         if (head == "ai_attach" && !riders.empty() && n.kids.size() >= 2 && !n.kids[1].list && riders.count(hsc::lower(n.kids[1].atom))) {
             auto &f = fixes["ai_attach"];
@@ -7794,6 +8105,7 @@ static void convert_scripts(Job &job, const fs::path &dir, Game target) {
         if (e.path().extension() == ".hsc") files.push_back(e.path());
     ScriptConverter conv(target);
     conv.rider_ai_off = target == Game::Xbox && job.cfg.xbox_rider_ai_off;
+    conv.poll_volumes = target == Game::Xbox;
     std::map<fs::path, std::string> texts;
     for (auto &f : files) {
         std::ifstream in(f, std::ios::binary);
@@ -11327,6 +11639,7 @@ static Result build_from_tags_impl(const Config &cfg, const fs::path &scenario_f
 // Single-text version (used by the test driver).
 std::string convert_script_text(Game target, const std::string &text, std::vector<std::string> *notes) {
     ScriptConverter conv(target);
+    conv.poll_volumes = target == Game::Xbox;
     conv.collect_user_names(text);
     std::string t = text;
     if (!conv.convert(t) && notes) notes->push_back("could not parse");
@@ -11374,7 +11687,9 @@ Result redo_model_lods(const Config &cfg, const fs::path &view_file, const std::
     log("Making " + model + " again (its trim and lower-detail versions, with its choice now)...");
     std::vector<std::string> deps = job.lod_deps;
     job.only_model = model;
+    xbox_scenery_sizes(job, deps);
     xbox_lods(job, deps);
+    xbox_scenery(job, deps);
     save_update(job, u.output, u.lods, u.share, job.optimize);
     // Its entry in the window, drawn again (its collision as the conversion had it).
     LodView now = make_lod_view(job, v.map_name);

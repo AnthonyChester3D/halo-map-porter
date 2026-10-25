@@ -26,6 +26,7 @@
 #include "mapcard_win.hpp"
 #include "maplist_win.hpp"
 #include "mappack.hpp"
+#include "perflog.hpp"
 #include "shaders_win.hpp"
 
 using namespace porter;
@@ -80,6 +81,8 @@ enum {
     ID_X_PORTALS_LBL,
     // which map the Xbox tab's windows are for: the Convert tab's or the Build tab's
     ID_X_FOR_LBL, ID_X_FOR, ID_X_FOR_HINT,
+    // reading Halo 1 Unlimited's perf logs (Settings tab)
+    ID_S_PERF, ID_S_PERF_HINT,
 };
 
 #define WM_APP_LOG (WM_APP + 1)
@@ -263,6 +266,26 @@ static std::wstring pick_file(const std::wstring &start, const wchar_t *filter, 
     ofn.Flags = OFN_EXPLORER | OFN_NOCHANGEDIR | (save ? OFN_OVERWRITEPROMPT : OFN_FILEMUSTEXIST);
     BOOL ok = save ? GetSaveFileNameW(&ofn) : GetOpenFileNameW(&ofn);
     return ok ? buf : L"";
+}
+
+// Several files (an open dialog with multiple selection); empty if cancelled.
+static std::vector<fs::path> pick_files(const std::wstring &start, const wchar_t *filter) {
+    std::vector<wchar_t> buf(65536, 0);
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = g_wnd;
+    ofn.lpstrFilter = filter;
+    ofn.lpstrFile = buf.data();
+    ofn.nMaxFile = (DWORD)buf.size();
+    ofn.lpstrInitialDir = start.empty() ? nullptr : start.c_str();
+    ofn.Flags = OFN_EXPLORER | OFN_NOCHANGEDIR | OFN_FILEMUSTEXIST | OFN_ALLOWMULTISELECT;
+    if (!GetOpenFileNameW(&ofn)) return {};
+    std::wstring first(buf.data());
+    const wchar_t *p = buf.data() + first.size() + 1;
+    if (!*p) return {fs::path(first)};   // (one file: its whole path)
+    std::vector<fs::path> out;
+    for (; *p; p += wcslen(p) + 1) out.push_back(fs::path(first) / p);
+    return out;
 }
 
 // ---------------------------------------------------------------- log
@@ -782,6 +805,48 @@ static void on_input_chosen() {
     else update_xbox_for();
 }
 
+// The Settings tab's "Read perf logs...": each log's report in the log (and in a text file beside the first), and with
+// several, them side by side.
+static void read_perf_logs() {
+    if (g_busy) {
+        MessageBoxW(g_wnd, L"Wait for the conversion to finish first (the log is in use).", L"Halo Map Porter", MB_ICONINFORMATION);
+        return;
+    }
+    std::vector<fs::path> files = pick_files(ini_get(L"perf_dir"), L"Perf logs (*.csv)\0*.csv\0All files\0*.*\0");
+    if (files.empty()) return;
+    ini_set(L"perf_dir", files[0].parent_path().wstring());
+    std::sort(files.begin(), files.end());   // (by name: a map's logs in the order they were made)
+    std::vector<perflog::Log> logs;
+    std::string text, errs;
+    for (auto &f : files) {
+        perflog::Log l;
+        std::string err;
+        if (!perflog::load(f, l, err)) { errs += err + "\n"; continue; }
+        text += perflog::report(l) + "\n";
+        logs.push_back(std::move(l));
+    }
+    if (logs.empty()) {
+        MessageBoxW(g_wnd, W(errs).c_str(), L"Halo Map Porter", MB_ICONWARNING);
+        return;
+    }
+    if (logs.size() > 1) text += perflog::compare(logs);
+    SetWindowTextW(g_log, L"");
+    if (!errs.empty()) append_log(W(errs));
+    append_log(W(text));
+    fs::path out = files[0].parent_path() / (files[0].stem().wstring() + (logs.size() > 1 ? L"_compared.txt" : L"_report.txt"));
+    std::string crlf;
+    for (char c : text) { if (c == '\n') crlf += '\r'; crlf += c; }
+    std::ofstream o(out, std::ios::binary);
+    if (o << crlf) {
+        o.close();
+        append_log(L"Saved as " + out.wstring());
+        g_last_report = out.wstring();   // ("Open report" opens it)
+        ShowWindow(GetDlgItem(g_wnd, ID_OPEN_REPORT), SW_SHOW);
+    }
+    SendMessageW(g_log, EM_SETSEL, 0, 0);
+    SendMessageW(g_log, EM_SCROLLCARET, 0, 0);   // (from the top)
+}
+
 // ---------------------------------------------------------------- jobs
 struct Done {
     bool ok;
@@ -1125,6 +1190,7 @@ static shadersui::Picks load_shader_picks(const fs::path &input) {
         else if (k == "props") picks.props = atoi(v.c_str()) ? 1 : 0;
         else if (k == "sky") picks.sky = atoi(v.c_str()) ? 1 : 0;
         else if (k == "effects") picks.effects = std::clamp(atoi(v.c_str()), 0, 2);
+        else if (k == "lights") picks.lights = std::clamp(atoi(v.c_str()), 0, 2);
         // (an older "scenery" line, a distance, is left out: it popped big things in and out of view)
     }
     return picks;
@@ -1135,7 +1201,7 @@ static void save_shader_picks(const fs::path &input, const shadersui::Picks &pic
     shadersui::Picks defaults;
     if (picks.mode == defaults.mode && picks.fog == defaults.fog && picks.tiny_px == defaults.tiny_px &&
         picks.weather == defaults.weather && picks.riders == defaults.riders && picks.props == defaults.props &&
-        picks.sky == defaults.sky && picks.effects == defaults.effects) {   // (all as by default)
+        picks.sky == defaults.sky && picks.effects == defaults.effects && picks.lights == defaults.lights) {   // (all as by default)
         fs::remove(p, ec);
         return;
     }
@@ -1151,6 +1217,7 @@ static void save_shader_picks(const fs::path &input, const shadersui::Picks &pic
     f << "props\t" << picks.props << '\n';
     f << "sky\t" << picks.sky << '\n';
     f << "effects\t" << picks.effects << '\n';
+    f << "lights\t" << picks.lights << '\n';
 }
 static void apply_shader_picks(Config &cfg, const fs::path &input) {
     shadersui::Picks picks = load_shader_picks(input);
@@ -1164,6 +1231,7 @@ static void apply_shader_picks(Config &cfg, const fs::path &input) {
     cfg.xbox_detailed_props_off = picks.props == 1;
     cfg.xbox_sky = picks.sky;
     cfg.xbox_effects = picks.effects;
+    cfg.xbox_object_lights = picks.lights;
     if (picks.mode == 1) {
         cfg.xbox_reflection_picks_set = true;
         cfg.xbox_reflection_picks = picks.drops;
@@ -2080,6 +2148,11 @@ static void create_controls() {
     y += 44;
     check(4, L"With each Xbox build, write a camera tour for Halo 1 Unlimited's perf log (perf\\tours, beside the map)", 26, y,
           708, ID_S_TOUR);
+    y += 28;
+    button(4, L"Read perf logs...", 26, y, 150, ID_S_PERF);
+    add(4, L"STATIC", L"Halo 1 Unlimited's logs: what limits a map's frame rate on the Xbox (the game, drawing or the "
+        L"graphics chip), the biggest costs and what to try. Pick several to compare.",
+        0, 190, y, 536, 34, ID_S_PERF_HINT);
 
     // Shared area
     g_log = add(-1, L"EDIT", L"", WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 10, 494, 740, 250, ID_LOG,
@@ -2335,6 +2408,9 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case ID_B_MCC_BROWSE: case ID_B_CE_BROWSE: case ID_S_CE_BROWSE: case ID_S_MCC_BROWSE:
         case ID_B_XBOX_BROWSE: case ID_S_XT_BROWSE: case ID_S_XM_BROWSE:
+        case ID_S_PERF:
+            read_perf_logs();
+            break;
         case ID_S_EK_BROWSE: case ID_S_INV_BROWSE: case ID_S_LOD_BROWSE: {
             int target = id - 1;
             auto f = pick_folder(get_text(target));

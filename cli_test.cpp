@@ -3,6 +3,7 @@
 //        cli_test build <file.scenario> <MCC|CE|Xbox> <out.map>
 #include "core.hpp"
 #include "render.hpp"
+#include "perflog.hpp"
 #include <algorithm>
 #include <cstdlib>
 #include <fstream>
@@ -60,6 +61,18 @@ static Game parse(const std::string &s) {
 }
 
 int main(int argc, char **argv) {
+    if (argc >= 3 && std::string(argv[1]) == "perflog") { // cli_test perflog <log.csv> [more.csv...]: the perf log report
+        std::vector<perflog::Log> logs;
+        for (int i = 2; i < argc; i++) {
+            perflog::Log l;
+            std::string err;
+            if (!perflog::load(argv[i], l, err)) { std::cout << "FAILED: " << err << "\n"; return 1; }
+            std::cout << perflog::report(l) << "\n";
+            logs.push_back(std::move(l));
+        }
+        if (logs.size() > 1) std::cout << perflog::compare(logs);
+        return 0;
+    }
     if (argc == 4 && std::string(argv[1]) == "hsc") { // cli_test hsc <MCC|CE|Xbox> <file.hsc>
         std::ifstream in(argv[3], std::ios::binary);
         std::string t((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
@@ -129,6 +142,7 @@ int main(int argc, char **argv) {
     if (getenv("XFX")) cfg.xbox_effects = atoi(getenv("XFX"));                    // 1 as made, 2 lighter
     cfg.xbox_rider_ai_off = getenv("XRIDERS") != nullptr;                          // riders without AI
     cfg.xbox_detailed_props_off = getenv("XPROPS") != nullptr;                     // detailed props without collision
+    if (getenv("XLIGHTS")) cfg.xbox_object_lights = atoi(getenv("XLIGHTS"));     // lights on the map's objects: 1 no specular, 2 off
     cfg.write_perf_tour = getenv("XTOUR") != nullptr;                              // a perf log camera tour beside the map
     if (const char *x = getenv("XREFL")) {   // keep | tag,tag,... (the level shaders window's picks)
         std::string w = x, item;

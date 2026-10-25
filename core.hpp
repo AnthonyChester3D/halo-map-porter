@@ -106,6 +106,10 @@ struct Config {
     // Small scenery with very detailed collision (perf::kDetailedProp...): its collision left out (players and shots
     // pass through it).
     bool xbox_detailed_props_off = false;
+    // Dynamic lights on the objects the map places (always on, like Deathtrap's warthogs' headlights): each one in
+    // view has the Xbox draw the level and objects around it again, twice (diffuse and specular). 0 as made; 1 no
+    // specular (the light stays, without its shine: about 70% of its passes' cost); 2 off (a lens flare stays).
+    int xbox_object_lights = 0;
     // With an Xbox build: a camera tour for Halo 1 Unlimited's perf log (its spawns, busiest and typical views),
     // written to perf\tours\<map>.txt beside the map.
     bool write_perf_tour = false;

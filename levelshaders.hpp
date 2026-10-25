@@ -97,6 +97,10 @@ struct Content {
     int32_t riders = 0;
     int32_t detailed_props = 0;          // placed
     char prop_names[160] = {};           // "chair pilot (416 surfaces), ..."
+    // The dynamic lights on the objects the map places (Config::xbox_object_lights): attached to them, or made by an
+    // effect attached to them; how many objects carry one.
+    int32_t object_lights = 0;
+    char light_names[160] = {};          // "headlights light (3 placed), ..."
 };
 struct Preview {
     std::vector<Triangle> triangles;

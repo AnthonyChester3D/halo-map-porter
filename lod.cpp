@@ -806,10 +806,13 @@ Result add_lods(const fs::path &model, const double cutoffs[5], const Settings &
     // With no switch distances, the switch distances this sets would also start switching those (a rock's variants
     // drawing another variant's geometry at a distance): leave such a model alone. Permutations the engine picks
     // itself ("~blur", a moving tire) can switch to another's geometry at a distance.
+    // (No switch distances: super high to low all 0. Super low is where it stops being drawn, not a switch: a model
+    // with only that set still always draws its most detailed version, so it gets the stock-style ones too, keeping
+    // its super low.)
     static const char *cutoff_names[5] = {"super high detail cutoff", "high detail cutoff", "medium detail cutoff",
                                           "low detail cutoff", "super low detail cutoff"};
     bool no_cutoffs = true;
-    for (auto c : cutoff_names) no_cutoffs = no_cutoffs && tagfile::get_num(root, c) == 0;
+    for (int i = 0; i < 4; i++) no_cutoffs = no_cutoffs && tagfile::get_num(root, cutoff_names[i]) == 0;
     if (mixed && no_cutoffs) { r.why = "its other permutations' levels would start switching"; return r; }
     // The model's triangles: its regions' first permutations, most detailed.
     for (auto &reg : *regions) {
@@ -891,10 +894,10 @@ Result add_lods(const fs::path &model, const double cutoffs[5], const Settings &
     }
     static const char *cut[5] = {"super high detail cutoff", "high detail cutoff", "medium detail cutoff", "low detail cutoff",
                                  "super low detail cutoff"};
-    bool none = true;
-    for (auto c : cut) none = none && tagfile::get_num(root, c) == 0;
-    if (none)
-        for (int i = 0; i < 5; i++) tagfile::set_num(root, cut[i], cutoffs[i]);
+    if (no_cutoffs) {
+        for (int i = 0; i < 4; i++) tagfile::set_num(root, cut[i], cutoffs[i]);
+        tagfile::set_num(root, cut[4], std::max(cutoffs[4], tagfile::get_num(root, cut[4])));
+    }
     if (!t.save(model)) { r.why = "couldn't be saved"; return r; }
     r.changed = true;
     // The model's triangles as the game counts them (each region's first permutation), most detailed, medium, low.

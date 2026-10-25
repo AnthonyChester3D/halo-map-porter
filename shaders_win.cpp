@@ -26,7 +26,7 @@ enum {
     IDC_MODE0 = 400, IDC_MODE1, IDC_MODE2, IDC_STATUS, IDC_LIST, IDC_VIEW, IDC_PREV, IDC_NEXT, IDC_BEFORE, IDC_AFTER,
     IDC_CHANGES, IDC_HILITE, IDC_COST, IDC_REMEASURE, IDC_OKB, IDC_CANCELB, IDC_ABOUT, IDC_PORTALS, IDC_FOG_LBL, IDC_FOG,
     IDC_FAR_LBL, IDC_FAR, IDC_FOG_DIST, IDC_FOG_UNITS, IDC_WEATHER_LBL, IDC_WEATHER, IDC_RIDERS_LBL, IDC_RIDERS, IDC_PROPS_LBL,
-    IDC_PROPS, IDC_SKY_LBL, IDC_SKY, IDC_FX_LBL, IDC_FX,
+    IDC_PROPS, IDC_SKY_LBL, IDC_SKY, IDC_FX_LBL, IDC_FX, IDC_LIGHTS_LBL, IDC_LIGHTS,
 };
 #define WM_LS_LOG (WM_APP + 60)
 #define WM_LS_DONE (WM_APP + 61)
@@ -410,6 +410,22 @@ void fill_content() {
     std::string names(c.prop_names);
     fill(IDC_PROPS, c.detailed_props > 0, L"No small props with very detailed collision", L"Keep their collision (as made)",
          L"No collision: " + W(names), St->picks.props);
+    // (the lights: three choices)
+    HWND h = item(IDC_LIGHTS);
+    SendMessageW(h, CB_RESETCONTENT, 0, 0);
+    if (c.object_lights <= 0) {
+        SendMessageW(h, CB_ADDSTRING, 0, (LPARAM)(St->data ? L"No dynamic lights on the map's objects" : L""));
+        SendMessageW(h, CB_SETCURSEL, 0, 0);
+        EnableWindow(h, FALSE);
+        return;
+    }
+    EnableWindow(h, TRUE);
+    std::wstring ln = W(std::string(c.light_names));
+    SendMessageW(h, CB_ADDSTRING, 0, (LPARAM)(L"Keep them (as made): " + ln).c_str());
+    SendMessageW(h, CB_ADDSTRING, 0, (LPARAM)L"No specular: the light stays, without its shine (half the cost or more)");
+    SendMessageW(h, CB_ADDSTRING, 0, (LPARAM)L"Off: no light (a lens flare stays)");
+    SendMessageW(h, CB_SETDROPPEDWIDTH, S(520), 0);
+    SendMessageW(h, CB_SETCURSEL, std::clamp(St->picks.lights, 0, 2), 0);
 }
 
 void fill_list() {
@@ -723,6 +739,8 @@ void create_controls() {
     for (auto t : kEffectsItems) SendMessageW(item(IDC_FX), CB_ADDSTRING, 0, (LPARAM)t);
     for (int i = 0; i < 3; i++)
         if (kEffectsPick[i] == St->picks.effects) SendMessageW(item(IDC_FX), CB_SETCURSEL, i, 0);
+    add(L"STATIC", L"Lights:", SS_NOTIFY, 884, 690, 42, 20, IDC_LIGHTS_LBL);
+    add(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 928, 686, 240, 300, IDC_LIGHTS);
     add(L"BUTTON", L"Measure again", BS_PUSHBUTTON | WS_TABSTOP, 12, 726, 120, 26, IDC_REMEASURE);
     add(L"STATIC", L"Shows: how much of what you see is its reflection. Covers: how much of the screen it is. Passes: triangles drawn again per view.",
         0, 140, 730, 740, 20, IDC_ABOUT);
@@ -830,6 +848,13 @@ void create_controls() {
                                L"tick. Without collision, players and shots pass through them.";
     tip(IDC_PROPS, props_tip);
     tip(IDC_PROPS_LBL, props_tip);
+    const wchar_t *lights_tip = L"Dynamic lights on the objects the map places, always on: Deathtrap's three warthogs each carry a "
+                                L"headlight. Each one in view has the Xbox draw the level and the objects around it again, twice: "
+                                L"once for its light and once for its shine (specular). Measured on Deathtrap: about 3.4 ms of a "
+                                L"frame with two in view (the shine 2.4 of it), and 1.2 ms setting the lights up. No specular keeps "
+                                L"the light and drops the shine pass; Off drops the light (a lens flare stays).";
+    tip(IDC_LIGHTS, lights_tip);
+    tip(IDC_LIGHTS_LBL, lights_tip);
     tip(IDC_VIEW, L"Click here, then fly: drag with the mouse to look around, W A S D to move where you look, Q / E to go "
                   L"down and up (Shift faster, Ctrl slower), the mouse wheel to step forward and back.");
     tip(IDC_PREV, L"The previous view (the selected shader's, or the ones that see most of the level).");
@@ -959,6 +984,12 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (HIWORD(wp) == CBN_SELCHANGE) {
                 int k = (int)SendMessageW(item(IDC_FX), CB_GETCURSEL, 0, 0);
                 if (k >= 0 && k < 3) St->picks.effects = kEffectsPick[k];
+            }
+            return 0;
+        case IDC_LIGHTS:
+            if (HIWORD(wp) == CBN_SELCHANGE && St->data && St->data->p.content.object_lights > 0) {
+                int k = (int)SendMessageW(item(IDC_LIGHTS), CB_GETCURSEL, 0, 0);
+                if (k >= 0 && k <= 2) St->picks.lights = k;
             }
             return 0;
         case IDC_RIDERS: case IDC_PROPS:

@@ -455,6 +455,58 @@ bool analyze(const fs::path &bsp_file, const fs::path &scenario, const Find &fin
                 names += (names.empty() ? "" : ", ") + fs::path(ref).stem().string() + " (" + std::to_string(surfaces) + " surfaces)";
             }
             snprintf(p.content.prop_names, sizeof p.content.prop_names, "%s", names.c_str());
+            // (the dynamic lights on placed objects: attached, or made by an attached effect, which always is dynamic)
+            std::map<std::string, int> lights;   // light tag -> objects carrying it
+            static const char *const kinds[][2] = {{"scenery", "scenery palette"}, {"machines", "machine palette"},
+                                                   {"controls", "control palette"}, {"light fixtures", "light fixture palette"}};
+            std::map<std::string, std::vector<std::string>> of_object;
+            for (auto &k : kinds) {
+                tagfile::Block items = sc.root().block(k[0]), pal = sc.root().block(k[1]);
+                for (size_t i = 0; i < items.size(); i++) {
+                    long long t = items[i].integer("type");
+                    if (t < 0 || (size_t)t >= pal.size()) continue;
+                    std::string o = pal[(size_t)t].ref("name");
+                    if (o.empty()) continue;
+                    if (!of_object.count(o)) {
+                        std::vector<std::string> &v = of_object[o];
+                        fs::path of = find(o);
+                        tagfile::Tag ot;
+                        if (of.empty() || !ot.load(of)) continue;
+                        tagfile::Block at = ot.root().block("attachments");
+                        for (size_t a = 0; a < at.size(); a++) {
+                            std::string ref = at[a].ref("type");
+                            fs::path lf = ref.empty() ? fs::path() : find(ref);
+                            if (lf.empty()) continue;
+                            if (ref.size() > 6 && ref.compare(ref.size() - 6, 6, ".light") == 0) {
+                                tagfile::Tag lt;
+                                if (lt.load(lf) && ((long long)lt.root().num("flags") & 1) && lt.root().num("radius") > 0) v.push_back(ref);
+                            } else if (ref.size() > 7 && ref.compare(ref.size() - 7, 7, ".effect") == 0) {
+                                tagfile::Tag et;
+                                if (!et.load(lf)) continue;
+                                tagfile::Block ev = et.root().block("events");
+                                for (size_t e = 0; e < ev.size(); e++) {
+                                    tagfile::Block parts = ev[e].block("parts");
+                                    for (size_t q = 0; q < parts.size(); q++) {
+                                        std::string l = parts[q].ref("type");
+                                        fs::path f2 = l.empty() ? fs::path() : find(l);
+                                        tagfile::Tag lt;
+                                        if (l.size() > 6 && l.compare(l.size() - 6, 6, ".light") == 0 && !f2.empty() && lt.load(f2) &&
+                                            lt.root().num("radius") > 0 && std::find(v.begin(), v.end(), l) == v.end())
+                                            v.push_back(l);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    for (auto &l : of_object[o]) lights[l]++;
+                }
+            }
+            std::string ln;
+            for (auto &[l, n] : lights) {
+                p.content.object_lights += n;
+                ln += (ln.empty() ? "" : ", ") + fs::path(l).stem().string() + " (" + std::to_string(n) + " placed)";
+            }
+            snprintf(p.content.light_names, sizeof p.content.light_names, "%s", ln.c_str());
         }
         for (size_t c = 0; c < clusters.size(); c++) {
             long long sky = clusters[c].integer("sky");
@@ -809,7 +861,7 @@ void draw(const Preview &p, const Camera &cam, const std::vector<char> &reflecti
 
 // The file: a magic, then each part as counts and raw values (this machine's byte order: the file is a cache).
 namespace {
-const char kMagic[8] = {'H', 'M', 'P', 'L', 'S', 'H', 'D', '6'};
+const char kMagic[8] = {'H', 'M', 'P', 'L', 'S', 'H', 'D', '7'};
 struct Out {
     std::ofstream f;
     template <class T> void raw(const T &v) { f.write((const char *)&v, sizeof v); }
