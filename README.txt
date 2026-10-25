@@ -1234,6 +1234,30 @@ Content nobody can get (Xbox)
   from (a mod's custom weapons often reuse stock effects, sounds and models,
   so folders like weapons\sniper rifle can still show up).
 
+Machines (Xbox)
+  Machines (device_machine: doors, lifts, anything a map animates as a
+  device) cost the Xbox more every tick than anything else it places that
+  doesn't move by itself: each updates its device, its dynamic lights and
+  its bones, and an elevator looks for riders (Deathtrap's 74 machines
+  took 6.3 ms of every 33 ms tick in Halo 1 Unlimited's perf log, where
+  its 49 scenery took 0.3). Two things change that, and nothing you can
+  see:
+  - An elevator machine with no collision model (nobody can stand on it)
+    keeps the flag but loses its elevator node. Every tick its node moved,
+    it searched a sphere its size for bipeds riding it, and only a biped
+    standing on its collision can ride. The flag also decides how its
+    lighting is sampled, so it stays. Deathtrap's trees, rocks and airbase
+    pieces scroll past as elevators like this: 14 kinds, 61 placed.
+  - A machine that's only a prop is placed as scenery instead: no
+    animation graph (it never changes pose), no device functions, sounds
+    or effects, not an elevator, placed without a name (no script can
+    reach it) and in no device group (no switch or script changes it).
+    Scenery is drawn and lit the same way (shadowless, like a machine) but
+    doesn't do a device's work every tick. A scenery tag is made beside
+    the machine's; other placements of the same machine stay machines.
+    Precipice's 42 holo panels are machines like this.
+  The log's [machines] lines list them.
+
 Custom weapons, vehicles and player model
   Maps made with custom tagsets often carry their own (high resolution)
   copies of the stock weapons, vehicles and player model. Every Xbox
@@ -1325,6 +1349,18 @@ HUDs from MCC maps
   per anchor (e.g. visor_bottom_left), chained after it as its child HUDs.
   The Xbox draws the whole chain, each from its own corner, so they stay
   at their edges on a split screen too.
+  The Xbox's corners aren't the screen's: it draws the HUD inside the
+  TV's title-safe frame, 48 pixels (of 640) in from the sides and 36 (of
+  480) from the top and bottom, where MCC draws to the screen's edges. So
+  an element moved from the middle of the top or bottom edge to the left
+  corner is moved back those 48 pixels, which centres it on the screen
+  (CMT's health bar sat 48 pixels right of the middle). And the elements
+  with an anchor of their own (the visor's pieces) are moved out by the
+  whole frame, to the screen's edges where MCC has them; left inside the
+  frame, they sat 48 and 36 pixels nearer the middle. On a split screen
+  that puts them as far past each view's edge. The rest of the HUD (the
+  shield, health, weapon and grenade panels, the motion sensor) stays
+  inside the frame, the way the Xbox's own HUD sits.
   Numbers (ammo and grenade counts, a scope's zoom) MCC lays out on its
   960p canvas whatever the HUD's own, so on a "480p" HUD their positions
   are halved too (left as they were, CMT's grenade count sat under its
@@ -1337,13 +1373,11 @@ HUDs from MCC maps
   spacing halved. The Xbox's own digits (another font, wider apart) put
   the counts beside their panels. With the Xbox's own weapons, their HUDs
   and digits are the Xbox's.
-  Two differences are the Xbox's, not the map's. It keeps the HUD inside
-  the TV's safe area, so every corner element sits about 25 pixels (of
-  640x480) further in than on MCC, which draws to the screen's edges. And
-  with widescreen on, the Xbox draws the HUD on its 640x480 screen and the
-  TV stretches it with the picture: round things come out a third wider
-  (the motion sensor an oval), where MCC draws its HUD unstretched. Both
-  would be the XBE's to change, for every map at once.
+  One difference is the Xbox's, not the map's: with widescreen on, the
+  Xbox draws the HUD on its 640x480 screen and the TV stretches it with
+  the picture, so round things come out a third wider (the motion sensor
+  an oval), where MCC draws its HUD unstretched. That would be the XBE's
+  to change, for every map at once.
   The textures themselves are then fitted (see HUD textures).
 
 HUD textures
@@ -1376,16 +1410,6 @@ HUD textures
   rifle scope: 1024x1024 at full size) is cut down to the middle that
   can show (1024x512; a split-screen view is smaller still): 1.3 MB down
   to 0.5 MB, the same on screen.
-  A scope mask can't simply be made smaller: the Xbox draws it a texel
-  to a pixel, so half the size is half the window. But the screen only
-  ever shows the middle 640x480 of it, and the effect only reads its
-  alpha (how dark each pixel goes). So a mask is kept as just that
-  640x480 of alpha, uncompressed (A8) and stored linear, which the Xbox
-  draws at any size, still a texel to a pixel and centred: CMT's 1024x512
-  focus rifle mask goes from 512 KB to 300 KB, exactly as before on
-  screen (a touch sharper, as A8 isn't block-compressed). A mask whose
-  colour night vision or desaturation reads too ("masked" in the
-  screen effect, as CMT's sniper rifle's is) is left as it is.
 
 The output is an NTSC (US) Xbox map.
 

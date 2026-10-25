@@ -1086,6 +1086,8 @@ std::string tag_path_noext(const fs::path &rel) {
 bool prepare_for_xbox(Job &job, std::string &err);
 size_t shrink_textures_to_fit(Job &job, size_t needed, int &count, bool hard = true);
 void restrict_to_xbox_mp(Job &job, const fs::path &xsrc);
+void drop_dead_placements(Job &job, const fs::path &xsrc);
+void trim_machines(Job &job, const fs::path &xsrc);
 bool drop_kept_vehicles(Job &job);
 void use_stock_versions(Job &job, const fs::path &xsrc);
 int guess_vehicle_type(const std::string &tag);
@@ -3732,7 +3734,7 @@ int cap_bitmap_tag(const fs::path &p, int max_side, bool alpha_tested = false) {
         int w = be16(b, e + 4), h = be16(b, e + 6), type = be16(b, e + 10), fmt = be16(b, e + 12), flags = be16(b, e + 14);
         int mips = be16(b, e + 20);
         bool did = false;
-        // not swizzled (palettized: mips only), nor linear (drawn in texels: a screen mask, linear_mask_bitmap_tag)
+        // not swizzled (palettized: mips only), nor linear (an interface bitmap, drawn in pixels)
         while (type == 0 && !(flags & 8) && !(flags & 16) && std::max(w, h) > max_side) {
             size_t m0 = mip_bytes(w, h, fmt);
             if (!m0 || (block_format(fmt) && !block_halvable(w, h))) break;   // e.g. a 1024x4 DXT strip stays as is
@@ -3966,50 +3968,6 @@ static size_t trim_hud_bitmap_tag(const fs::path &p, bool drop_mips, int max_w, 
     put_be32(out, 40, ~crc32_of(out.data() + 64, out.size() - 64));
     std::ofstream(p, std::ios::binary) << out;
     return bp.pp - out_pix.size();
-}
-
-// A weapon's screen effect mask (a scope's surround) as just what the Xbox's 640x480 screen shows of it: the middle
-// `max_w` x `max_h` of its alpha, uncompressed (A8, a byte a texel, exact), as an interface bitmap, which Invader
-// builds linear (unswizzled, any size). The Xbox reads a linear texture's coordinates in texels
-// (rasterizer_xbox_screen_effect.c: convolution_scale 1), so it still draws it a texel to a pixel, centred, as the
-// whole mask was; past its edges the clamp repeats them, as it did the whole mask's. The effect darkens the screen
-// by the mask's alpha alone; its colour (blue) is read only by night vision or desaturation marked "masked", whose
-// masks the caller leaves as they are. Rows stay whole steps of the Xbox's 64-byte pitch (the width a multiple of 64).
-// Only a single texture with no mipmaps (fit_hud_textures has dropped a mask's). Returns the bytes saved (0: unchanged).
-static size_t linear_mask_bitmap_tag(const fs::path &p, int max_w, int max_h) {
-    BitmapParts bp;
-    if (!bp.read(p) || bp.nbd != 1 || bp.nseq > 1 || (bp.nseq && bp.sprites(0))) return 0;
-    std::string &b = bp.b;
-    const size_t e = bp.bd_off;
-    const int w = be16(b, e + 4), h = be16(b, e + 6), type = be16(b, e + 10), fmt = be16(b, e + 12), flags = be16(b, e + 14);
-    const uint32_t off = be32(b, e + 24);
-    const bool has_alpha = fmt == 8 || fmt == 9 || fmt == 11 || fmt == 14 || fmt == 15 || fmt == 16 || fmt == 18;
-    if (type != 0 || (flags & (4 | 8 | 16)) || be16(b, e + 20) != 0 || !has_alpha) return 0;   // (palettized, swizzled, linear)
-    const size_t n = mip_bytes(w, h, fmt);
-    if (!n || (size_t)off + n > bp.pp) return 0;
-    const int cw = std::min(w, max_w) / 64 * 64, ch = std::min(h, max_h);
-    if (cw < 64 || ch < 1 || (w - cw) % 2 || (h - ch) % 2 || (size_t)cw * ch >= bp.pp) return 0;
-    std::vector<unsigned char> rgba;
-    if (!decode_level(b.substr(bp.pp_off + off, n), w, h, fmt, rgba)) return 0;
-    const int x0 = (w - cw) / 2, y0 = (h - ch) / 2;
-    std::string px((size_t)cw * ch, '\0');
-    for (int y = 0; y < ch; y++)
-        for (int x = 0; x < cw; x++) px[(size_t)y * cw + x] = (char)rgba[((size_t)(y0 + y) * w + x0 + x) * 4 + 3];
-    put_be16(b, 64, 4);       // type: interface bitmaps
-    put_be16(b, 64 + 2, 5);   // format: monochrome
-    put_be16(b, e + 4, (uint16_t)cw);
-    put_be16(b, e + 6, (uint16_t)ch);
-    put_be16(b, e + 12, 0);   // A8
-    put_be16(b, e + 14, 16);  // linear
-    put_be16(b, e + 16, (uint16_t)((int16_t)be16(b, e + 16) - x0));   // registration point, in pixels
-    put_be16(b, e + 18, (uint16_t)((int16_t)be16(b, e + 18) - y0));
-    put_be32(b, e + 24, 0);
-    put_be32(b, e + 28, (uint32_t)px.size());
-    std::string out = b.substr(0, bp.pp_off) + px + b.substr(bp.pp_off + bp.pp);
-    put_be32(out, 64 + 48, (uint32_t)px.size());
-    put_be32(out, 40, ~crc32_of(out.data() + 64, out.size() - 64));
-    std::ofstream(p, std::ios::binary) << out;
-    return bp.pp - px.size();
 }
 
 // One of a sheet's pictures (a sequence's first sprite, or its first texture whole), in a form another sheet's can be
@@ -7989,6 +7947,10 @@ static bool hud_picture_size(const fs::path &file, int seq, double &w, double &h
     return w > 0 && h > 0;
 }
 
+// Where the Xbox's HUD corners are on its 640x480 screen: its title-safe frame's (rasterizer_xbox.c,
+// RASTERIZER_FRAME_BOUNDS: 48, 36 to 592, 444). MCC's are the screen's own.
+static const int kXboxFrameX = 48, kXboxFrameY = 36;
+
 // HUD anchors: the Xbox's five, then MCC's four (top centre, bottom centre, left centre, right centre).
 static const char *const kHudAnchors[9] = {"top_left", "top_right", "bottom_left", "bottom_right", "center",
                                            "top_center", "bottom_center", "left_center", "right_center"};
@@ -8047,7 +8009,7 @@ void convert_hud_layout(Job &job, const fs::path &xsrc, std::vector<std::string>
         bool own = false;         // anchor_key is the element's own (a weapon HUD's per-element anchor)
     };
     std::map<std::string, bool> half;   // bitmap -> flagged "half hud scale" / "force hud use highres scale"
-    int scaled = 0, high_res = 0, moved = 0, numbers = 0, anchored = 0, copies = 0, tags960 = 0, tags480 = 0;
+    int scaled = 0, high_res = 0, moved = 0, numbers = 0, anchored = 0, copies = 0, tags960 = 0, tags480 = 0, to_edges = 0;
     // A map from MCC (its HUDs' canvases were read from it, or its HUDs are laid out as MCC's).
     const bool mcc = job.from == Game::MCC || job.hud_canvas_known || guess;
     std::vector<std::string> made;
@@ -8146,17 +8108,24 @@ void convert_hud_layout(Job &job, const fs::path &xsrc, std::vector<std::string>
             }
             offset[key.substr(0, key.size() - 13)] = {x, y};
         }
-        // Anchors: each element's MCC anchor as an Xbox one, its offset moved to match.
+        // Anchors: each element's MCC anchor as an Xbox one, its offset moved to match. The Xbox's corners are those
+        // of the TV's title-safe frame, 48 pixels in from the sides and 36 from the top and bottom
+        // (rasterizer_xbox.c: RASTERIZER_FRAME_BOUNDS), where MCC's are the screen's: an element from the middle of the
+        // top or bottom edge, drawn from the Xbox corner beside it, is moved back by those 48 so it's centred on the
+        // screen (CMT's health bar was 48 right of the middle). And an element with an anchor of its own, apart from
+        // its HUD's (MCC's per-element anchors: CMT's visor, pieces along the screen's edges), is moved out by the whole
+        // frame, to the screen's edges where MCC draws it (on the Xbox they sat 48 and 36 pixels nearer the middle).
         std::map<int, std::vector<size_t>> groups;   // Xbox anchor -> the elements drawn from it
         std::map<std::string, int> field_to;         // an interface anchor field -> the Xbox anchor it becomes
         for (size_t i = 0; i < elems.size(); i++) {
             Elem &e = elems[i];
             if (e.anchor_key.empty()) continue;
             int a = hud_anchor_of(vals, e.anchor_key);
+            const bool apart = e.own && a >= 0;                      // its own anchor
             if (a < 0 && e.own) a = hud_anchor_of(vals, "anchor");   // from its HUD's
             if (a < 0) a = 0;
             int x = a;
-            if (a >= 5) {
+            if (a >= 5 || (apart && a != 4)) {
                 double w = 0, h = 0;
                 fs::path dir = !e.bitmap.empty() && in_overlay(e.bitmap) ? job.overlay : xsrc;
                 if (!e.bitmap.empty() && hud_picture_size(dir / from_u8(e.bitmap), e.seq, w, h)) {
@@ -8167,17 +8136,21 @@ void convert_hud_layout(Job &job, const fs::path &xsrc, std::vector<std::string>
                 if (it != offset.end()) {
                     auto [ox, oy] = it->second;
                     double nx = ox;
+                    int ny = oy;
                     switch (a) {
-                    case 5: x = 0; nx = 320 + ox - w / 2; break;   // top centre: from the top left
-                    case 6: x = 2; nx = 320 + ox - w / 2; break;   // bottom centre: from the bottom left
-                    case 7: x = 4; nx = ox + w / 2 - 320; break;   // left centre: from the centre
-                    case 8: x = 4; nx = 320 - ox - w / 2; break;   // right centre: from the centre
+                    case 0: case 1: case 2: case 3: nx = ox - kXboxFrameX; ny = oy - kXboxFrameY; break;   // (apart)
+                    case 5: x = 0; nx = 320 - kXboxFrameX + ox - w / 2; break;   // top centre: from the top left
+                    case 6: x = 2; nx = 320 - kXboxFrameX + ox - w / 2; break;   // bottom centre: from the bottom left
+                    case 7: x = 4; nx = ox + w / 2 - 320; break;                 // left centre: from the centre
+                    case 8: x = 4; nx = 320 - ox - w / 2; break;                 // right centre: from the centre
                     }
-                    sets.push_back({e.base + "anchor_offset", std::to_string((int)std::lround(nx)) + "," + std::to_string(oy)});
-                } else {
+                    if (apart && (a == 5 || a == 6)) ny = oy - kXboxFrameY;
+                    sets.push_back({e.base + "anchor_offset", std::to_string((int)std::lround(nx)) + "," + std::to_string(ny)});
+                    if (apart) to_edges++;
+                } else if (a >= 5) {
                     x = a == 5 ? 0 : a == 6 ? 2 : 4;
                 }
-                anchored++;
+                if (a >= 5) anchored++;
             }
             if (!e.own) field_to[e.anchor_key] = x;
             groups[x].push_back(i);
@@ -8285,7 +8258,13 @@ void convert_hud_layout(Job &job, const fs::path &xsrc, std::vector<std::string>
         job.note("[xbox] placed " + std::to_string(anchored) + " HUD elements anchored where the Xbox has no anchor (the middle "
                  "of a screen edge) from the corner or centre beside it" +
                  (copies ? ", and put the elements of weapon HUDs anchored apart from their HUD into " + std::to_string(copies) +
-                               " copies of those HUDs chained after them, each drawn from its own anchor" : ""));
+                               " copies of those HUDs chained after them, each drawn from its own anchor" : "") +
+                 " (centred on the screen, not on the Xbox's title-safe frame, which starts 48 pixels in from the left)");
+    if (to_edges)
+        job.note("[xbox] moved " + std::to_string(to_edges) + " HUD element" + (to_edges == 1 ? "" : "s") + " with an anchor of "
+                 "their own (MCC's per-element anchors, such as a visor's pieces along the screen's edges) out to the screen's "
+                 "edges, where MCC draws them: the Xbox draws HUDs from its title-safe frame, 48 pixels in from the sides and "
+                 "36 from the top and bottom");
 }
 
 // The map's own HUD bitmaps at the resolution the Xbox shows them. The Xbox draws its HUD on a 640x480 screen,
@@ -8303,8 +8282,6 @@ void convert_hud_layout(Job &job, const fs::path &xsrc, std::vector<std::string>
 // element draws at a texel to a pixel or bigger, and of a mask; and the edges of one only drawn centred as a crosshair
 // overlay and bigger than the 640x480 screen (CMT's focus rifle scope overlay: 1024x1024 at full size, cut to the
 // middle 1024x512; a split-screen view is smaller still, so it's covered too).
-// Last, a mask whose alpha is all its effect reads keeps just the 640x480 of it the screen shows, uncompressed
-// (linear_mask_bitmap_tag: CMT's 1024x512 DXT5 scope surrounds, 512 KB, then 300 KB).
 static void fit_hud_textures(Job &job, const fs::path &xsrc, const std::vector<std::string> &hud_tags) {
     if (hud_tags.empty()) return;
     const Config &cfg = job.cfg;
@@ -8317,7 +8294,6 @@ static void fit_hud_textures(Job &job, const fs::path &xsrc, const std::vector<s
     struct Draw { std::string tag, base; double w, h; bool centred; };   // centred: a crosshair overlay at the middle
     std::map<std::string, std::vector<Draw>> draws;   // bitmap -> the elements that draw it
     std::map<std::string, int> mask_rows;             // mask -> the screen rows it must cover (480; split screen 240)
-    std::set<std::string> mask_colour;                // masks whose colour an effect reads, not just their alpha
     std::set<std::string> other;                      // anything else a HUD refers to (those bitmaps are left alone)
     const std::set<std::string> huds(hud_tags.begin(), hud_tags.end());
     for (auto &tag : hud_tags) {
@@ -8344,12 +8320,6 @@ static void fit_hud_textures(Job &job, const fs::path &xsrc, const std::vector<s
         }
         for (auto &[key, v] : kv) {
             if (v.empty() || drawn.count(key)) continue;
-            for (const std::string m : {"mask_fullscreen", "mask_splitscreen"}) {
-                if (!ends_with(key, m)) continue;
-                const std::string se = key.substr(0, key.size() - m.size());   // its screen effect ("screen_effect[0].")
-                if (vals[se + "even_more_flags.masked"] == "1" || vals[se + "desaturation_flags.masked"] == "1")
-                    mask_colour.insert(bitmap_path(v));   // night vision / desaturation read its colour
-            }
             if (ends_with(key, "mask_fullscreen")) mask_rows[bitmap_path(v)] = 480;
             else if (ends_with(key, "mask_splitscreen")) mask_rows[bitmap_path(v)] = std::max(mask_rows[bitmap_path(v)], 240);
             else other.insert(bitmap_path(v));   // every other value: a reference in a field this doesn't know
@@ -8378,8 +8348,8 @@ static void fit_hud_textures(Job &job, const fs::path &xsrc, const std::vector<s
         if (!hud_globals.empty() && !ends_with(hud_globals, ".hud_globals")) hud_globals += ".hud_globals";
     }
     auto users = find_referrers({xsrc}, cands);
-    size_t hud_before = 0, hud_after = 0, mask_before = 0, mask_after = 0, trim_before = 0, trim_after = 0, lin_before = 0, lin_after = 0;
-    int fitted = 0, masks = 0, cropped = 0, unmipped = 0, linear = 0;
+    size_t hud_before = 0, hud_after = 0, mask_before = 0, mask_after = 0, trim_before = 0, trim_after = 0;
+    int fitted = 0, masks = 0, cropped = 0, unmipped = 0;
     std::map<std::string, std::vector<std::pair<std::string, std::string>>> sets;   // HUD tag -> (field, value)
     for (auto &bm : cands) {
         bool hud_only = true;
@@ -8438,14 +8408,6 @@ static void fit_hud_textures(Job &job, const fs::path &xsrc, const std::vector<s
                 (cut ? cropped : unmipped)++;
             }
         }
-        // A mask whose alpha is all the effect reads: just the 640x480 the screen shows of it, uncompressed.
-        BitmapParts lin;
-        if (mask && !mask_colour.count(bm) && lin.read(p))
-            if (size_t saved = linear_mask_bitmap_tag(p, 640, 480)) {
-                lin_before += lin.pp;
-                lin_after += lin.pp - saved;
-                linear++;
-            }
     }
     std::string out;
     for (auto &[tag, s] : sets) {
@@ -8478,11 +8440,6 @@ static void fit_hud_textures(Job &job, const fs::path &xsrc, const std::vector<s
                     "screen (scope overlays) down to the middle the screen shows, without their smaller copies";
         job.note("[xbox] " + what + ": " + mb(trim_before) + " of textures now " + mb(trim_after) + " (the same on screen)");
     }
-    if (linear)
-        job.note("[xbox] kept just the 640x480 the screen shows of " + std::to_string(linear) + " weapon screen mask" +
-                 (linear == 1 ? "" : "s") + " (scope surrounds), uncompressed, alpha only (all the effect reads; a mask "
-                 "night vision or desaturation reads too is left whole): " + mb(lin_before) + " now " + mb(lin_after) +
-                 " (the same on screen)");
 }
 
 // ---------------------------------------------------------------- the map's globals
@@ -9158,6 +9115,7 @@ bool prepare_for_xbox(Job &job, std::string &err) {
     // warthog, ghost, scorpion; the Halo Universal XBE spawns any) and replaces PC-only weapons, so use
     // the Xbox equivalents.
     use_stock_versions(job, xsrc);
+    drop_dead_placements(job, xsrc);
     restrict_to_xbox_mp(job, xsrc);
     apply_xbox_slots(job, xsrc);
     merge_map_globals(job, xsrc);
@@ -9165,6 +9123,7 @@ bool prepare_for_xbox(Job &job, std::string &err) {
     fix_kept_weapons(job, xsrc);
     correct_xbox_tagset(job);
     trim_unobtainable(job, xsrc);
+    trim_machines(job, xsrc);
     apply_replacements(job, xsrc);
     fix_seat_labels(job, xsrc);
     trim_pickup_extras(job, xsrc);
@@ -9837,6 +9796,342 @@ void fix_seat_labels(Job &job, const fs::path &xsrc) {
 static void remove_scenario_vehicle(Job &job, const fs::path &xsrc, const std::string &r);
 
 // Apply the vehicle slots / weapon choices to the map's placed content.
+// What a multiplayer match can never make, taken out before anything else looks at the map's vehicles and weapons
+// (the slots, the weapons & vehicles window), so it isn't offered, slotted or built:
+//  - a vehicle placement with none of its multiplayer spawn flags set (no game type's "default" bit, nor the
+//    "allowed" one a custom vehicle set uses): Halo PC and MCC never spawn it. The Xbox doesn't read those flags
+//    (Warthog reads them only for Custom Edition maps: game_engine_ce_vehicle_placement_allowed), so on the Xbox it
+//    would spawn in every game (Precipice's Scorpion). Only when the map's other vehicle placements have flags: a map
+//    with none set anywhere never had them (tags from an Xbox map), and spawns them all;
+//  - an item spawn point (netgame equipment) whose four game types are all "none": no game type matches it
+//    (match_game_type);
+//  - a placed vehicle, weapon or equipment marked "not placed: automatically" that has no name: nothing makes it
+//    (a script makes an object the map doesn't place by its name).
+// Named placements stay (a script can make them: Precipice's beam_attach_hog), and so does everything else. A palette
+// entry left with nothing placed from it goes too (not the vehicles' when the map has AI, whose starting locations
+// use them), and with the item spawn points' item collections, whatever only they used drops out of the build.
+void drop_dead_placements(Job &job, const fs::path &xsrc) {
+    const Config &cfg = job.cfg;
+    const std::string scen = job.scenario + ".scenario";
+    struct Kind { const char *block, *palette; };
+    static const Kind kinds[] = {{"vehicles", "vehicle_palette"}, {"weapons", "weapon_palette"}, {"equipment", "equipment_palette"}};
+    static const char *spawn_bits[] = {"slayer_default", "ctf_default", "king_default", "oddball_default",
+                                       "slayer_allowed", "ctf_allowed", "king_allowed", "oddball_allowed"};
+    std::vector<std::string> said;
+    int said_items = 0;
+    // The scenario's copies: the fixes' (which the build uses) and the prepared one (which the Xbox steps read).
+    for (const fs::path &dir : {job.fixes, xsrc}) {
+        if (dir.empty() || !fs::exists(dir / from_u8(scen))) continue;
+        auto kv = list_values(cfg, dir, scen);
+        std::map<std::string, std::string> vals(kv.begin(), kv.end());
+        if (vals["type"] != "multiplayer" && vals["type.multiplayer"] != "*") continue;
+        auto count = [&](const std::string &block) {
+            int n = 0;
+            while (vals.count(block + "[" + std::to_string(n) + "].type") || vals.count(block + "[" + std::to_string(n) + "].type_0")) n++;
+            return n;
+        };
+        auto num = [&](const std::string &k) {
+            auto it = vals.find(k);
+            return it == vals.end() || it->second.empty() || !isdigit((unsigned char)it->second[0]) ? -1 : std::atoi(it->second.c_str());
+        };
+        const int names = [&] { int n = 0; while (vals.count("object_names[" + std::to_string(n) + "].name")) n++; return n; }();
+        const bool has_ai = vals.count("encounters[0].name") > 0;
+        std::vector<std::string> edits, renumber, drop_palette;
+        std::map<std::string, int> gone;   // palette entry's tag -> placements taken out
+        for (const Kind &k : kinds) {
+            const std::string b = k.block, pal = k.palette;
+            const int n = count(b), np = [&] { int c = 0; while (vals.count(pal + "[" + std::to_string(c) + "].name")) c++; return c; }();
+            bool any_flags = false;
+            if (b == "vehicles")
+                for (int i = 0; i < n && !any_flags; i++)
+                    for (const char *f : spawn_bits)
+                        if (vals[b + "[" + std::to_string(i) + "].multiplayer_spawn_flags." + f] == "1") { any_flags = true; break; }
+            std::vector<int> dead;
+            std::vector<int> left(np, 0), was(np, 0);
+            for (int i = 0; i < n; i++) {
+                const std::string e = b + "[" + std::to_string(i) + "]";
+                const int t = num(e + ".type"), nm = num(e + ".name");
+                if (t >= 0 && t < np) was[t]++;
+                if (nm >= 0 && nm < names) { if (t >= 0 && t < np) left[t]++; continue; }   // named: a script may make it
+                bool never = vals[e + ".not_placed.automatically"] == "1";
+                if (!never && b == "vehicles" && any_flags) {
+                    never = true;
+                    for (const char *f : spawn_bits)
+                        if (vals[e + ".multiplayer_spawn_flags." + f] == "1") { never = false; break; }
+                }
+                if (never) {
+                    dead.push_back(i);
+                    if (t >= 0 && t < np) gone[norm_rel(vals[pal + "[" + std::to_string(t) + "].name"])]++;
+                } else if (t >= 0 && t < np) {
+                    left[t]++;
+                }
+            }
+            for (auto it = dead.rbegin(); it != dead.rend(); ++it) edits.insert(edits.end(), {"-E", b + "[" + std::to_string(*it) + "]"});
+            // Palette entries whose every placement went: renumber what stays placed, then take them out.
+            if (b == "vehicles" && has_ai) continue;
+            std::vector<int> empty;
+            for (int t = 0; t < np; t++) if (was[t] > 0 && left[t] == 0) empty.push_back(t);
+            if (empty.empty()) continue;
+            int kept_i = 0;
+            for (int i = 0; i < n; i++) {
+                if (std::binary_search(dead.begin(), dead.end(), i)) continue;
+                const int t = num(b + "[" + std::to_string(i) + "].type");
+                const int shift = (int)std::count_if(empty.begin(), empty.end(), [&](int u) { return u < t; });
+                if (t >= 0 && t < np && shift)
+                    renumber.insert(renumber.end(), {"-S", b + "[" + std::to_string(kept_i) + "].type", std::to_string(t - shift)});
+                kept_i++;
+            }
+            for (auto it = empty.rbegin(); it != empty.rend(); ++it) drop_palette.insert(drop_palette.end(), {"-E", pal + "[" + std::to_string(*it) + "]"});
+        }
+        std::vector<int> dead_items;
+        const int ne = count("netgame_equipment");
+        std::map<std::string, int> items_gone;
+        for (int i = 0; i < ne; i++) {
+            const std::string e = "netgame_equipment[" + std::to_string(i) + "]";
+            bool none = true;
+            for (int t = 0; t < 4 && none; t++) none = vals[e + ".type_" + std::to_string(t) + ".none"] == "*";
+            if (!none) continue;
+            dead_items.push_back(i);
+            items_gone[fs::path(from_u8(norm_rel(vals[e + ".item_collection"]))).stem().u8string()]++;
+        }
+        for (auto it = dead_items.rbegin(); it != dead_items.rend(); ++it) edits.insert(edits.end(), {"-E", "netgame_equipment[" + std::to_string(*it) + "]"});
+        if (edits.empty()) continue;
+        std::string out;
+        std::vector<std::string> cmd{u8(tool(cfg, "invader-edit")), "-t", u8(dir), scen};
+        cmd.insert(cmd.end(), edits.begin(), edits.end());
+        cmd.insert(cmd.end(), renumber.begin(), renumber.end());
+        cmd.insert(cmd.end(), drop_palette.begin(), drop_palette.end());
+        if (run_process(cmd, out) != 0) {
+            job.log("  couldn't take out the placements no game can use: " + out);
+            continue;
+        }
+        if (!said.empty() || said_items) continue;   // (the same map in both copies: said once)
+        for (auto &[tag, c] : gone) said.push_back(fs::path(from_u8(tag)).stem().u8string() + " (" + std::to_string(c) + " placed)");
+        for (auto &[ic, c] : items_gone)
+            said.push_back(ic + " (" + std::to_string(c) + " spawn point" + (c == 1 ? "" : "s") + ")");
+        said_items = (int)dead_items.size();
+    }
+    if (said.empty()) return;
+    std::string list = said[0];
+    for (size_t i = 1; i < said.size(); i++) list += ", " + said[i];
+    job.note("[trim] took out placements no game type can ever spawn (vehicles with none of their gametype flags set, "
+             "which the Xbox ignores and would spawn in every game; item spawn points with every gametype \"none\"; "
+             "unnamed objects marked not placed): " + list + ". A vehicle or weapon nothing else uses drops out of the map "
+             "(one in a vehicle slot stays when the map has Race vehicle spawns: Race spawns the slots' vehicles)");
+}
+
+// Machines (device_machine) cost the Xbox more every tick than anything else a map places that doesn't move by
+// itself: each updates its device, recomputes its dynamic lights and its bones, and an elevator looks for riders
+// (Deathtrap's 74 machines: 6.3 ms of every 33 ms tick in Halo 1 Unlimited's perf log, scenery 0.3 ms for 49). Two
+// things here change nothing anyone can see:
+//  - an elevator nobody can stand on (no collision model) keeps the flag but loses its elevator node: every tick
+//    the node moved, the machine searched a sphere its size for bipeds riding it, and only a biped standing on its
+//    collision rides it (machine_elevator_carry_riders; the engine skips an elevator without a node). The flag also
+//    decides how its lighting is sampled (sideways, and again as it moves: object_lights.c), so it stays.
+//    Deathtrap's trees, rocks and airbase pieces scroll past as elevators with no collision: 14 kinds, 62 placed;
+//  - a machine that's only a prop becomes scenery: one with no animation graph (it never changes pose), no
+//    device functions (its shaders and attachments read nothing a device sets), no device sounds or effects,
+//    and not an elevator (sampled as scenery is), placed without a name (no script can reach it) and in no device
+//    group (no control or script changes its power or position). Its look, collision, lighting and functions are
+//    the scenery's too (scenery_new: like a machine, shadowless; the object's own random constant and other inputs
+//    the same), and scenery skips the device's and the dynamic lights' work every tick. A machine kind with
+//    other placements keeps them. Precipice's 42 holo panels are machines like this.
+void trim_machines(Job &job, const fs::path &xsrc) {
+    const std::string scen = job.scenario + ".scenario";
+    auto file_of = [](std::string ref, const char *ext) {
+        std::replace(ref.begin(), ref.end(), '\\', '/');
+        return ref.empty() ? ref : ref + ext;
+    };
+    std::vector<fs::path> copies;   // the scenario's copies: the fixes' (which the build uses) and the prepared one
+    for (const fs::path &d : {job.fixes, xsrc})
+        if (!d.empty() && fs::exists(d / from_u8(scen))) copies.push_back(d);
+    if (copies.empty()) return;
+    tagfile::EditTag sc;
+    if (!sc.load(copies[0] / from_u8(scen))) return;
+    if (tagfile::get_num(sc.root(), "type") != 1) return;   // multiplayer
+    std::vector<tagfile::TagNode> *mpal = tagfile::block(sc.root(), "machine palette");
+    if (!mpal || mpal->empty()) return;
+    std::vector<std::string> kinds;
+    for (auto &p : *mpal) {
+        std::string *r = tagfile::ref_path(p, "name");
+        kinds.push_back(r ? file_of(*r, ".device_machine") : "");
+    }
+    auto winning = [&](const std::string &tag) {
+        for (const fs::path &d : {job.fixes, xsrc})
+            if (!d.empty() && !tag.empty() && fs::exists(d / from_u8(tag))) return d;
+        return fs::path();
+    };
+    std::map<int, int> placed;   // machine palette index -> placements
+    if (auto *m = tagfile::block(sc.root(), "machines"))
+        for (auto &e : *m) placed[(int)tagfile::get_num(e, "type")]++;
+
+    // 1. Elevators nobody can stand on: no node.
+    int lifts = 0, lifts_placed = 0;
+    std::vector<std::string> lift_names;
+    std::set<int> prop_kinds;   // machine palette entries that are only props (2)
+    for (size_t k = 0; k < kinds.size(); k++) {
+        const std::string &tag = kinds[k];
+        fs::path win = winning(tag);
+        if (win.empty()) continue;
+        tagfile::EditTag mt;
+        if (!mt.load(win / from_u8(tag))) continue;
+        tagfile::TagNode &r = mt.root();
+        const int mflags = (int)tagfile::get_num(r, "machine flags");
+        std::string *coll = tagfile::ref_path(r, "collision model"), *graph = tagfile::ref_path(r, "animation graph");
+        const bool no_collision = !coll || coll->empty();
+        if ((mflags & 4) && no_collision && (int)tagfile::get_num(r, "elevator node") != 0xFFFF) {
+            bool done = false;
+            for (const fs::path &d : {job.fixes, xsrc}) {   // every copy (the fixes' wins in the build)
+                if (d.empty() || !fs::exists(d / from_u8(tag))) continue;
+                tagfile::EditTag c;
+                if (!c.load(d / from_u8(tag))) continue;
+                tagfile::set_num(c.root(), "elevator node", 0xFFFF);
+                done = c.save(d / from_u8(tag)) || done;
+            }
+            if (done) {
+                lifts++;
+                lifts_placed += placed[(int)k];
+                lift_names.push_back(fs::path(from_u8(tag)).stem().u8string());
+            }
+        }
+        bool prop = (!graph || graph->empty()) && !(mflags & 4) && !(mflags & 2);
+        for (const char *f : {"device a in", "device b in", "device c in", "device d in"})
+            if (tagfile::get_num(r, f) != 0) prop = false;
+        for (const char *f : {"open", "close", "opened", "closed", "depowered", "repowered", "delay effect"}) {
+            std::string *p = tagfile::ref_path(r, f);
+            if (p && !p->empty()) prop = false;
+        }
+        if (prop) prop_kinds.insert((int)k);
+    }
+    if (lifts) {
+        std::string list = lift_names[0];
+        for (size_t i = 1; i < lift_names.size() && i < 10; i++) list += ", " + lift_names[i];
+        if (lift_names.size() > 10) list += " and " + std::to_string(lift_names.size() - 10) + " more";
+        job.note("[machines] " + std::to_string(lifts) + " elevator machine" + (lifts == 1 ? "" : "s") + " with no collision (" +
+                 std::to_string(lifts_placed) + " placed) no longer look for riders every tick, which only a biped standing "
+                 "on their collision can be: " + list + " (their lighting stays as it was)");
+    }
+
+    // 2. Props: those placements become scenery.
+    if (prop_kinds.empty()) return;
+    // A scenery tag to start from, for its header: one the map has, or any of the Xbox's.
+    fs::path templ;
+    if (auto *sp = tagfile::block(sc.root(), "scenery palette"))
+        for (auto &p : *sp) {
+            std::string *r = tagfile::ref_path(p, "name");
+            std::string t = r ? file_of(*r, ".scenery") : "";
+            for (const fs::path &d : {job.fixes, xsrc, job.overlay})
+                if (templ.empty() && !d.empty() && !t.empty() && fs::exists(d / from_u8(t))) templ = d / from_u8(t);
+        }
+    if (templ.empty() && !job.overlay.empty() && fs::exists(job.overlay / "scenery")) {
+        std::error_code ec;
+        for (auto it = fs::recursive_directory_iterator(job.overlay / "scenery", ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec))
+            if (it->path().extension() == ".scenery") { templ = it->path(); break; }
+    }
+    if (templ.empty()) return;
+    std::map<int, std::string> scenery_of;   // machine palette index -> its scenery tag (no extension, '\\')
+    for (int k : prop_kinds) {
+        const std::string &tag = kinds[k];
+        fs::path win = winning(tag);
+        tagfile::EditTag mt, st;
+        if (win.empty() || !mt.load(win / from_u8(tag)) || !st.load(templ)) continue;
+        tagfile::TagNode &m = mt.root();
+        tagfile::TagNode n = tagfile::new_node(st.root().sid);
+        if (n.fixed.size() < 380 || m.fixed.size() < 380) continue;
+        n.fixed.replace(0, 380, m.fixed, 0, 380);   // the object's own fields, laid out alike
+        tagfile::set_num(n, "object type", tagfile::get_num(st.root(), "object type"));
+        int of = (int)tagfile::get_num(n, "flags");
+        if (!((int)tagfile::get_num(m, "machine flags") & 1)) of |= 8;   // not a pathfinding obstacle, as the machine wasn't
+        tagfile::set_num(n, "flags", of);
+        for (const char *f : {"model", "animation graph", "collision model", "physics", "modifier shader", "creation effect"}) {
+            std::string *a = tagfile::ref_path(m, f), *b = tagfile::ref_path(n, f);
+            if (a && b) *b = *a;
+        }
+        for (const char *f : {"attachments", "widgets", "functions", "change colors", "predicted resources"}) {
+            std::vector<tagfile::TagNode> *a = tagfile::block(m, f), *b = tagfile::block(n, f);
+            if (a && b) *b = *a;
+        }
+        // The fixed bytes of a reference hold its tag group: the machine's are the object's, the same.
+        std::string base = tag.substr(0, tag.size() - std::string(".device_machine").size()), out = base + ".scenery";
+        for (int i = 2; fs::exists(xsrc / from_u8(out)) || (!job.overlay.empty() && fs::exists(job.overlay / from_u8(out))); i++)
+            out = base + "_prop" + (i > 2 ? std::to_string(i) : "") + ".scenery";
+        st.root() = n;
+        std::error_code ec;
+        fs::create_directories((xsrc / from_u8(out)).parent_path(), ec);
+        if (!st.save(xsrc / from_u8(out))) continue;
+        std::string ref = out.substr(0, out.size() - 8);
+        std::replace(ref.begin(), ref.end(), '/', '\\');
+        scenery_of[k] = ref;
+    }
+    if (scenery_of.empty()) return;
+    int moved = 0;
+    std::map<std::string, int> moved_of;
+    for (size_t ci = 0; ci < copies.size(); ci++) {
+        tagfile::EditTag s;
+        if (!s.load(copies[ci] / from_u8(scen))) continue;
+        tagfile::TagNode &root = s.root();
+        std::vector<tagfile::TagNode> *machines = tagfile::block(root, "machines"), *scenery = tagfile::block(root, "scenery"),
+                                      *spal = tagfile::block(root, "scenery palette"), *mp = tagfile::block(root, "machine palette");
+        if (!machines || !scenery || !spal || !mp) continue;
+        const int names = tagfile::block(root, "object names") ? (int)tagfile::block(root, "object names")->size() : 0;
+        std::map<int, int> spal_of;   // machine palette index -> scenery palette index
+        std::vector<tagfile::TagNode> keep;
+        int here = 0;
+        std::map<std::string, int> here_of;
+        for (auto &e : *machines) {
+            const int t = (int)tagfile::get_num(e, "type"), nm = (int)tagfile::get_num(e, "name");
+            const bool grouped = (int)tagfile::get_num(e, "power group") != 0xFFFF || (int)tagfile::get_num(e, "position group") != 0xFFFF;
+            if (!scenery_of.count(t) || (nm != 0xFFFF && nm < names) || grouped || t >= (int)mp->size()) {
+                keep.push_back(e);
+                continue;
+            }
+            if (!spal_of.count(t)) {
+                tagfile::TagNode pe = spal->empty() ? tagfile::new_node(tagfile::block_struct(root, "scenery palette")) : (*spal)[0];
+                if (spal->empty()) {   // the reference's group ('scen') and no tag ID
+                    pe.fixed.replace(0, 4, "scen");
+                    pe.fixed.replace(12, 4, std::string(4, '\xff'));
+                }
+                if (std::string *r = tagfile::ref_path(pe, "name")) *r = scenery_of[t];
+                spal_of[t] = (int)spal->size();
+                spal->push_back(pe);
+            }
+            tagfile::TagNode se = tagfile::new_node(tagfile::block_struct(root, "scenery"));
+            if (se.fixed.size() < 40 || e.fixed.size() < 40) { keep.push_back(e); continue; }
+            se.fixed.replace(0, 40, e.fixed, 0, 40);   // type, name, not placed, permutation, position, rotation, appearance
+            se.fixed.replace(32, 4, std::string(4, '\0'));
+            tagfile::set_num(se, "type", spal_of[t]);
+            scenery->push_back(se);
+            here++;
+            here_of[fs::path(from_u8(file_of(scenery_of[t], ""))).filename().u8string()]++;
+        }
+        if (!here) continue;
+        // Machine kinds left with nothing placed go from the palette (the rest renumbered).
+        std::vector<int> count(mp->size(), 0);
+        for (auto &e : keep) {
+            int t = (int)tagfile::get_num(e, "type");
+            if (t >= 0 && t < (int)count.size()) count[t]++;
+        }
+        std::vector<int> drop;
+        for (auto &[t, si] : spal_of) if (count[t] == 0) drop.push_back(t);
+        for (auto &e : keep) {
+            int t = (int)tagfile::get_num(e, "type");
+            int shift = (int)std::count_if(drop.begin(), drop.end(), [&](int d) { return d < t; });
+            if (t >= 0 && t < (int)count.size() && shift) tagfile::set_num(e, "type", t - shift);
+        }
+        std::sort(drop.rbegin(), drop.rend());
+        for (int d : drop) mp->erase(mp->begin() + d);
+        *machines = keep;
+        if (!s.save(copies[ci] / from_u8(scen))) continue;
+        if (!moved) { moved = here; moved_of = here_of; }
+    }
+    if (!moved) return;
+    std::string list;
+    for (auto &[n, c] : moved_of) list += (list.empty() ? "" : ", ") + n + " (" + std::to_string(c) + ")";
+    job.note("[machines] " + std::to_string(moved) + " machine" + (moved == 1 ? "" : "s") + " that are only props (no animation, "
+             "device functions, sounds or effects, no name, in no device group) placed as scenery instead, which the Xbox "
+             "doesn't update as a device every tick, looking the same: " + list);
+}
+
 void restrict_to_xbox_mp(Job &job, const fs::path &xsrc) {
     const Config &cfg = job.cfg;
     auto have = [&](const std::string &t) {
