@@ -163,17 +163,10 @@ int main(int argc, char **argv) {
         std::cout << "level shaders file: " << file.u8string() << "\n";
         return 0;
     }
-    if (mode == "analyze") {   // cli_test analyze <in.map|scenario> x x
-        std::string name;
-        Game in = detect_game(argv[2], &name);
-        ContentAnalysis an;
-        if (!analyze_xbox_contents(cfg, argv[2], in, an, log)) { std::cout << "FAILED: " << an.error << "\n"; return 1; }
-        printf("used %.3f MB (optimize saves %.3f), limit %.2f; file %.2f MB (limit %.0f); fixed %.3f; tags %zu roots %zu\n",
-               an.used_mb, an.optimize_saves_mb, an.limit_mb, an.file_mb, an.file_limit_mb, an.fixed_mb, an.tags.size(), an.roots.size());
-        print_items(an);
-        write_previews(an);
-        if (getenv("XSAVE")) save_content_analysis(an, getenv("XSAVE"));
-        if (getenv("XDUMP")) {   // for the window test
+    // XDUMP=<file>: a measurement's tags, their sizes and what they use, and its items (for the window test)
+    auto dump = [](const ContentAnalysis &an) {
+        if (!getenv("XDUMP")) return;
+        {
             FILE *f = fopen(getenv("XDUMP"), "wb");
             fprintf(f, "%s\n%.6f %.6f %.6f %.6f %.6f %.6f %.6f\n", an.map_name.c_str(), an.limit_mb, an.file_limit_mb, an.used_mb,
                     an.optimize_saves_mb, an.file_mb, an.fixed_mb, an.fixed_file_mb);
@@ -192,6 +185,18 @@ int main(int argc, char **argv) {
                 fprintf(f, "%s\n%s\n%s\n%d %d %.6f %.6f\n", it.tag.c_str(), it.name.c_str(), it.used_by.c_str(), it.vehicle, it.in_map, it.memory_mb, it.file_mb);
             fclose(f);
         }
+    };
+    if (mode == "analyze") {   // cli_test analyze <in.map|scenario> x x
+        std::string name;
+        Game in = detect_game(argv[2], &name);
+        ContentAnalysis an;
+        if (!analyze_xbox_contents(cfg, argv[2], in, an, log)) { std::cout << "FAILED: " << an.error << "\n"; return 1; }
+        printf("used %.3f MB (optimize saves %.3f), limit %.2f; file %.2f MB (limit %.0f); fixed %.3f; tags %zu roots %zu\n",
+               an.used_mb, an.optimize_saves_mb, an.limit_mb, an.file_mb, an.file_limit_mb, an.fixed_mb, an.tags.size(), an.roots.size());
+        print_items(an);
+        write_previews(an);
+        if (getenv("XSAVE")) save_content_analysis(an, getenv("XSAVE"));
+        dump(an);
         if (!cfg.xbox_replace.empty()) {
             ContentEstimate e = estimate_contents(an, cfg.xbox_replace);
             printf("with picks: %.3f MB mem (%.3f after optimize), %.2f MB file\n", e.memory_mb, e.memory_optimized_mb, e.file_mb);
@@ -204,6 +209,7 @@ int main(int argc, char **argv) {
         printf("used %.3f MB (optimize saves %.3f), limit %.2f; file %.2f MB (limit %.0f); fixed %.3f; tags %zu roots %zu\n",
                an.used_mb, an.optimize_saves_mb, an.limit_mb, an.file_mb, an.file_limit_mb, an.fixed_mb, an.tags.size(), an.roots.size());
         print_items(an);
+        dump(an);
         return 0;
     }
     if (mode == "update") {   // cli_test update <cache>/work/convert/update.txt x x: the LODs window's "Update the map"

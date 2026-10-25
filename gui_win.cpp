@@ -744,8 +744,9 @@ static void on_input_chosen() {
         if (_wcsicmp(stem.c_str(), W(name).c_str()) != 0 && !(g == Game::Xbox && folder_mode()))   // map folders load any file name
             msg = W(game_name(g)) + L" map \"" + W(name) + L"\" - renamed, won't load as \"" + stem + L"\"";
         set_text(ID_DETECT, msg);
-        Game to = g == Game::CE ? Game::MCC : Game::CE;
-        if (g == Game::Xbox && folder_mode()) to = Game::Xbox;   // adding someone's Xbox map to a map folder build
+        // Xbox, unless the map already is one: then Custom Edition, or Xbox when it's going into a map folder build
+        // (someone else's port).
+        Game to = g != Game::Xbox || folder_mode() ? Game::Xbox : Game::CE;
         SendDlgItemMessageW(g_wnd, ID_TO, CB_SETCURSEL, (int)to, 0);
         // already in a map folder? start its card from that folder's info.txt / preview.bin
         fs::path grand = in.parent_path().parent_path(), xo(get_text(ID_B_XBOX_OUT));
@@ -924,6 +925,19 @@ static fs::path update_output(const fs::path &update) {
     return {};
 }
 
+// The LODs window is for the Xbox map, and its "Build the map" converts with the Convert tab as it is: a Convert tab
+// set to another game is switched to Xbox first, with the Save as that goes with it (one chosen for the other game is
+// that game's maps folder, the wrong place for an Xbox map and its card). Returns a line for the log ("" = it was Xbox).
+static std::wstring ensure_xbox_output() {
+    Game to = combo_game(ID_TO);
+    if (to == Game::Xbox) return L"";
+    SendDlgItemMessageW(g_wnd, ID_TO, CB_SETCURSEL, (int)Game::Xbox, 0);
+    g_out_manual = false;
+    update_out_path();
+    return L"\"To game\" on the Convert tab was " + W(game_name(to)) + L"; the LODs window is for the Xbox map, so it's "
+           L"Xbox now. Save as: " + get_text(ID_OUT);
+}
+
 // The Xbox tab's "LODs...": the LODs window on the last conversion of this map with these options; if there isn't one,
 // the map is first prepared as far as the window (no map built: the window's "Build the map" builds it).
 static void open_lods() {
@@ -938,18 +952,14 @@ static void open_lods() {
         MessageBoxW(g_wnd, L"Wait for the conversion to finish first.", L"Halo Map Porter", MB_ICONINFORMATION);
         return;
     }
+    bool build = game == Game::Unknown;
+    std::wstring to_note = build ? L"" : ensure_xbox_output();
     save_settings();
     Config cfg = make_config();
     apply_xbox_options(cfg);
     std::string pkey = prepared_key(cfg, in);
-    if (!g_last_lods.empty() && !g_last_update.empty() && g_last_update_key == pkey && fs::exists(fs::path(g_last_lods)) &&
-        fs::exists(fs::path(g_last_update))) {
-        PostMessageW(g_wnd, WM_COMMAND, ID_SEE_LODS, 0);
-        return;
-    }
     // Where "Build the map" will put it: the Convert tab's "Save as", or the Build tab's Xbox folder.
     fs::path out;
-    bool build = game == Game::Unknown;
     if (!build) {
         out = fs::path(get_text(ID_OUT));
         if (out.empty()) { MessageBoxW(g_wnd, L"Choose where to save the converted map first.", L"Halo Map Porter", MB_ICONINFORMATION); return; }
@@ -971,6 +981,13 @@ static void open_lods() {
             if (!card.folder.empty()) out = folder / W(card.folder) / (build_map_name() + L".map");
         }
     }
+    // The last conversion of this map with these options, going to the same place: open the window on it.
+    if (!g_last_lods.empty() && !g_last_update.empty() && g_last_update_key == pkey && fs::exists(fs::path(g_last_lods)) &&
+        fs::exists(fs::path(g_last_update)) && same_path(update_output(fs::path(g_last_update)), out)) {
+        if (!to_note.empty()) append_log(to_note);
+        PostMessageW(g_wnd, WM_COMMAND, ID_SEE_LODS, 0);
+        return;
+    }
     // A map folder (Halo Universal XBE) gets its card now, as a conversion's does (the map built later goes in it).
     std::wstring card_note;
     if (folder_mode()) {
@@ -985,6 +1002,7 @@ static void open_lods() {
     set_busy(true);
     SetWindowTextW(g_log, L"");
     append_log(L"Preparing " + in.filename().wstring() + L" for the LODs window (the map is built from there)");
+    if (!to_note.empty()) append_log(to_note);
     if (!card_note.empty()) append_log(card_note);
     std::thread([=] {
         Result r = build ? build_from_tags(cfg, in, Game::Xbox, out, share, post_log)
@@ -2106,7 +2124,7 @@ static void create_controls() {
     }
     set_check(ID_B_XBOX, ini_get(L"b_xbox", L"0") == L"1");
     SendDlgItemMessageW(g_wnd, ID_FROM, CB_SETCURSEL, 0, 0);
-    SendDlgItemMessageW(g_wnd, ID_TO, CB_SETCURSEL, 1, 0);
+    SendDlgItemMessageW(g_wnd, ID_TO, CB_SETCURSEL, (int)Game::Xbox, 0);
     if (!get_text(ID_IN).empty()) on_input_chosen();
     else update_out_path();
     update_invader_status();
@@ -2300,7 +2318,8 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                                          update.empty() || fs::exists(update_output(update)));
                 if (again && !g_busy) {
                     if (g_last_was_build) start_build();
-                    else start_convert(true);
+                    else   // (To changed since the Xbox conversion: still the Xbox map, asking as a new one would)
+                        start_convert(ensure_xbox_output().empty());
                 }
             }
             break;

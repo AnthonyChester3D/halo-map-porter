@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstring>
 #include <functional>
+#include <set>
 
 namespace animcomp {
 
@@ -455,14 +456,33 @@ GraphResult compress_graph(tagfile::TagNode &root, int level) {
         for (auto &n : *nodes) parent.push_back((int)(int16_t)(uint16_t)get_num(n, "parent node index"));
     const double angle = (level >= 2 ? 0.2 : 0.05) * kPi / 180, units = level >= 2 ? 0.0004 : 0.0001,
                  scale = level >= 2 ? 0.002 : 0.0005, slack = level >= 2 ? 0.002 : 0.0003;
-    for (auto &e : *anims) {
+    // Animations played by a value whatever their type: a device's position and power (devices.c: a wheel spinning as
+    // a machine's position loops), an object's animations driven by its functions, a vehicle's (steering, velocity,
+    // suspension). The engine plays them as it plays an overlay by a value, so they are kept as overlays are.
+    std::set<int> by_value;
+    auto collect = [&](const char *outer, std::initializer_list<const char *> inner) {
+        std::vector<TagNode> *b = block(root, outer);
+        if (!b) return;
+        for (auto &x : *b) {
+            if (inner.size() == 0) by_value.insert((int)(int16_t)(uint16_t)get_num(x, "animation"));
+            for (auto in : inner)
+                if (std::vector<TagNode> *c = block(x, in))
+                    for (auto &y : *c) by_value.insert((int)(int16_t)(uint16_t)get_num(y, "animation"));
+        }
+    };
+    collect("objects", {});
+    collect("devices", {"animations"});
+    collect("vehicles", {"animations", "suspension animations"});
+    for (size_t ai = 0; ai < anims->size(); ai++) {
+        TagNode &e = (*anims)[ai];
         int flags = (int)get_num(e, "flags");
-        if (get_num(e, "type") == 1) {
+        if (get_num(e, "type") == 1 || by_value.count((int)ai)) {
             // An overlay stays (or goes back to) its frames: the engine blends a compressed overlay's rotations only at
             // whole frames when it plays one by a value (overlay_animation_apply_continuous: a vehicle's velocity,
-            // steering and suspension, a rider's acceleration), so they snap from one frame to the next as the value
-            // moves (a hovering Ghost jitters between its leaning poses). A compressed one whose frames are still in
-            // the tag (MCC's) has them back; one without them is left as it is.
+            // steering and suspension, a rider's acceleration, a device's position), so they snap from one frame to
+            // the next as the value moves (a hovering Ghost jitters between its leaning poses; Deathtrap's wheels
+            // turned a frame of their 60 every 4 of the game's). A compressed one whose frames are still in the tag
+            // (MCC's) has them back; one without them is left as it is.
             std::string *fd = data(e, "frame data"), *def = data(e, "default data");
             size_t off = (size_t)get_num(e, "offset to compressed data");
             if ((flags & 1) && fd && def && off > 0 && off <= fd->size()) {

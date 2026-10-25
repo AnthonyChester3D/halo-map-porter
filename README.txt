@@ -96,7 +96,9 @@ Use this for a map you already have as a .map file.
    The app reads the file and sets "From game" for you
    (it shows "Detected: MCC map ..." or similar).
 
-2. To game: pick where it's going (MCC, Halo Custom Edition or Xbox).
+2. To game: Xbox, unless you pick another (MCC or Halo Custom Edition).
+   An Xbox map starts at Halo Custom Edition (or at Xbox with "Map
+   folders" on, to give someone else's port its map card).
 
 3. Save as: filled in with the target game's maps folder. Change it with
    Browse if you want it somewhere else.
@@ -231,7 +233,13 @@ pass, see HUD textures; menu art is left alone):
   character's, weapon's (first-person model too), the first-person arms'
   and scenery's textures at most 512 px (their bump, detail and cube maps
   256), ammo and other pickups 256; effects, decals and anything else
-  256. (It used to cap every object's textures at 256, half what Bungie's
+  256. An effect's bitmap (a particle's, a particle system's, a
+  contrail's, weather's) is also held to Bungie's biggest as a whole,
+  336 KB (the pistol's muzzle flash, two 256x256 frames; all of Bungie's
+  effect textures together come to 4.6 MB): one bigger has every frame
+  halved until it fits (CMT's beam cannon's plasma arcs, 30 frames of
+  256x256, 1.2 MB, become 128x128 frames, 0.3 MB). Small on screen, where
+  they're seen, they look about the same. (It used to cap every object's textures at 256, half what Bungie's
   vehicles and weapons have: a vehicle made with 1024 or 2048 textures
   came out a quarter or an eighth of its size, and looked it.)
 - "512 max (sharper)": everything at most 512 px, no budget.
@@ -632,8 +640,13 @@ Levels of detail (LODs)
   going), and for a compressed one it blends the turns only at whole
   frames, so the pose snapped from one frame to the next as the value
   moved (a hovering Ghost jittered between its leaning poses while it sat
-  still). A compressed overlay whose frames are still in the tag (an MCC
-  tagset's) gets them back, whatever the setting. The log's [anim] line gives the tag
+  still). Devices are played the same way, by their position and power
+  (Deathtrap's wheels, a 60-frame turn over an 8-second loop, moved a
+  frame every 4 of the game's when compressed), and so are an object's
+  animations its functions drive: whatever type those animations are,
+  they're kept as overlays are. A compressed overlay whose frames are
+  still in the tag (an MCC tagset's) gets them back, whatever the
+  setting. The log's [anim] line gives the tag
   memory before and after, and the farthest any bone end moved.
   Blood Gulch (the Xbox's own animations): tag memory 8.1 MB > 7.6 MB
   (harder 7.5 MB). Precipice with its own weapons: 1.1 MB of animations >
@@ -748,6 +761,9 @@ Levels of detail (LODs)
   the map": the first build, from the tags prepared, with every model's
   choice. (Precipice: 28 s prepared, a model made again in under a
   second, built in 60 s, the same map a 2-minute conversion makes.)
+  The map goes where the Convert tab's Save as says (or the Build tab's
+  Xbox folder); a Convert tab set to another game is switched to Xbox
+  first, with the Xbox Save as, and the log says so.
 
   The LOD library
   Every version the app makes is kept in the LOD library folder (Settings
@@ -1187,6 +1203,19 @@ Content nobody can get (Xbox)
   Xbox maps have only 22 MB for level geometry and other tag data,
   so multiplayer maps leave out what no player can get in a match. The log
   lists each one as a [trim] line:
+  - placements no game type can ever spawn, taken out first, so they're
+    not offered in the Weapons & vehicles window or given a slot either:
+    a vehicle with none of its gametype flags set (Precipice's Scorpion:
+    Halo PC and MCC never spawn it, but the Xbox ignores those flags and
+    would spawn it in every game), an item spawn point whose gametypes are
+    all "none", and an unnamed vehicle, weapon or equipment marked "not
+    placed: automatically". Named ones stay, because a script can make
+    them. A map with no gametype flags on any vehicle (tags from an Xbox
+    map) keeps its vehicles, since it never had flags to go by. A vehicle
+    or weapon with nothing else placing it then drops out of the map. A
+    slot vehicle stays when the map has Race vehicle spawns, because Race
+    spawns the slot vehicles itself (a default Race game's second vehicle
+    is the Scorpion, so Precipice keeps its tank for Race);
   - palette entries the scenario never places (weapons, equipment, vehicles);
   - the single-player character and the weapons it carries (the stock
     assault rifle and pistol). Matches spawn players as the multiplayer
@@ -1296,8 +1325,25 @@ HUDs from MCC maps
   per anchor (e.g. visor_bottom_left), chained after it as its child HUDs.
   The Xbox draws the whole chain, each from its own corner, so they stay
   at their edges on a split screen too.
-  Ammo and grenade counts use the Xbox's own digits (as do its own HUDs),
-  at the Xbox's size: smaller than MCC draws a map's own digits.
+  Numbers (ammo and grenade counts, a scope's zoom) MCC lays out on its
+  960p canvas whatever the HUD's own, so on a "480p" HUD their positions
+  are halved too (left as they were, CMT's grenade count sat under its
+  panel and the ammo count over the bullets). And with the map's own
+  weapons (the Xbox tab's "Use the Xbox's own versions" off), the Xbox
+  draws counts with the map's own digits (its globals' "hud digits
+  definition"): MCC draws HUD digits at half size and their spacing at
+  half, and a digits sheet flagged "half hud scale" at half again, so a
+  copy of the sheet is made that size (CMT's: 256x256 to 64x64) and the
+  spacing halved. The Xbox's own digits (another font, wider apart) put
+  the counts beside their panels. With the Xbox's own weapons, their HUDs
+  and digits are the Xbox's.
+  Two differences are the Xbox's, not the map's. It keeps the HUD inside
+  the TV's safe area, so every corner element sits about 25 pixels (of
+  640x480) further in than on MCC, which draws to the screen's edges. And
+  with widescreen on, the Xbox draws the HUD on its 640x480 screen and the
+  TV stretches it with the picture: round things come out a third wider
+  (the motion sensor an oval), where MCC draws its HUD unstretched. Both
+  would be the XBE's to change, for every map at once.
   The textures themselves are then fitted (see HUD textures).
 
 HUD textures
@@ -1322,6 +1368,24 @@ HUD textures
   it does on the screen it was made for (CMT's 4 masks: 6 MB down to
   1.5 MB). MCC's BC7 HUD textures are written as DXT5 (DXT1 when nothing
   in them is see-through) as they're halved.
+  Then what never reaches the screen goes. A bitmap every element draws
+  at a texel to a pixel or bigger (and a scope mask) loses its smaller
+  copies (mipmaps): the Xbox only reads those for something drawn
+  smaller, and they're a third on top of the texture. And a crosshair
+  overlay drawn centred and bigger than the 640x480 screen (CMT's focus
+  rifle scope: 1024x1024 at full size) is cut down to the middle that
+  can show (1024x512; a split-screen view is smaller still): 1.3 MB down
+  to 0.5 MB, the same on screen.
+  A scope mask can't simply be made smaller: the Xbox draws it a texel
+  to a pixel, so half the size is half the window. But the screen only
+  ever shows the middle 640x480 of it, and the effect only reads its
+  alpha (how dark each pixel goes). So a mask is kept as just that
+  640x480 of alpha, uncompressed (A8) and stored linear, which the Xbox
+  draws at any size, still a texel to a pixel and centred: CMT's 1024x512
+  focus rifle mask goes from 512 KB to 300 KB, exactly as before on
+  screen (a touch sharper, as A8 isn't block-compressed). A mask whose
+  colour night vision or desaturation reads too ("masked" in the
+  screen effect, as CMT's sniper rifle's is) is left as it is.
 
 The output is an NTSC (US) Xbox map.
 
