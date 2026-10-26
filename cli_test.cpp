@@ -90,6 +90,15 @@ int main(int argc, char **argv) {
         if (logs.size() > 1) std::cout << perflog::compare(logs);
         return 0;
     }
+    if (argc >= 3 && std::string(argv[1]) == "stack") { // cli_test stack <file.hsc>...: script_stack_report
+        std::vector<std::string> texts;
+        for (int i = 2; i < argc; i++) {
+            std::ifstream in(argv[i], std::ios::binary);
+            texts.push_back(std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>()));
+        }
+        for (auto &l : script_stack_report(texts)) std::cout << l << "\n";
+        return 0;
+    }
     if (argc == 4 && std::string(argv[1]) == "hsc") { // cli_test hsc <MCC|CE|Xbox> <file.hsc>
         std::ifstream in(argv[3], std::ios::binary);
         std::string t((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());

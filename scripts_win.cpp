@@ -183,6 +183,13 @@ std::wstring join(const std::vector<std::string> &v) {
     return s;
 }
 
+// The converter's notes: what it changes, and (after an empty line) how they'll run on the Xbox
+void split_notes(const std::vector<std::string> &n, std::vector<std::string> &changes, std::vector<std::string> &runs) {
+    auto gap = std::find(n.begin(), n.end(), std::string());
+    changes.assign(n.begin(), gap);
+    runs.assign(gap == n.end() ? gap : gap + 1, n.end());
+}
+
 void update_pos() {
     DWORD a = 0, b = 0;
     SendMessageW(box(), EM_GETSEL, (WPARAM)&a, (LPARAM)&b);
@@ -236,11 +243,13 @@ void show() {
                         L"them into the map.";
         }
     } else if (M->view == kXbox) {
-        std::vector<std::string> n;
+        std::vector<std::string> n, changes, runs;
         auto conv = M->mine.empty() ? std::vector<ScriptFile>() : M->convert(M->mine, n);
         if (M->file < (int)conv.size()) t = crlf(conv[(size_t)M->file].text);
-        notes = n.empty() ? std::wstring(L"Nothing in them needs changing for the Xbox.")
-                          : L"What the Xbox build changes (read-only here: edit your scripts, and this follows):\r\n" + join(n);
+        split_notes(n, changes, runs);
+        notes = runs.empty() ? L"" : join(runs) + L"\r\n\r\n";   // (what they cost a tick first: it's what's looked for)
+        notes += changes.empty() ? std::wstring(L"Nothing in them needs changing for the Xbox.")
+                                 : L"What the Xbox build changes (read-only here: edit your scripts, and this follows):\r\n" + join(changes);
     } else {
         if (M->have_map && M->file < (int)M->map.size()) {
             t = crlf(M->map[(size_t)M->file].text);
@@ -334,14 +343,16 @@ void check() {
         set_notes(L"These can't be read as they are (the build would stop here):\r\n" + join(lines));
         return;
     }
-    std::vector<std::string> n;
+    std::vector<std::string> n, changes, runs;
     M->convert(M->mine, n);
+    split_notes(n, changes, runs);
     lines.push_back("Nothing stops them being read. The build compiles them against the map's objects, AI and tags, and "
                     "says what's wrong there (a name the map doesn't have, a wrong number of arguments), with the line.");
-    if (!n.empty()) {
+    if (!changes.empty()) {
         lines.push_back("For the Xbox, the build changes:");
-        for (auto &l : n) lines.push_back("  " + l);
+        for (auto &l : changes) lines.push_back("  " + l);
     }
+    for (auto &l : runs) lines.push_back(l);
     set_notes(join(lines));
 }
 

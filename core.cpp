@@ -7990,6 +7990,156 @@ struct ScriptConverter {
         return n.list && n.kids.size() == 1 && !n.kids[0].list && player_scripts.count(hsc::lower(n.kids[0].atom));
     }
 
+    // ---- Shallower calls, and switches. The Xbox runs each script on a stack of 512 bytes (ScriptStack): a call
+    // takes 16-30 of them while it runs, and one that would go past the end stops the script for good.
+    // What a script does, through every script it calls: the variables it sets (a parameter as the global holding it;
+    // calling a script with parameters sets those), the scripts it calls, and whether it can sleep (others run then).
+    struct Effects { std::set<std::string> sets, calls; bool sleeps = false; };
+    struct UserScript { Effects direct, all; };
+    std::map<std::string, UserScript> scripts;      // lowercase name ->
+    std::map<std::string, std::string> var_types;   // the map's globals, and the parameters' globals: name -> type
+    std::set<std::string> engine_globals;
+    bool analyzed = false;
+    std::set<std::string> user0;   // (as planned: each run starts from these)
+    int param_globals0 = 0;
+    std::map<std::string, std::pair<int, std::string>> fixes0;
+    // Calls of scripts with parameters whose parameters are set just before the statement they're in: they're only
+    // (name), not (begin (set ...) (name)) (a call less, and a frame less on the stack, at each of them)
+    std::set<const hsc::Node *> bare;
+    const hsc::Node *void_stmt = nullptr;   // the statement being written, when its value isn't used
+    std::string cur_script;                  // the script being written
+    size_t cur_file = 0;
+    // Switches: (if (= v 0) ...) (if (= v 1) ...) ... (Inferno's maps' lookups in their 16-slot "arrays": each test
+    // made every time), or the same as else-ifs, (if (= v 0) a (if (= v 1) b ...)) (Digsite's 30-minute announcer:
+    // 30 ifs inside each other, too deep for the stack). Written as a tree that tests halves first, (if (< v 8) ...),
+    // where the stack allows (convert_texts tries them): shapes[(file, where)].
+    bool switches = false;
+    struct Shape { int splits = 0; bool flat = true; };
+    struct Candidate { std::pair<size_t, size_t> key; bool chain = false, flattenable = false; size_t n = 0; std::string script; };
+    std::map<std::pair<size_t, size_t>, Shape> shapes;
+    std::vector<Candidate> cands;
+    std::set<const hsc::Node *> chain_inner;   // (else-ifs of a switch found from its first if)
+    struct Case { double k = 0; std::string ktext; const hsc::Node *test = nullptr, *body = nullptr, *whole = nullptr; };
+
+    static bool number(const std::string &a, double &v) {
+        static const std::regex num(R"(^-?[0-9]+(\.[0-9]+)?$)");
+        if (!std::regex_match(a, num)) return false;
+        v = std::strtod(a.c_str(), nullptr);
+        return true;
+    }
+    // The variable an atom names (a parameter: the global holding it), or "" (a number, a name of something)
+    std::string variable(const hsc::Node &a) const {
+        if (a.list || a.str) return "";
+        std::string l = hsc::lower(a.atom);
+        if (subst) {
+            auto it = subst->find(l);
+            if (it != subst->end()) return it->second;
+        }
+        return var_types.count(l) || engine_globals.count(l) ? l : "";
+    }
+    const std::vector<Param> *param_call(const hsc::Node &n) const {
+        if (!n.list || n.kids.empty() || n.kids[0].list || n.kids[0].str) return nullptr;
+        auto ps = param_scripts.find(hsc::lower(n.kids[0].atom));
+        return ps != param_scripts.end() && n.kids.size() - 1 == ps->second.size() ? &ps->second : nullptr;
+    }
+    void walk_effects(const hsc::Node &n, const std::map<std::string, std::string> &params, Effects &e) const {
+        if (!n.list || n.kids.empty()) return;
+        if (!n.kids[0].list && !n.kids[0].str) {
+            std::string h = hsc::lower(n.kids[0].atom);
+            if (h == "set" && n.kids.size() >= 2 && !n.kids[1].list) {
+                std::string t = hsc::lower(n.kids[1].atom);
+                auto p = params.find(t);
+                e.sets.insert(p == params.end() ? t : p->second);
+            }
+            if (h == "sleep" || h == "sleep_until" || h == "sleep_forever") e.sleeps = true;
+            if (scripts.count(h)) e.calls.insert(h);
+        }
+        for (auto &k : n.kids) walk_effects(k, params, e);
+    }
+    // Through the scripts it calls
+    void close(Effects &e) const {
+        std::set<std::string> direct = e.calls;
+        for (auto &c : direct) {
+            auto u = scripts.find(c);
+            if (u == scripts.end()) continue;
+            e.sets.insert(u->second.all.sets.begin(), u->second.all.sets.end());
+            e.calls.insert(u->second.all.calls.begin(), u->second.all.calls.end());
+            e.sleeps = e.sleeps || u->second.all.sleeps;
+        }
+        for (auto &c : e.calls) {
+            auto ps = param_scripts.find(c);
+            if (ps != param_scripts.end())
+                for (auto &p : ps->second) e.sets.insert(p.global);
+        }
+    }
+    Effects effects_of(const hsc::Node &n, Effects *direct = nullptr) const {
+        static const std::map<std::string, std::string> none;
+        Effects e;
+        walk_effects(n, subst ? *subst : none, e);
+        if (direct) *direct = e;
+        close(e);
+        return e;
+    }
+    // (after the parameters' globals are named)
+    void analyze() {
+        if (analyzed) return;
+        analyzed = true;
+        for (auto &n : kScriptNames)
+            if (n.global) engine_globals.insert(hsc::lower(n.name));
+        for (auto &[sn, ps] : param_scripts)
+            for (auto &p : ps) var_types[p.global] = p.type;
+        std::vector<std::vector<hsc::Node>> trees;
+        for (auto &s : texts) {
+            trees.emplace_back();
+            size_t i = 0;
+            if (!hsc::parse(s, i, trees.back(), false)) trees.back().clear();
+        }
+        // (script <kind> <name> body...) / (script static|stub <type> <name> body...); name: (name (type p) ...) with parameters
+        struct Def { std::string name; const hsc::Node *n; size_t body; };
+        std::vector<Def> defs;
+        for (auto &top : trees)
+            for (auto &n : top) {
+                if (!n.list || n.kids.size() < 3 || n.kids[0].list) continue;
+                std::string h = hsc::lower(n.kids[0].atom);
+                if (h == "global" && !n.kids[1].list && !n.kids[2].list) {
+                    var_types[hsc::lower(n.kids[2].atom)] = hsc::lower(n.kids[1].atom);
+                    continue;
+                }
+                if (h != "script" || n.kids[1].list) continue;
+                std::string kind = hsc::lower(n.kids[1].atom);
+                size_t at = (kind == "static" || kind == "stub") ? 3 : 2;
+                if (n.kids.size() <= at) continue;
+                const hsc::Node &nm = n.kids[at];
+                std::string name = nm.list ? (nm.kids.empty() || nm.kids[0].list ? "" : nm.kids[0].atom) : nm.atom;
+                if (name.empty()) continue;
+                defs.push_back({hsc::lower(name), &n, at + 1});
+                scripts[hsc::lower(name)];
+            }
+        for (auto &d : defs) {
+            std::map<std::string, std::string> params;
+            auto ps = param_scripts.find(d.name);
+            if (ps != param_scripts.end())
+                for (auto &p : ps->second) params[p.name] = p.global;
+            for (size_t k = d.body; k < d.n->kids.size(); k++) walk_effects(d.n->kids[k], params, scripts[d.name].direct);
+        }
+        for (auto &[name, u] : scripts) u.all = u.direct;
+        for (bool more = true; more;) {
+            more = false;
+            for (auto &[name, u] : scripts) {
+                size_t sets = u.all.sets.size(), calls = u.all.calls.size();
+                bool sleeps = u.all.sleeps;
+                std::set<std::string> cs = u.all.calls;
+                for (auto &c : cs) {
+                    auto &o = scripts[c].all;
+                    u.all.sets.insert(o.sets.begin(), o.sets.end());
+                    u.all.calls.insert(o.calls.begin(), o.calls.end());
+                    u.all.sleeps = u.all.sleeps || o.sleeps;
+                }
+                more = more || sets != u.all.sets.size() || calls != u.all.calls.size() || sleeps != u.all.sleeps;
+            }
+        }
+    }
+
     static std::string default_value(const std::string &type) {
         static const std::map<std::string, std::string> defaults{
             {"real", "0"}, {"short", "0"}, {"long", "0"}, {"boolean", "false"}, {"string", "\"\""},
@@ -8072,6 +8222,279 @@ struct ScriptConverter {
         return it == missing.end() ? nullptr : it->second;
     }
 
+    // A call of a script with parameters: " (set <its global> <argument>) ..." (temporaries first when an argument
+    // calls another such script, so all arguments are taken before any is set)
+    std::string param_sets(const std::string &s, const hsc::Node &n, const std::vector<Param> &ps) {
+        std::string r;
+        bool nested = false;
+        for (size_t k = 1; k < n.kids.size(); k++) nested = nested || calls_param_script(n.kids[k]);
+        std::string head = hsc::lower(n.kids[0].atom);
+        std::vector<std::string> temps;
+        for (size_t k = 1; k < n.kids.size(); k++) {
+            auto &p = ps[k - 1];
+            std::string dst = p.global;
+            if (nested) {
+                do dst = ("t" + std::to_string(++param_globals) + "_" + head + "_" + p.name).substr(0, 31);
+                while (user.count(dst));
+                user.insert(dst);
+                extra_globals += "(global " + p.type + " " + dst + " " + default_value(p.type) + ")\n";
+                temps.push_back(dst);
+            }
+            r += " (set " + dst + " " + emit(s, n.kids[k]) + ")";
+        }
+        for (size_t k = 0; k < temps.size(); k++) r += " (set " + ps[k].global + " " + temps[k] + ")";
+        return r;
+    }
+
+    static std::string indent_of(const std::string &s, size_t at) {
+        size_t line = s.rfind('\n', at ? at - 1 : 0);
+        line = line == std::string::npos ? 0 : line + 1;
+        size_t e = line;
+        while (e < at && (s[e] == ' ' || s[e] == '\t')) e++;
+        return s.substr(line, e - line);
+    }
+
+    // Variables calling script x can change: what it sets, and the parameters of each script with parameters it calls
+    // (itself too, unless `self`)
+    std::set<std::string> writes(const std::string &x, bool self) {
+        std::set<std::string> w = scripts[x].all.sets;
+        auto add = [&](const std::string &t) {
+            auto ps = param_scripts.find(t);
+            if (ps != param_scripts.end())
+                for (auto &p : ps->second) w.insert(p.global);
+        };
+        if (self) add(x);
+        for (auto &t : scripts[x].all.calls) add(t);
+        return w;
+    }
+    // The calls of scripts with parameters in statement c that can have their parameters set before c, so they're just
+    // (name): each argument a number or a name, or a variable; c can't sleep (another script could call the same one
+    // meanwhile); and, as c is worked out (left to right, a call's arguments before it), nothing before the call
+    // changes those variables or the parameters (a call of the same script with others, one through another script).
+    // Returns the sets to put before c, and marks the calls (bare).
+    std::string hoists(const std::string &s, const hsc::Node &c) {
+        if (param_scripts.empty()) return "";
+        Effects e = effects_of(c);
+        if (e.sleeps) return "";
+        // What c does, in order: (node, a call of a script of the map's / a set, outside c's own sequences)
+        struct Event { const hsc::Node *n; std::string script, set; bool outer; };
+        std::vector<Event> events;
+        bool random = false;
+        std::function<void(const hsc::Node &, bool)> walk = [&](const hsc::Node &n, bool outer) {
+            if (!n.list || n.kids.empty()) return;
+            std::string h = !n.kids[0].list && !n.kids[0].str ? hsc::lower(n.kids[0].atom) : "";
+            if (h == "begin") outer = false;   // (written by seq on its own)
+            if (h == "begin_random") random = true;
+            for (auto &k : n.kids) walk(k, outer);
+            if (h == "set" && n.kids.size() >= 2 && !n.kids[1].list) {
+                std::string v = variable(n.kids[1]);
+                events.push_back({&n, "", v.empty() ? hsc::lower(n.kids[1].atom) : v, outer});
+            } else if (scripts.count(h)) {
+                events.push_back({&n, h, "", outer});
+            }
+        };
+        walk(c, true);
+        if (random) return "";
+        std::string r;
+        std::set<std::string> done;
+        for (auto &first : events) {
+            const std::vector<Param> *ps = first.script.empty() || !first.outer || first.n == &c ? nullptr : param_call(*first.n);
+            if (!ps || done.count(first.script)) continue;
+            const std::string &S = first.script;
+            done.insert(S);
+            // its arguments: numbers, names, variables
+            std::set<std::string> vars, globals;
+            std::string args;
+            bool ok = true;
+            for (size_t k = 1; k < first.n->kids.size(); k++) {
+                const hsc::Node &a = first.n->kids[k];
+                ok = ok && !a.list;
+                std::string v = variable(a);
+                if (!v.empty()) vars.insert(v);
+                args += " " + (a.str ? a.atom : hsc::lower(a.atom));
+            }
+            if (!ok) continue;
+            for (auto &p : *ps) globals.insert(p.global);
+            std::set<std::string> own = writes(S, false);
+            bool changes_own = false, changes_args = false;
+            for (auto &g : globals) changes_own = changes_own || own.count(g);
+            for (auto &v : vars) changes_args = changes_args || own.count(v);
+            std::vector<const hsc::Node *> mine;
+            bool clean = true;
+            for (auto &ev : events) {
+                if (!ev.set.empty()) {
+                    if (vars.count(ev.set) || globals.count(ev.set)) clean = false;
+                    continue;
+                }
+                if (ev.script == S) {
+                    std::string a;
+                    bool atoms = true;
+                    for (size_t k = 1; k < ev.n->kids.size(); k++) {
+                        const hsc::Node &x = ev.n->kids[k];
+                        atoms = atoms && !x.list;
+                        a += " " + (x.str ? x.atom : hsc::lower(x.atom));
+                    }
+                    bool same = atoms && a == args;
+                    if (clean && same && ev.outer && ev.n != &c) mine.push_back(ev.n);
+                    else if (!same) clean = false;   // (it sets the parameters to its own)
+                    if (changes_own || changes_args) clean = false;
+                    continue;
+                }
+                if (scripts[ev.script].all.calls.count(S)) clean = false;
+                for (auto &v : vars)
+                    if (writes(ev.script, true).count(v)) clean = false;
+            }
+            if (mine.empty()) continue;
+            for (size_t k = 1; k < first.n->kids.size(); k++)
+                r += (r.empty() ? "" : " ") + std::string("(set ") + (*ps)[k - 1].global + " " + emit(s, first.n->kids[k]) + ")";
+            for (auto *x : mine) bare.insert(x);
+        }
+        return r;
+    }
+
+    // The statements n.kids[from...] (a script's or a (begin ...)'s), with the spaces and comments between them.
+    // `void_end`: the last one's value isn't used either (a script that returns nothing).
+    std::string seq(const std::string &s, const hsc::Node &n, size_t from, bool void_end) {
+        std::string r;
+        size_t no_run = 0;   // (a run of tests found here and left as it is: not looked at again from inside it)
+        for (size_t k = from; k < n.kids.size(); k++) {
+            const hsc::Node &c = n.kids[k];
+            if (k > from) r += s.substr(n.kids[k - 1].e, c.b - n.kids[k - 1].e);
+            if (switches && k >= no_run) {
+                std::vector<Case> cs;
+                std::string var;
+                const hsc::Node *vn = nullptr;
+                size_t len = switch_run(n, k, cs, var, vn);
+                if (len >= 6 && (k + len < n.kids.size() || void_end)) {
+                    bool ok = true;
+                    for (auto &x : cs) {
+                        Effects e = effects_of(*x.body);
+                        ok = ok && !e.sets.count(var) && !e.sleeps;
+                    }
+                    if (ok) {
+                        std::pair<size_t, size_t> key{cur_file, c.b};
+                        cands.push_back({key, false, true, cs.size(), cur_script});
+                        auto sh = shapes.find(key);
+                        if (sh != shapes.end()) {
+                            r += switch_text(s, *vn, var, cs, sh->second, nullptr, indent_of(s, c.b), false);
+                            k += len - 1;
+                            continue;
+                        }
+                    }
+                    no_run = k + len;
+                }
+            }
+            const hsc::Node *saved = void_stmt;
+            void_stmt = k + 1 < n.kids.size() || void_end ? &c : nullptr;
+            std::string pre = hoists(s, c);
+            std::string body;
+            const std::vector<Param> *ps = bare.count(&c) ? nullptr : param_call(c);
+            if (ps) body = param_sets(s, c, *ps).substr(1) + " (" + c.kids[0].atom + ")";   // (no (begin ...) around it)
+            else body = emit(s, c);
+            void_stmt = saved;
+            if (!pre.empty()) r += pre + "\n" + indent_of(s, c.b);
+            r += body;
+        }
+        return r;
+    }
+
+    // (= v K) or (= K v): v a variable holding a number, K a number
+    bool case_test(const hsc::Node &t, std::string &var, const hsc::Node *&vn, std::string &ktext, double &k) const {
+        if (!t.list || t.kids.size() != 3 || t.kids[0].list || t.kids[0].atom != "=") return false;
+        for (int o = 0; o < 2; o++) {
+            const hsc::Node &a = t.kids[1 + o], &b = t.kids[2 - o];
+            if (a.list || a.str || b.list || b.str || !number(b.atom, k)) continue;
+            std::string v = variable(a);
+            auto ty = var_types.find(v);
+            if (v.empty() || ty == var_types.end() || (ty->second != "short" && ty->second != "long" && ty->second != "real")) continue;
+            var = v;
+            vn = &a;
+            ktext = b.atom;
+            return true;
+        }
+        return false;
+    }
+    // A run of (if (= v K) body) from n.kids[k], each with another K: how many
+    size_t switch_run(const hsc::Node &n, size_t k, std::vector<Case> &cs, std::string &var, const hsc::Node *&vn) const {
+        std::set<double> seen;
+        size_t j = k;
+        for (; j < n.kids.size(); j++) {
+            const hsc::Node &c = n.kids[j];
+            if (!c.list || c.kids.size() != 3 || c.kids[0].list || hsc::lower(c.kids[0].atom) != "if") break;
+            std::string v, kt;
+            const hsc::Node *vv = nullptr;
+            double kv = 0;
+            if (!case_test(c.kids[1], v, vv, kt, kv) || (j > k && v != var) || seen.count(kv)) break;
+            if (j == k) { var = v; vn = vv; }
+            seen.insert(kv);
+            cs.push_back({kv, kt, &c.kids[1], &c.kids[2], &c});
+        }
+        return j - k;
+    }
+    // How many tests a lookup makes at most, and the levels of ifs it goes through
+    static int switch_tests(size_t n, const Shape &sh, bool chain_kept) {
+        if (chain_kept) return (int)n;
+        size_t leaf = n;
+        for (int i = 0; i < sh.splits && leaf > 1; i++) leaf = (leaf + 1) / 2;
+        return sh.splits + (int)leaf;
+    }
+    // On one line when it has no comments (spaces in strings kept)
+    static std::string one_line(const std::string &t) {
+        if (t.find(';') != std::string::npos) return t;
+        std::string r;
+        bool str = false, space = false;
+        for (char ch : t) {
+            if (ch == '"') str = !str;
+            if (!str && isspace((unsigned char)ch)) { space = true; continue; }
+            if (space && !r.empty() && r.back() != '(' && ch != ')') r += ' ';
+            space = false;
+            r += ch;
+        }
+        return r;
+    }
+    std::string case_if(const std::string &s, const Case &c) {
+        if (c.whole) return one_line(emit(s, *c.whole));
+        return "(if " + one_line(emit(s, *c.test)) + " " + one_line(emit(s, *c.body)) + ")";
+    }
+    std::string switch_tree(const std::string &s, const std::string &vtext, const std::vector<Case> &cs, size_t lo, size_t hi, int splits,
+                            bool flat, const std::string &els, const std::string &ind) {
+        std::string in = ind + "    ";
+        if (splits == 0 || hi - lo <= 1) {
+            if (flat) {
+                if (hi - lo == 1) return case_if(s, cs[lo]);
+                std::string r = "(begin";
+                for (size_t i = lo; i < hi; i++) r += "\n" + in + case_if(s, cs[i]);
+                return r + ")";
+            }
+            std::string r, close;
+            for (size_t i = lo; i < hi; i++) {
+                r += (i > lo ? "\n" + in : "") + "(if " + one_line(emit(s, *cs[i].test)) + " " + one_line(emit(s, *cs[i].body));
+                close += ")";
+            }
+            if (!els.empty()) r += "\n" + in + els;
+            return r + close;
+        }
+        size_t mid = lo + (hi - lo) / 2;
+        return "(if (< " + vtext + " " + cs[mid].ktext + ")\n" + in + switch_tree(s, vtext, cs, lo, mid, splits - 1, flat, els, in) + "\n" +
+               in + switch_tree(s, vtext, cs, mid, hi, splits - 1, flat, els, in) + ")";
+    }
+    std::string switch_text(const std::string &s, const hsc::Node &vn, const std::string &var, std::vector<Case> cs, const Shape &sh,
+                            const hsc::Node *els, const std::string &ind, bool chain) {
+        size_t n = cs.size();
+        std::sort(cs.begin(), cs.end(), [](const Case &a, const Case &b) { return a.k < b.k; });
+        std::string e = els ? emit(s, *els) : "";
+        std::string r = switch_tree(s, emit(s, vn), cs, 0, n, sh.splits, sh.flat, e, ind);
+        auto &f = fixes[cur_script + " (" + vn.atom + ")"];
+        f.first++;
+        std::string what = chain ? std::to_string(n) + " else-ifs on " + vn.atom + " (an if inside each other: as many levels of the "
+                                   "script's stack)"
+                                 : "a " + std::to_string(n) + "-way lookup on " + vn.atom + " (an if for each value, all tested each time)";
+        f.second = what + ": now tests halves first, at most " + std::to_string(switch_tests(n, sh, false)) + " tests" +
+                   (chain ? " and as few levels" : " instead of " + std::to_string(n));
+        (void)var;
+        return r;
+    }
+
     std::string emit(const std::string &s, const hsc::Node &n) {
         if (!n.list) {
             if (n.str) return n.atom;
@@ -8100,6 +8523,54 @@ struct ScriptConverter {
         };
         if (n.kids.empty() || n.kids[0].list || n.kids[0].str) return rebuild("");
         std::string head = hsc::lower(n.kids[0].atom);
+        if (bare.count(&n)) return "(" + n.kids[0].atom + ")";   // (its parameters set before its statement: hoists)
+        if (head == "script" && n.kids.size() >= 3 && !n.kids[1].list) {
+            std::string kind = hsc::lower(n.kids[1].atom);
+            size_t at = (kind == "static" || kind == "stub") ? 3 : 2;
+            if (n.kids.size() > at) {
+                const hsc::Node &nm = n.kids[at];
+                cur_script = nm.list ? (nm.kids.empty() || nm.kids[0].list ? "" : nm.kids[0].atom) : nm.atom;
+            }
+        }
+        // (if (= v 0) a (if (= v 1) b ...)): a switch (see `switches`)
+        if (switches && head == "if" && n.kids.size() == 4 && !chain_inner.count(&n)) {
+            std::vector<Case> cs;
+            std::string var;
+            const hsc::Node *vn = nullptr, *els = nullptr, *cur = &n;
+            std::set<double> seen;
+            std::vector<const hsc::Node *> inner;
+            for (;;) {
+                std::string v, kt;
+                const hsc::Node *vv = nullptr;
+                double kv = 0;
+                if (!cur->list || (cur->kids.size() != 3 && cur->kids.size() != 4) || cur->kids[0].list ||
+                    hsc::lower(cur->kids[0].atom) != "if" || !case_test(cur->kids[1], v, vv, kt, kv) || (!cs.empty() && v != var) ||
+                    seen.count(kv)) {
+                    els = cur;
+                    break;
+                }
+                if (cs.empty()) { var = v; vn = vv; }
+                else inner.push_back(cur);
+                seen.insert(kv);
+                cs.push_back({kv, kt, &cur->kids[1], &cur->kids[2], nullptr});
+                if (cur->kids.size() == 3) break;
+                cur = &cur->kids[3];
+            }
+            chain_inner.insert(inner.begin(), inner.end());
+            if (cs.size() >= 4 && (!els || els->e - els->b <= 200)) {
+                bool flat = &n == void_stmt && !els;
+                for (auto &x : cs) {
+                    if (!flat) break;
+                    Effects e = effects_of(*x.body);
+                    flat = !e.sets.count(var) && !e.sleeps;
+                }
+                std::pair<size_t, size_t> key{cur_file, n.b};
+                cands.push_back({key, true, flat, cs.size(), cur_script});
+                auto sh = shapes.find(key);
+                if (sh != shapes.end() && (flat || !sh->second.flat))
+                    return switch_text(s, *vn, var, cs, sh->second, els, indent_of(s, n.b), true);
+            }
+        }
         // (script continuous <name> (if (volume_test_object <volume> <player>) ...) ...) -> waits first until any player
         // is in one of its volumes, testing every 5 ticks
         if (poll_volumes && head == "script" && n.kids.size() >= 4 && !n.kids[1].list && hsc::lower(n.kids[1].atom) == "continuous" &&
@@ -8121,12 +8592,8 @@ struct ScriptConverter {
                     for (auto &v : vols) gate += " (volume_test_objects " + v + " (players))";
                     gate += ")";
                 }
-                std::string r = s.substr(n.b, n.kids[3].b - n.b) + "(sleep_until " + gate + " 5)\n    ";
-                size_t pos = n.kids[3].b;
-                for (size_t k = 3; k < n.kids.size(); k++) {
-                    r += s.substr(pos, n.kids[k].b - pos) + emit(s, n.kids[k]);
-                    pos = n.kids[k].e;
-                }
+                std::string r = s.substr(n.b, n.kids[3].b - n.b) + "(sleep_until " + gate + " 5)\n    " + seq(s, n, 3, true);
+                size_t pos = n.kids.back().e;
                 std::string list;
                 for (auto &v : vols) list += (list.empty() ? "" : ", ") + v;
                 auto &f = fixes[n.kids[2].atom];
@@ -8172,9 +8639,10 @@ struct ScriptConverter {
                         std::string r = decls + s.substr(n.b, n.kids[at].b - n.b) + n.kids[at].kids[0].atom;
                         size_t pos = n.kids[at].e;
                         subst = &m;
-                        for (size_t k = at + 1; k < n.kids.size(); k++) {
-                            r += s.substr(pos, n.kids[k].b - pos) + emit(s, n.kids[k]);
-                            pos = n.kids[k].e;
+                        bool void_end = at == 2 || n.kids[2].list || hsc::lower(n.kids[2].atom) == "void";
+                        if (n.kids.size() > at + 1) {
+                            r += s.substr(pos, n.kids[at + 1].b - pos) + seq(s, n, at + 1, void_end);
+                            pos = n.kids.back().e;
                         }
                         subst = nullptr;
                         count(ps->first, "parameters turned into globals (not supported in " + std::string(game_name(target)) + ")");
@@ -8183,26 +8651,11 @@ struct ScriptConverter {
                 }
             }
             // Call: (name a b) -> (begin (set global_a a) (set global_b b) (name))
+            // (In a script's or a (begin ...)'s statements, seq writes it without the begin, and hoists can set the
+            // parameters before the statement a call is in: then it's just (name).)
             auto ps = param_scripts.find(head);
             if (ps != param_scripts.end() && n.kids.size() - 1 == ps->second.size()) {
-                std::string r = "(begin";
-                bool nested = false; // an argument calls a script with parameters: evaluate all arguments first
-                for (size_t k = 1; k < n.kids.size(); k++) nested = nested || calls_param_script(n.kids[k]);
-                std::vector<std::string> temps;
-                for (size_t k = 1; k < n.kids.size(); k++) {
-                    auto &p = ps->second[k - 1];
-                    std::string dst = p.global;
-                    if (nested) {
-                        do dst = ("t" + std::to_string(++param_globals) + "_" + head + "_" + p.name).substr(0, 31);
-                        while (user.count(dst));
-                        user.insert(dst);
-                        extra_globals += "(global " + p.type + " " + dst + " " + default_value(p.type) + ")\n";
-                        temps.push_back(dst);
-                    }
-                    r += " (set " + dst + " " + emit(s, n.kids[k]) + ")";
-                }
-                for (size_t k = 0; k < temps.size(); k++) r += " (set " + ps->second[k].global + " " + temps[k] + ")";
-                r += " (" + n.kids[0].atom + "))";
+                std::string r = "(begin" + param_sets(s, n, ps->second) + " (" + n.kids[0].atom + "))";
                 // A (begin ...) has no type of its own. Where nothing around it gives one, as in the first operand
                 // of (= ...) or (< ...), the compiled script keeps it untyped ("passthrough"), and the Xbox crashes
                 // comparing an untyped value (Deathtrap's lightning: (= (modulo (game_time) 1800) 1740)). So the
@@ -8214,6 +8667,19 @@ struct ScriptConverter {
                 if (t == "unit") return "(unit " + r + ")";
                 if (t == "object") return "(list_get " + r + " 0)";
                 return r;
+            }
+        }
+        // (= (vehicle_script x) none): the call's (begin ...) as a comparison's first operand, of a script returning an
+        // object of a kind no function passes on as it is (Cairo's (get_cargo pelican)): an object, through list_get
+        // (the vehicle as a list of one). (Elsewhere the begin takes the type its place wants.)
+        static const std::set<std::string> compares{"=", "!=", "<", ">", "<=", ">="};
+        if (compares.count(head) && n.kids.size() == 3 && param_call(n.kids[1]) && !bare.count(&n.kids[1])) {
+            auto rt = param_returns.find(hsc::lower(n.kids[1].kids[0].atom));
+            std::string t = rt == param_returns.end() ? "" : rt->second;
+            if (t == "vehicle" || t == "weapon" || t == "scenery" || t == "device") {
+                std::string r = s.substr(n.b, n.kids[1].b - n.b) + "(list_get " + emit(s, n.kids[1]) + " 0)";
+                r += s.substr(n.kids[1].e, n.kids[2].b - n.kids[1].e) + emit(s, n.kids[2]);
+                return r + s.substr(n.kids[2].e, n.e - n.kids[2].e);
             }
         }
         // (= (begin ...) 5): the same untyped first operand, written by the map's author (see above).
@@ -8241,6 +8707,26 @@ struct ScriptConverter {
                 count(hsc::lower(n.kids[1].atom), "setting it removed");
                 return stand_in('v');
             }
+        }
+        // A script's statements, and a (begin ...)'s (seq: calls with parameters written without a begin of their own)
+        size_t body = 0;
+        bool void_end = false;
+        if (head == "script" && n.kids.size() >= 3 && !n.kids[1].list) {
+            std::string kind = hsc::lower(n.kids[1].atom);
+            body = (kind == "static" || kind == "stub") ? 4 : 3;
+            void_end = body == 3 || n.kids[2].list || hsc::lower(n.kids[2].atom) == "void";
+        } else if (head == "begin" && !user.count(head)) {
+            body = 1;
+        }
+        if (body && n.kids.size() > body) {
+            std::string r = s.substr(n.b, n.kids[0].e - n.b);
+            size_t pos = n.kids[0].e;
+            for (size_t k = 1; k < body; k++) {
+                r += s.substr(pos, n.kids[k].b - pos) + emit(s, n.kids[k]);
+                pos = n.kids[k].e;
+            }
+            r += s.substr(pos, n.kids[body].b - pos) + seq(s, n, body, void_end);
+            return r + s.substr(n.kids.back().e, n.e - n.kids.back().e);
         }
         const ScriptName *f = lookup(head);
         if (!f || f->global) return rebuild(n.kids[0].atom);
@@ -8414,8 +8900,9 @@ struct ScriptConverter {
         }
     }
 
-    // Converts one file. Returns false if it can't be parsed (left unchanged).
-    bool convert(std::string &text) {
+    // Everything worked out from all the files (collect_user_names) before any is converted.
+    void plan() {
+        if (analyzed) return;
         wide_numbers();
         for (auto &[script, ps] : param_scripts)
             for (auto &p : ps)
@@ -8426,6 +8913,24 @@ struct ScriptConverter {
                     p.global = g;
                     user.insert(g);
                 }
+        analyze();
+        user0 = user;
+        param_globals0 = param_globals;
+        fixes0 = fixes;
+    }
+    // Before converting the files again (convert_texts' tries): as planned
+    void restart() {
+        changes.clear();
+        fixes = fixes0;
+        user = user0;
+        param_globals = param_globals0;
+        extra_globals.clear();
+        cands.clear();
+    }
+
+    // Converts one file. Returns false if it can't be parsed (left unchanged).
+    bool convert(std::string &text) {
+        plan();
         std::vector<hsc::Node> top;
         size_t i = 0;
         if (!hsc::parse(text, i, top, false)) return false;
@@ -8438,9 +8943,456 @@ struct ScriptConverter {
         out += text.substr(pos);
         text = extra_globals + out;
         extra_globals.clear();
+        bare.clear();
+        chain_inner.clear();
+        void_stmt = nullptr;
         return true;
     }
 };
+
+// ---------------------------------------------------------------- how deep scripts go, and what they cost a tick
+// Script definitions in parsed files: (script <kind> <name> body...) / (script static|stub <type> <name> body...)
+struct ScriptDefs {
+    struct Def { std::string kind; const hsc::Node *n = nullptr; size_t body = 0; };
+    std::vector<std::vector<hsc::Node>> trees;
+    std::map<std::string, Def> defs;   // lowercase name ->
+    explicit ScriptDefs(const std::vector<std::string> &texts) {
+        trees.reserve(texts.size());
+        for (auto &s : texts) {
+            trees.emplace_back();
+            size_t i = 0;
+            if (!hsc::parse(s, i, trees.back(), false)) trees.back().clear();
+        }
+        for (auto &top : trees)
+            for (auto &n : top) {
+                if (!n.list || n.kids.size() < 4 || n.kids[0].list || n.kids[1].list || hsc::lower(n.kids[0].atom) != "script") continue;
+                std::string kind = hsc::lower(n.kids[1].atom);
+                size_t at = (kind == "static" || kind == "stub") ? 3 : 2;
+                if (n.kids.size() <= at + 1) continue;
+                const hsc::Node &nm = n.kids[at];
+                std::string name = nm.list ? (nm.kids.empty() || nm.kids[0].list ? "" : nm.kids[0].atom) : nm.atom;
+                if (name.empty()) continue;
+                auto &d = defs[hsc::lower(name)];
+                if (d.n && d.kind == "static" && kind == "stub") continue;   // (a stub only stands in for one)
+                d = {kind, &n, at + 1};
+            }
+    }
+    static bool is_static(const Def &d) { return d.kind == "static" || d.kind == "stub"; }
+};
+
+// How deep a script's calls nest, in bytes of the 512 each script has for them on the Xbox (and Halo PC: the
+// engine's hs_runtime.c). A call takes a frame of 16 bytes and what its function keeps while it works (an if 12, a
+// begin 8, a set 4, (= a b) 14, an ordinary function 4 for each argument and 6, a script 4), and the calls in its
+// arguments go on top of it. A script that would go past the end is stopped there, for good.
+struct ScriptStack : ScriptDefs {
+    static constexpr int kSize = 512;
+    std::map<std::string, std::pair<int, std::vector<std::string>>> memo;   // static script: (bytes from its call, path)
+    using ScriptDefs::ScriptDefs;
+
+    // Bytes that working out n takes from where its frame starts (0: a value, no frame), and the static scripts it
+    // goes through at its deepest
+    int depth(const hsc::Node &n, std::vector<std::string> &path, int guard) {
+        path.clear();
+        if (!n.list || n.kids.empty() || n.kids[0].list || n.kids[0].str) return 0;
+        std::string h = hsc::lower(n.kids[0].atom);
+        size_t argc = n.kids.size() - 1;
+        if (h == "begin" && argc == 1) return depth(n.kids[1], path, guard);   // (Invader leaves out a begin of one)
+        if (h == "cond") return cond(n, 1, path, guard);
+        auto d = defs.find(h);
+        if (d != defs.end() && is_static(d->second)) {
+            if (guard > 40) return 20;
+            auto m = memo.find(h);
+            if (m == memo.end()) {
+                memo[h] = {20, {}};   // (a script calling itself: not again)
+                std::vector<std::string> p;
+                int b = 20 + body(d->second, p, guard + 1);
+                m = memo.insert_or_assign(h, std::make_pair(b, p)).first;
+            }
+            path.push_back(h);
+            path.insert(path.end(), m->second.second.begin(), m->second.second.end());
+            return m->second.first;
+        }
+        static const std::map<std::string, int> keeps{
+            {"begin", 8}, {"if", 12}, {"and", 9}, {"or", 9}, {"set", 4}, {"=", 14}, {"!=", 14}, {"<", 14}, {">", 14}, {"<=", 14},
+            {">=", 14}, {"+", 14}, {"-", 14}, {"*", 14}, {"/", 14}, {"min", 14}, {"max", 14}, {"sleep", 10}, {"sleep_until", 18},
+            {"begin_random", 10}, {"unit", 4}, {"inspect", 4}};
+        auto k = keeps.find(h);
+        int frame = 16 + (k != keeps.end() ? k->second : 4 * (int)argc + 6), best = frame;
+        for (size_t i = 1; i < n.kids.size(); i++) {
+            std::vector<std::string> p;
+            int x = frame + depth(n.kids[i], p, guard);
+            if (x > best) { best = x; path = p; }
+        }
+        return best;
+    }
+    // (cond (test body...) ...): (if test (begin body...) (if ...))
+    int cond(const hsc::Node &n, size_t i, std::vector<std::string> &path, int guard) {
+        path.clear();
+        while (i < n.kids.size() && (!n.kids[i].list || n.kids[i].kids.empty())) i++;
+        if (i >= n.kids.size()) return 0;
+        const hsc::Node &c = n.kids[i];
+        int best = 28;
+        std::vector<std::string> p;
+        auto take = [&](int x) { if (x > best) { best = x; path = p; } };
+        take(28 + depth(c.kids[0], p, guard));
+        if (c.kids.size() == 2) take(28 + depth(c.kids[1], p, guard));
+        for (size_t k = 1; c.kids.size() > 2 && k < c.kids.size(); k++) take(28 + 24 + depth(c.kids[k], p, guard));
+        take(28 + cond(n, i + 1, p, guard));
+        return best;
+    }
+    int body(const Def &d, std::vector<std::string> &path, int guard) {
+        path.clear();
+        if (d.n->kids.size() == d.body + 1) return depth(d.n->kids[d.body], path, guard);
+        int best = 24;
+        for (size_t k = d.body; k < d.n->kids.size(); k++) {
+            std::vector<std::string> p;
+            int x = 24 + depth(d.n->kids[k], p, guard);
+            if (x > best) { best = x; path = p; }
+        }
+        return best;
+    }
+    struct Use { int bytes = 0; std::vector<std::string> path; };
+    // Each script that runs on its own (not static): the deepest its calls go (its thread's own frame: 20 bytes)
+    std::map<std::string, Use> tops() {
+        std::map<std::string, Use> r;
+        for (auto &[name, d] : defs) {
+            if (is_static(d)) continue;
+            Use u;
+            u.bytes = 20 + body(d, u.path, 0);
+            r[name] = u;
+        }
+        return r;
+    }
+};
+
+// Roughly what a map's scripts do each tick, in calls (a global read or a comparison: 1; heavier ones more, by
+// kCallWeights), and in ms on the Xbox (0.0036 ms a call: Deathtrap's scripts, measured). A continuous script's
+// statements run once a round, the round lasting its sleeps (at least a tick); a sleep_until tests its condition every
+// period it's given. "Typical": an if's branches count only when it has an else (half each: a switch's tree), and an
+// and/or only its first operand; "most": all an if or and/or can run. Static scripts count where they're called
+// (not one that sleeps: that runs now and then, not each tick).
+struct ScriptCost : ScriptDefs {
+    static constexpr double kMsPerCall = 0.0036;
+    using Heavy = std::map<std::string, double>;
+    bool typical = true;
+    bool own_only = false;   // (the static scripts called not counted: own())
+    // What a static script's own statements cost, without the static scripts it calls
+    double own(const std::string &name) {
+        auto d = defs.find(name);
+        if (d == defs.end()) return 0;
+        own_only = true;
+        Heavy h;
+        double c = 0;
+        for (size_t k = d->second.body; k < d->second.n->kids.size(); k++) c += cost(d->second.n->kids[k], h);
+        own_only = false;
+        return c;
+    }
+    std::map<std::pair<std::string, bool>, std::pair<double, Heavy>> memo;
+    std::map<std::string, int> sleeps_memo;
+    using ScriptDefs::ScriptDefs;
+
+    static double weight(const std::string &f) {
+        static const std::map<std::string, double> w{
+            {"object_create_anew_containing", 40}, {"object_create_containing", 40}, {"object_destroy_containing", 40},
+            {"object_create_anew", 15}, {"object_create", 15}, {"object_destroy", 8}, {"object_destroy_all", 60},
+            {"ai_place", 30}, {"ai_erase", 10}, {"ai_kill", 10}, {"ai_go_to_vehicle", 12}, {"ai_magically_see_encounter", 12},
+            {"ai_magically_see_players", 10}, {"ai_command_list", 10}, {"ai_command_list_by_unit", 8}, {"ai_attach", 8},
+            {"ai_migrate", 10}, {"ai_vehicle_enterable_actors", 8}, {"ai_vehicle_enterable_distance", 8}, {"ai_living_count", 6},
+            {"ai_strength", 6}, {"ai_actors", 6}, {"ai_allegiance", 4}, {"effect_new", 8}, {"effect_new_on_object_marker", 8},
+            {"damage_new", 10}, {"damage_object", 8}, {"sound_impulse_start", 6}, {"sound_looping_start", 6},
+            {"sound_impulse_predict", 4}, {"objects_can_see_object", 15}, {"objects_can_see_flag", 15},
+            {"objects_distance_to_object", 6}, {"objects_distance_to_flag", 6}, {"volume_test_objects", 3},
+            {"volume_test_objects_all", 3}, {"volume_test_object", 2}, {"volume_teleport_players_not_inside", 6}, {"players", 2},
+            {"object_teleport", 6}, {"objects_attach", 6}, {"objects_detach", 4}, {"object_set_scale", 4},
+            {"object_set_permutation", 3}, {"device_set_position", 2}, {"device_set_position_immediate", 3},
+            {"device_set_power", 2}, {"device_group_set", 3}, {"unit_kill", 6}, {"unit_enter_vehicle", 8}, {"vehicle_load_magic", 8},
+            {"vehicle_unload", 6}, {"unit_exit_vehicle", 6}, {"vehicle_test_seat", 2}, {"vehicle_test_seat_list", 4},
+            {"vehicle_riders", 3}, {"vehicle_driver", 2}, {"unit_set_current_vitality", 3}, {"object_set_shield", 2},
+            {"camera_set", 4}, {"cinematic_start", 4}, {"print", 2}, {"sv_say", 4}, {"begin_random", 2},
+            {"scenery_animation_start", 6}, {"custom_animation", 6}, {"object_create_folder", 30}, {"object_destroy_folder", 30}};
+        auto it = w.find(f);
+        return it == w.end() ? 1 : it->second;
+    }
+    static bool is_sleep(const std::string &h) { return h == "sleep" || h == "sleep_until" || h == "sleep_forever"; }
+    bool sleeps(const std::string &name, int guard = 0) {
+        auto m = sleeps_memo.find(name);
+        if (m != sleeps_memo.end()) return m->second == 1;
+        auto d = defs.find(name);
+        if (d == defs.end() || guard > 40) return false;
+        sleeps_memo[name] = 0;
+        bool r = false;
+        std::function<void(const hsc::Node &)> walk = [&](const hsc::Node &n) {
+            if (r || !n.list || n.kids.empty()) return;
+            if (!n.kids[0].list && !n.kids[0].str) {
+                std::string h = hsc::lower(n.kids[0].atom);
+                auto c = defs.find(h);
+                if (is_sleep(h) || (c != defs.end() && is_static(c->second) && sleeps(h, guard + 1))) { r = true; return; }
+            }
+            for (auto &k : n.kids) walk(k);
+        };
+        for (size_t k = d->second.body; k < d->second.n->kids.size(); k++) walk(d->second.n->kids[k]);
+        sleeps_memo[name] = r ? 1 : 0;
+        return r;
+    }
+    double cost(const hsc::Node &n, Heavy &heavy, int guard = 0) {
+        if (!n.list || n.kids.empty()) return 0;
+        if (n.kids[0].list || n.kids[0].str) {
+            double t = 0;
+            for (auto &k : n.kids) t += cost(k, heavy, guard);
+            return t;
+        }
+        std::string h = hsc::lower(n.kids[0].atom);
+        if (is_sleep(h)) return 0;   // (a round's sleeps: rounds())
+        double w = weight(h), t = w;
+        if (w >= 3) heavy[h] += 1;
+        auto d = defs.find(h);
+        if (d != defs.end() && is_static(d->second) && guard < 30 && !sleeps(h) && !own_only) {
+            heavy["(" + h + ")"] += 1;   // (a static script: how often, for script_cost_notes)
+            auto key = std::make_pair(h, typical);
+            auto m = memo.find(key);
+            if (m == memo.end()) {
+                memo[key] = {0, {}};   // (guard)
+                Heavy hv;
+                double c = 0;
+                for (size_t k = d->second.body; k < d->second.n->kids.size(); k++) c += cost(d->second.n->kids[k], hv, guard + 1);
+                m = memo.insert_or_assign(key, std::make_pair(c, hv)).first;
+            }
+            t += m->second.first;
+            for (auto &[k, v] : m->second.second) heavy[k] += v;
+        }
+        auto add = [&](const Heavy &from, double f) { for (auto &[k, v] : from) heavy[k] += v * f; };
+        if (h == "if" && n.kids.size() >= 3) {
+            t += cost(n.kids[1], heavy, guard);
+            Heavy a, b;
+            double ca = cost(n.kids[2], a, guard), cb = n.kids.size() > 3 ? cost(n.kids[3], b, guard) : 0;
+            if (typical) {
+                if (n.kids.size() > 3) { t += (ca + cb) / 2; add(a, 0.5); add(b, 0.5); }
+            } else if (ca >= cb) { t += ca; add(a, 1); }
+            else { t += cb; add(b, 1); }
+            return t;
+        }
+        if ((h == "and" || h == "or") && n.kids.size() >= 2) {
+            t += cost(n.kids[1], heavy, guard);
+            for (size_t k = 2; k < n.kids.size() && !typical; k++) t += cost(n.kids[k], heavy, guard);
+            return t;
+        }
+        if (h == "cond") {
+            for (size_t k = 1; k < n.kids.size(); k++) {
+                const hsc::Node &c = n.kids[k];
+                if (!c.list || c.kids.empty()) continue;
+                t += cost(c.kids[0], heavy, guard);
+                for (size_t j = 1; j < c.kids.size() && !typical; j++) t += cost(c.kids[j], heavy, guard);
+            }
+            return t;
+        }
+        for (size_t k = 1; k < n.kids.size(); k++) t += cost(n.kids[k], heavy, guard);
+        return t;
+    }
+    struct Row { std::string name; double calls = 0; Heavy heavy; std::string gate; };   // calls a tick
+    std::vector<Row> rounds(bool typ) {
+        typical = typ;
+        std::vector<Row> rows;
+        for (auto &[name, d] : defs) {
+            if (d.kind != "continuous") continue;
+            Row r;
+            r.name = d.n->kids[2].atom;
+            double work = 0, ticks = 0, polls = 0;
+            Heavy hw;
+            for (size_t k = d.body; k < d.n->kids.size(); k++) {
+                const hsc::Node &st = d.n->kids[k];
+                std::string h = st.list && !st.kids.empty() && !st.kids[0].list ? hsc::lower(st.kids[0].atom) : "";
+                double v = 0;
+                if (h == "sleep") {
+                    ticks += st.kids.size() > 1 && !st.kids[1].list && number(st.kids[1].atom, v) ? std::max(1.0, v) : 30;
+                    continue;
+                }
+                if (h == "sleep_until") {
+                    double p = st.kids.size() > 2 && !st.kids[2].list && number(st.kids[2].atom, v) ? std::max(1.0, v) : 30;
+                    Heavy hp;
+                    polls += cost(st.kids.size() > 1 ? st.kids[1] : st, hp) / p;
+                    for (auto &[f, c] : hp) r.heavy[f] += c / p;
+                    ticks += p;
+                    continue;
+                }
+                work += cost(st, hw);
+            }
+            ticks = std::max(1.0, ticks);
+            r.calls = work / ticks + polls;
+            for (auto &[f, c] : hw) r.heavy[f] += c / ticks;
+            // (if <X isn't there> (sleep -1)) first: it stops for good unless X is there (a network trick's object)
+            const hsc::Node &f = d.n->kids[d.body];
+            if (f.list && f.kids.size() == 3 && !f.kids[0].list && hsc::lower(f.kids[0].atom) == "if" && f.kids[2].list &&
+                !f.kids[2].kids.empty() && !f.kids[2].kids[0].list && is_sleep(hsc::lower(f.kids[2].kids[0].atom)) &&
+                (f.kids[2].kids.size() == 1 || (!f.kids[2].kids[1].list && f.kids[2].kids[1].atom.rfind("-1", 0) == 0))) {
+                std::function<void(const hsc::Node &)> find = [&](const hsc::Node &x) {
+                    if (!r.gate.empty() || !x.list || x.kids.size() < 2) return;
+                    if (!x.kids[0].list && hsc::lower(x.kids[0].atom) == "unit_get_health" && !x.kids[1].list) { r.gate = x.kids[1].atom; return; }
+                    for (auto &k : x.kids) find(k);
+                };
+                find(f.kids[1]);
+                if (r.gate.empty()) r.gate = "a test";
+            }
+            rows.push_back(r);
+        }
+        std::sort(rows.begin(), rows.end(), [](const Row &a, const Row &b) { return a.calls > b.calls; });
+        return rows;
+    }
+    static bool number(const std::string &a, double &v) {
+        char *end = nullptr;
+        v = std::strtod(a.c_str(), &end);
+        return !a.empty() && end && *end == 0;
+    }
+};
+
+static std::string ms_text(double ms) {
+    char b[32];
+    snprintf(b, sizeof b, ms < 0.095 ? "%.2f" : ms < 9.95 ? "%.1f" : "%.0f", ms);
+    return b;
+}
+
+// What the scripts cost a tick on the Xbox, as the map made them and as converted
+static std::vector<std::string> script_cost_notes(const std::vector<std::string> &made, const std::vector<std::string> &conv) {
+    std::vector<std::string> r;
+    ScriptCost a(made), b(conv), bm(conv);
+    auto ra = a.rounds(true), rb = b.rounds(true), rm = bm.rounds(false);
+    auto total = [](const std::vector<ScriptCost::Row> &rows, bool gated) {
+        double t = 0;
+        for (auto &x : rows) if (x.gate.empty() != gated) t += x.calls;
+        return t * ScriptCost::kMsPerCall;
+    };
+    double ta = total(ra, false), tb = total(rb, false), tm = total(rm, false);
+    if (std::max(ta, tb) < 0.25) {
+        r.push_back("script work each tick on the Xbox: light (under 0.25 ms of a tick's 33)");
+        return r;
+    }
+    std::string line = "script work each tick on the Xbox: about " + ms_text(tb) + " ms of a tick's 33";
+    if (std::fabs(ta - tb) >= 0.05) line += " (" + ms_text(ta) + " ms as the map made them)";
+    if (tm > tb * 1.3 + 0.1 && tm < tb * 4) line += ", up to " + ms_text(tm) + " ms when everything they test for is happening";
+    r.push_back(line);
+    int shown = 0;
+    for (auto &x : rb) {
+        double ms = x.calls * ScriptCost::kMsPerCall;
+        if (!x.gate.empty() || ms < 0.1 || shown == 3) continue;
+        shown++;
+        // what takes it: heavy functions, and the static scripts it calls (each with all it does)
+        std::vector<std::pair<double, std::string>> hv;
+        for (auto &[f, c] : x.heavy) {
+            if (c < 0.5) continue;
+            if (f[0] == '(') {
+                std::string sn = f.substr(1, f.size() - 2);
+                hv.push_back({c * (1 + b.own(sn)), sn + " x" + std::to_string((int)std::lround(c))});
+            } else {
+                hv.push_back({c * ScriptCost::weight(f), f + " x" + std::to_string((int)std::lround(c))});
+            }
+        }
+        std::sort(hv.rbegin(), hv.rend());
+        std::string what;
+        for (size_t i = 0; i < hv.size() && i < 4; i++)
+            if (hv[i].first >= x.calls * 0.05) what += (what.empty() ? "" : ", ") + hv[i].second;
+        r.push_back("  " + x.name + ": about " + ms_text(ms) + " ms" + (what.empty() ? "" : " (a tick: " + what + ")"));
+    }
+    double tg = total(rb, true);
+    if (tg >= 0.1) {
+        std::string names;
+        for (auto &x : rb)
+            if (!x.gate.empty() && x.calls * ScriptCost::kMsPerCall >= 0.05) names += (names.empty() ? "" : ", ") + x.name;
+        r.push_back("  and " + ms_text(tg) + " ms more in scripts that stop at once unless an object is there (" + names + ")");
+    }
+    return r;
+}
+
+// Scripts whose calls go deeper than the Xbox's 512 bytes for them: stopped there
+static std::vector<std::string> script_stack_notes(const std::vector<std::string> &texts) {
+    std::vector<std::string> r;
+    ScriptStack st(texts);
+    for (auto &[name, u] : st.tops()) {
+        if (u.bytes <= ScriptStack::kSize) continue;
+        std::string path = st.defs[name].n->kids[2].atom;
+        for (auto &p : u.path) path += " > " + p;
+        r.push_back(st.defs[name].n->kids[2].atom + " can go " + std::to_string(u.bytes) + " bytes deep in calls (" + path +
+                    "), past the 512 a script has for them: the Xbox would stop it there, for good");
+    }
+    return r;
+}
+
+// Converts one map's scripts, every file (false for one that can't be read: left as it is). For the Xbox, each switch
+// (ScriptConverter::switches) is tried as a tree in turn, kept in the shape that tests least if no script then goes
+// deeper in calls than kStackSafe bytes (or than it went before, when it already did); else as it is.
+static std::vector<bool> convert_texts(ScriptConverter &conv, std::vector<std::string> &texts) {
+    static constexpr int kStackSafe = 480;   // (of 512: a little to spare)
+    conv.plan();
+    auto run = [&](std::vector<std::string> &out) {
+        conv.restart();
+        out = texts;
+        std::vector<bool> ok;
+        for (size_t i = 0; i < out.size(); i++) {
+            conv.cur_file = i;
+            ok.push_back(conv.convert(out[i]));
+        }
+        return ok;
+    };
+    std::vector<std::string> out;
+    std::vector<bool> ok = run(out);
+    if (conv.switches && !conv.cands.empty()) {
+        auto cands = conv.cands;
+        std::stable_sort(cands.begin(), cands.end(), [](const auto &a, const auto &b) { return a.chain > b.chain; });
+        std::set<std::pair<size_t, size_t>> seen;
+        auto stack_of = [](const std::vector<std::string> &t) {
+            std::map<std::string, int> m;
+            for (auto &[k, u] : ScriptStack(t).tops()) m[k] = u.bytes;
+            return m;
+        };
+        auto over = [](const std::map<std::string, int> &m) {
+            long o = 0;
+            for (auto &[k, v] : m) o += std::max(0, v - ScriptStack::kSize);
+            return o;
+        };
+        auto acc = stack_of(out);
+        for (auto &c : cands) {
+            if (!seen.insert(c.key).second) continue;
+            std::vector<ScriptConverter::Shape> tries;
+            int most = 1;
+            while ((size_t(1) << (most + 1)) < c.n) most++;
+            if (!c.chain) tries = {{2, true}, {1, true}};
+            else {
+                if (c.flattenable)
+                    for (int k = 0; k <= std::min(3, most); k++) tries.push_back({k, true});
+                for (int k = 1; k <= most; k++) tries.push_back({k, false});
+            }
+            auto tests = [&](const ScriptConverter::Shape &sh) {   // (about how many a lookup makes)
+                double leaf = (double)c.n;
+                for (int i = 0; i < sh.splits; i++) leaf = std::ceil(leaf / 2);
+                return sh.splits + (sh.flat ? leaf : (leaf + 1) / 2);
+            };
+            std::pair<long, double> best{over(acc), c.chain ? (c.n + 1) / 2.0 : (double)c.n};
+            bool found = false;
+            ScriptConverter::Shape pick;
+            std::map<std::string, int> pick_m;
+            for (auto &sh : tries) {
+                conv.shapes[c.key] = sh;
+                std::vector<std::string> t;
+                run(t);
+                auto m = stack_of(t);
+                bool fine = true;
+                for (auto &[k, v] : m) {
+                    auto was = acc.find(k);
+                    if (v > std::max(kStackSafe, was == acc.end() ? 0 : was->second)) fine = false;
+                }
+                std::pair<long, double> score{over(m), tests(sh)};
+                if (fine && score < best) { best = score; pick = sh; pick_m = m; found = true; }
+            }
+            if (found) {
+                conv.shapes[c.key] = pick;
+                acc = pick_m;
+            } else {
+                conv.shapes.erase(c.key);
+            }
+        }
+        ok = run(out);
+    }
+    texts = out;
+    return ok;
+}
 
 // Convert every .hsc under `dir` for the target game; notes what changed.
 static void convert_scripts(Job &job, const fs::path &dir, Game target) {
@@ -8451,24 +9403,31 @@ static void convert_scripts(Job &job, const fs::path &dir, Game target) {
     ScriptConverter conv(target);
     conv.rider_ai_off = target == Game::Xbox && job.cfg.xbox_rider_ai_off;
     conv.poll_volumes = target == Game::Xbox;
-    std::map<fs::path, std::string> texts;
+    conv.switches = target == Game::Xbox;
+    std::sort(files.begin(), files.end());
+    std::vector<std::string> texts, made;
     for (auto &f : files) {
         std::ifstream in(f, std::ios::binary);
-        texts[f] = std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-        conv.collect_user_names(texts[f]);
+        texts.push_back(std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>()));
+        conv.collect_user_names(texts.back());
     }
-    for (auto &[f, t] : texts) {
-        std::string before = t;
-        if (!conv.convert(t)) {
-            job.note("[scripts] couldn't read " + f.filename().u8string() + " to check it for " + game_name(target));
+    made = texts;
+    std::vector<bool> ok = convert_texts(conv, texts);
+    for (size_t i = 0; i < files.size(); i++) {
+        if (!ok[i]) {
+            job.note("[scripts] couldn't read " + files[i].filename().u8string() + " to check it for " + game_name(target));
             continue;
         }
-        if (t != before) std::ofstream(f, std::ios::binary) << t;
+        if (texts[i] != made[i]) std::ofstream(files[i], std::ios::binary) << texts[i];
     }
     for (auto &[name, c] : conv.changes)
         job.note("[scripts] " + name + " (not in " + game_name(target) + "): " + c.second + " (" +
                  std::to_string(c.first) + "x)");
     for (auto &[name, c] : conv.fixes) job.note("[scripts] " + name + ": " + c.second);
+    if (target != Game::MCC)
+        for (auto &l : script_stack_notes(texts)) job.note("[scripts] " + l);
+    if (target == Game::Xbox)
+        for (auto &l : script_cost_notes(made, texts)) job.note("[scripts] " + l);
 }
 
 // Prepare the user's/converted tags for Xbox: only tags the map uses are copied to a scratch
@@ -12309,14 +13268,19 @@ static Result build_from_tags_impl(const Config &cfg, const fs::path &scenario_f
 std::string convert_script_text(Game target, const std::string &text, std::vector<std::string> *notes) {
     ScriptConverter conv(target);
     conv.poll_volumes = target == Game::Xbox;
+    conv.switches = target == Game::Xbox;
     conv.collect_user_names(text);
-    std::string t = text;
-    if (!conv.convert(t) && notes) notes->push_back("could not parse");
+    std::vector<std::string> t{text};
+    if (!convert_texts(conv, t)[0] && notes) notes->push_back("could not parse");
     if (notes) {
         for (auto &[name, c] : conv.changes) notes->push_back(name + ": " + c.second + " (" + std::to_string(c.first) + "x)");
         for (auto &[name, c] : conv.fixes) notes->push_back(name + ": " + c.second);
+        if (target != Game::MCC)
+            for (auto &l : script_stack_notes(t)) notes->push_back(l);
+        if (target == Game::Xbox)
+            for (auto &l : script_cost_notes({text}, t)) notes->push_back(l);
     }
-    return t;
+    return t[0];
 }
 
 // ---------------------------------------------------------------- the scripts window (scripts_win.hpp)
@@ -12390,14 +13354,42 @@ std::vector<ScriptFile> convert_script_files(const Config &cfg, Game target, con
     ScriptConverter conv(target);
     conv.rider_ai_off = target == Game::Xbox && cfg.xbox_rider_ai_off;
     conv.poll_volumes = target == Game::Xbox;
-    for (auto &f : files) conv.collect_user_names(f.text);
+    conv.switches = target == Game::Xbox;
+    std::vector<std::string> made, texts;
+    for (auto &f : files) {
+        conv.collect_user_names(f.text);
+        made.push_back(f.text);
+    }
+    texts = made;
+    std::vector<bool> ok = convert_texts(conv, texts);
     std::vector<ScriptFile> out = files;
-    for (auto &f : out)
-        if (!conv.convert(f.text)) notes.push_back(f.name + " can't be read (see Check), so nothing in it was converted");
+    for (size_t i = 0; i < out.size(); i++) {
+        out[i].text = texts[i];
+        if (!ok[i]) notes.push_back(out[i].name + " can't be read (see Check), so nothing in it was converted");
+    }
     for (auto &[name, c] : conv.changes)
         notes.push_back(name + " (not in " + game_name(target) + "): " + c.second + " (" + std::to_string(c.first) + "x)");
     for (auto &[name, c] : conv.fixes) notes.push_back(name + ": " + c.second);
+    std::vector<std::string> more;   // (after an empty line: what they'll do there)
+    if (target != Game::MCC) more = script_stack_notes(texts);
+    if (target == Game::Xbox)
+        for (auto &l : script_cost_notes(made, texts)) more.push_back(l);
+    if (!more.empty()) {
+        notes.push_back("");
+        notes.insert(notes.end(), more.begin(), more.end());
+    }
     return out;
+}
+
+std::vector<std::string> script_stack_report(const std::vector<std::string> &texts) {
+    std::vector<std::string> r;
+    ScriptStack st(texts);
+    for (auto &[name, u] : st.tops()) {
+        std::string l = name + " " + std::to_string(u.bytes);
+        for (size_t i = 0; i < u.path.size(); i++) l += (i ? " > " : " ") + u.path[i];
+        r.push_back(l);
+    }
+    return r;
 }
 
 std::string script_syntax_problem(const std::string &s) {

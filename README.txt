@@ -408,7 +408,16 @@ game, the app rewrites the map's scripts for that game:
     player_effect_set_max_vibrate becomes player_effect_set_max_rumble on
     Xbox, pin becomes (min (max ...)), abs_real becomes (max x (* -1 x)),
     sleep_forever becomes (sleep -1), local_players becomes players.
-  - MCC scripts with parameters are rewritten to pass them through globals.
+  - MCC scripts with parameters are rewritten to pass them through globals:
+    (get_weapon index) becomes (set <its global> index) (get_weapon). The
+    sets go just before the statement the call is in, so the call itself
+    is only (get_weapon), wherever nothing between could change them (a
+    call of the same script with something else, a script that calls it,
+    a set of the variable passed, a sleep); else they go in a (begin ...)
+    around the call. Each (begin ...) is a call more, and a level more of
+    the script's stack (see "How deep scripts go" below): Inferno's maps
+    pass parameters three calls deep, and with a begin at each level their
+    main script went past the end of its stack.
     Their result is given a definite type, and so is a (begin ...), (if ...)
     or (cond ...) used as the first value of a comparison such as (= ...):
     left untyped, a comparison crashes the game as soon as it runs (it made
@@ -445,15 +454,61 @@ game, the app rewrites the map's scripts for that game:
     once someone is. Halo's scripts have no loops (no for or while; a
     continuous script is the loop, run once a tick), so this is the cheap
     way: the most a player in the volume waits is a sixth of a second.
+  - Xbox: lookups. With no arrays, scripts keep 16 players' things in 16
+    globals and pick one with an if for each:
+    (if (= index 0) (set r ref_player0)) (if (= index 1) ...) ... Every
+    test runs every time (Inferno's maps do this hundreds of times a tick:
+    most of their script time). Written as else-ifs instead,
+    (if (= index 0) a (if (= index 1) b ...)), each if sits inside the
+    last, a level of the stack each: Digsite's 30-minute announcer is 30
+    deep, past the end of its stack from minute 14. Either way, six or
+    more such tests on one variable (four, for else-ifs) become a tree that
+    tests halves first: (if (< index 8) <0 to 7> <8 to 15>), and the same
+    again inside, with the tests for each value at the end. A 16-way
+    lookup makes 6 tests instead of 16; 30 else-ifs go 7 levels deep
+    instead of 30. Ifs one after another are only changed where nothing
+    they run changes the variable or sleeps (else-ifs run one branch
+    anyway), and each shape is kept only if no script then goes deeper
+    than 480 of its 512 bytes (else a shallower shape, or as it was):
+    lookups called from deep inside other calls stay as they are.
 The log lists every change as [scripts] lines with how many times it
 happened, so you can check that nothing important was lost.
+
+How deep scripts go: Halo (the Xbox and PC alike) runs each script on a
+stack of 512 bytes. Each call in progress takes 16 to 34 of them (an if 28,
+a begin 24, a call of a static script 20, an ordinary function 22 and 4 more
+for each argument), and the calls in its arguments go on top: a script
+calling a script calling a script, each in an if, adds up. A script that
+would go past the end is stopped right there, for good (OpenCE's debug log
+says "stack overflow"), so whatever it does stops working. Bungie's own
+levels go at most 410 deep. The log warns about any script that can still
+go past 512
+after the changes above ("[scripts] ... can go 530 bytes deep in calls"),
+with the scripts its deepest calls go through: shorten that chain of calls
+in the scripts window.
+
+What the scripts cost a tick (Xbox, in the log and the scripts window):
+"[scripts] script work each tick on the Xbox: about 2.3 ms of a tick's 33
+(3.1 ms as the map made them)", then the heaviest continuous scripts with
+what each does a tick (the scripts they call and the heavy functions, with
+how many times). It's an estimate from the scripts' text: a call counts 1
+(about 0.0036 ms on the Xbox, measured with Deathtrap's), heavier ones more
+(placing AI, creating objects, volume tests, sounds); a continuous script's
+statements count once a round of its sleeps, a sleep_until's test once a
+period; an if's branches count half each when it has an else (as a lookup's
+tree does) and not at all when it hasn't (things usually aren't happening).
+"Up to" is with everything they test for happening at once. Scripts that
+stop at once unless an object is there (a network trick's) are counted
+apart. A map's script time adds to the Xbox's frame time: past a few ms it's
+worth a look in the scripts window.
 
 The scripts window ("Scripts...", top right of the Xbox tab): the map's
 scripts to read and edit, for the map "Map" shows (the Convert tab's map
 or the Build tab's scenario).
   - "Show" picks what the big box shows: your scripts (edit them there),
     "As the Xbox gets them" (the same, converted the way the Xbox build
-    converts them, with the list of changes below it; read-only), or "The
+    converts them, with the list of changes below it, and what they cost a
+    tick and any that go too deep for the stack; read-only), or "The
     map's own" (as Invader gets them back out of the map; read-only). A
     map's own scripts are read in a second or two (only its scenario tag is
     taken out of the map); a Build tab scenario's are its data folder's

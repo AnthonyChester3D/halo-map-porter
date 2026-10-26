@@ -346,12 +346,16 @@ struct ScriptFile { std::string name, text; };
 bool read_map_scripts(const Config &cfg, const fs::path &input, std::vector<ScriptFile> &files, std::string &err,
                       std::vector<std::string> *tricks = nullptr);
 // `files` as a build for `target` compiles them: converted together as a build converts the map's (the target's
-// function names, stand-ins for what it lacks, `cfg`'s script options). `notes`: what changed.
+// function names, stand-ins for what it lacks, `cfg`'s script options). `notes`: what changed; then, after an empty
+// line, how they'll run there (what they cost a tick on the Xbox, any whose calls go too deep for its script stack).
 std::vector<ScriptFile> convert_script_files(const Config &cfg, Game target, const std::vector<ScriptFile> &files,
                                              std::vector<std::string> &notes);
 // What stops HSC text being read at all ("Line 12: this ( is never closed"), or "" if nothing does. (The build
 // compiles the scripts against the map's objects and tags, and says what else is wrong, with the line.)
 std::string script_syntax_problem(const std::string &text);
+// How deep each script that runs on its own (not static) goes in calls, in bytes of the 512 the Xbox has for each:
+// "name bytes a > b > c" (the static scripts at its deepest), one per script (the test driver).
+std::vector<std::string> script_stack_report(const std::vector<std::string> &texts);
 
 // Runs a process, returns exit code, captures combined stdout/stderr.
 int run_process(const std::vector<std::string> &args, std::string &output);
