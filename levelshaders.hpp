@@ -107,16 +107,61 @@ struct Content {
     char light_names[160] = {};          // "headlights light (3 placed), ..."
 };
 // What the showcase's shots look at and keep clear of (showcase.hpp), from the scenario: its CTF flags and power items
-// (rocket launchers, sniper rifles, fuel rods, flamethrowers, overshields, camouflage), and the boxes around the
-// objects it places (scenery, machines, controls, light fixtures: each model's box, turned as placed), which the
-// level's own triangles don't have.
+// (rocket launchers, sniper rifles, fuel rods, flamethrowers, overshields, camouflage), the other places players are
+// (where they spawn, the other items' spawn points, the other game types' flags: hills, teleporters, race points, the
+// vehicles a game type spawns), and the boxes around the objects it places (scenery, machines, controls, light
+// fixtures: each model's box, turned as placed), which the level's own triangles don't have.
 struct Mark {
-    enum Kind : int32_t { kFlag = 0, kPower = 1 };
+    enum Kind : int32_t { kFlag = 0, kPower = 1, kSpawn = 2, kItem = 3, kPlace = 4, kVehicle = 5 };
     float p[3] = {0, 0, 0};
     int32_t kind = kFlag;
     char name[32] = {};
 };
 struct Box { float c[3] = {0, 0, 0}, axis[2][2] = {{1, 0}, {0, 1}}, half[3] = {0, 0, 0}; };   // (axes: turned about z only)
+// The objects in the level when a game starts, drawn where they are: what the scenario places (scenery, machines,
+// controls, light fixtures, vehicles a multiplayer game type spawns, weapons, equipment) and the items on its
+// multiplayer spawn points (each one's item collection's first item). Each draws its model's most detailed geometry
+// (each region's first permutation) with its shaders' base maps. Lit as the engine lights an object (object_lights.c,
+// lights_prepare_for_object_static): straight down from its bounding sphere's centre and from four points around it,
+// the level's lightmap where each ray meets it, as an ambient light and two distant ones (one from where the lightmap's
+// light comes from there, one bounced up off the surface in its colour), averaged; the level's default lighting where
+// none meets a lit surface.
+struct ModelVertex { float p[3], n[3], uv[2]; };   // in the model's own space (x forward, y left, z up)
+struct ModelPart {
+    enum : int32_t { kCutout = 1, kTwoSided = 2, kSeeThrough = 4, kAdd = 8, kMultiply = 16, kDoubleMultiply = 32 };
+    int32_t first = 0, count = 0;   // its triangles (Model::tris, 3 corners each, wound counterclockwise seen from the front)
+    int32_t texture = -1;           // its base map (Preview::textures; a transparent shader's first map)
+    int32_t flags = 0;              // cut out where its base map's alpha is half or less (alpha tested), drawn from both
+                                    // sides, see-through (a transparent shader, or an alpha-blended decal): blended by
+                                    // its alpha, or as its shader's framebuffer blend function says (added, multiplied,
+                                    // multiplied twice)
+    int32_t shader = -1;            // Model::shaders
+};
+struct Model {
+    std::string tag;
+    std::vector<ModelVertex> vertices;
+    std::vector<uint32_t> tris;
+    std::vector<ModelPart> parts;
+    std::vector<std::string> shaders;   // its parts' shader tags
+};
+struct ObjectLight {   // the engine's render_lighting: an ambient colour and two distant lights (colour, direction it shines)
+    float ambient[3] = {0.2f, 0.2f, 0.2f};
+    float color[2][3] = {{1, 1, 1}, {0.4f, 0.4f, 0.5f}};
+    float direction[2][3] = {{-0.577f, -0.577f, -0.577f}, {0, 0, 1}};
+    // The light on a surface facing `n` (world space, unit): ambient, plus each distant light where it faces it.
+    void at(const float n[3], float out[3]) const;
+};
+struct Object {
+    enum Kind : int32_t { kScenery, kMachine, kControl, kLightFixture, kVehicle, kWeapon, kEquipment, kItem, kKinds };
+    int32_t model = -1;              // Preview::models
+    int32_t kind = kScenery;
+    float axes[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};   // its forward, left and up in the world
+    float p[3] = {0, 0, 0};
+    ObjectLight light;
+    int32_t lit = 0;                 // lightmap samples it was lit by (0: the level's default lighting)
+    char tag[96] = {};               // its object tag ("vehicles/warthog/warthog.vehicle")
+};
+const char *object_kind(int kind);   // "scenery", "a machine", ... (for people)
 struct Preview {
     std::vector<Triangle> triangles;
     std::vector<Material> materials;
@@ -134,6 +179,8 @@ struct Preview {
     Content content;
     std::vector<Mark> marks;
     std::vector<Box> boxes;
+    std::vector<Model> models;
+    std::vector<Object> objects;
     // Which room a point is in: the level's BSP tree (child: a node, ~leaf for a leaf (-2 and less), -1 solid).
     struct Node { float n[3] = {0, 0, 0}; float d = 0; int32_t front = -1, back = -1; };
     std::vector<Node> tree;
@@ -158,18 +205,20 @@ void suggest(Analysis &a);
 // shader to tint (-1 none). `shown`: if given, per shader, its pixels, their brightness and its reflection's part of
 // it; `total` the whole picture's brightness. Extras: `portals` outlined (where nothing is in front of them) and each
 // room tinted a colour of its own; `fog` (by distance in front of the camera, as the engine fogs; nothing past its
-// opaque distance when it cuts).
+// opaque distance when it cuts); `objects` drawn (Preview::objects).
 struct Camera { std::array<double, 3> eye{}; double yaw = 0, pitch = 0; };
 struct Shown { double reflection = 0, brightness = 0; int pixels = 0; };
-struct Extras { bool portals = false; bool fog_on = false; Fog fog; };
+struct Extras { bool portals = false; bool fog_on = false; Fog fog; bool objects = false; };
 void draw(const Preview &p, const Camera &c, const std::vector<char> &reflections, int highlight, int w, int h,
           std::vector<uint32_t> &px, std::vector<Shown> *shown = nullptr, double *total = nullptr,
           const Extras *extras = nullptr);
 
 // The surface at pixel (x, y) of a w x h picture drawn from `c` (as draw and the window's picture see it: the nearest
 // triangle there that's drawn, facing the camera unless see-through, not cut away by its cut-out): its triangle, or -1.
-// `hit`: where the ray meets it.
-int pick(const Preview &p, const Camera &c, int w, int h, double x, double y, std::array<double, 3> *hit = nullptr);
+// `hit`: where the ray meets it. `object` (given: the objects are in the picture): the object there, in front of the
+// level (its index in Preview::objects, and `part` its model's part), else -1; the triangle is then -1.
+int pick(const Preview &p, const Camera &c, int w, int h, double x, double y, std::array<double, 3> *hit = nullptr,
+         int *object = nullptr, int *part = nullptr);
 
 // The analysis and preview in a file (for the level shaders window), and back.
 bool save(const Analysis &a, const Preview &p, const std::filesystem::path &file);

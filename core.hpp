@@ -87,10 +87,12 @@ struct Config {
     // The level's fog (its skies' outdoor fog): 0 automatic: fog that's nearly opaque (90% or more) is made fully
     // opaque, so the Xbox draws nothing past it (the engine moves the view's far end to the fog's opaque distance
     // only at full density); 1 as the map has it; 2 fully opaque at `xbox_fog_scale` x its own opaque distance; 3
-    // fully opaque at `xbox_fog_distance` world units.
+    // fully opaque at `xbox_fog_distance` world units (0: its own distance), starting at `xbox_fog_start` (below 0:
+    // where it starts as made). Halo's fog is linear: none at its start distance, its maximum density at its opaque one.
     int xbox_fog = 0;
     double xbox_fog_scale = 1.0;
     double xbox_fog_distance = 0;
+    double xbox_fog_start = -1;
     // The map's own effects (effects.hpp): 0 brought down to Bungie's busiest where past them; 1 as made; 2 lighter
     // (looping ones on objects keep a quarter of their particles).
     int xbox_effects = 0;

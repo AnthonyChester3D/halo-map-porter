@@ -1042,15 +1042,35 @@ Level reflections, fog, scenery, weather and more: the "Level..." window (Xbox)
     Alpha-tested surfaces (grates, railings, treelines) are cut out by
     their bump map's alpha, as the game cuts them, so a material whose bump
     map and color map don't line up shows that here too.
+  - "Objects" (on by default): the objects in the level when a game
+    starts, where they are: the scenery, machines, controls, light
+    fixtures, vehicles (ones a multiplayer game type spawns), weapons and
+    equipment the map places, and an item on each multiplayer spawn point
+    (its item collection's first). Each draws its model's most detailed
+    version with its shaders' base maps: alpha-tested ones cut out by the
+    base map's alpha, see-through ones blended as their shader says (added,
+    multiplied, or by their alpha). They're lit the way the engine lights
+    an object: it looks straight down from the object's middle and from
+    four points around it to the level below, takes the lightmap's colour
+    there, and lights the object with part of it all round, the rest from
+    the direction the lightmap's light came from at that spot, and a little
+    bounced up off the surface below in its colour. An object with nothing
+    lit within 10 units below it gets the level's default lighting, as in
+    the game. Not shown: their detail, reflection and self-illumination
+    maps, change colours, animations and shadows; markers and effects
+    (lights, sparks, smoke) only as their models are.
   - Double-click a surface in the picture to find its shader: one in the
     list is selected there (the view stays where it is); one that doesn't
     reflect is tinted and named in the line above the list, as is a
-    see-through one. The line also says when it's alpha-tested. The picture
-    has the level only: objects (scenery, machines, vehicles) aren't in it.
+    see-through one. The line also says when it's alpha-tested.
+    Double-click an object to name it, what it is, and the shader of the
+    part you clicked (and whether it's alpha-tested: cut out where its base
+    map's alpha is under half, which is how a model's shader is drawn
+    unless it says it isn't).
   - "Showcase flythrough...": the camera shots for Halo 1 Unlimited's
     showcase screensaver, played and made in the picture (see "Showcase
     flythroughs" below).
-  - "Show portals": each portal outlined in yellow, glowing orange where
+  - "Portals": each portal outlined in yellow, glowing orange where
     you can see through it, and each room (cluster) tinted a colour of its
     own. The engine draws the room you're in, then only the rooms it can
     see through portals. The line above the list says how many rooms and
@@ -1061,12 +1081,13 @@ Level reflections, fog, scenery, weather and more: the "Level..." window (Xbox)
     take (or dropping them saves).
   - Fog: as the conversion leaves it (automatic, the default), as the map
     has it, fully opaque at its distance, three quarters of it or half of
-    it, or Other: fully opaque at a distance you type in the box beside it
-    (in world units; 1 unit = 10 feet, about 3 m). The picture shows it,
-    and follows as you type (its sky is a plain gradient, not the level's
-    own sky).
+    it, or Other: from where it starts to where it's fully opaque, the two
+    distances you type in the boxes beside it (in world units; 1 unit = 10
+    feet, about 3 m). The boxes show the level's own distances (see "Fog"
+    below). The picture shows it, and follows as you type (its sky is a
+    plain gradient, not the level's own sky).
   - Hide scenery: never (the default), or below 4, 8, 12 or 16 pixels
-    across. The picture shows the level only, not its objects.
+    across. The picture draws every object however small.
   - Weather: as made (the default), lighter, half the drops, or off, each
     with the level's own number of drops. The picture doesn't show it.
   - Sky: drawn in fewer layers, looking the same (the default), or as made
@@ -1084,6 +1105,12 @@ Level reflections, fog, scenery, weather and more: the "Level..." window (Xbox)
   changes (or the portals option); "Measure again" starts over.
 
 Fog (Xbox)
+  Halo's fog (each sky's outdoor fog, and its indoor fog for rooms with no
+  sky) thickens evenly with distance from the camera, the way most engines'
+  linear fog does: none nearer than its start distance, then thicker and
+  thicker up to its opaque distance, where it reaches its maximum density,
+  and that density from there on. (With a start of 60 units and an opaque
+  distance of 150, something 105 units away is half fogged.)
   The engine draws nothing past a level's fog, but only when the fog is
   fully opaque there (its sky's maximum density exactly 1): then it moves
   the view's far end to the fog's opaque distance, and the level, objects
@@ -1095,9 +1122,10 @@ Fog (Xbox)
   included (the sky shows there instead). The log's [fog] line says what
   changed. Per map, the "Level..." window can keep the fog as the map has
   it, make it fully opaque nearer (three quarters or half its distance:
-  less drawn, foggier), or fully opaque at a distance you type (nearer or
-  farther than the map's; not nearer than where its fog starts). The
-  map's own skies only; Bungie's levels keep theirs.
+  less drawn, foggier), or fully opaque between two distances you type:
+  where it starts (0: at the camera) and where it's fully opaque (nearer or
+  farther than the map's). The start stays short of the opaque distance.
+  The map's own skies only; Bungie's levels keep theirs.
 
 Sky (Xbox, "Level..." window)
   The Xbox draws the sky first in every frame, over the whole view, before
@@ -1248,38 +1276,70 @@ Showcase flythroughs (Xbox, "Level..." window)
   while bots play) needs camera shots for each map. Each Xbox conversion
   into a map folder (the folder with the map's info.txt) writes them as
   showcase.txt beside the map, so a map maker can ship theirs with a map.
-  Made from the level, unless you make your own:
+  Made from the level, unless you make your own, and kept to where
+  players play: the places the scenario says players are (where they
+  spawn, the item spawn points, every game type's flags, hills,
+  teleporters and race points, the vehicles a game type spawns), and the
+  floors near them, at most half a unit above one (so not the roofs and
+  high ledges no one gets to):
   - circling its CTF flags and power items (rocket launchers, sniper
     rifles, fuel rods, flamethrowers, overshields, camouflage): a slow
     100-degree arc a few units off and above, looking at it;
+  - looking down on a flag, a power item or the middle of where players
+    are, from 5 to 10 units above and 7 to 18 off to the side, moving a
+    little way round it (these may be outside where players can go);
   - gliding between two places players stand that see each other;
-  - looking down its longest sight lines, the camera drifting forward;
+  - down the longest sight lines players have: from one place players
+    are towards another far off that it sees, the camera drifting
+    towards it;
   - rising over open ground near the middle, tilting down to take the
     level in.
   Every shot is checked every quarter of a second: the camera stays
-  inside the level, at least 0.6 units from any surface and outside the
-  boxes around the map's placed objects (scenery, machines, controls,
-  light fixtures: each model's box, turned as placed), never passes
-  through a wall between two checks, and sees what it circles at the start,
-  the end and most of the way. On a small map the shots go closer
+  inside the level, clear of every surface (0.6 units; gliding and sight
+  lines 0.35) and outside the boxes around the map's placed objects
+  (scenery, machines, controls, light fixtures: each model's box, turned
+  as placed), never passes through a wall between two checks, and sees
+  what it circles at the start, the end and most of the way, through
+  nothing (glass included). Apart from looking down, it stays in the box
+  around where players are (a few units past it across, from their feet
+  to a few units over their heads). On a small map the shots go closer
   together, and gliding and rising shots must look out at least 6 and 8
-  units, not into a wall. Deathtrap gets 6 shots (64 seconds), Precipice
-  8 (88). The log's [showcase] line says what was written; a showcase.txt
-  in the map folder that the app didn't write (its first line doesn't
-  name Halo Map Porter) is kept.
+  units, not into a wall. Deathtrap gets 8 shots (80 seconds), Precipice
+  11 (128). The log's [showcase] line says what was written; a
+  showcase.txt in the map folder that the app didn't write (its first
+  line doesn't name Halo Map Porter) is kept.
   "Showcase flythrough..." (top right of the Level window) swaps the list
   for the shots: select one to go to its start and see its path (cyan),
   its keys (yellow) and what it looks at (magenta); grey boxes are the
-  map's objects, which the picture doesn't draw. "Play them all" and "Play
+  ones around the map's placed objects, which the camera keeps clear of. "Play them all" and "Play
   this shot" fly the picture through them (click the picture or Stop to
   stop). To make your own: fly to where a shot starts, "New shot here",
   fly on and "Add key here" at each next spot (keys 3 seconds apart;
   Seconds makes the shot slower or faster, keeping its path); tick "Keep
   looking at what's in the middle of the picture" while aiming at
-  something to keep it in view. Delete, move up and down, and "Make again"
-  (back to shots made from the level). Once you change a shot they're this
-  map's own, kept with its other Level choices, and every conversion
-  writes them.
+  something to keep it in view. Name: the shot's name (31 characters).
+  - Keys: the arrows pick one of the selected shot's keys (orange in the
+    picture; or double-click a yellow key in the picture) and take the
+    picture there; "Go to it" goes back to it. Fly somewhere and "Move it
+    here" to move it (it keeps its time in the shot), "Add key here" to
+    put a new one after it (halfway to the next key, or 3 seconds after
+    the last), "Remove it" to take it out (without its first key the shot
+    starts at the next one).
+  - Orbit: "New orbit here" makes a shot circling what's in the middle of
+    the picture (a surface or an object), looking at it, starting from
+    your side of it: radius units from it across, height units above it,
+    turning that many degrees (360 a whole circle; negative: clockwise),
+    in 12 seconds (Seconds changes it). With an orbit selected, the boxes
+    change it (and its Seconds); moving its keys one by one makes it a
+    shot of keys of its own.
+  - A shot you make or change is checked as the made ones are, and the
+    line above the list says when the camera goes through a surface,
+    leaves the level, or loses sight of what it looks at.
+  Delete, move up and down, and "Make again" (back to shots made from the
+  level). Once you change a shot they're this map's own, kept with its
+  other Level choices, and every conversion writes them. An orbit is
+  written as its keys, with a "# orbit" comment after its look line (the
+  Level window reads it to change it again; Halo 1 Unlimited skips it).
   The file (what Halo 1 Unlimited reads; plain text, so it can be edited
   by hand too):
     # a comment (anything after # on a line)

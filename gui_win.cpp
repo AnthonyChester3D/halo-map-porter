@@ -1180,6 +1180,7 @@ static shadersui::Picks load_shader_picks(const fs::path &input) {
         if (k == "mode") picks.mode = std::clamp(atoi(v.c_str()), 0, 2);
         else if (k == "drop" && !v.empty()) picks.drops.insert(v);
         else if (k == "fogdist") picks.fog_distance = std::max(0.0, atof(v.c_str()));
+        else if (k == "fogstart") picks.fog_start = atof(v.c_str());
         else if (k == "fog") {
             picks.fog = std::clamp(atoi(v.c_str()), 0, 3);
             size_t t2 = v.find('\t');
@@ -1225,6 +1226,7 @@ static void save_shader_picks(const fs::path &input, const shadersui::Picks &pic
     for (auto &t : picks.drops) f << "drop\t" << t << '\n';
     f << "fog\t" << picks.fog << '\t' << picks.fog_scale << '\n';
     f << "fogdist\t" << picks.fog_distance << '\n';
+    f << "fogstart\t" << picks.fog_start << '\n';
     f << "tinypx\t" << picks.tiny_px << '\n';
     f << "weather\t" << picks.weather << '\n';
     f << "riders\t" << picks.riders << '\n';
@@ -1239,6 +1241,7 @@ static void apply_shader_picks(Config &cfg, const fs::path &input) {
     cfg.xbox_fog = picks.fog;
     cfg.xbox_fog_scale = picks.fog_scale;
     cfg.xbox_fog_distance = picks.fog_distance;
+    cfg.xbox_fog_start = picks.fog_start;
     cfg.xbox_scenery_pixels = picks.tiny_px;
     cfg.xbox_showcase_text = picks.showcase;
     cfg.xbox_weather = picks.weather;
@@ -1290,11 +1293,15 @@ static void open_shaders() {
                             : picks.mode == 2 ? L"every reflection kept"
                                               : std::to_wstring(picks.drops.size()) + L" reflection" + (picks.drops.size() == 1 ? L"" : L"s") +
                                                     L" go (your picks)";
-        wchar_t fog[80];
-        if (picks.fog == 0) swprintf(fog, 80, L"automatic");
-        else if (picks.fog == 1) swprintf(fog, 80, L"as the map has it");
-        else if (picks.fog == 3) swprintf(fog, 80, L"fully opaque at %g units", picks.fog_distance);
-        else swprintf(fog, 80, L"fully opaque at %.0f%% of its distance", picks.fog_scale * 100);
+        wchar_t fog[100];
+        if (picks.fog == 0) swprintf(fog, 100, L"automatic");
+        else if (picks.fog == 1) swprintf(fog, 100, L"as the map has it");
+        else if (picks.fog == 3 && picks.fog_start >= 0 && picks.fog_distance > 0)
+            swprintf(fog, 100, L"from %g units, fully opaque at %g", picks.fog_start, picks.fog_distance);
+        else if (picks.fog == 3 && picks.fog_start >= 0) swprintf(fog, 100, L"starting at %g units, fully opaque", picks.fog_start);
+        else if (picks.fog == 3 && picks.fog_distance > 0) swprintf(fog, 100, L"fully opaque at %g units", picks.fog_distance);
+        else if (picks.fog == 3) swprintf(fog, 100, L"fully opaque");
+        else swprintf(fog, 100, L"fully opaque at %.0f%% of its distance", picks.fog_scale * 100);
         wchar_t tiny[60];
         if (picks.tiny_px > 0) swprintf(tiny, 60, L"hidden below %g px", picks.tiny_px);
         else swprintf(tiny, 60, L"never hidden");

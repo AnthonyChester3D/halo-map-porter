@@ -149,9 +149,12 @@ int main(int argc, char **argv) {
     }
     if (getenv("XNOPORTALS")) cfg.xbox_add_portals = false;
     if (getenv("XREPLAN")) cfg.xbox_replan_portals = true;
-    if (const char *x = getenv("XFOG")) {   // 0 automatic, 1 as made, 2[:scale] opaque at scale x its distance, 3:units
-        cfg.xbox_fog = atoi(x);
-        if (const char *c = strchr(x, ':')) (cfg.xbox_fog == 3 ? cfg.xbox_fog_distance : cfg.xbox_fog_scale) = atof(c + 1);
+    if (const char *x = getenv("XFOG")) {   // 0 automatic, 1 as made, 2[:scale] opaque at scale x its distance,
+        cfg.xbox_fog = atoi(x);              // 3:units[:start] opaque at units (starting at start)
+        if (const char *c = strchr(x, ':')) {
+            (cfg.xbox_fog == 3 ? cfg.xbox_fog_distance : cfg.xbox_fog_scale) = atof(c + 1);
+            if (const char *c2 = strchr(c + 1, ':'); c2 && cfg.xbox_fog == 3) cfg.xbox_fog_start = atof(c2 + 1);
+        }
     }
     if (getenv("XSCENERY")) cfg.xbox_scenery_pixels = atof(getenv("XSCENERY"));   // pixels across
     if (getenv("XWEATHER")) cfg.xbox_weather = atoi(getenv("XWEATHER"));          // 1 lighter, 2 half, 3 off

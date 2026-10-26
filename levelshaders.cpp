@@ -263,12 +263,39 @@ bool model_box(const fs::path &file, float lo[3], float hi[3]) {
 static void read_marks(const tagfile::Elem &sc, const Find &find, Preview &p) {
     tagfile::Block flags = sc.block("netgame flags");
     for (size_t i = 0; i < flags.size(); i++) {
-        if (flags[i].integer("type") != 0) continue;   // (0: a CTF flag's spot)
+        long long type = flags[i].integer("type");
         Mark m;
         for (int k = 0; k < 3; k++) m.p[k] = (float)flags[i].num("position", k);
-        m.kind = Mark::kFlag;
-        snprintf(m.name, sizeof m.name, "%s flag", flags[i].integer("usage id") == 1 ? "blue" : "red");   // (CTF: 0 red, 1 blue)
+        if (type == 0) {   // (a CTF flag's spot)
+            m.kind = Mark::kFlag;
+            snprintf(m.name, sizeof m.name, "%s flag", flags[i].integer("usage id") == 1 ? "blue" : "red");   // (CTF: 0 red, 1 blue)
+        } else {
+            static const char *const kTypes[] = {"flag", "flag vehicle", "oddball", "race point", "race vehicle", "bank",
+                                                 "teleporter", "teleporter exit", "hill"};
+            m.kind = Mark::kPlace;
+            snprintf(m.name, sizeof m.name, "%s", type >= 0 && type < 9 ? kTypes[type] : "place");
+        }
         p.marks.push_back(m);
+    }
+    tagfile::Block starts = sc.block("player starting locations");
+    for (size_t i = 0; i < starts.size(); i++) {
+        Mark m;
+        for (int k = 0; k < 3; k++) m.p[k] = (float)starts[i].num("position", k);
+        m.kind = Mark::kSpawn;
+        snprintf(m.name, sizeof m.name, "spawn");
+        p.marks.push_back(m);
+    }
+    {
+        tagfile::Block veh = sc.block("vehicles"), vpal = sc.block("vehicle palette");
+        for (size_t i = 0; i < veh.size(); i++) {
+            long long t = veh[i].integer("type");
+            if (t < 0 || (size_t)t >= vpal.size() || veh[i].integer("multiplayer spawn flags") == 0) continue;
+            Mark m;
+            for (int k = 0; k < 3; k++) m.p[k] = (float)veh[i].num("position", k);
+            m.kind = Mark::kVehicle;
+            snprintf(m.name, sizeof m.name, "%s", fs::path(vpal[(size_t)t].ref("name")).stem().string().c_str());
+            p.marks.push_back(m);
+        }
     }
     static const char *const kPower[] = {"rocket", "sniper", "fuel", "flame", "overshield", "over shield", "camo", "invis"};
     tagfile::Block eq = sc.block("netgame equipment");
@@ -277,10 +304,9 @@ static void read_marks(const tagfile::Elem &sc, const Find &find, Preview &p) {
         for (auto &c : low) c = (char)std::tolower((unsigned char)c);
         bool power = false;
         for (const char *w : kPower) power = power || low.find(w) != std::string::npos;
-        if (!power) continue;
         Mark m;
         for (int k = 0; k < 3; k++) m.p[k] = (float)eq[i].num("position", k);
-        m.kind = Mark::kPower;
+        m.kind = power ? Mark::kPower : Mark::kItem;
         snprintf(m.name, sizeof m.name, "%s", stem.c_str());
         p.marks.push_back(m);
     }
@@ -329,6 +355,410 @@ static void read_marks(const tagfile::Elem &sc, const Find &find, Preview &p) {
     }
 }
 
+const char *object_kind(int kind) {
+    static const char *const k[Object::kKinds] = {"scenery", "a machine", "a control", "a light fixture", "a vehicle",
+                                                  "a weapon", "equipment", "an item on a spawn point"};
+    return kind >= 0 && kind < Object::kKinds ? k[kind] : "an object";
+}
+
+void ObjectLight::at(const float n[3], float out[3]) const {
+    float f[2];
+    for (int i = 0; i < 2; i++)
+        f[i] = std::max(0.0f, -(n[0] * direction[i][0] + n[1] * direction[i][1] + n[2] * direction[i][2]));
+    for (int k = 0; k < 3; k++) out[k] = ambient[k] + color[0][k] * f[0] + color[1][k] * f[1];
+}
+
+namespace {
+
+double or_one(double v) { return v == 0 || !std::isfinite(v) ? 1.0 : v; }
+
+// A model tag (.gbxmodel or .model) as a Model: its most detailed geometry (each region's first permutation's super
+// high), its shaders' base maps put in `tex`. False when it has no triangles.
+bool read_model(const std::string &tag, const Find &find, Textures &tex, Model &out) {
+    out = Model();
+    out.tag = tag;
+    fs::path mf = find(tag);
+    tagfile::Tag t;
+    if (mf.empty() || !t.load(mf)) return false;
+    tagfile::Elem r = t.root();
+    double mu = or_one(r.num("base map u scale")), mv = or_one(r.num("base map v scale"));
+    tagfile::Block geos = r.block("geometries"), regions = r.block("regions"), shaders = r.block("shaders");
+    std::vector<int> use;
+    for (size_t i = 0; i < regions.size(); i++) {
+        tagfile::Block perms = regions[i].block("permutations");
+        if (!perms.size()) continue;
+        long long g = perms[0].integer("super high");
+        if (g >= 0 && g < (long long)geos.size() && std::find(use.begin(), use.end(), (int)g) == use.end()) use.push_back((int)g);
+    }
+    // Each shader: its base map, how it repeats, how it's drawn (rasterizer_xbox_models.c: a shader_model is
+    // alpha-tested by its base map's alpha unless it says it isn't, or it's an alpha-blended decal).
+    struct Look { int texture = -1, flags = 0, index = -1; double u = 1, v = 1; bool done = false; };
+    std::vector<Look> looks(shaders.size());
+    auto look = [&](long long si) -> Look {
+        if (si < 0 || (size_t)si >= looks.size()) return Look();
+        Look &l = looks[(size_t)si];
+        if (l.done) return l;
+        l.done = true;
+        std::string group, ref = shaders[(size_t)si].ref("shader", &group);
+        std::string st = with_extension(ref, group, find);
+        l.index = (int)out.shaders.size();
+        out.shaders.push_back(st.empty() ? ref : st);
+        tagfile::Tag sh;
+        fs::path sf = st.empty() ? fs::path() : find(st);
+        if (sf.empty() || !sh.load(sf)) return l;
+        tagfile::Elem e = sh.root();
+        std::string ext = fs::path(st).extension().u8string(), base;
+        if (ext == ".shader_model") {
+            base = bitmap_ref(e, "base map");
+            l.u = or_one(e.num("map u scale"));
+            l.v = or_one(e.num("map v scale"));
+            long long f = (long long)e.num("shader model flags");
+            if (f & 2) l.flags |= ModelPart::kTwoSided;
+            if (f & 8) l.flags |= ModelPart::kSeeThrough;
+            else if (!(f & 4)) l.flags |= ModelPart::kCutout;
+        } else if (ext == ".shader_environment") {
+            base = bitmap_ref(e, "base map");
+        } else {
+            l.flags |= ModelPart::kSeeThrough | ModelPart::kTwoSided;
+            if (ext == ".shader_transparent_chicago" || ext == ".shader_transparent_chicago_extended" ||
+                ext == ".shader_transparent_generic") {
+                // (0 alpha blend, 1 multiply, 2 double multiply, 3 add, 4 subtract, 5 min, 6 max, 7 alpha-multiply add)
+                long long f = (long long)e.num("framebuffer blend function");
+                l.flags |= f == 3 || f == 7 ? ModelPart::kAdd : f == 1 ? ModelPart::kMultiply : f == 2 ? ModelPart::kDoubleMultiply : 0;
+            }
+            tagfile::Block maps = e.block(ext == ".shader_transparent_chicago_extended" ? "maps 4 stage" : "maps");
+            if (!maps.size() && ext == ".shader_transparent_chicago_extended") maps = e.block("maps 2 stage");
+            if (maps.size()) {
+                base = bitmap_ref(maps[0], "map");
+                l.u = or_one(maps[0].num("map u scale"));
+                l.v = or_one(maps[0].num("map v scale"));
+            }
+        }
+        l.texture = tex.get(base, 0, 128);
+        if ((l.flags & ModelPart::kCutout) && l.texture >= 0) {   // (nothing to cut when no texel is half see-through)
+            const std::vector<uint8_t> &px = tex.p.textures[(size_t)l.texture].rgba;
+            bool any = false;
+            for (size_t i = 3; i < px.size() && !any; i += 4) any = px[i] <= 127;
+            if (!any) l.flags &= ~ModelPart::kCutout;
+        } else if (l.texture < 0) {
+            l.flags &= ~ModelPart::kCutout;
+        }
+        return l;
+    };
+    for (int g : use) {
+        tagfile::Block parts = geos[(size_t)g].block("parts");
+        for (size_t k = 0; k < parts.size(); k++) {
+            tagfile::Block verts = parts[k].block("uncompressed vertices"), strip = parts[k].block("triangles");
+            if (!verts.size() || !strip.size()) continue;
+            Look l = look(parts[k].integer("shader index"));
+            uint32_t base = (uint32_t)out.vertices.size();
+            for (size_t v = 0; v < verts.size(); v++) {
+                ModelVertex x;
+                for (int c = 0; c < 3; c++) {
+                    x.p[c] = (float)verts[v].num("position", c);
+                    x.n[c] = (float)verts[v].num("normal", c);
+                }
+                x.uv[0] = (float)(verts[v].num("texture coords", 0) * mu * l.u);
+                x.uv[1] = (float)(verts[v].num("texture coords", 1) * mv * l.v);
+                out.vertices.push_back(x);
+            }
+            ModelPart part;
+            part.first = (int32_t)(out.tris.size() / 3);
+            part.texture = l.texture;
+            part.flags = l.flags;
+            part.shader = l.index;
+            std::vector<int> s;
+            for (size_t i = 0; i < strip.size(); i++) {
+                static const char *f[3] = {"vertex0 index", "vertex1 index", "vertex2 index"};
+                for (int c = 0; c < 3; c++) {
+                    int x = (int)strip[i].integer(f[c]);
+                    if (x != 65535) s.push_back(x);
+                }
+            }
+            const int n = (int)verts.size();
+            for (size_t i = 2; i < s.size(); i++) {
+                int a = s[i - 2], b = s[i - 1], c = s[i];
+                if (a == b || b == c || a == c || a < 0 || b < 0 || c < 0 || a >= n || b >= n || c >= n) continue;
+                // (wound counterclockwise seen from the front: the side its corners' normals face)
+                const ModelVertex &A = out.vertices[base + a], &B = out.vertices[base + b], &C = out.vertices[base + c];
+                V3 e1{B.p[0] - A.p[0], B.p[1] - A.p[1], B.p[2] - A.p[2]}, e2{C.p[0] - A.p[0], C.p[1] - A.p[1], C.p[2] - A.p[2]};
+                V3 nn{A.n[0] + B.n[0] + C.n[0], A.n[1] + B.n[1] + C.n[1], A.n[2] + B.n[2] + C.n[2]};
+                bool flip = dot(cross(e1, e2), nn) < 0;
+                if (dot(nn, nn) < 1e-12) flip = (i - 2) % 2 == 1;
+                if (flip) std::swap(b, c);
+                out.tris.insert(out.tris.end(), {base + a, base + b, base + c});
+            }
+            part.count = (int32_t)(out.tris.size() / 3) - part.first;
+            if (part.count) out.parts.push_back(part);
+        }
+    }
+    return !out.tris.empty();
+}
+
+// The level's triangles in a grid by where they are across (x, y), for what's straight below a point.
+struct Below {
+    const Preview &p;
+    double x0 = 0, y0 = 0, cell = 4;
+    int nx = 0, ny = 0;
+    std::vector<std::vector<int>> cells;
+    explicit Below(const Preview &pv) : p(pv) {
+        double lo[2] = {1e30, 1e30}, hi[2] = {-1e30, -1e30};
+        for (auto &t : p.triangles)
+            if (t.material >= 0)
+                for (auto &v : t.v)
+                    for (int k = 0; k < 2; k++) { lo[k] = std::min(lo[k], (double)v.p[k]); hi[k] = std::max(hi[k], (double)v.p[k]); }
+        if (lo[0] > hi[0]) return;
+        cell = std::max({4.0, (hi[0] - lo[0]) / 512, (hi[1] - lo[1]) / 512});
+        x0 = lo[0];
+        y0 = lo[1];
+        nx = (int)((hi[0] - lo[0]) / cell) + 1;
+        ny = (int)((hi[1] - lo[1]) / cell) + 1;
+        cells.assign((size_t)nx * ny, {});
+        for (size_t i = 0; i < p.triangles.size(); i++) {
+            const Triangle &t = p.triangles[i];
+            if (t.material < 0) continue;
+            double a[2] = {1e30, 1e30}, b[2] = {-1e30, -1e30};
+            for (auto &v : t.v)
+                for (int k = 0; k < 2; k++) { a[k] = std::min(a[k], (double)v.p[k]); b[k] = std::max(b[k], (double)v.p[k]); }
+            int cx0 = std::clamp((int)((a[0] - x0) / cell), 0, nx - 1), cx1 = std::clamp((int)((b[0] - x0) / cell), 0, nx - 1);
+            int cy0 = std::clamp((int)((a[1] - y0) / cell), 0, ny - 1), cy1 = std::clamp((int)((b[1] - y0) / cell), 0, ny - 1);
+            for (int y = cy0; y <= cy1; y++)
+                for (int x = cx0; x <= cx1; x++) cells[(size_t)y * nx + x].push_back((int)i);
+        }
+    }
+    // The first level surface a ray from `q` straight down `reach` units meets from its front (as the engine's
+    // structure_test_vector: going into the level's solid): its triangle and the barycentrics of its 2nd and 3rd
+    // corners there; -1 for none.
+    int hit(const V3 &q, double reach, double &l1, double &l2) const {
+        if (!nx) return -1;
+        int cx = (int)std::floor((q[0] - x0) / cell), cy = (int)std::floor((q[1] - y0) / cell);
+        if (cx < 0 || cy < 0 || cx >= nx || cy >= ny) return -1;
+        int best = -1;
+        double best_z = q[2] - reach;
+        for (int i : cells[(size_t)cy * nx + cx]) {
+            const Triangle &t = p.triangles[(size_t)i];
+            const float *a = t.v[0].p, *b = t.v[1].p, *c = t.v[2].p;
+            double e1x = b[0] - a[0], e1y = b[1] - a[1], e2x = c[0] - a[0], e2y = c[1] - a[1];
+            double det = e1x * e2y - e2x * e1y;   // (its normal's z, as Halo winds it: negative when it faces up)
+            if (det >= -1e-12) continue;
+            double px = q[0] - a[0], py = q[1] - a[1];
+            double u = (px * e2y - e2x * py) / det, v = (e1x * py - px * e1y) / det;
+            if (u < 0 || v < 0 || u + v > 1) continue;
+            double z = a[2] + (b[2] - a[2]) * u + (c[2] - a[2]) * v;
+            if (z > q[2] || z <= best_z) continue;
+            best = i;
+            best_z = z;
+            l1 = u;
+            l2 = v;
+        }
+        return best;
+    }
+};
+
+// brighten_real_rgb_color (object_lights.c): its brightest channel `fraction` brighter, up to 1, at least `fraction`.
+void brighten(float c[3], float fraction) {
+    float m = std::max({c[0], c[1], c[2]});
+    if (m <= 0) return;
+    float scale = fraction + 1, sm = scale * m;
+    if (sm > 1) scale = 1 / m;
+    else if (sm < fraction) scale = fraction / m;
+    for (int k = 0; k < 3; k++) c[k] *= scale;
+}
+
+// The level's lighting for objects (lights_distant_lighting_at_point, build_distant_lights in object_lights.c).
+struct Lighting {
+    const Preview &p;
+    const Below &below;
+    const std::vector<std::array<float, 9>> &incident;   // per triangle: its corners' incident radiosity (the lightmap's
+                                                         // light: where it comes from, as long as it's that directional)
+    ObjectLight fallback;                                // the level's default lighting, else the engine's
+    // At a point: the light from the lightmap below it, or false (and the fallback) when the ray meets no lit surface.
+    bool at(const V3 &q, bool bright, ObjectLight &out) const {
+        out = fallback;
+        double l1 = 0, l2 = 0;
+        int ti = below.hit(q, 10, l1, l2);
+        if (ti < 0) return false;
+        const Triangle &t = p.triangles[(size_t)ti];
+        const Material &m = p.materials[(size_t)t.material];
+        if (m.shader < 0 || m.base < 0 || t.lightmap < 0) return false;   // (a shader_environment with a base map and a lightmap)
+        double l0 = 1 - l1 - l2;
+        auto lerp = [&](const float *a, const float *b, const float *c, int k) { return a[k] * l0 + b[k] * l1 + c[k] * l2; };
+        float lm[4], diffuse[4];
+        sample(p.textures[(size_t)t.lightmap], lerp(t.v[0].luv, t.v[1].luv, t.v[2].luv, 0), lerp(t.v[0].luv, t.v[1].luv, t.v[2].luv, 1), false, lm);
+        sample(p.textures[(size_t)m.base], lerp(t.v[0].uv, t.v[1].uv, t.v[2].uv, 0), lerp(t.v[0].uv, t.v[1].uv, t.v[2].uv, 1), true, diffuse);
+        V3 surface = norm(V3{lerp(t.v[0].n, t.v[1].n, t.v[2].n, 0), lerp(t.v[0].n, t.v[1].n, t.v[2].n, 1), lerp(t.v[0].n, t.v[1].n, t.v[2].n, 2)});
+        V3 rn{0, 0, 0};
+        double accuracy = 0;
+        const auto &inc = incident[(size_t)ti];
+        const double w[3] = {l0, l1, l2};
+        for (int k = 0; k < 3; k++) {
+            V3 d{inc[k * 3], inc[k * 3 + 1], inc[k * 3 + 2]};
+            double len = std::sqrt(dot(d, d));
+            if (len > 1e-12) d = mul(d, 1 / len);
+            rn = {rn[0] + d[0] * w[k], rn[1] + d[1] * w[k], rn[2] + d[2] * w[k]};
+            accuracy += len * w[k];
+        }
+        rn = norm(rn);
+        (void)accuracy;   // (the engine uses it for the object's shadow only)
+        float brightness = lm[0] * 0.299f + lm[1] * 0.587f + lm[2] * 0.114f;
+        for (int k = 0; k < 3; k++) {
+            out.ambient[k] = lm[k] * 0.4f + 0.03f;
+            out.color[0][k] = lm[k];
+            out.direction[0][k] = (float)-rn[k];
+            out.color[1][k] = diffuse[k] * brightness;
+            out.direction[1][k] = (float)surface[k];
+        }
+        if (bright) {
+            brighten(out.ambient, 0.2f);
+            brighten(out.color[0], 0.3f);
+            brighten(out.color[1], 0.2f);
+        }
+        return true;
+    }
+    // An object's (lights_prepare_for_object_static): from its bounding sphere's centre and four points around it
+    // (the radius x 0.707 away in x and y), the ones that meet a lit surface averaged. Its samples in `lit`.
+    ObjectLight object(const V3 &center, double radius, bool bright, int &lit) const {
+        ObjectLight light, s;
+        lit = 0;
+        if (at(center, bright, light)) lit = 1;
+        else light = ObjectLight{{0, 0, 0}, {{0, 0, 0}, {0, 0, 0}}, {{0, 0, 0}, {0, 0, 0}}};
+        for (int corner = 0; corner < 4; corner++) {
+            V3 q{center[0] + ((corner & 1) ? 0.70710678 : -0.70710678) * radius,
+                 center[1] + ((corner & 2) ? 0.70710678 : -0.70710678) * radius, center[2]};
+            if (!at(q, bright, s)) continue;
+            lit++;
+            for (int k = 0; k < 3; k++) {
+                light.ambient[k] += s.ambient[k];
+                for (int i = 0; i < 2; i++) {
+                    light.color[i][k] += s.color[i][k];
+                    light.direction[i][k] += s.direction[i][k];
+                }
+            }
+        }
+        if (lit > 1) {
+            float scale = 1.0f / lit;
+            for (int k = 0; k < 3; k++) {
+                light.ambient[k] *= scale;
+                for (int i = 0; i < 2; i++) light.color[i][k] *= scale;
+            }
+            for (int i = 0; i < 2; i++) {
+                V3 d = norm(V3{light.direction[i][0], light.direction[i][1], light.direction[i][2]});
+                for (int k = 0; k < 3; k++) light.direction[i][k] = (float)d[k];
+            }
+        } else if (lit == 0) {
+            light = s;
+        }
+        return light;
+    }
+};
+
+// The objects in the level when a game starts (Preview::objects, models), lit by its lightmap.
+void read_objects(const tagfile::Elem &sc, const tagfile::Elem &bsp, const Find &find, Textures &tex,
+                  const std::vector<std::array<float, 9>> &incident, Preview &p) {
+    Below below(p);
+    Lighting lighting{p, below, incident, ObjectLight()};
+    if (bsp.num("default ambient color", 0) != 0) {   // (the level's own default lighting, when it has one)
+        ObjectLight &f = lighting.fallback;
+        for (int k = 0; k < 3; k++) {
+            f.ambient[k] = (float)bsp.num("default ambient color", k);
+            f.color[0][k] = (float)bsp.num("default distant light 0 color", k);
+            f.direction[0][k] = (float)bsp.num("default distant light 0 direction", k);
+            f.color[1][k] = (float)bsp.num("default distant light 1 color", k);
+            f.direction[1][k] = (float)bsp.num("default distant light 1 direction", k);
+        }
+    }
+    std::map<std::string, int> model_of;   // object tag -> its model (-1: none)
+    struct Def { int model = -1; double radius = 0; V3 offset{}; bool bright = false; };
+    std::map<std::string, Def> defs;
+    auto def = [&](const std::string &o) -> const Def & {
+        auto it = defs.find(o);
+        if (it != defs.end()) return it->second;
+        Def d;
+        fs::path of = find(o);
+        tagfile::Tag ot;
+        if (!of.empty() && ot.load(of)) {
+            tagfile::Elem r = ot.root();
+            d.radius = r.num("bounding radius");
+            for (int k = 0; k < 3; k++) d.offset[k] = r.num("bounding offset", k);
+            d.bright = ((long long)r.num("flags") & 4) != 0;   // (artificially bright)
+            std::string m = r.ref("model");
+            if (!m.empty()) {
+                auto mt = model_of.find(m);
+                if (mt == model_of.end()) {
+                    Model model;
+                    int id = -1;
+                    if (p.models.size() < 1000 && read_model(m, find, tex, model)) {
+                        id = (int)p.models.size();
+                        p.models.push_back(std::move(model));
+                    }
+                    mt = model_of.emplace(m, id).first;
+                }
+                d.model = mt->second;
+            }
+        }
+        return defs.emplace(o, d).first->second;
+    };
+    auto place = [&](const std::string &o, int kind, const V3 &pos, double yaw, double pitch, double roll) {
+        if (o.empty() || p.objects.size() >= 5000) return;
+        const Def &d = def(o);
+        if (d.model < 0) return;
+        Object x;
+        x.model = d.model;
+        x.kind = kind;
+        double cy = std::cos(yaw), sy = std::sin(yaw), cp = std::cos(pitch), sp = std::sin(pitch), cr = std::cos(roll), sr = std::sin(roll);
+        V3 f{cy * cp, sy * cp, sp}, l0{-sy, cy, 0}, u0{-sp * cy, -sp * sy, cp};
+        V3 l{l0[0] * cr + u0[0] * sr, l0[1] * cr + u0[1] * sr, l0[2] * cr + u0[2] * sr};
+        V3 u{u0[0] * cr - l0[0] * sr, u0[1] * cr - l0[1] * sr, u0[2] * cr - l0[2] * sr};
+        const V3 axes[3] = {f, l, u};
+        for (int i = 0; i < 3; i++)
+            for (int k = 0; k < 3; k++) x.axes[i][k] = (float)axes[i][k];
+        for (int k = 0; k < 3; k++) x.p[k] = (float)pos[k];
+        V3 center{pos[0] + f[0] * d.offset[0] + l[0] * d.offset[1] + u[0] * d.offset[2],
+                  pos[1] + f[1] * d.offset[0] + l[1] * d.offset[1] + u[1] * d.offset[2],
+                  pos[2] + f[2] * d.offset[0] + l[2] * d.offset[1] + u[2] * d.offset[2]};
+        int lit = 0;
+        x.light = lighting.object(center, d.radius, d.bright, lit);
+        x.lit = lit;
+        snprintf(x.tag, sizeof x.tag, "%s", o.c_str());
+        p.objects.push_back(x);
+    };
+    static const char *const kinds[][2] = {{"scenery", "scenery palette"}, {"machines", "machine palette"},
+                                           {"controls", "control palette"}, {"light fixtures", "light fixture palette"},
+                                           {"vehicles", "vehicle palette"}, {"weapons", "weapon palette"},
+                                           {"equipment", "equipment palette"}};
+    for (int k = 0; k < 7; k++) {
+        tagfile::Block items = sc.block(kinds[k][0]), pal = sc.block(kinds[k][1]);
+        for (size_t i = 0; i < items.size(); i++) {
+            long long t = items[i].integer("type");
+            if (t < 0 || (size_t)t >= pal.size()) continue;
+            if ((long long)items[i].num("not placed") & 1) continue;   // (not placed automatically: only by scripts)
+            if (k == Object::kVehicle && items[i].integer("multiplayer spawn flags") == 0) continue;   // (no game type spawns it)
+            V3 pos{items[i].num("position", 0), items[i].num("position", 1), items[i].num("position", 2)};
+            place(pal[(size_t)t].ref("name"), k, pos, items[i].num("rotation", 0), items[i].num("rotation", 1), items[i].num("rotation", 2));
+        }
+    }
+    // (the multiplayer spawn points' items: each one's collection's first)
+    tagfile::Block eq = sc.block("netgame equipment");
+    std::map<std::string, std::string> first_item;
+    for (size_t i = 0; i < eq.size(); i++) {
+        std::string ic = eq[i].ref("item collection");
+        if (ic.empty()) continue;
+        if (!first_item.count(ic)) {
+            std::string &item = first_item[ic];
+            fs::path f = find(ic);
+            tagfile::Tag t;
+            if (!f.empty() && t.load(f)) {
+                tagfile::Block perms = t.root().block("permutations");
+                for (size_t k = 0; k < perms.size() && item.empty(); k++) item = perms[k].ref("item");
+            }
+        }
+        V3 pos{eq[i].num("position", 0), eq[i].num("position", 1), eq[i].num("position", 2)};
+        place(first_item[ic], Object::kItem, pos, eq[i].num("facing"), 0, 0);
+    }
+}
+
+}   // namespace
+
 bool analyze(const fs::path &bsp_file, const fs::path &scenario, const Find &find, Analysis &a, Preview &p, std::string *why) {
     auto fail = [&](const char *w) { if (why) *why = w; return false; };
     a = Analysis();
@@ -339,6 +769,7 @@ bool analyze(const fs::path &bsp_file, const fs::path &scenario, const Find &fin
     tagfile::Block surfaces = r.block("surfaces"), lightmaps = r.block("lightmaps");
     p.triangles.assign(surfaces.size(), Triangle());
     Textures tex{p, find, {}};
+    std::vector<std::array<float, 9>> incident(surfaces.size(), std::array<float, 9>{});   // (for lighting objects)
     std::string lightmaps_bitmap = bitmap_ref(r, "lightmaps bitmap");
     std::map<std::string, int> material_of, shader_of;
     std::vector<int> material_triangles;
@@ -430,7 +861,7 @@ bool analyze(const fs::path &bsp_file, const fs::path &scenario, const Find &fin
                 if (z & 0x200) z -= 0x400;
                 out[0] = x / 1023.0f; out[1] = y / 1023.0f; out[2] = z / 511.0f;
             };
-            auto vertex = [&](size_t i, Vertex &v) {
+            auto vertex = [&](size_t i, Vertex &v, float *inc) {
                 size_t at = i * stride;
                 for (int k = 0; k < 3; k++) v.p[k] = f32(at + 4 * k);
                 if (compressed) {
@@ -443,15 +874,19 @@ bool analyze(const fs::path &bsp_file, const fs::path &scenario, const Find &fin
                     v.uv[0] = f32(at + 48); v.uv[1] = f32(at + 52);
                 }
                 v.luv[0] = v.luv[1] = 0.5f;
-                if (have_lm) {
+                if (have_lm) {   // (a lightmap vertex: its incident radiosity, then its lightmap coordinates)
                     size_t la = lbase + i * lstride;
                     if (compressed) {
                         int16_t u, w;
                         memcpy(&u, data.data() + la + 4, 2);
                         memcpy(&w, data.data() + la + 6, 2);
                         v.luv[0] = u / 32767.0f; v.luv[1] = w / 32767.0f;
+                        uint32_t n;
+                        memcpy(&n, data.data() + la, 4);
+                        unpack(n, inc);
                     } else {
                         v.luv[0] = f32(la + 12); v.luv[1] = f32(la + 16);
+                        for (int k = 0; k < 3; k++) inc[k] = f32(la + 4 * k);
                     }
                 }
             };
@@ -461,9 +896,10 @@ bool analyze(const fs::path &bsp_file, const fs::path &scenario, const Find &fin
                        i2 = (size_t)surfaces[(size_t)sfc].integer("vertex2 index");
                 if (i0 >= count || i1 >= count || i2 >= count) continue;
                 Triangle &tr = p.triangles[(size_t)sfc];
-                vertex(i0, tr.v[0]);
-                vertex(i1, tr.v[1]);
-                vertex(i2, tr.v[2]);
+                float *inc = incident[(size_t)sfc].data();
+                vertex(i0, tr.v[0], inc);
+                vertex(i1, tr.v[1], inc + 3);
+                vertex(i2, tr.v[2], inc + 6);
                 tr.material = material;
                 tr.lightmap = lm;
                 int sh = p.materials[(size_t)material].shader;
@@ -621,6 +1057,7 @@ bool analyze(const fs::path &bsp_file, const fs::path &scenario, const Find &fin
             }
             snprintf(p.content.light_names, sizeof p.content.light_names, "%s", ln.c_str());
             read_marks(sc.root(), find, p);
+            read_objects(sc.root(), r, find, tex, incident, p);
         }
         for (size_t c = 0; c < clusters.size(); c++) {
             long long sky = clusters[c].integer("sky");
@@ -755,6 +1192,54 @@ void suggest(Analysis &a) {
     for (size_t s = 0; s < S; s++) a.shaders[s].suggested = dropped[s] != 0;
 }
 
+namespace {
+// An object's triangle in the world: its corners, texture coordinates and light (the object's light where each corner
+// faces), and how it's drawn (ModelPart).
+struct WorldTriangle { float q[3][3], uv[3][2], c[3][3]; int texture = -1, flags = 0, object = -1, part = -1; };
+void object_triangles(const Preview &p, std::vector<WorldTriangle> &out) {
+    out.clear();
+    for (size_t oi = 0; oi < p.objects.size(); oi++) {
+        const Object &o = p.objects[oi];
+        if (o.model < 0 || (size_t)o.model >= p.models.size()) continue;
+        const Model &m = p.models[(size_t)o.model];
+        for (size_t pi = 0; pi < m.parts.size(); pi++) {
+            const ModelPart &part = m.parts[pi];
+            for (int32_t t = part.first; t < part.first + part.count && (size_t)t * 3 + 2 < m.tris.size(); t++) {
+                WorldTriangle w;
+                w.texture = part.texture;
+                w.flags = part.flags;
+                w.object = (int)oi;
+                w.part = (int)pi;
+                for (int k = 0; k < 3; k++) {
+                    const ModelVertex &v = m.vertices[m.tris[(size_t)t * 3 + k]];
+                    float n[3];
+                    for (int c = 0; c < 3; c++) {
+                        w.q[k][c] = o.p[c] + o.axes[0][c] * v.p[0] + o.axes[1][c] * v.p[1] + o.axes[2][c] * v.p[2];
+                        n[c] = o.axes[0][c] * v.n[0] + o.axes[1][c] * v.n[1] + o.axes[2][c] * v.n[2];
+                    }
+                    float l = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+                    if (l > 1e-12f) for (float &c : n) c /= l;
+                    o.light.at(n, w.c[k]);
+                    w.uv[k][0] = v.uv[0];
+                    w.uv[k][1] = v.uv[1];
+                }
+                out.push_back(w);
+            }
+        }
+    }
+}
+// Whether an object's triangle is cut away at barycentrics (l1, l2): alpha-tested, where its base map's alpha is half or
+// less (the Xbox's alpha reference 0x7F, "greater").
+bool object_cut_away(const Preview &p, const WorldTriangle &t, double l1, double l2) {
+    if (!(t.flags & ModelPart::kCutout) || t.texture < 0 || (size_t)t.texture >= p.textures.size()) return false;
+    double l0 = 1 - l1 - l2;
+    float c[4];
+    sample(p.textures[(size_t)t.texture], t.uv[0][0] * l0 + t.uv[1][0] * l1 + t.uv[2][0] * l2,
+           t.uv[0][1] * l0 + t.uv[1][1] * l1 + t.uv[2][1] * l2, true, c);
+    return c[3] * 255 <= 127;
+}
+}   // namespace
+
 void draw(const Preview &p, const Camera &cam, const std::vector<char> &reflections, int highlight, int w, int h,
           std::vector<uint32_t> &px, std::vector<Shown> *shown, double *total_out, const Extras *extras) {
     const bool show_portals = extras && extras->portals;
@@ -839,6 +1324,23 @@ void draw(const Preview &p, const Camera &cam, const std::vector<char> &reflecti
             if (z < zb[o] && !(cut && cut_away(p, t, l1, l2))) { zb[o] = z; tid[o] = (int)i; b1[o] = l1; b2[o] = l2; }
         });
     }
+    // The objects (their triangles after the level's in `tid`), see-through ones later with the level's.
+    const int T = (int)p.triangles.size();
+    std::vector<WorldTriangle> ot;
+    std::vector<int> clear_objects;
+    if (extras && extras->objects) object_triangles(p, ot);
+    for (size_t k = 0; k < ot.size(); k++) {
+        const WorldTriangle &t = ot[k];
+        if (t.flags & ModelPart::kSeeThrough) { clear_objects.push_back((int)k); continue; }
+        if (!(t.flags & ModelPart::kTwoSided)) {   // (wound counterclockwise seen from the front)
+            V3 a{t.q[0][0], t.q[0][1], t.q[0][2]}, b{t.q[1][0], t.q[1][1], t.q[1][2]}, c{t.q[2][0], t.q[2][1], t.q[2][2]};
+            if (dot(cross(sub(b, a), sub(c, a)), sub(eye, a)) <= 0) continue;
+        }
+        raster_corners(t.q[0], t.q[1], t.q[2], [&](int x, int y, float z, float l1, float l2) {
+            size_t o = (size_t)y * w + x;
+            if (z < zb[o] && !object_cut_away(p, t, l1, l2)) { zb[o] = z; tid[o] = T + (int)k; b1[o] = l1; b2[o] = l2; }
+        });
+    }
     // Shading.
     double total = 0;
     for (int y = 0; y < h; y++)
@@ -848,6 +1350,19 @@ void draw(const Preview &p, const Camera &cam, const std::vector<char> &reflecti
             if (tid[o] < 0 || zb[o] > far_z) {   // (the sky; past opaque fog the engine draws nothing either)
                 double g = (double)y / h;
                 col[0] = 0.30 + 0.15 * g; col[1] = 0.36 + 0.14 * g; col[2] = 0.46 + 0.10 * g;
+            } else if (tid[o] >= T) {   // (an object: its base map x its light)
+                const WorldTriangle &t = ot[(size_t)(tid[o] - T)];
+                double l1 = b1[o], l2 = b2[o], l0 = 1 - l1 - l2;
+                float base[4] = {0.6f, 0.6f, 0.6f, 1};
+                if (t.texture >= 0)
+                    sample(p.textures[(size_t)t.texture], t.uv[0][0] * l0 + t.uv[1][0] * l1 + t.uv[2][0] * l2,
+                           t.uv[0][1] * l0 + t.uv[1][1] * l1 + t.uv[2][1] * l2, true, base);
+                for (int k = 0; k < 3; k++) col[k] = base[k] * (t.c[0][k] * l0 + t.c[1][k] * l1 + t.c[2][k] * l2);
+                if (fogged) {
+                    double span = std::max(1e-3, (double)fog.opaque - fog.start);
+                    double f = fog.density * std::clamp((zb[o] - fog.start) / span, 0.0, 1.0);
+                    for (int k = 0; k < 3; k++) col[k] = std::min(1.0, col[k]) * (1 - f) + fog.color[k] * f;
+                }
             } else {
                 const Triangle &t = p.triangles[(size_t)tid[o]];
                 const Material &m = p.materials[(size_t)t.material];
@@ -924,6 +1439,31 @@ void draw(const Preview &p, const Camera &cam, const std::vector<char> &reflecti
             px[o] = (uint32_t)(std::min(1.0, r) * 255) << 16 | (uint32_t)(std::min(1.0, g) * 255) << 8 | (uint32_t)(std::min(1.0, b) * 255);
         });
     }
+    // (the objects' see-through parts: by their framebuffer blend function, fogged as the engine fogs them: what they
+    // add fades with the fog, what they multiply by turns to 1)
+    for (int k : clear_objects) {
+        const WorldTriangle &t = ot[(size_t)k];
+        raster_corners(t.q[0], t.q[1], t.q[2], [&](int x, int y, float z, float l1, float l2) {
+            size_t o = (size_t)y * w + x;
+            if (z >= zb[o] || z > far_z) return;
+            double l0 = 1 - l1 - l2;
+            float c[4] = {0.55f, 0.65f, 0.75f, 0.35f};
+            if (t.texture >= 0)
+                sample(p.textures[(size_t)t.texture], t.uv[0][0] * l0 + t.uv[1][0] * l1 + t.uv[2][0] * l2,
+                       t.uv[0][1] * l0 + t.uv[1][1] * l1 + t.uv[2][1] * l2, true, c);
+            double f = 0;
+            if (fogged) f = fog.density * std::clamp((z - fog.start) / std::max(1e-3, (double)fog.opaque - fog.start), 0.0, 1.0);
+            uint32_t q = px[o];
+            double d[3] = {((q >> 16) & 255) / 255.0, ((q >> 8) & 255) / 255.0, (q & 255) / 255.0};
+            for (int i = 0; i < 3; i++) {
+                if (t.flags & ModelPart::kAdd) d[i] += c[i] * (1 - f);
+                else if (t.flags & ModelPart::kMultiply) d[i] *= c[i] * (1 - f) + f;
+                else if (t.flags & ModelPart::kDoubleMultiply) d[i] *= (2 * c[i]) * (1 - f) + f;
+                else d[i] = d[i] * (1 - c[3]) + (c[i] * (1 - f) + fog.color[i] * f) * c[3];
+            }
+            px[o] = (uint32_t)(std::min(1.0, d[0]) * 255) << 16 | (uint32_t)(std::min(1.0, d[1]) * 255) << 8 | (uint32_t)(std::min(1.0, d[2]) * 255);
+        });
+    }
     // The portals: a glow where you see through one (nothing in front of it), and its outline.
     if (show_portals) {
         auto blend = [&](size_t o, const double c[3], double a) {
@@ -974,7 +1514,10 @@ void draw(const Preview &p, const Camera &cam, const std::vector<char> &reflecti
     if (total_out) *total_out = total;
 }
 
-int pick(const Preview &p, const Camera &cam, int w, int h, double x, double y, std::array<double, 3> *hit) {
+int pick(const Preview &p, const Camera &cam, int w, int h, double x, double y, std::array<double, 3> *hit, int *object,
+         int *part) {
+    if (object) *object = -1;
+    if (part) *part = -1;
     if (w <= 0 || h <= 0) return -1;
     const double tx = std::tan(35.0 * 3.14159265358979 / 180), ty = tx * h / w;
     V3 eye{cam.eye[0], cam.eye[1], cam.eye[2]};
@@ -1006,13 +1549,38 @@ int pick(const Preview &p, const Camera &cam, int w, int h, double x, double y, 
         best = (int)i;
         best_t = dist;
     }
+    if (object) {   // (the objects, in front of it)
+        std::vector<WorldTriangle> ot;
+        object_triangles(p, ot);
+        for (const WorldTriangle &t : ot) {
+            V3 a{t.q[0][0], t.q[0][1], t.q[0][2]}, b{t.q[1][0], t.q[1][1], t.q[1][2]}, c{t.q[2][0], t.q[2][1], t.q[2][2]};
+            V3 e1 = sub(b, a), e2 = sub(c, a);
+            if (!(t.flags & (ModelPart::kTwoSided | ModelPart::kSeeThrough)) && dot(cross(e1, e2), sub(eye, a)) <= 0) continue;
+            V3 pv = cross(d, e2);
+            double det = dot(e1, pv);
+            if (std::fabs(det) < 1e-12) continue;
+            V3 tv = sub(eye, a);
+            double l1 = dot(tv, pv) / det;
+            if (l1 < 0 || l1 > 1) continue;
+            V3 q = cross(tv, e1);
+            double l2 = dot(d, q) / det;
+            if (l2 < 0 || l1 + l2 > 1) continue;
+            double dist = dot(e2, q) / det;
+            if (dist < 0.02 || dist >= best_t || object_cut_away(p, t, l1, l2)) continue;
+            best = -1;
+            best_t = dist;
+            *object = t.object;
+            if (part) *part = t.part;
+        }
+        if (*object >= 0 && hit) *hit = {eye[0] + d[0] * best_t, eye[1] + d[1] * best_t, eye[2] + d[2] * best_t};
+    }
     if (hit && best >= 0) *hit = {eye[0] + d[0] * best_t, eye[1] + d[1] * best_t, eye[2] + d[2] * best_t};
     return best;
 }
 
 // The file: a magic, then each part as counts and raw values (this machine's byte order: the file is a cache).
 namespace {
-const char kMagic[8] = {'H', 'M', 'P', 'L', 'S', 'H', 'D', '9'};
+const char kMagic[8] = {'H', 'M', 'P', 'L', 'S', 'H', 'D', 'B'};
 struct Out {
     std::ofstream f;
     template <class T> void raw(const T &v) { f.write((const char *)&v, sizeof v); }
@@ -1079,6 +1647,14 @@ bool save(const Analysis &a, const Preview &p, const fs::path &file) {
     o.vec(p.leaf_room);
     o.vec(p.marks);
     o.vec(p.boxes);
+    o.raw((uint32_t)p.models.size());
+    for (auto &m : p.models) {
+        o.str(m.tag);
+        o.vec(m.vertices); o.vec(m.tris); o.vec(m.parts);
+        o.raw((uint32_t)m.shaders.size());
+        for (auto &t : m.shaders) o.str(t);
+    }
+    o.vec(p.objects);
     return (bool)o.f;
 }
 
@@ -1134,6 +1710,28 @@ bool load(Analysis &a, Preview &p, const fs::path &file) {
     in.vec(p.leaf_room);
     in.vec(p.marks);
     in.vec(p.boxes);
+    in.raw(n);
+    if (!in.ok || n > 100000) return false;
+    p.models.resize(n);
+    for (auto &m : p.models) {
+        in.str(m.tag);
+        in.vec(m.vertices); in.vec(m.tris); in.vec(m.parts);
+        uint32_t k = 0;
+        in.raw(k);
+        if (!in.ok || k > 100000) return false;
+        m.shaders.resize(k);
+        for (auto &t : m.shaders) in.str(t);
+    }
+    in.vec(p.objects);
+    // (every reference in range: the pictures index with them)
+    for (auto &m : p.models) {
+        for (uint32_t v : m.tris) if (v >= m.vertices.size()) return false;
+        for (auto &pt : m.parts)
+            if (pt.first < 0 || pt.count < 0 || (size_t)(pt.first + pt.count) * 3 > m.tris.size() ||
+                pt.texture >= (int32_t)p.textures.size())
+                return false;
+    }
+    for (auto &ob : p.objects) if (ob.model >= (int32_t)p.models.size()) return false;
     return in.ok && a.drawn.size() == (size_t)a.views * a.shaders.size();
 }
 

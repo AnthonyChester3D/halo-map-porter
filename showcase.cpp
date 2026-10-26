@@ -35,6 +35,16 @@ double ease(double x) {
     return 0.6 * x + 0.4 * (1 - std::cos(kPi * x)) / 2;
 }
 
+constexpr double kEye = 0.62;   // a player's eyes above the ground (as the measured views have them)
+
+// A point a tenth of a unit from `to` towards `from`: what's looked at can be on a surface (picked in the picture), and
+// seeing it is seeing up to it.
+V3 short_of(V3 from, V3 to) {
+    V3 d = sub(from, to);
+    double l = len(d);
+    return l > 0.2 ? add(to, mul(d, 0.1 / l)) : to;
+}
+
 // ---- the level as the camera sees it: a grid of its triangles, its rooms, and the placed objects' boxes
 struct World {
     const lshade::Preview &p;
@@ -249,15 +259,17 @@ Shot keyed(const std::string &label, double seconds, double every, const std::fu
 // The shot is flyable: every quarter second the camera is somewhere open and saw no wall on its way there; with a look
 // point, it sees it at the start, at the end and at least `seen` of the time. Returns the share of the time it sees
 // it (1 without one), or -1.
-double flyable(const World &w, const Shot &s, double seen = 0.9) {
+// (`inside`: where the camera may be, else anywhere open. What it looks at it sees through nothing, not even glass.)
+double flyable(const World &w, const Shot &s, double seen = 0.9, const std::function<bool(const V3 &)> &inside = nullptr,
+               double margin = 0.6) {
     V3 last{};
     int n = 0, sees = 0;
     bool first = true, now = true;
     for (double t = 0; t <= s.seconds + 1e-9; t += 0.25) {
         View v = at(s, t);
-        if (!w.open(v.eye)) return -1;
+        if (!w.open(v.eye, margin) || (inside && !inside(v.eye))) return -1;
         if (n && !w.sees(last, v.eye, true)) return -1;
-        now = !s.look || w.sees(v.eye, s.at);
+        now = !s.look || w.sees(v.eye, short_of(v.eye, s.at), true);
         if (n == 0) first = now;
         if (now) sees++;
         last = v.eye;
@@ -282,6 +294,56 @@ bool sees_out(const World &w, const Shot &s, double most = 6) {
 
 }   // namespace
 
+Shot orbit_shot(const V3 &at, double radius, double height, double start, double sweep, double seconds,
+                const std::string &label) {
+    radius = std::clamp(radius, 0.5, 200.0);
+    seconds = std::clamp(seconds, 0.5, 600.0);
+    // (a key at least every 1.5 seconds and every 15 degrees: the curve between them stays on the circle)
+    double every = std::min(1.5, seconds / std::max(2.0, std::ceil(std::fabs(sweep) / 15)));
+    Shot s = keyed(label, seconds, every, [&](double u) {
+        double a = rad(start + sweep * ease(u));
+        Key k;
+        k.p = {at[0] + radius * std::cos(a), at[1] + radius * std::sin(a), at[2] + height};
+        k.yaw = yaw_to(k.p, at);
+        k.pitch = deg(std::atan2(at[2] - k.p[2], len2d(sub(at, k.p))));
+        return k;
+    });
+    s.look = true;
+    s.at = at;
+    s.orbit = {true, radius, height, start, sweep};
+    return s;
+}
+
+std::string trouble(const lshade::Preview &p, const Shot &s) {
+    if (s.keys.empty() || p.triangles.empty()) return "";
+    World w(p);
+    V3 last{};
+    int n = 0, sees = 0;
+    double wall = -1, inside = -1;
+    for (double t = 0; t <= s.seconds + 1e-9; t += 0.25) {
+        View v = at(s, t);
+        if (inside < 0 && p.room_at(v.eye) < 0) inside = t;
+        if (wall < 0 && n && !w.sees(last, v.eye, true)) wall = t;
+        if (!s.look || w.sees(v.eye, short_of(v.eye, s.at), true)) sees++;
+        last = v.eye;
+        n++;
+    }
+    char b[200];
+    if (inside >= 0) {
+        snprintf(b, sizeof b, "the camera is outside the level or inside a wall %.1f seconds in", inside);
+        return b;
+    }
+    if (wall >= 0) {
+        snprintf(b, sizeof b, "the camera goes through a surface or an object's box %.1f seconds in", wall);
+        return b;
+    }
+    if (s.look && n && sees < n * 0.85) {
+        snprintf(b, sizeof b, "something is between the camera and what it looks at for %.0f%% of the shot", 100.0 * (n - sees) / n);
+        return b;
+    }
+    return "";
+}
+
 double Showcase::length() const {
     double t = 0;
     for (auto &s : shots) t += s.seconds;
@@ -301,10 +363,14 @@ std::string write(const Showcase &s, const std::string &map, const std::string &
     snprintf(b, sizeof b, "fade %.2f\r\n", s.fade);
     out += b;
     for (auto &sh : s.shots) {
-        snprintf(b, sizeof b, "\r\nshot %.2f %s\r\n", sh.seconds, sh.label.substr(0, 31).c_str());
+        snprintf(b, sizeof b, "\r\nshot %.2f %s\r\n", sh.seconds, clean_label(sh.label).c_str());
         out += b;
         if (sh.look) {
             snprintf(b, sizeof b, "look %.2f %.2f %.2f\r\n", sh.at[0], sh.at[1], sh.at[2]);
+            out += b;
+        }
+        if (sh.look && sh.orbit.on) {   // (for the Level window: an orbit it can change; a comment to Halo 1 Unlimited)
+            snprintf(b, sizeof b, "# orbit %.2f %.2f %.1f %.1f\r\n", sh.orbit.radius, sh.orbit.height, sh.orbit.start, sh.orbit.sweep);
             out += b;
         }
         for (auto &k : sh.keys) {
@@ -318,6 +384,18 @@ std::string write(const Showcase &s, const std::string &map, const std::string &
         }
     }
     return out;
+}
+
+std::string clean_label(const std::string &label) {
+    std::string out;
+    for (char c : label) {
+        if (c == '#' || ((unsigned char)c < 32 && c != '\t') || (unsigned char)c >= 127) continue;   // (plain ASCII: what Halo's font has)
+        out += c == '\t' || c == ',' || c == ';' ? ' ' : c;
+    }
+    size_t a = out.find_first_not_of(' ');
+    out = a == std::string::npos ? "" : out.substr(a, 31);
+    size_t b = out.find_last_not_of(' ');
+    return b == std::string::npos ? "" : out.substr(0, b + 1);
 }
 
 bool ours(const std::string &text) {
@@ -337,6 +415,15 @@ bool read(const std::string &text, Showcase &out, std::string *error) {
     };
     while (std::getline(in, line)) {
         n++;
+        {   // (the Level window's own comment: the shot before it is an orbit, radius height start sweep)
+            std::istringstream cs(line);
+            std::string h, w;
+            Shot::Orbit o;
+            if (cs >> h >> w && h == "#" && w == "orbit" && !out.shots.empty() && (cs >> o.radius >> o.height >> o.start >> o.sweep)) {
+                o.on = true;
+                out.shots.back().orbit = o;
+            }
+        }
         size_t hash = line.find('#');
         if (hash != std::string::npos) line.resize(hash);
         for (auto &c : line)
@@ -373,8 +460,10 @@ bool read(const std::string &text, Showcase &out, std::string *error) {
             return fail("\"" + word + "\" isn't fade, shot, look or key");
         }
     }
-    for (auto &s : out.shots)
+    for (auto &s : out.shots) {
         if (s.keys.empty()) return fail("shot \"" + s.label + "\" has no keys");
+        if (!s.look) s.orbit.on = false;
+    }
     return true;
 }
 
@@ -445,31 +534,66 @@ Showcase generate(const lshade::Preview &p, std::string *report) {
         return sc;
     }
     World w(p);
-    // Where players stand: a spread-out few hundred of the measured views.
-    std::vector<V3> spots;
-    std::vector<double> spot_yaw;
+    // Where players are: the scenario's spawns, item spawn points, flags, game type places and vehicles, at eye height.
+    std::vector<V3> play;
+    for (auto &m : p.marks) {
+        V3 q{m.p[0], m.p[1], m.p[2] + kEye};
+        if (w.open(q, 0.3)) play.push_back(q);
+    }
+    // The measured views (from floors in the box around those), a spread-out few hundred.
+    std::vector<V3> sampled;
+    std::vector<double> sampled_yaw;
     size_t every = std::max<size_t>(1, p.views.size() / 240);
     for (size_t i = 0; i < p.views.size(); i += every) {
-        spots.push_back({p.views[i].eye[0], p.views[i].eye[1], p.views[i].eye[2]});
-        spot_yaw.push_back(deg(p.views[i].yaw));
+        sampled.push_back({p.views[i].eye[0], p.views[i].eye[1], p.views[i].eye[2]});
+        sampled_yaw.push_back(deg(p.views[i].yaw));
     }
     V3 middle{0, 0, 0}, slo{1e30, 1e30, 1e30}, shi{-1e30, -1e30, -1e30};
-    for (auto &q : spots) {
+    const std::vector<V3> &extent = play.size() >= 2 ? play : sampled;
+    for (auto &q : extent) {
         middle = add(middle, q);
         for (int k = 0; k < 3; k++) { slo[(size_t)k] = std::min(slo[(size_t)k], q[(size_t)k]); shi[(size_t)k] = std::max(shi[(size_t)k], q[(size_t)k]); }
     }
-    middle = mul(middle, 1.0 / spots.size());
-    // (how far apart shots go, and how far a glide goes: by the size of where players stand, so a small map gets as
+    middle = mul(middle, 1.0 / extent.size());
+    // (how far apart shots go, and how far a glide goes: by the size of where players are, so a small map gets as
     // many shots as a big one)
     const double across = len2d(sub(shi, slo)), apart = std::clamp(across * 0.2, 4.0, 12.0);
-    const double glide_lo = std::clamp(across * 0.3, 6.0, 14.0), glide_hi = std::clamp(across * 0.9, glide_lo + 4, 32.0);
+    const double glide_lo = std::clamp(across * 0.2, 6.0, 14.0), glide_hi = std::clamp(across * 0.9, glide_lo + 4, 32.0);
+    // Where players stand: those views near a place players are (within `apart` across, and at most half a unit above it,
+    // so not on the roofs and high ledges the views' floors take in that no one gets to), and those places
+    // themselves. All the views when the scenario has too few places.
+    std::vector<V3> spots;
+    std::vector<double> spot_yaw;
+    const double reach_across = std::max(6.0, apart);
+    for (size_t i = 0; i < sampled.size(); i++) {
+        bool near_play = false;
+        for (auto &q : play) {
+            double up = sampled[i][2] - q[2];
+            if (up <= 0.5 && up >= -2.5 && len2d(sub(sampled[i], q)) <= reach_across) { near_play = true; break; }
+        }
+        if (near_play) { spots.push_back(sampled[i]); spot_yaw.push_back(sampled_yaw[i]); }
+    }
+    for (auto &q : play) {
+        spots.push_back(q);
+        spot_yaw.push_back(len2d(sub(middle, q)) > 1 ? yaw_to(q, middle) : 0);
+    }
+    if (spots.size() < 6) { spots = sampled; spot_yaw = sampled_yaw; }
+    // Where the camera goes for the shots among the players (circling, gliding, sight lines): in the box around where
+    // players are (a few units past it across, from just under their feet to a few units over their heads). Only the
+    // shots looking down on them go outside it.
+    const V3 plo = slo, phi = shi;
+    auto in_play = [&](const V3 &q) {
+        if (play.size() < 2) return true;
+        return q[0] >= plo[0] - 3 && q[0] <= phi[0] + 3 && q[1] >= plo[1] - 3 && q[1] <= phi[1] + 3 &&
+               q[2] >= plo[2] - kEye - 0.5 && q[2] <= phi[2] + 3.5;
+    };
     std::vector<V3> used;   // where shots already are (the next ones go elsewhere)
     auto far_from_used = [&](V3 q, double d) {
         for (auto &u : used)
             if (len(sub(u, q)) < d) return false;
         return true;
     };
-    std::vector<Shot> orbits, lines, glides, reveals;
+    std::vector<Shot> orbits, lines, glides, reveals, overviews;
 
     // Circling a point: a 100-degree arc round it in 12 seconds, a few units off and above, looking at it: of the
     // clear ones, the one that sees it most (nearest radius and height first: close is more interesting).
@@ -477,21 +601,11 @@ Showcase generate(const lshade::Preview &p, std::string *report) {
         V3 at = add(c, {0, 0, 0.4});
         Shot best;
         double best_seen = -1;
-        for (double r : {4.5, 3.5, 6.0, 7.5, 3.0})
-            for (double h : {1.6, 2.4, 1.0, 3.4})
+        for (double r : {4.5, 3.5, 6.0, 7.5, 3.0, 2.5})
+            for (double h : {1.2, 2.0, 0.6, 3.0})
                 for (int a0 = 0; a0 < 360 && best_seen < 0.999; a0 += 20) {
-                    double sweep = clockwise ? -100 : 100;
-                    Shot s = keyed("orbit: " + label, 12, 1.5, [&](double u) {
-                        double a = rad(a0 + sweep * ease(u));
-                        Key k;
-                        k.p = {c[0] + r * std::cos(a), c[1] + r * std::sin(a), c[2] + h};
-                        k.yaw = yaw_to(k.p, at);
-                        k.pitch = deg(std::atan2(at[2] - k.p[2], len2d(sub(at, k.p))));
-                        return k;
-                    });
-                    s.look = true;
-                    s.at = at;
-                    double seen = flyable(w, s, 0.85);
+                    Shot s = orbit_shot(at, r, h, a0, clockwise ? -100 : 100, 12, "orbit: " + label);
+                    double seen = flyable(w, s, 0.85, in_play);
                     if (seen > best_seen) { best_seen = seen; best = s; }
                 }
         if (best_seen < 0) return false;
@@ -517,45 +631,63 @@ Showcase generate(const lshade::Preview &p, std::string *report) {
         orbit(add(spots[best], {0, 0, -0.62}), "the middle", false);
     }
 
-    // Looking down the longest sight lines: from where players stand, the directions that see farthest, the camera
-    // drifting forward along them.
-    struct Line { double reach; V3 from; double yaw; };
+    // Down the longest sight lines players have: from a place players are, looking at another far off that it sees,
+    // the camera drifting towards it.
+    struct Line { double d; V3 a, b; };
     std::vector<Line> found;
-    for (size_t i = 0; i < spots.size(); i++) {
-        V3 eye = add(spots[i], {0, 0, 0.4});
-        if (!w.open(eye)) continue;
-        double best = 0, by = 0;
-        for (int d = 0; d < 16; d++) {
-            double y = d * 22.5;
-            double r = w.reach(eye, dir_of(y, -2), 160);
-            if (r > best) { best = r; by = y; }
+    const double line_lo = std::max(10.0, across * 0.25);
+    {
+        std::vector<V3> ends;
+        for (auto &q : play) {
+            V3 e = add(q, {0, 0, 0.3});
+            if (w.open(e)) ends.push_back(e);
         }
-        if (best >= 25) found.push_back({best, eye, by});
+        if (ends.size() < 2)
+            for (auto &q : spots) ends.push_back(add(q, {0, 0, 0.3}));
+        size_t checks = 0;
+        std::vector<Line> far;
+        for (size_t i = 0; i < ends.size(); i++)
+            for (size_t j = i + 1; j < ends.size(); j++) {
+                double d = len(sub(ends[j], ends[i]));
+                if (d >= line_lo) far.push_back({d, ends[i], ends[j]});
+            }
+        std::sort(far.begin(), far.end(), [](const Line &x, const Line &y) { return x.d > y.d; });
+        for (auto &l : far) {
+            if (found.size() >= 40 || checks++ > 20000) break;
+            if (w.sees(l.a, l.b)) found.push_back(l);
+        }
     }
-    std::sort(found.begin(), found.end(), [](const Line &a, const Line &b) { return a.reach > b.reach; });
     for (auto &l : found) {
         if (lines.size() >= 2) break;
-        if (!far_from_used(l.from, apart)) continue;
-        double go = std::min(7.0, l.reach * 0.12), drift = lines.size() % 2 ? -6 : 6;
-        V3 fwd = dir_of(l.yaw, 0);
-        Shot s = keyed("sight line", 10, 2, [&](double u) {
-            Key k;
-            k.p = add(l.from, mul(fwd, go * ease(u) - 0.5));
-            k.yaw = l.yaw - drift / 2 + drift * ease(u);
-            k.pitch = -2;
-            return k;
-        });
-        if (flyable(w, s) < 0) continue;
-        lines.push_back(s);
-        used.push_back(l.from);
+        for (int side = 0; side < 2 && lines.size() < 2; side++) {   // (from either end)
+            V3 a = side ? l.b : l.a, b = side ? l.a : l.b;
+            if (!far_from_used(a, apart)) continue;
+            V3 d = sub(b, a);
+            double go = std::min(7.0, l.d * 0.15), drift = lines.size() % 2 ? -4 : 4, heading = yaw_to(a, b);
+            V3 fwd = mul(d, 1 / l.d);
+            Shot s = keyed("sight line", 10, 2, [&](double u) {
+                Key k;
+                k.p = add(a, mul(fwd, go * ease(u) - 0.5));
+                k.yaw = heading - drift / 2 + drift * ease(u);
+                k.pitch = deg(std::atan2(b[2] - k.p[2], len2d(sub(b, k.p))));
+                return k;
+            });
+            if (flyable(w, s, 0.9, in_play, 0.35) < 0) continue;
+            lines.push_back(s);
+            used.push_back(a);
+            break;
+        }
     }
 
     // Gliding between two places players stand that see each other (14 to 32 units apart on a big map, less on a
     // small one), a little above head height, looking ahead.
     struct Pair { double d; size_t a, b; };
     std::vector<Pair> pairs;
-    for (size_t i = 0; i < spots.size(); i += 2)
-        for (size_t j = i + 1; j < spots.size(); j += 2) {
+    std::vector<char> clear_above(spots.size());   // (room for the camera half a unit over their eyes)
+    for (size_t i = 0; i < spots.size(); i++) clear_above[i] = w.open(add(spots[i], {0, 0, 0.5}), 0.35);
+    for (size_t i = 0; i < spots.size(); i++)
+        for (size_t j = i + 1; j < spots.size(); j++) {
+            if (!clear_above[i] || !clear_above[j]) continue;
             V3 d = sub(spots[j], spots[i]);
             double h = len2d(d);
             if (h < glide_lo || h > glide_hi || std::fabs(d[2]) > 3) continue;
@@ -578,9 +710,43 @@ Showcase generate(const lshade::Preview &p, std::string *report) {
             k.pitch = -3;
             return k;
         });
-        if (flyable(w, s) < 0 || !sees_out(w, s)) continue;
+        if (flyable(w, s, 0.9, in_play, 0.35) < 0 || !sees_out(w, s)) continue;
         glides.push_back(s);
         used.push_back(mid);
+    }
+
+    // Looking down on where players play: from above and off to the side of a flag, a power item or the middle of
+    // where players are, the camera moving round it a little, looking at it (from outside where players can go, too).
+    {
+        std::vector<std::pair<V3, std::string>> targets;
+        for (auto &m : p.marks)
+            if (m.kind == lshade::Mark::kFlag || m.kind == lshade::Mark::kPower) targets.push_back({{m.p[0], m.p[1], m.p[2] + 0.4}, m.name});
+        if (!play.empty()) {
+            size_t best = 0;
+            for (size_t i = 0; i < play.size(); i++)
+                if (len(sub(play[i], middle)) < len(sub(play[best], middle))) best = i;
+            targets.push_back({add(play[best], {0, 0, -0.2}), "the middle"});
+        }
+        std::vector<V3> done;
+        for (auto &tg : targets) {
+            if (overviews.size() >= 2) break;
+            const V3 c = tg.first;
+            bool spaced = true;
+            for (auto &q : done)
+                if (len(sub(q, c)) < apart * 1.5) spaced = false;
+            if (!spaced) continue;
+            bool made = false;
+            for (double h : {7.0, 10.0, 5.0})
+                for (double r : {10.0, 14.0, 7.0, 18.0})
+                    for (int a0 = 0; a0 < 360 && !made; a0 += 30) {
+                        Shot s = orbit_shot(c, r, h, a0, overviews.size() % 2 ? -40 : 40, 10, "looking down on " + tg.second);
+                        s.orbit.on = false;   // (keys of its own: not an orbit to change)
+                        if (flyable(w, s, 0.85) < 0) continue;
+                        overviews.push_back(s);
+                        done.push_back(c);
+                        made = true;
+                    }
+        }
     }
 
     // Rising over open ground: from where players stand with open sky above, nearest the middle first, the camera
@@ -607,18 +773,20 @@ Showcase generate(const lshade::Preview &p, std::string *report) {
         }
     }
 
-    // In turn: the reveal, then circling, gliding and sight lines, one of each at a time.
+    // In turn: the reveal, then circling, looking down, gliding and sight lines, one of each at a time.
     for (auto &s : reveals) sc.shots.push_back(s);
     for (size_t k = 0; k < 4; k++) {
         if (k < orbits.size()) sc.shots.push_back(orbits[k]);
+        if (k < overviews.size()) sc.shots.push_back(overviews[k]);
         if (k < glides.size()) sc.shots.push_back(glides[k]);
         if (k < lines.size()) sc.shots.push_back(lines[k]);
     }
     if (report) {
-        char b[200];
-        snprintf(b, sizeof b, "%zu shots, %.0f seconds: %zu circling (%d flags, %d power items), %zu gliding, %zu down sight "
-                 "lines, %zu rising",
-                 sc.shots.size(), sc.length(), orbits.size(), flags, powers, glides.size(), lines.size(), reveals.size());
+        char b[240];
+        snprintf(b, sizeof b, "%zu shots, %.0f seconds: %zu circling (%d flags, %d power items), %zu looking down, %zu gliding, "
+                 "%zu down sight lines, %zu rising",
+                 sc.shots.size(), sc.length(), orbits.size(), flags, powers, overviews.size(), glides.size(), lines.size(),
+                 reveals.size());
         *report = sc.shots.empty() ? "no shot kept the camera clear of the level's walls" : b;
     }
     return sc;

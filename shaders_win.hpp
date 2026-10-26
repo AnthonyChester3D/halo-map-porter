@@ -21,10 +21,12 @@ using Measure = std::function<bool(std::filesystem::path &file, std::string &err
 struct Picks {
     int mode = 2;
     std::set<std::string> drops;
-    // The level's fog and tiny scenery (Config::xbox_fog, xbox_fog_scale, xbox_fog_distance, xbox_scenery_pixels).
+    // The level's fog and tiny scenery (Config::xbox_fog, xbox_fog_scale, xbox_fog_distance, xbox_fog_start,
+    // xbox_scenery_pixels).
     int fog = 0;
     double fog_scale = 1.0;
     double fog_distance = 0;
+    double fog_start = -1;
     double tiny_px = 0;
     int weather = 0;   // (Config::xbox_weather)
     int riders = 0;    // 1: no AI for units riding other objects (Config::xbox_rider_ai_off)

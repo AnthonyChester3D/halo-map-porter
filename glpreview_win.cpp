@@ -32,13 +32,18 @@ namespace {
 struct GL { GLFUNCS(DECLARE) };
 #undef DECLARE
 
+// (an object: in its model's own space, placed by the model-view matrix; its light where each corner faces, as
+// lshade::ObjectLight::at, with the lights' directions turned into the model's space)
 const char *kVertex = R"(#version 110
+uniform float u_object;
+uniform vec3 u_ambient, u_color0, u_to0, u_color1, u_to1;
 varying vec3 v_pos;
 varying vec3 v_n;
 varying vec2 v_uv;
 varying vec2 v_luv;
 varying float v_room;
 varying float v_depth;
+varying vec3 v_light;
 void main() {
     v_pos = gl_Vertex.xyz;
     v_depth = -(gl_ModelViewMatrix * gl_Vertex).z;
@@ -46,6 +51,11 @@ void main() {
     v_uv = gl_MultiTexCoord0.xy;
     v_luv = gl_MultiTexCoord1.xy;
     v_room = gl_MultiTexCoord2.x;
+    v_light = vec3(0.0);
+    if (u_object > 0.5) {
+        vec3 n = normalize(gl_Normal);
+        v_light = u_ambient + u_color0 * max(0.0, dot(n, u_to0)) + u_color1 * max(0.0, dot(n, u_to1));
+    }
     gl_Position = ftransform();
 }
 )";
@@ -62,7 +72,7 @@ uniform samplerCube u_cube;
 uniform sampler2D u_cut;
 uniform float u_has_base, u_has_detail, u_has_lm, u_has_cube, u_has_cut, u_cut_scale;
 uniform float u_detail_scale, u_mask_alpha, u_lm_scale;
-uniform float u_made, u_converted, u_loses, u_highlight, u_rooms, u_see_through;
+uniform float u_made, u_converted, u_loses, u_highlight, u_rooms, u_see_through, u_object, u_object_cut, u_blend;
 uniform vec3 u_perp, u_para, u_eye;
 uniform vec3 u_fog_color;
 uniform float u_fog_density, u_fog_start, u_fog_opaque;
@@ -72,6 +82,7 @@ varying vec2 v_uv;
 varying vec2 v_luv;
 varying float v_room;
 varying float v_depth;
+varying vec3 v_light;
 vec3 fogged(vec3 c) {
     if (u_fog_density <= 0.0) return c;
     float f = u_fog_density * clamp((v_depth - u_fog_start) / max(0.001, u_fog_opaque - u_fog_start), 0.0, 1.0);
@@ -89,6 +100,21 @@ vec3 room_colour(float r) {
     return vec3(v, p, q);
 }
 void main() {
+    if (u_object > 0.5) {   // (an object: its base map x its light; alpha-tested ones cut by the base map's alpha)
+        vec4 ob = u_has_base > 0.5 ? texture2D(u_base, v_uv) : vec4(0.6, 0.6, 0.6, 1.0);
+        if (u_object_cut > 0.5 && ob.a <= 0.498) discard;
+        if (u_see_through > 0.5) {   // (blended as its shader says: u_blend 1 added, 2 multiplied, 3 twice; else by its alpha)
+            float f = u_fog_density <= 0.0 ? 0.0 : u_fog_density * clamp((v_depth - u_fog_start) / max(0.001, u_fog_opaque - u_fog_start), 0.0, 1.0);
+            if (u_blend > 0.5 && u_blend < 1.5) gl_FragColor = vec4(ob.rgb * (1.0 - f), 1.0);
+            else if (u_blend > 1.5 && u_blend < 2.5) gl_FragColor = vec4(mix(ob.rgb, vec3(1.0), f), 1.0);
+            else if (u_blend > 2.5) gl_FragColor = vec4(mix(ob.rgb, vec3(0.5), f), 1.0);
+            else gl_FragColor = vec4(fogged(ob.rgb), ob.a);
+            return;
+        }
+        vec3 oc = fogged(ob.rgb * v_light);
+        gl_FragColor = vec4(min(u_loses > 0.5 ? oc * 0.3 : oc, 1.0), 1.0);
+        return;
+    }
     // (alpha-tested: drawn only where its cut-out, the bump map's alpha, is over half, as the Xbox's 0x7F "greater")
     if (u_has_cut > 0.5 && texture2D(u_cut, v_uv * u_cut_scale).a <= 0.498) discard;
     vec4 b = u_has_base > 0.5 ? texture2D(u_base, v_uv) : vec4(0.6, 0.6, 0.6, 1.0);
@@ -124,6 +150,7 @@ void main() {
 
 struct Vtx { float p[3], n[3], uv[2], luv[2], room; };
 struct Group { int material = -1, lightmap = -1; bool see_through = false; GLint first = 0; GLsizei count = 0; };
+struct Part { GLint first = 0; GLsizei count = 0; int texture = -1, flags = 0; };   // a model part's vertices in the objects' buffer
 
 }   // namespace
 
@@ -132,10 +159,11 @@ struct Renderer::Impl {
     HDC dc = nullptr;
     HGLRC rc = nullptr;
     GL gl;
-    GLuint program = 0, vbo = 0;
+    GLuint program = 0, vbo = 0, object_vbo = 0;
     std::map<std::string, GLint> loc;
     const lshade::Preview *scene = nullptr;
     std::vector<Group> groups;
+    std::vector<std::vector<Part>> model_parts;   // per model
     std::vector<GLuint> tex2d, cube;   // per preview texture (0: none)
     size_t vertices = 0;
 
@@ -150,8 +178,10 @@ struct Renderer::Impl {
         tex2d.clear();
         cube.clear();
         groups.clear();
+        model_parts.clear();
         if (vbo) gl.glDeleteBuffers(1, &vbo);
-        vbo = 0;
+        if (object_vbo) gl.glDeleteBuffers(1, &object_vbo);
+        vbo = object_vbo = 0;
         vertices = 0;
         scene = nullptr;
     }
@@ -237,6 +267,9 @@ void Renderer::set_scene(const lshade::Preview *p) {
     }
     for (auto &t : p->triangles)
         if (t.lightmap >= 0 && (size_t)t.lightmap < is_flat.size()) is_flat[(size_t)t.lightmap] = 1;
+    for (auto &m : p->models)
+        for (auto &pt : m.parts)
+            if (pt.texture >= 0 && (size_t)pt.texture < is_flat.size()) is_flat[(size_t)pt.texture] = 1;
     d->tex2d.assign(p->textures.size(), 0);
     d->cube.assign(p->textures.size(), 0);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
@@ -305,6 +338,33 @@ void Renderer::set_scene(const lshade::Preview *p) {
     gl.glGenBuffers(1, &d->vbo);
     gl.glBindBuffer(GL_ARRAY_BUFFER, d->vbo);
     gl.glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(v.size() * sizeof(Vtx)), v.data(), GL_STATIC_DRAW);
+    // The objects' models, each part's corners in a run of their own (in the model's space).
+    v.clear();
+    for (auto &m : p->models) {
+        d->model_parts.emplace_back();
+        for (auto &pt : m.parts) {
+            Part q;
+            q.first = (GLint)v.size();
+            q.texture = pt.texture;
+            q.flags = pt.flags;
+            for (int32_t t = pt.first; t < pt.first + pt.count; t++)
+                for (int k = 0; k < 3; k++) {
+                    const lshade::ModelVertex &mv = m.vertices[m.tris[(size_t)t * 3 + k]];
+                    Vtx x{};
+                    for (int c = 0; c < 3; c++) { x.p[c] = mv.p[c]; x.n[c] = mv.n[c]; }
+                    x.uv[0] = mv.uv[0]; x.uv[1] = mv.uv[1];
+                    x.room = -1;
+                    v.push_back(x);
+                }
+            q.count = (GLsizei)(v.size() - (size_t)q.first);
+            d->model_parts.back().push_back(q);
+        }
+    }
+    if (!v.empty()) {
+        gl.glGenBuffers(1, &d->object_vbo);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, d->object_vbo);
+        gl.glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(v.size() * sizeof(Vtx)), v.data(), GL_STATIC_DRAW);
+    }
     gl.glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
@@ -351,18 +411,21 @@ void Renderer::draw(const Frame &f) {
 
         glEnable(GL_DEPTH_TEST);
         glDepthFunc(GL_LESS);
-        gl.glBindBuffer(GL_ARRAY_BUFFER, d->vbo);
-        glEnableClientState(GL_VERTEX_ARRAY);
-        glVertexPointer(3, GL_FLOAT, sizeof(Vtx), (void *)offsetof(Vtx, p));
-        glEnableClientState(GL_NORMAL_ARRAY);
-        glNormalPointer(GL_FLOAT, sizeof(Vtx), (void *)offsetof(Vtx, n));
-        const size_t tc_offsets[3] = {offsetof(Vtx, uv), offsetof(Vtx, luv), offsetof(Vtx, room)};
-        const int tc_sizes[3] = {2, 2, 1};
-        for (int k = 0; k < 3; k++) {
-            gl.glClientActiveTexture(GL_TEXTURE0 + k);
-            glEnableClientState(GL_TEXTURE_COORD_ARRAY);
-            glTexCoordPointer(tc_sizes[k], GL_FLOAT, sizeof(Vtx), (void *)tc_offsets[k]);
-        }
+        auto use_buffer = [&](GLuint buffer) {
+            gl.glBindBuffer(GL_ARRAY_BUFFER, buffer);
+            glEnableClientState(GL_VERTEX_ARRAY);
+            glVertexPointer(3, GL_FLOAT, sizeof(Vtx), (void *)offsetof(Vtx, p));
+            glEnableClientState(GL_NORMAL_ARRAY);
+            glNormalPointer(GL_FLOAT, sizeof(Vtx), (void *)offsetof(Vtx, n));
+            const size_t tc_offsets[3] = {offsetof(Vtx, uv), offsetof(Vtx, luv), offsetof(Vtx, room)};
+            const int tc_sizes[3] = {2, 2, 1};
+            for (int k = 0; k < 3; k++) {
+                gl.glClientActiveTexture(GL_TEXTURE0 + k);
+                glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+                glTexCoordPointer(tc_sizes[k], GL_FLOAT, sizeof(Vtx), (void *)tc_offsets[k]);
+            }
+        };
+        use_buffer(d->vbo);
         gl.glUseProgram(d->program);
         gl.glUniform1i(d->u("u_base"), 0);
         gl.glUniform1i(d->u("u_detail"), 1);
@@ -376,6 +439,7 @@ void Renderer::draw(const Frame &f) {
         gl.glUniform1f(d->u("u_fog_density"), fog_on ? f.fog.density : 0.0f);
         gl.glUniform1f(d->u("u_fog_start"), f.fog.start);
         gl.glUniform1f(d->u("u_fog_opaque"), f.fog.opaque);
+        gl.glUniform1f(d->u("u_object"), 0.0f);
         auto bind2d = [&](int unit, int tex, const char *has) {
             GLuint id = tex >= 0 && (size_t)tex < d->tex2d.size() ? d->tex2d[(size_t)tex] : 0;
             gl.glActiveTexture(GL_TEXTURE0 + unit);
@@ -420,6 +484,58 @@ void Renderer::draw(const Frame &f) {
                 gl.glUniform1f(d->u("u_converted"), on(f.converted) ? 1.0f : 0.0f);
                 gl.glUniform1f(d->u("u_highlight"), f.highlight >= 0 && mt.shader == f.highlight ? 1.0f : 0.0f);
                 glDrawArrays(GL_TRIANGLES, g.first, g.count);
+            }
+            // The objects: each placed by its own matrix, lit by its own light (see-through parts in the second pass).
+            if (f.objects && d->object_vbo) {
+                use_buffer(d->object_vbo);
+                gl.glUniform1f(d->u("u_object"), 1.0f);
+                gl.glUniform1f(d->u("u_has_cut"), 0.0f);
+                gl.glUniform1f(d->u("u_has_cube"), 0.0f);
+                glFrontFace(GL_CCW);   // (lshade::Model's winding)
+                for (auto &o : p->objects) {
+                    if (o.model < 0 || (size_t)o.model >= d->model_parts.size()) continue;
+                    const float mm[16] = {o.axes[0][0], o.axes[0][1], o.axes[0][2], 0, o.axes[1][0], o.axes[1][1], o.axes[1][2], 0,
+                                          o.axes[2][0], o.axes[2][1], o.axes[2][2], 0, o.p[0], o.p[1], o.p[2], 1};
+                    glPushMatrix();
+                    glMultMatrixf(mm);
+                    // (towards each light, in the model's space)
+                    float to[2][3];
+                    for (int i = 0; i < 2; i++)
+                        for (int a = 0; a < 3; a++)
+                            to[i][a] = -(o.axes[a][0] * o.light.direction[i][0] + o.axes[a][1] * o.light.direction[i][1] +
+                                         o.axes[a][2] * o.light.direction[i][2]);
+                    gl.glUniform3f(d->u("u_ambient"), o.light.ambient[0], o.light.ambient[1], o.light.ambient[2]);
+                    gl.glUniform3f(d->u("u_color0"), o.light.color[0][0], o.light.color[0][1], o.light.color[0][2]);
+                    gl.glUniform3f(d->u("u_to0"), to[0][0], to[0][1], to[0][2]);
+                    gl.glUniform3f(d->u("u_color1"), o.light.color[1][0], o.light.color[1][1], o.light.color[1][2]);
+                    gl.glUniform3f(d->u("u_to1"), to[1][0], to[1][1], to[1][2]);
+                    for (auto &q : d->model_parts[(size_t)o.model]) {
+                        bool see = (q.flags & lshade::ModelPart::kSeeThrough) != 0;
+                        if (see != (pass == 1)) continue;
+                        if (pass == 0) {
+                            if (q.flags & lshade::ModelPart::kTwoSided) glDisable(GL_CULL_FACE);
+                            else glEnable(GL_CULL_FACE);
+                        }
+                        gl.glUniform1f(d->u("u_see_through"), see ? 1.0f : 0.0f);
+                        gl.glUniform1f(d->u("u_object_cut"), (q.flags & lshade::ModelPart::kCutout) ? 1.0f : 0.0f);
+                        if (see) {   // (its framebuffer blend function: added, multiplied, multiplied twice, else by its alpha)
+                            int blend = (q.flags & lshade::ModelPart::kAdd) ? 1 : (q.flags & lshade::ModelPart::kMultiply) ? 2
+                                        : (q.flags & lshade::ModelPart::kDoubleMultiply) ? 3 : 0;
+                            gl.glUniform1f(d->u("u_blend"), (float)blend);
+                            if (blend == 1) glBlendFunc(GL_ONE, GL_ONE);
+                            else if (blend == 2) glBlendFunc(GL_DST_COLOR, GL_ZERO);
+                            else if (blend == 3) glBlendFunc(GL_DST_COLOR, GL_SRC_COLOR);
+                            else glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                        }
+                        bind2d(0, q.texture, "u_has_base");
+                        glDrawArrays(GL_TRIANGLES, q.first, q.count);
+                    }
+                    glPopMatrix();
+                }
+                gl.glUniform1f(d->u("u_object"), 0.0f);
+                glFrontFace(GL_CW);
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                use_buffer(d->vbo);
             }
         }
         gl.glUseProgram(0);
@@ -471,6 +587,13 @@ void Renderer::draw(const Frame &f) {
             glBegin(GL_POINTS);
             for (auto &q : f.keys) glVertex3f(q[0], q[1], q[2]);
             glEnd();
+            if (f.key >= 0 && (size_t)f.key < f.keys.size()) {   // (the picked key: orange, bigger)
+                glPointSize(13.0f);
+                glColor4f(1.0f, 0.5f, 0.1f, 1.0f);
+                glBegin(GL_POINTS);
+                glVertex3f(f.keys[(size_t)f.key][0], f.keys[(size_t)f.key][1], f.keys[(size_t)f.key][2]);
+                glEnd();
+            }
             if (f.look) {
                 glColor4f(1.0f, 0.3f, 0.9f, 1.0f);
                 glPointSize(12.0f);

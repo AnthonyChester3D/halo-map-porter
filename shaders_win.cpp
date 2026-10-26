@@ -29,7 +29,10 @@ enum {
     IDC_FAR_LBL, IDC_FAR, IDC_FOG_DIST, IDC_FOG_UNITS, IDC_WEATHER_LBL, IDC_WEATHER, IDC_RIDERS_LBL, IDC_RIDERS, IDC_PROPS_LBL,
     IDC_PROPS, IDC_SKY_LBL, IDC_SKY, IDC_FX_LBL, IDC_FX, IDC_LIGHTS_LBL, IDC_LIGHTS,
     IDC_SHOWCASE, IDC_SC_LIST, IDC_SC_PLAY, IDC_SC_PLAYSHOT, IDC_SC_STOP, IDC_SC_NEW, IDC_SC_ADD, IDC_SC_UNDO, IDC_SC_SECS_LBL,
-    IDC_SC_SECS, IDC_SC_LOOK, IDC_SC_DELETE, IDC_SC_UP, IDC_SC_DOWN, IDC_SC_REMAKE, IDC_SC_HINT,
+    IDC_SC_SECS, IDC_SC_LOOK, IDC_SC_DELETE, IDC_SC_UP, IDC_SC_DOWN, IDC_SC_REMAKE, IDC_SC_NAME_LBL, IDC_SC_NAME,
+    IDC_SC_KEYS_LBL, IDC_SC_KPREV, IDC_SC_KEY, IDC_SC_KNEXT, IDC_SC_KGO, IDC_SC_KMOVE, IDC_SC_ORBIT_LBL, IDC_SC_ORAD_LBL,
+    IDC_SC_ORAD, IDC_SC_OHGT_LBL, IDC_SC_OHGT, IDC_SC_OAR_LBL, IDC_SC_OAR, IDC_SC_ORBIT, IDC_SC_HINT,
+    IDC_FOG_START, IDC_FOG_TO, IDC_OBJECTS,
 };
 #define WM_LS_LOG (WM_APP + 60)
 #define WM_LS_DONE (WM_APP + 61)
@@ -54,6 +57,7 @@ struct State {
     size_t view_at = 0;
     int show = 1;                  // 0 as made, 1 as converted, 2 what changes
     bool highlight = true, portals = false;
+    bool objects = true;   // (the objects in the level drawn; remembered while the app runs: g_objects)
     HWND tips = nullptr;
     // the camera: the view's spot, turned by dragging and flown with the keys
     lshade::Camera cam;
@@ -73,6 +77,9 @@ struct State {
     showcase::Showcase sc;
     std::string sc_report;
     int sc_sel = -1;
+    int sc_key = 0;   // (the selected shot's key being changed: in Shot::keys)
+    // The orbit boxes: "New orbit here" makes one with them, and they change the selected shot when it's an orbit.
+    double orbit_radius = 5, orbit_height = 2, orbit_around = 100;
     HWND sc_list = nullptr;
     bool playing = false;
     int play_shot = -1;   // (-1: all of them, round and round)
@@ -93,6 +100,7 @@ void post(UINT msg, WPARAM wp, Note *n) {
     if (!w || !PostMessageW(w, msg, wp, (LPARAM)n)) delete n;
 }
 fs::path g_disk;
+bool g_objects = true;   // (State::objects, for the next window)
 
 int S(int v) { return MulDiv(v, St->dpi, 96); }
 std::wstring W(const std::string &s) {
@@ -101,6 +109,13 @@ std::wstring W(const std::string &s) {
     std::wstring w(n, 0);
     MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), &w[0], n);
     return w;
+}
+std::string U(const std::wstring &w) {
+    if (w.empty()) return {};
+    int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+    std::string s(n, 0);
+    WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), &s[0], n, nullptr, nullptr);
+    return s;
 }
 HWND item(int id) { return GetDlgItem(St->wnd, id); }
 std::wstring thousands(long long n) {
@@ -171,9 +186,11 @@ lshade::Fog fog_for(const lshade::Camera &c) {
     if (St->picks.fog == 2 && outdoor) {
         f.density = 1;
         f.opaque = std::max(f.opaque * (float)std::clamp(St->picks.fog_scale, 0.1, 1.0), f.start + 1.0f);
-    } else if (St->picks.fog == 3 && outdoor && St->picks.fog_distance > 0) {
+    } else if (St->picks.fog == 3 && outdoor) {
         f.density = 1;
-        f.opaque = std::max((float)St->picks.fog_distance, f.start + 1.0f);
+        float o = St->picks.fog_distance > 0 ? (float)St->picks.fog_distance : f.opaque;
+        if (St->picks.fog_start >= 0) f.start = std::clamp((float)St->picks.fog_start, 0.0f, std::max(0.0f, o - 1.0f));
+        f.opaque = std::max(o, f.start + 1.0f);
     } else if (f.density >= 0.9f && f.density < 1.0f) {
         f.density = 1;
     }
@@ -196,6 +213,7 @@ void render(bool fast) {
         f.what_it_loses = St->show == 2;
         f.highlight = St->highlight ? St->selected : -1;
         f.portals = St->portals;
+        f.objects = St->objects;
         f.fog_on = true;
         f.fog = fog_for(c);
         if (St->sc_mode) {   // (the showcase: the objects' boxes, and the selected shot's path, keys and look point)
@@ -204,6 +222,7 @@ void render(bool fast) {
                 const showcase::Shot &shot = St->sc.shots[(size_t)St->sc_sel];
                 for (auto &q : showcase::path(shot, 0.1)) f.path.push_back({(float)q[0], (float)q[1], (float)q[2]});
                 for (auto &k : shot.keys) f.keys.push_back({(float)k.p[0], (float)k.p[1], (float)k.p[2]});
+                f.key = St->sc_key >= 0 && (size_t)St->sc_key < shot.keys.size() ? St->sc_key : -1;
                 f.look = shot.look;
                 f.look_at = {(float)shot.at[0], (float)shot.at[1], (float)shot.at[2]};
             }
@@ -218,6 +237,7 @@ void render(bool fast) {
     if (fast) { w /= 2; h /= 2; }
     lshade::Extras ex;
     ex.portals = St->portals;
+    ex.objects = St->objects;
     ex.fog_on = true;
     ex.fog = fog_for(c);
     if (St->show == 2) {
@@ -292,7 +312,8 @@ void sc_fill() {
         it.iItem = (int)i;
         it.pszText = (LPWSTR)name.c_str();
         ListView_InsertItem(St->sc_list, &it);
-        std::wstring cells[3] = {secs(shot.seconds), std::to_wstring(shot.keys.size()), shot.look ? L"a point" : L""};
+        std::wstring cells[3] = {secs(shot.seconds), std::to_wstring(shot.keys.size()),
+                                 shot.orbit.on ? L"circling it" : shot.look ? L"a point" : L""};
         for (int c = 0; c < 3; c++) ListView_SetItemText(St->sc_list, (int)i, c + 1, (LPWSTR)cells[c].c_str());
     }
     if (St->sc_sel >= (int)St->sc.shots.size()) St->sc_sel = (int)St->sc.shots.size() - 1;
@@ -303,18 +324,64 @@ void sc_fill() {
     St->sc_filling = false;
     sc_select(St->sc_sel, false);
 }
-// The selected shot: its seconds and look in the boxes under the list; the camera to its start.
-void sc_select(int row, bool move_camera) {
-    St->sc_sel = row;
-    bool have = row >= 0 && (size_t)row < St->sc.shots.size();
+showcase::Shot *sc_shot() { return St->sc_sel >= 0 && (size_t)St->sc_sel < St->sc.shots.size() ? &St->sc.shots[(size_t)St->sc_sel] : nullptr; }
+std::wstring num_text(double v) {
+    wchar_t b[32];
+    swprintf(b, 32, L"%g", std::round(v * 10) / 10);
+    return b;
+}
+// The selected key: which of the shot's it is, and when.
+void sc_key_show() {
+    showcase::Shot *shot = sc_shot();
+    bool have = shot && !shot->keys.empty();
+    if (have) St->sc_key = std::clamp(St->sc_key, 0, (int)shot->keys.size() - 1);
+    std::wstring t = have ? L"Key " + std::to_wstring(St->sc_key + 1) + L" of " + std::to_wstring(shot->keys.size()) + L", at " +
+                                secs(shot->keys[(size_t)St->sc_key].t) + L" s"
+                          : L"";
+    SetWindowTextW(item(IDC_SC_KEY), t.c_str());
+    EnableWindow(item(IDC_SC_KPREV), have && St->sc_key > 0);
+    EnableWindow(item(IDC_SC_KNEXT), have && St->sc_key + 1 < (int)shot->keys.size());
+    for (int id : {IDC_SC_KGO, IDC_SC_KMOVE, IDC_SC_ADD}) EnableWindow(item(id), have);
+    EnableWindow(item(IDC_SC_UNDO), have && shot->keys.size() > 1);
+}
+// The orbit boxes: the selected shot's when it's an orbit, else the ones "New orbit here" uses.
+void sc_orbit_show() {
+    showcase::Shot *shot = sc_shot();
+    if (shot && shot->orbit.on) {
+        St->orbit_radius = shot->orbit.radius;
+        St->orbit_height = shot->orbit.height;
+        St->orbit_around = shot->orbit.sweep;
+    }
     St->sc_filling = true;
-    SetWindowTextW(item(IDC_SC_SECS), have ? secs(St->sc.shots[(size_t)row].seconds).c_str() : L"");
-    CheckDlgButton(St->wnd, IDC_SC_LOOK, have && St->sc.shots[(size_t)row].look ? BST_CHECKED : BST_UNCHECKED);
+    SetWindowTextW(item(IDC_SC_ORAD), num_text(St->orbit_radius).c_str());
+    SetWindowTextW(item(IDC_SC_OHGT), num_text(St->orbit_height).c_str());
+    SetWindowTextW(item(IDC_SC_OAR), num_text(St->orbit_around).c_str());
     St->sc_filling = false;
-    for (int id : {IDC_SC_PLAYSHOT, IDC_SC_ADD, IDC_SC_UNDO, IDC_SC_SECS, IDC_SC_LOOK, IDC_SC_DELETE, IDC_SC_UP, IDC_SC_DOWN})
-        EnableWindow(item(id), have);
+    SetWindowTextW(item(IDC_SC_ORBIT_LBL), shot && shot->orbit.on ? L"This orbit:" : L"Orbit:");
+}
+// A shot changed here: what's wrong with it, if anything, in the status line (else the usual line).
+void sc_check(const showcase::Shot &shot) {
+    std::string t = showcase::trouble(St->data->p, shot);
+    if (t.empty()) return;
+    std::wstring line = L"Shot " + std::to_wstring(St->sc_sel + 1) + L": " + W(t) + L".";
+    SetWindowTextW(item(IDC_STATUS), line.c_str());
+}
+// The selected shot: its name, seconds, look, keys and orbit in the boxes under the list; the camera to its start.
+void sc_select(int row, bool move_camera) {
+    if (row != St->sc_sel) St->sc_key = 0;
+    St->sc_sel = row;
+    showcase::Shot *shot = sc_shot();
+    bool have = shot != nullptr;
+    St->sc_filling = true;
+    SetWindowTextW(item(IDC_SC_SECS), have ? secs(shot->seconds).c_str() : L"");
+    SetWindowTextW(item(IDC_SC_NAME), have ? W(shot->label).c_str() : L"");
+    CheckDlgButton(St->wnd, IDC_SC_LOOK, have && shot->look ? BST_CHECKED : BST_UNCHECKED);
+    St->sc_filling = false;
+    for (int id : {IDC_SC_PLAYSHOT, IDC_SC_SECS, IDC_SC_NAME, IDC_SC_LOOK, IDC_SC_DELETE, IDC_SC_UP, IDC_SC_DOWN}) EnableWindow(item(id), have);
     EnableWindow(item(IDC_SC_PLAY), !St->sc.shots.empty());
-    if (have && move_camera && !St->playing) camera_to(showcase::at(St->sc.shots[(size_t)row], 0));
+    sc_key_show();
+    sc_orbit_show();
+    if (have && move_camera && !St->playing) camera_to(showcase::at(*shot, 0));
     render(false);
 }
 // A change made here: the shots are this map's own from now on.
@@ -409,7 +476,10 @@ void set_sc_mode(bool on) {
 bool middle_point(std::array<double, 3> &at) {
     RECT rc;
     GetClientRect(St->view, &rc);
-    return lshade::pick(St->data->p, St->cam, rc.right, rc.bottom, rc.right / 2.0, rc.bottom / 2.0, &at) >= 0;
+    int object = -1;
+    int t = lshade::pick(St->data->p, St->cam, rc.right, rc.bottom, rc.right / 2.0, rc.bottom / 2.0, &at,
+                         St->objects ? &object : nullptr);
+    return t >= 0 || object >= 0;
 }
 
 void go_to_view() {
@@ -486,8 +556,9 @@ void set_row(int row) {
     ListView_SetItemText(St->list, row, 5, (LPWSTR)sug.c_str());
 }
 
-// The fog and tiny scenery choices (Picks::fog, fog_scale, fog_distance, tiny_px): the fog's described with the level's
-// own numbers; the last fog choice is a distance typed into the box beside it.
+// The fog and tiny scenery choices (Picks::fog, fog_scale, fog_distance, fog_start, tiny_px): the fog's described with
+// the level's own numbers; the last fog choice is two distances typed into the boxes beside it, where it starts and
+// where it's fully opaque.
 const double kTiny[] = {0, 4, 8, 12, 16};
 const int kTinyCount = 5;
 // The effects choices, in the order listed, and the Picks::effects each one is.
@@ -506,18 +577,26 @@ lshade::Fog level_fog() {
     if (St->data && !f.any()) f = St->data->p.indoor_fog;
     return f;
 }
-// The typed distance's box: shows the distance in use, and takes typing only with "Other" chosen.
+// The typed distances' boxes: show the distances in use (the outdoor fog's as the conversion leaves it), and take typing
+// only with "Other" chosen.
 void show_fog_distance() {
     lshade::Fog f = level_fog();
-    double d = St->picks.fog_distance > 0 ? St->picks.fog_distance : f.opaque;
-    wchar_t b[32] = L"";
+    double start = f.start, d = f.opaque;
+    if (St->picks.fog == 3) {
+        d = St->picks.fog_distance > 0 ? St->picks.fog_distance : f.opaque;
+        if (St->picks.fog_start >= 0) start = St->picks.fog_start;
+    } else if (St->picks.fog == 2) {
+        d = std::max(f.opaque * std::clamp(St->picks.fog_scale, 0.1, 1.0), f.start + 1.0);
+    }
+    wchar_t b[32] = L"", a[32] = L"";
     if (d > 0) swprintf(b, 32, L"%.0f", d);
+    if (f.any()) swprintf(a, 32, L"%.0f", start);
     St->filling = true;
     SetWindowTextW(item(IDC_FOG_DIST), b);
+    SetWindowTextW(item(IDC_FOG_START), a);
     St->filling = false;
     bool on = St->data && f.any() && St->picks.fog == 3;
-    EnableWindow(item(IDC_FOG_DIST), on);
-    EnableWindow(item(IDC_FOG_UNITS), on);
+    for (int id : {IDC_FOG_START, IDC_FOG_TO, IDC_FOG_DIST, IDC_FOG_UNITS}) EnableWindow(item(id), on);
 }
 void fill_fog() {
     HWND c = item(IDC_FOG);
@@ -544,7 +623,7 @@ void fill_fog() {
     std::wstring items[6] = {a, L"As the map has it (" + std::wstring(pc) + L" at " + units(f.opaque) + L")",
                              L"Fully opaque at " + units(f.opaque), L"Fully opaque nearer, at " + units(f.opaque * 0.75),
                              L"Fully opaque nearer still, at " + units(f.opaque * 0.5),
-                             L"Other: type a distance \u2192"};
+                             L"Other: type the distances \u2192"};
     for (auto &t : items) SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)t.c_str());
     SendMessageW(c, CB_SETDROPPEDWIDTH, S(380), 0);
     SendMessageW(c, CB_SETCURSEL, fog_item(), 0);
@@ -779,14 +858,65 @@ void tick() {
 
 // Double-clicking the picture: the shader of the surface there, selected in the list (the view stays), or named in the
 // status line when the list doesn't have it (it doesn't reflect, or it's see-through).
+// (in the showcase: a key of the selected shot drawn within 12 pixels of it picked instead)
+bool pick_key(int x, int y, int w, int h) {
+    showcase::Shot *shot = sc_shot();
+    if (!St->sc_mode || St->playing || !shot || w <= 0 || h <= 0) return false;
+    const double tx = std::tan(35.0 * 3.14159265358979 / 180), ty = tx * h / w;
+    const auto &c = St->cam;
+    double fwd[3] = {std::cos(c.yaw) * std::cos(c.pitch), std::sin(c.yaw) * std::cos(c.pitch), std::sin(c.pitch)};
+    double right[3] = {fwd[1], -fwd[0], 0};
+    double rl = std::sqrt(right[0] * right[0] + right[1] * right[1]);
+    if (rl < 1e-9) return false;
+    right[0] /= rl; right[1] /= rl;
+    double up[3] = {right[1] * fwd[2] - right[2] * fwd[1], right[2] * fwd[0] - right[0] * fwd[2], right[0] * fwd[1] - right[1] * fwd[0]};
+    int best = -1;
+    double best_d = 12.0 * St->dpi / 96;
+    for (size_t k = 0; k < shot->keys.size(); k++) {
+        double d[3] = {shot->keys[k].p[0] - c.eye[0], shot->keys[k].p[1] - c.eye[1], shot->keys[k].p[2] - c.eye[2]};
+        double z = d[0] * fwd[0] + d[1] * fwd[1] + d[2] * fwd[2];
+        if (z < 0.05) continue;
+        double sx = ((d[0] * right[0] + d[1] * right[1]) / z / tx * 0.5 + 0.5) * w;
+        double sy = (0.5 - (d[0] * up[0] + d[1] * up[1] + d[2] * up[2]) / z / ty * 0.5) * h;
+        double dist = std::hypot(sx - x, sy - y);
+        if (dist < best_d) { best_d = dist; best = (int)k; }
+    }
+    if (best < 0) return false;
+    St->sc_key = best;
+    sc_key_show();
+    std::wstring line = L"Picked key " + std::to_wstring(best + 1) + L" of shot " + std::to_wstring(St->sc_sel + 1) +
+                        L": Go to it, or fly somewhere and Move it here.";
+    SetWindowTextW(item(IDC_STATUS), line.c_str());
+    render(false);
+    return true;
+}
 void pick_at(int x, int y) {
     const lshade::Preview &p = St->data->p;
     RECT rc;
     GetClientRect(St->view, &rc);
-    int t = lshade::pick(p, St->cam, rc.right, rc.bottom, x, y);
+    if (pick_key(x, y, rc.right, rc.bottom)) return;
+    int object = -1, part = -1;
+    int t = lshade::pick(p, St->cam, rc.right, rc.bottom, x, y, nullptr, St->objects ? &object : nullptr, &part);
+    if (object >= 0) {   // (an object: named, with its shader, in the status line)
+        const lshade::Object &o = p.objects[(size_t)object];
+        const lshade::Model &m = p.models[(size_t)o.model];
+        std::wstring what = L"Double-clicked: " + fs::path(W(o.tag)).stem().wstring() + L" (" + W(lshade::object_kind(o.kind)) + L")";
+        if (part >= 0 && (size_t)part < m.parts.size()) {
+            const lshade::ModelPart &mp = m.parts[(size_t)part];
+            if (mp.shader >= 0 && (size_t)mp.shader < m.shaders.size())
+                what += L", shader " + fs::path(W(m.shaders[(size_t)mp.shader])).filename().wstring();
+            if (mp.flags & lshade::ModelPart::kCutout) what += L" (alpha-tested: cut out where its base map's alpha is under half)";
+            else if (mp.flags & lshade::ModelPart::kSeeThrough) what += L" (see-through)";
+        }
+        what += L". " + W(o.tag);
+        if (!o.lit) what += L". Nothing lit is below it: it has the level's default lighting.";
+        SetWindowTextW(item(IDC_STATUS), what.c_str());
+        return;
+    }
     if (t < 0) {
-        SetWindowTextW(item(IDC_STATUS), L"Double-clicked: no surface of the level there (the sky, or an object: the picture "
-                                         L"has the level only).");
+        SetWindowTextW(item(IDC_STATUS), St->objects ? L"Double-clicked: nothing there (the sky)."
+                                                     : L"Double-clicked: no surface of the level there (the sky, or an object: "
+                                                       L"tick Objects to draw them).");
         return;
     }
     int m = p.triangles[(size_t)t].material;
@@ -939,7 +1069,7 @@ void create_controls() {
     }
     // The showcase flythrough: its shots in place of the list (hidden until "Showcase flythrough...").
     add(L"BUTTON", L"Showcase flythrough...", BS_PUSHBUTTON | WS_TABSTOP, 968, 10, 200, 26, IDC_SHOWCASE);
-    St->sc_list = add(WC_LISTVIEWW, L"", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP, 12, 68, 548, 396, IDC_SC_LIST);
+    St->sc_list = add(WC_LISTVIEWW, L"", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP, 12, 68, 548, 236, IDC_SC_LIST);
     ListView_SetExtendedListViewStyle(St->sc_list, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
     {
         struct Col { const wchar_t *name; int w; } scols[] = {{L"Shot", 290}, {L"Seconds", 74}, {L"Keys", 56}, {L"Looks at", 100}};
@@ -952,45 +1082,72 @@ void create_controls() {
             ListView_InsertColumn(St->sc_list, i, &c);
         }
     }
-    add(L"BUTTON", L"Play them all", BS_PUSHBUTTON | WS_TABSTOP, 12, 472, 116, 26, IDC_SC_PLAY);
-    add(L"BUTTON", L"Play this shot", BS_PUSHBUTTON | WS_TABSTOP, 134, 472, 116, 26, IDC_SC_PLAYSHOT);
-    add(L"BUTTON", L"Stop", BS_PUSHBUTTON | WS_TABSTOP, 256, 472, 80, 26, IDC_SC_STOP);
-    add(L"BUTTON", L"New shot here", BS_PUSHBUTTON | WS_TABSTOP, 12, 506, 116, 26, IDC_SC_NEW);
-    add(L"BUTTON", L"Add key here", BS_PUSHBUTTON | WS_TABSTOP, 134, 506, 116, 26, IDC_SC_ADD);
-    add(L"BUTTON", L"Remove last key", BS_PUSHBUTTON | WS_TABSTOP, 256, 506, 124, 26, IDC_SC_UNDO);
-    add(L"STATIC", L"Seconds:", SS_NOTIFY, 12, 544, 56, 20, IDC_SC_SECS_LBL);
-    add(L"EDIT", L"", ES_RIGHT | ES_AUTOHSCROLL | WS_TABSTOP, 70, 541, 58, 22, IDC_SC_SECS, WS_EX_CLIENTEDGE);
+    add(L"STATIC", L"Name:", SS_NOTIFY, 12, 315, 40, 20, IDC_SC_NAME_LBL);
+    add(L"EDIT", L"", ES_AUTOHSCROLL | WS_TABSTOP, 54, 312, 250, 22, IDC_SC_NAME, WS_EX_CLIENTEDGE);
+    SendMessageW(item(IDC_SC_NAME), EM_SETLIMITTEXT, 31, 0);
+    add(L"STATIC", L"Seconds:", SS_NOTIFY, 316, 315, 56, 20, IDC_SC_SECS_LBL);
+    add(L"EDIT", L"", ES_RIGHT | ES_AUTOHSCROLL | WS_TABSTOP, 374, 312, 58, 22, IDC_SC_SECS, WS_EX_CLIENTEDGE);
     SendMessageW(item(IDC_SC_SECS), EM_SETLIMITTEXT, 6, 0);
-    add(L"BUTTON", L"Keep looking at what's in the middle of the picture", BS_AUTOCHECKBOX | WS_TABSTOP, 140, 542, 380, 22, IDC_SC_LOOK);
-    add(L"BUTTON", L"Delete shot", BS_PUSHBUTTON | WS_TABSTOP, 12, 574, 116, 26, IDC_SC_DELETE);
-    add(L"BUTTON", L"Move up", BS_PUSHBUTTON | WS_TABSTOP, 134, 574, 90, 26, IDC_SC_UP);
-    add(L"BUTTON", L"Move down", BS_PUSHBUTTON | WS_TABSTOP, 230, 574, 90, 26, IDC_SC_DOWN);
-    add(L"BUTTON", L"Make again", BS_PUSHBUTTON | WS_TABSTOP, 444, 574, 116, 26, IDC_SC_REMAKE);
+    add(L"BUTTON", L"Keep looking at what's in the middle of the picture", BS_AUTOCHECKBOX | WS_TABSTOP, 12, 340, 420, 22, IDC_SC_LOOK);
+    add(L"BUTTON", L"Play them all", BS_PUSHBUTTON | WS_TABSTOP, 12, 368, 116, 26, IDC_SC_PLAY);
+    add(L"BUTTON", L"Play this shot", BS_PUSHBUTTON | WS_TABSTOP, 134, 368, 116, 26, IDC_SC_PLAYSHOT);
+    add(L"BUTTON", L"Stop", BS_PUSHBUTTON | WS_TABSTOP, 256, 368, 80, 26, IDC_SC_STOP);
+    add(L"BUTTON", L"New shot here", BS_PUSHBUTTON | WS_TABSTOP, 12, 400, 116, 26, IDC_SC_NEW);
+    add(L"BUTTON", L"Delete shot", BS_PUSHBUTTON | WS_TABSTOP, 134, 400, 96, 26, IDC_SC_DELETE);
+    add(L"BUTTON", L"Move up", BS_PUSHBUTTON | WS_TABSTOP, 236, 400, 80, 26, IDC_SC_UP);
+    add(L"BUTTON", L"Move down", BS_PUSHBUTTON | WS_TABSTOP, 322, 400, 90, 26, IDC_SC_DOWN);
+    add(L"BUTTON", L"Make again", BS_PUSHBUTTON | WS_TABSTOP, 444, 400, 116, 26, IDC_SC_REMAKE);
+    add(L"STATIC", L"Keys:", SS_NOTIFY, 12, 444, 40, 20, IDC_SC_KEYS_LBL);
+    add(L"BUTTON", L"\u2190", BS_PUSHBUTTON | WS_TABSTOP, 54, 440, 30, 26, IDC_SC_KPREV);
+    add(L"STATIC", L"", SS_CENTER | SS_NOTIFY, 88, 444, 168, 20, IDC_SC_KEY);
+    add(L"BUTTON", L"\u2192", BS_PUSHBUTTON | WS_TABSTOP, 258, 440, 30, 26, IDC_SC_KNEXT);
+    add(L"BUTTON", L"Go to it", BS_PUSHBUTTON | WS_TABSTOP, 296, 440, 90, 26, IDC_SC_KGO);
+    add(L"BUTTON", L"Add key here", BS_PUSHBUTTON | WS_TABSTOP, 54, 472, 116, 26, IDC_SC_ADD);
+    add(L"BUTTON", L"Move it here", BS_PUSHBUTTON | WS_TABSTOP, 176, 472, 116, 26, IDC_SC_KMOVE);
+    add(L"BUTTON", L"Remove it", BS_PUSHBUTTON | WS_TABSTOP, 298, 472, 90, 26, IDC_SC_UNDO);
+    add(L"STATIC", L"Orbit:", SS_NOTIFY, 12, 516, 70, 20, IDC_SC_ORBIT_LBL);
+    add(L"STATIC", L"radius", SS_NOTIFY, 84, 516, 40, 20, IDC_SC_ORAD_LBL);
+    add(L"EDIT", L"", ES_RIGHT | ES_AUTOHSCROLL | WS_TABSTOP, 126, 513, 44, 22, IDC_SC_ORAD, WS_EX_CLIENTEDGE);
+    add(L"STATIC", L"height", SS_NOTIFY, 178, 516, 42, 20, IDC_SC_OHGT_LBL);
+    add(L"EDIT", L"", ES_RIGHT | ES_AUTOHSCROLL | WS_TABSTOP, 222, 513, 44, 22, IDC_SC_OHGT, WS_EX_CLIENTEDGE);
+    add(L"STATIC", L"turn", SS_NOTIFY, 274, 516, 32, 20, IDC_SC_OAR_LBL);
+    add(L"EDIT", L"", ES_RIGHT | ES_AUTOHSCROLL | WS_TABSTOP, 308, 513, 50, 22, IDC_SC_OAR, WS_EX_CLIENTEDGE);
+    for (int id : {IDC_SC_ORAD, IDC_SC_OHGT, IDC_SC_OAR}) SendMessageW(item(id), EM_SETLIMITTEXT, 6, 0);
+    add(L"BUTTON", L"New orbit here", BS_PUSHBUTTON | WS_TABSTOP, 444, 511, 116, 26, IDC_SC_ORBIT);
     add(L"STATIC",
         L"These shots play in order in Halo 1 Unlimited's showcase screensaver. New shot here starts one where the picture "
-        L"is; fly on and click Add key here at each next spot (3 seconds apart; Seconds makes it slower or faster). Tick the "
-        L"box while aiming at something to keep it in view. Cyan: the shot's path. Grey: objects the picture leaves out. "
-        L"Changed shots are this map's own: each Xbox conversion puts them in the map folder's showcase.txt.",
-        0, 12, 608, 548, 104, IDC_SC_HINT);
+        L"is; fly on and click Add key here at each next spot (3 seconds on; Seconds makes the shot slower or faster). The "
+        L"arrows pick a key (or double-click a yellow one in the picture): Go to it, then fly somewhere and Move it here, or "
+        L"Add key here to put a new one after it. New orbit here circles what's in the middle of the picture, starting from "
+        L"your side of it: radius units across from it, height above it, turning that many degrees (negative: the other "
+        L"way). Tick the box while aiming at something to keep it in view. Cyan: the shot's path; orange: the picked key. "
+        L"Grey: boxes the camera keeps clear of. Changed shots are this map's own: each Xbox conversion puts them in the map "
+        L"folder's showcase.txt.",
+        0, 12, 552, 548, 160, IDC_SC_HINT);
     for (int id = IDC_SC_LIST; id <= IDC_SC_HINT; id++) ShowWindow(item(id), SW_HIDE);
     St->view = CreateWindowExW(WS_EX_CLIENTEDGE, L"HMPLevelView", L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_TABSTOP,
                                S(572), S(68), S(596), S(447), St->wnd,
                                (HMENU)(INT_PTR)IDC_VIEW, GetModuleHandleW(nullptr), nullptr);
     add(L"BUTTON", L"\u2190", BS_PUSHBUTTON | WS_TABSTOP, 572, 522, 36, 26, IDC_PREV);
     add(L"BUTTON", L"\u2192", BS_PUSHBUTTON | WS_TABSTOP, 612, 522, 36, 26, IDC_NEXT);
-    add(L"BUTTON", L"As made", BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, 662, 524, 76, 22, IDC_BEFORE);
-    add(L"BUTTON", L"As converted", BS_AUTORADIOBUTTON, 742, 524, 100, 22, IDC_AFTER);
-    add(L"BUTTON", L"What it loses", BS_AUTORADIOBUTTON, 846, 524, 104, 22, IDC_CHANGES);
-    add(L"BUTTON", L"Tint selected", BS_AUTOCHECKBOX | WS_GROUP | WS_TABSTOP, 960, 524, 100, 22, IDC_HILITE);
-    add(L"BUTTON", L"Show portals", BS_AUTOCHECKBOX | WS_TABSTOP, 1066, 524, 102, 22, IDC_PORTALS);
+    add(L"BUTTON", L"As made", BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, 658, 524, 72, 22, IDC_BEFORE);
+    add(L"BUTTON", L"As converted", BS_AUTORADIOBUTTON, 732, 524, 96, 22, IDC_AFTER);
+    add(L"BUTTON", L"What it loses", BS_AUTORADIOBUTTON, 830, 524, 100, 22, IDC_CHANGES);
+    add(L"BUTTON", L"Tint selected", BS_AUTOCHECKBOX | WS_GROUP | WS_TABSTOP, 936, 524, 94, 22, IDC_HILITE);
+    add(L"BUTTON", L"Portals", BS_AUTOCHECKBOX | WS_TABSTOP, 1034, 524, 64, 22, IDC_PORTALS);
+    add(L"BUTTON", L"Objects", BS_AUTOCHECKBOX | WS_TABSTOP, 1100, 524, 68, 22, IDC_OBJECTS);
     add(L"STATIC", L"", SS_NOTIFY, 572, 554, 596, 36, IDC_COST);
     add(L"STATIC", L"Fog:", SS_NOTIFY, 572, 600, 34, 20, IDC_FOG_LBL);
-    add(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 608, 596, 192, 300, IDC_FOG);
-    add(L"EDIT", L"", ES_NUMBER | ES_RIGHT | ES_AUTOHSCROLL | WS_TABSTOP, 804, 597, 44, 22, IDC_FOG_DIST, WS_EX_CLIENTEDGE);
+    add(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 608, 596, 166, 300, IDC_FOG);
+    add(L"EDIT", L"", ES_NUMBER | ES_RIGHT | ES_AUTOHSCROLL | WS_TABSTOP, 778, 597, 38, 22, IDC_FOG_START, WS_EX_CLIENTEDGE);
+    SendMessageW(item(IDC_FOG_START), EM_SETLIMITTEXT, 5, 0);
+    add(L"STATIC", L"to", SS_NOTIFY | SS_CENTER, 816, 600, 18, 20, IDC_FOG_TO);
+    add(L"EDIT", L"", ES_NUMBER | ES_RIGHT | ES_AUTOHSCROLL | WS_TABSTOP, 834, 597, 38, 22, IDC_FOG_DIST, WS_EX_CLIENTEDGE);
     SendMessageW(item(IDC_FOG_DIST), EM_SETLIMITTEXT, 5, 0);
-    add(L"STATIC", L"units", SS_NOTIFY, 852, 600, 32, 20, IDC_FOG_UNITS);
-    add(L"STATIC", L"Hide scenery:", SS_NOTIFY, 890, 600, 76, 20, IDC_FAR_LBL);
-    add(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 968, 596, 200, 300, IDC_FAR);
+    add(L"STATIC", L"units", SS_NOTIFY, 876, 600, 30, 20, IDC_FOG_UNITS);
+    add(L"STATIC", L"Hide scenery:", SS_NOTIFY, 908, 600, 76, 20, IDC_FAR_LBL);
+    add(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 986, 596, 182, 300, IDC_FAR);
+    SendMessageW(item(IDC_FAR), CB_SETDROPPEDWIDTH, S(200), 0);
     {
         const wchar_t *tiny_items[kTinyCount] = {L"Never (the default)", L"Below 4 px (8 widescreen)", L"Below 8 px (16 widescreen)",
                                                  L"Below 12 px (24 widescreen)", L"Below 16 px (32 widescreen)"};
@@ -1022,6 +1179,8 @@ void create_controls() {
     CheckRadioButton(St->wnd, IDC_MODE0, IDC_MODE2, IDC_MODE0 + St->picks.mode);
     CheckRadioButton(St->wnd, IDC_BEFORE, IDC_CHANGES, IDC_AFTER);
     CheckDlgButton(St->wnd, IDC_HILITE, BST_CHECKED);
+    St->objects = g_objects;
+    CheckDlgButton(St->wnd, IDC_OBJECTS, St->objects ? BST_CHECKED : BST_UNCHECKED);
     {
         int k = 0;   // (the nearest of the choices)
         for (int i = 1; i < kTinyCount; i++)
@@ -1059,19 +1218,46 @@ void create_controls() {
     tip(IDC_PORTALS, L"Outlines each portal in yellow (the openings the engine looks through from one room to the next), "
                      L"glowing orange where you can see through it, and tints each room (cluster) a colour of its own. The engine draws the room you're in, then only the rooms "
                      L"it can see through portals, so walls between rooms hide what's behind them.");
+    tip(IDC_SC_NAME, L"The shot's name, for people (Halo 1 Unlimited's file keeps 31 characters).");
+    tip(IDC_SC_KPREV, L"The key before: picked, and the picture goes to it.");
+    tip(IDC_SC_KNEXT, L"The key after: picked, and the picture goes to it.");
+    tip(IDC_SC_KEY, L"The picked key (orange in the picture). Double-click a yellow key in the picture to pick it.");
+    tip(IDC_SC_KGO, L"Puts the picture where the picked key is, looking as it does.");
+    tip(IDC_SC_KMOVE, L"Moves the picked key to where the picture is now, looking the way it does (at the same time in the shot).");
+    tip(IDC_SC_ADD, L"A new key where the picture is, after the picked one: halfway to the next key, or 3 seconds after the last "
+                    L"(the shot gets longer).");
+    tip(IDC_SC_UNDO, L"Removes the picked key. Without the first, the shot starts at the next one; without the last, it ends at "
+                     L"the one before.");
+    const wchar_t *orbit_tip = L"New orbit here: a shot circling what's in the middle of the picture, looking at it, starting "
+                               L"from your side of it. Radius: how far from it the camera is, across (world units; 1 unit = 10 "
+                               L"feet, about 3 m). Height: how far above it. Turn: how many degrees round it the shot goes "
+                               L"(360 a whole circle; negative: clockwise). With an orbit picked in the list, these change it.";
+    for (int id : {IDC_SC_ORBIT, IDC_SC_ORBIT_LBL, IDC_SC_ORAD, IDC_SC_ORAD_LBL, IDC_SC_OHGT, IDC_SC_OHGT_LBL, IDC_SC_OAR, IDC_SC_OAR_LBL})
+        tip(id, orbit_tip);
+    tip(IDC_OBJECTS, L"Draws the objects in the level when a game starts: the scenery, machines, controls, light fixtures, "
+                     L"vehicles, weapons and equipment the map places, and an item on each multiplayer spawn point (its "
+                     L"collection's first). Each is lit as the engine lights an object: from the lightmap straight below it "
+                     L"(an ambient light, the light from the direction the lightmap's comes from there, and its surface's "
+                     L"colour bounced up). Double-click one to name it and its shader.");
     tip(IDC_COST, L"Every level triangle is drawn at least twice (its lightmap, then its textures); a reflection draws it once "
                   L"or twice more. That's the processor's time as well as the graphics chip's: it sends the level again. "
                   L"Measured on an Xbox, about 0.45 ms of each 33 ms frame per 1,000 passes (Deathtrap's reflections: 1.4 ms "
                   L"a frame on average, 3.2 ms in its busiest view). Dropping one also frees its cube map's memory. Typical: "
                   L"half of the views from where players stand draw more; busy: one in ten does. Sidewinder is among the "
                   L"busiest stock maps that still run smoothly.");
-    const wchar_t *fog_tip = L"The Xbox stops drawing anything (level, objects, effects) past the fog's opaque distance, but only "
-                             L"when the fog is fully opaque there: at 99% it still draws everything. Automatic makes fog that's "
-                             L"nearly opaque (90% or more) fully so. Nearer opaque fog draws less, but the level looks foggier. "
-                             L"Other: type the distance yourself in the box beside it. "
-                             L"The picture shows the fog as the conversion leaves it.";
+    const wchar_t *fog_tip = L"Halo's fog rises evenly with distance: none before its start distance, then thicker and thicker up "
+                             L"to its opaque distance, as thick as it gets from there on (the two boxes show the level's). The Xbox "
+                             L"stops drawing anything (level, objects, effects) past the opaque distance, but only when the fog is "
+                             L"fully opaque there: at 99% it still draws everything. Automatic makes fog that's nearly opaque (90% "
+                             L"or more) fully so. Nearer opaque fog draws less, but the level looks foggier. Other: type both "
+                             L"distances yourself. The picture shows the fog as the conversion leaves it.";
     tip(IDC_FOG, fog_tip);
     tip(IDC_FOG_LBL, fog_tip);
+    const wchar_t *start_tip = L"Where the fog starts, in world units (1 unit = 10 feet, about 3 m), with \"Other\" chosen: "
+                               L"nothing nearer is fogged, and it thickens evenly from there. 0 starts it at the camera. It "
+                               L"stays short of where it's fully opaque. The picture follows as you type.";
+    tip(IDC_FOG_START, start_tip);
+    tip(IDC_FOG_TO, start_tip);
     const wchar_t *dist_tip = L"Where the fog turns fully opaque, in world units (1 unit = 10 feet, about 3 m), with \"Other\" "
                               L"chosen: nothing past it is drawn. It can't be nearer than where the fog starts. The picture "
                               L"follows as you type.";
@@ -1082,7 +1268,7 @@ void create_controls() {
                              L"about 57 units away; a 16-unit tree not until about 900. Halo 1 Unlimited counts models at half "
                              L"their size in widescreen, so there they go at twice the size. The engine measures size by how far "
                              L"ahead of the camera something is, so things at the screen's edges stay a little longer than ones "
-                             L"you look at; at these sizes that's hard to see. They don't show in the picture.";
+                             L"you look at; at these sizes that's hard to see. The picture draws every object however small.";
     tip(IDC_FAR, far_tip);
     tip(IDC_FAR_LBL, far_tip);
     const wchar_t *weather_tip = L"Rain and snow cost the Xbox's processor every frame, indoors too: every drop is moved, clipped "
@@ -1227,8 +1413,8 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                     if (k == kFogOther && St->picks.fog_distance <= 0) St->picks.fog_distance = std::round(level_fog().opaque);
                     show_fog_distance();
                     if (k == kFogOther) {
-                        SetFocus(item(IDC_FOG_DIST));
-                        SendMessageW(item(IDC_FOG_DIST), EM_SETSEL, 0, -1);
+                        SetFocus(item(IDC_FOG_START));
+                        SendMessageW(item(IDC_FOG_START), EM_SETSEL, 0, -1);
                     }
                     render(false);
                 }
@@ -1241,6 +1427,16 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 double d = wcstod(b, nullptr);
                 if (d >= 1) {   // (an empty box, or 0, while typing: the last distance stays)
                     St->picks.fog_distance = d;
+                    render(false);
+                }
+            }
+            return 0;
+        case IDC_FOG_START:
+            if (HIWORD(wp) == EN_CHANGE && !St->filling && St->picks.fog == 3) {
+                wchar_t b[16] = L"";
+                GetWindowTextW(item(IDC_FOG_START), b, 16);
+                if (b[0]) {   // (an empty box while typing: the last start stays)
+                    St->picks.fog_start = wcstod(b, nullptr);
                     render(false);
                 }
             }
@@ -1285,6 +1481,10 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             St->portals = IsDlgButtonChecked(h, IDC_PORTALS) == BST_CHECKED;
             render(false);
             return 0;
+        case IDC_OBJECTS:
+            St->objects = g_objects = IsDlgButtonChecked(h, IDC_OBJECTS) == BST_CHECKED;
+            render(false);
+            return 0;
         case IDC_HILITE:
             St->highlight = IsDlgButtonChecked(h, IDC_HILITE) == BST_CHECKED;
             render(false);
@@ -1311,28 +1511,19 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             size_t at = St->sc_sel >= 0 ? (size_t)St->sc_sel + 1 : St->sc.shots.size();
             St->sc.shots.insert(St->sc.shots.begin() + (long)std::min(at, St->sc.shots.size()), shot);
             St->sc_sel = (int)std::min(at, St->sc.shots.size() - 1);
+            St->sc_key = 0;
             sc_changed();
             return 0;
         }
-        case IDC_SC_ADD: case IDC_SC_UNDO: case IDC_SC_DELETE: case IDC_SC_UP: case IDC_SC_DOWN: {
+        case IDC_SC_DELETE: case IDC_SC_UP: case IDC_SC_DOWN: {
             int sel = St->sc_sel;
             if (sel < 0 || (size_t)sel >= St->sc.shots.size()) return 0;
             sc_stop();
             auto &shots = St->sc.shots;
-            showcase::Shot &shot = shots[(size_t)sel];
-            if (id == IDC_SC_ADD) {
-                showcase::Key k = key_here();
-                k.t = (shot.keys.empty() ? 0 : shot.keys.back().t) + 3;
-                if (shot.keys.empty()) k.t = 0;
-                shot.keys.push_back(k);
-                shot.seconds = std::max(k.t, 1.0);
-            } else if (id == IDC_SC_UNDO) {
-                if (shot.keys.size() <= 1) return 0;
-                shot.keys.pop_back();
-                if (shot.keys.back().t > 0) shot.seconds = shot.keys.back().t;
-            } else if (id == IDC_SC_DELETE) {
+            if (id == IDC_SC_DELETE) {
                 shots.erase(shots.begin() + sel);
                 St->sc_sel = std::min(sel, (int)shots.size() - 1);
+                St->sc_key = 0;
             } else if (id == IDC_SC_UP) {
                 if (sel == 0) return 0;
                 std::swap(shots[(size_t)sel], shots[(size_t)sel - 1]);
@@ -1345,6 +1536,124 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             sc_changed();
             return 0;
         }
+        // The selected shot's keys: pick one, go to it, move it, add one after it, remove it.
+        case IDC_SC_KPREV: case IDC_SC_KNEXT: case IDC_SC_KGO: {
+            showcase::Shot *shot = sc_shot();
+            if (!shot || shot->keys.empty()) return 0;
+            sc_stop();
+            if (id != IDC_SC_KGO) St->sc_key = std::clamp(St->sc_key + (id == IDC_SC_KNEXT ? 1 : -1), 0, (int)shot->keys.size() - 1);
+            sc_key_show();
+            camera_to(showcase::at(*shot, shot->keys[(size_t)St->sc_key].t));
+            render(false);
+            return 0;
+        }
+        case IDC_SC_ADD: case IDC_SC_KMOVE: case IDC_SC_UNDO: {
+            showcase::Shot *shot = sc_shot();
+            if (!shot) return 0;
+            sc_stop();
+            auto &keys = shot->keys;
+            int k = keys.empty() ? -1 : std::clamp(St->sc_key, 0, (int)keys.size() - 1);
+            if (id == IDC_SC_ADD) {   // (after the picked key: halfway to the next one, or 3 seconds after the last)
+                showcase::Key nk = key_here();
+                if (k < 0) {
+                    nk.t = 0;
+                    keys.push_back(nk);
+                    St->sc_key = 0;
+                } else if ((size_t)k + 1 < keys.size()) {
+                    nk.t = (keys[(size_t)k].t + keys[(size_t)k + 1].t) / 2;
+                    keys.insert(keys.begin() + k + 1, nk);
+                    St->sc_key = k + 1;
+                } else {
+                    nk.t = keys[(size_t)k].t + 3;
+                    keys.push_back(nk);
+                    shot->seconds = std::max(nk.t, 1.0);
+                    St->sc_key = k + 1;
+                }
+            } else if (id == IDC_SC_KMOVE) {   // (where the picture is now, at the same time in the shot)
+                if (k < 0) return 0;
+                showcase::Key nk = key_here();
+                nk.t = keys[(size_t)k].t;
+                nk.fov = keys[(size_t)k].fov;
+                keys[(size_t)k] = nk;
+            } else {   // (the first one gone: the shot starts at the next; the last one gone: it ends at the one before)
+                if (k < 0 || keys.size() <= 1) return 0;
+                keys.erase(keys.begin() + k);
+                if (k == 0) {
+                    double shift = keys[0].t;
+                    for (auto &q : keys) q.t -= shift;
+                    shot->seconds = std::max(0.5, shot->seconds - shift);
+                } else if ((size_t)k == keys.size() && keys.back().t > 0) {
+                    shot->seconds = keys.back().t;
+                }
+                St->sc_key = std::min(k, (int)keys.size() - 1);
+            }
+            shot->orbit.on = false;   // (its own keys now)
+            sc_changed();
+            sc_check(*shot);
+            return 0;
+        }
+        case IDC_SC_NAME:
+            if (HIWORD(wp) == EN_CHANGE && !St->sc_filling && sc_shot()) {
+                wchar_t b[64] = {};
+                GetWindowTextW(item(IDC_SC_NAME), b, 64);
+                std::string name = showcase::clean_label(U(b));
+                showcase::Shot &shot = *sc_shot();
+                if (name == shot.label) return 0;
+                shot.label = name;
+                St->sc_custom = true;
+                std::wstring row = std::to_wstring(St->sc_sel + 1) + L". " + W(name.empty() ? std::string("shot") : name);
+                ListView_SetItemText(St->sc_list, St->sc_sel, 0, (LPWSTR)row.c_str());
+                sc_status();
+            }
+            return 0;
+        // The orbit boxes: typed into, they change the selected orbit (else they're for the next "New orbit here").
+        case IDC_SC_ORAD: case IDC_SC_OHGT: case IDC_SC_OAR:
+            if (HIWORD(wp) == EN_CHANGE && !St->sc_filling) {
+                wchar_t b[16] = {};
+                GetWindowTextW(item(id), b, 16);
+                wchar_t *end = nullptr;
+                double v = wcstod(b, &end);
+                if (end == b) return 0;   // (empty, or only a sign, while typing)
+                if (id == IDC_SC_ORAD) { if (v < 0.5 || v > 200) return 0; St->orbit_radius = v; }
+                else if (id == IDC_SC_OHGT) { if (v < -50 || v > 100) return 0; St->orbit_height = v; }
+                else { if (std::fabs(v) < 5 || std::fabs(v) > 1080) return 0; St->orbit_around = v; }
+                showcase::Shot *shot = sc_shot();
+                if (!shot || !shot->orbit.on) return 0;
+                sc_stop();
+                showcase::Shot o = showcase::orbit_shot(shot->at, St->orbit_radius, St->orbit_height, shot->orbit.start,
+                                                        St->orbit_around, shot->seconds, shot->label);
+                *shot = o;
+                St->sc_custom = true;
+                ListView_SetItemText(St->sc_list, St->sc_sel, 2, (LPWSTR)std::to_wstring(shot->keys.size()).c_str());
+                sc_key_show();
+                camera_to(showcase::at(*shot, 0));
+                sc_status();
+                sc_check(*shot);
+                render(false);
+            }
+            return 0;
+        case IDC_SC_ORBIT: {   // (round what's in the middle of the picture, starting from the camera's side of it)
+            if (!St->data) return 0;
+            sc_stop();
+            std::array<double, 3> at{};
+            if (!middle_point(at)) {
+                SetWindowTextW(item(IDC_STATUS), L"Nothing in the middle of the picture to circle: aim at it first.");
+                return 0;
+            }
+            double start = deg_of(std::atan2(St->cam.eye[1] - at[1], St->cam.eye[0] - at[0]));
+            showcase::Shot shot = showcase::orbit_shot(at, St->orbit_radius, St->orbit_height, start, St->orbit_around, 12,
+                                                       "orbit " + std::to_string(St->sc.shots.size() + 1));
+            size_t pos = St->sc_sel >= 0 ? (size_t)St->sc_sel + 1 : St->sc.shots.size();
+            pos = std::min(pos, St->sc.shots.size());
+            St->sc.shots.insert(St->sc.shots.begin() + (long)pos, shot);
+            St->sc_sel = (int)pos;
+            St->sc_key = 0;
+            sc_changed();
+            camera_to(showcase::at(St->sc.shots[pos], 0));
+            render(false);
+            sc_check(St->sc.shots[pos]);
+            return 0;
+        }
         case IDC_SC_SECS:
             if (HIWORD(wp) == EN_CHANGE && !St->sc_filling && St->sc_sel >= 0 && (size_t)St->sc_sel < St->sc.shots.size()) {
                 wchar_t b[16] = {};
@@ -1353,12 +1662,19 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 showcase::Shot &shot = St->sc.shots[(size_t)St->sc_sel];
                 if (v < 0.5 || v > 600 || std::fabs(v - shot.seconds) < 1e-9) return 0;
                 // (the keys spread out or closer together with it: the same path, slower or faster)
-                if (shot.keys.size() > 1 && shot.seconds > 0)
-                    for (auto &k : shot.keys) k.t *= v / shot.seconds;
-                shot.seconds = v;
+                if (shot.orbit.on) {
+                    shot = showcase::orbit_shot(shot.at, shot.orbit.radius, shot.orbit.height, shot.orbit.start, shot.orbit.sweep, v,
+                                                shot.label);
+                    ListView_SetItemText(St->sc_list, St->sc_sel, 2, (LPWSTR)std::to_wstring(shot.keys.size()).c_str());
+                } else {
+                    if (shot.keys.size() > 1 && shot.seconds > 0)
+                        for (auto &k : shot.keys) k.t *= v / shot.seconds;
+                    shot.seconds = v;
+                }
                 St->sc_custom = true;
                 ListView_SetItemText(St->sc_list, St->sc_sel, 1, (LPWSTR)secs(v).c_str());
                 sc_status();
+                sc_key_show();
                 render(false);
             }
             return 0;
@@ -1377,7 +1693,9 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 } else {
                     shot.look = false;
                 }
+                shot.orbit.on = false;   // (an orbit looks at its middle: a new point, or none, and it's keys of its own)
                 sc_changed();
+                sc_check(shot);
             }
             return 0;
         case IDC_SC_REMAKE:

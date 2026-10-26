@@ -6767,12 +6767,14 @@ static std::map<std::string, int> object_counts(Job &job, const tagfile::Elem &s
     return placed;
 }
 
-// The level's fog. The engine moves the view's far end to the fog's opaque distance only when the fog is fully
-// opaque there (maximum density exactly 1: render.c), and then draws nothing past it: the level, objects, effects.
-// Fog that's nearly so (90% or more) hides what's past it anyway, so by default it's made fully opaque (Deathtrap's,
-// Precipice's sky: 92% at 110 units, past which the airbase and many trees were still drawn). The level window can
-// instead make the outdoor fog fully opaque nearer (a share of its distance) or at a distance typed in. The map's own
-// skies only (Bungie's levels keep theirs); a sky's indoor fog too (rooms with no sky).
+// The level's fog. Halo's fog (a sky's outdoor and indoor fog) is linear in distance from the camera: none at its start
+// distance, rising evenly to its maximum density at its opaque distance, that density past it (rasterizer_xbox.c's fog
+// constants). The engine moves the view's far end to the opaque distance only when the fog is fully opaque there
+// (maximum density exactly 1: render.c), and then draws nothing past it: the level, objects, effects. Fog that's nearly
+// so (90% or more) hides what's past it anyway, so by default it's made fully opaque (Deathtrap's, Precipice's sky: 92%
+// at 110 units, past which the airbase and many trees were still drawn). The level window can instead make the outdoor
+// fog fully opaque nearer (a share of its distance) or between distances typed in (where it starts, where it's fully
+// opaque). The map's own skies only (Bungie's levels keep theirs); a sky's indoor fog too (rooms with no sky).
 void xbox_fog(Job &job) {
     const Config &cfg = job.cfg;
     if (cfg.xbox_fog == 1 || job.analysis) return;
@@ -6800,22 +6802,31 @@ void xbox_fog(Job &job) {
             double density = tagfile::get_num(r, fd.c_str()), start = tagfile::get_num(r, fs_.c_str()),
                    opaque = tagfile::get_num(r, fo.c_str());
             if (opaque <= 0 || density <= 0) continue;
-            double nd = density, no = opaque;
+            double nd = density, no = opaque, ns = start;
             if (cfg.xbox_fog == 2 && k == "outdoor") {
                 nd = 1.0;
                 no = std::max(opaque * std::clamp(cfg.xbox_fog_scale, 0.1, 1.0), start + 1.0);
-            } else if (cfg.xbox_fog == 3 && k == "outdoor" && cfg.xbox_fog_distance > 0) {
+            } else if (cfg.xbox_fog == 3 && k == "outdoor") {
                 nd = 1.0;
-                no = std::max(cfg.xbox_fog_distance, start + 1.0);
+                no = cfg.xbox_fog_distance > 0 ? cfg.xbox_fog_distance : opaque;
+                // (a start typed in stays short of the opaque distance: the engine divides by the distance between them)
+                if (cfg.xbox_fog_start >= 0) ns = std::clamp(cfg.xbox_fog_start, 0.0, std::max(0.0, no - 1.0));
+                no = std::max(no, ns + 1.0);
             } else if (density >= 0.9 && density < 1.0) {
                 nd = 1.0;
             }
-            if (nd == density && no == opaque) continue;
+            if (nd == density && no == opaque && ns == start) continue;
             tagfile::set_num(r, fd.c_str(), nd);
             tagfile::set_num(r, fo.c_str(), no);
-            char buf[160];
-            snprintf(buf, sizeof buf, "%s fog fully opaque at %s units (%s m; it was %.0f%% at %s)", kind, fmt_num(no).c_str(),
-                     fmt_num(no * 3.048).c_str(), density * 100, fmt_num(opaque).c_str());
+            if (ns != start) tagfile::set_num(r, fs_.c_str(), ns);
+            char buf[220];
+            if (ns != start)
+                snprintf(buf, sizeof buf, "%s fog from %s to %s units, fully opaque there (%s to %s m; it was %.0f%% from %s to %s)",
+                         kind, fmt_num(ns).c_str(), fmt_num(no).c_str(), fmt_num(ns * 3.048).c_str(), fmt_num(no * 3.048).c_str(),
+                         density * 100, fmt_num(start).c_str(), fmt_num(opaque).c_str());
+            else
+                snprintf(buf, sizeof buf, "%s fog fully opaque at %s units (%s m; it was %.0f%% at %s)", kind, fmt_num(no).c_str(),
+                         fmt_num(no * 3.048).c_str(), density * 100, fmt_num(opaque).c_str());
             what += (what.empty() ? "" : ", ") + std::string(buf);
         }
         if (what.empty() || !et.save(ed / from_u8(sky))) continue;
