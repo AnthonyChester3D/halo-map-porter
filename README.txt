@@ -112,6 +112,35 @@ Use this for a map you already have as a .map file.
 5. Click Convert. Progress shows in the log box. When it's done, use
    "Open output folder" or "Open report".
 
+Unpack (Xbox): for a map you'll fine-tune on the Xbox tab, click Unpack
+first. It extracts the map's tags (or reuses the ones extracted before:
+extracting only ever happens once per map file) and prepares them for the
+Xbox with the options as they are, the way a conversion does, but doesn't
+build the map. While it's at it, it measures the map for the Xbox tab's
+windows from those same tags (Weapons & vehicles, when no picks are set;
+Level; LODs), so they open on it straight away instead of preparing the
+map themselves. Then go through the Xbox tab and its windows, and click
+Convert:
+- When the map file and every option the tags were prepared with are as
+  they were (the Xbox tab's options, your weapons & vehicles picks, the
+  Level window's choices, the models' choices in the LODs window), Convert
+  builds from the unpacked tags: no preparing again. The map is the same
+  one a conversion from scratch makes; the log says it's building from
+  them, and the report keeps what preparing them changed.
+- When any of those changed, Convert prepares the map again with them (it
+  can't know what else a change touches), as it always has.
+The windows use the last unpacked (or converted) tags even after you
+change options: the LODs window does the models' levels of detail and
+trims again on them with the options now (seconds) when those changed;
+the Weapons & vehicles window measures them with the models done again
+the same way. Only options that change which tags the map has (the Xbox's
+own weapons and vehicles, vehicle slots, custom weapon choices, keeping
+every vehicle, animation compression) make them prepare the map again.
+What was unpacked is remembered when the app closes (the tags stay in
+the cache folder's work\convert until the next conversion or Unpack).
+Precipice, on a 2-core PC: a conversion 57 s; Unpack 25 s (17 s prepared,
+8 s measured), then Convert 23 s.
+
 The first conversion to Custom Edition takes about a minute longer than
 later ones, because the app reads the stock tags from your Custom Edition
 maps once and caches them.
@@ -419,6 +448,61 @@ game, the app rewrites the map's scripts for that game:
 The log lists every change as [scripts] lines with how many times it
 happened, so you can check that nothing important was lost.
 
+The scripts window ("Scripts...", top right of the Xbox tab): the map's
+scripts to read and edit, for the map "Map" shows (the Convert tab's map
+or the Build tab's scenario).
+  - "Show" picks what the big box shows: your scripts (edit them there),
+    "As the Xbox gets them" (the same, converted the way the Xbox build
+    converts them, with the list of changes below it; read-only), or "The
+    map's own" (as Invader gets them back out of the map; read-only). A
+    map's own scripts are read in a second or two (only its scenario tag is
+    taken out of the map); a Build tab scenario's are its data folder's
+    .hsc files, or its tag's when it has none.
+  - Save keeps your version for this map, in the app's folder
+    (%LOCALAPPDATA%\HaloMapPorter\scripts, "Open folder" shows it). From
+    then on every conversion or build of the map, for any game, compiles
+    your version instead of the map's own, converted for that game as the
+    map's are. Saving text that's the same as the map's keeps nothing.
+    "Back to the map's" throws your version away.
+  - Convert after editing doesn't prepare the map again: the tags Unpack
+    (or a conversion) prepared get your scripts as they are now, and the
+    map is built from them (the same map a conversion from scratch makes).
+    The LODs window's "Build the map" does the same.
+  - A map without scripts can be given some: write them in the box (it
+    starts as an empty scripts.hsc) and Save.
+  - Check (and Save) say what stops the scripts being read at all, with
+    the line: a ( never closed, a ) too many, a " not closed on its line,
+    something outside any (script ...) or (global ...). The build itself
+    checks them against the map: a trigger volume, object, flag or tag
+    the map doesn't have, or a wrong argument, stops it with the file,
+    line and the line's text in the log.
+  - Names in a script (kill_volume, hog1, a cutscene flag, an AI
+    encounter) are the names they have in the scenario, given in Sapien
+    (trigger volumes: Game data > Trigger volumes) and shown in Guerilla.
+  - Keys: Ctrl+F find, F3 find the next, Ctrl+G go to a line, Ctrl+S save,
+    Tab indents (4 spaces).
+
+Old network tricks (Xbox, noted in the log and the scripts window): Halo
+PC's netcode sends its clients the host's units and items, but not what the
+host's scripts do with devices, nor which console is the host, so maps made
+for it signal with units placed out of play. A vehicle no client has tells
+a script it runs on the host ("does it exist": unit_get_health is -1 for
+none); the host teleports a vehicle onto a biped, and every console's
+scripts wait for that biped's death, which is sent. The original Xbox's
+system link runs the same game on every console, and OpenCE places a map's
+objects on every console (each one counts as the host), so on the Xbox
+these tricks do nothing. The log says which units are only there for one
+and what the scripts do with them ("[scripts] network trick, potential
+saving"): the scripts can do without them (rewrite them in the scripts
+window) and the units can go. Precipice (Custom Edition and MCC): 3
+Warthogs and 2 cyborgs under the map (z -165) sync its purple beam and
+pick the host; its beam can run from the game's clock instead (the same
+on every console), as Deathtrap's warthogs do. Dogs of War: a Warthog in
+a far corner picks the host. A game type trick (bipeds out of play that a
+gametype-only spawn kills, so the scripts know the game type: Coldsnap's
+ctf, slayer and race) is noted too, but it stays: Halo 1's scripts can't
+ask the game type, and it works on every console.
+
 XBOX TAB: VEHICLE SLOTS AND PC WEAPONS
 All of this was tested on original Xbox hardware and the Halo 1 decomp.
 
@@ -550,13 +634,32 @@ Levels of detail (LODs)
   reused. The log's [heavy] line names each model with its triangles as
   made > now, and how much tag memory that saved; in the LODs window, "As
   the map made it" swaps the original back in, to compare.
+  First-person weapons: a first-person model is drawn as the game draws
+  it in first person, posed by every frame of its weapon's first-person
+  animations (idle counted most, then firing; each overlay, like turning
+  and moving, on the idle pose), through a view wider than any field of
+  view (110 x 80 degrees), its opaque parts hiding what's behind them.
+  The triangles that are never on screen (the back of a rocket tube, the
+  side of a stock off the edge of the screen, insides) are taken out,
+  even from a model within its budget, and then the ones seen least are
+  simplified first (the side facing you is kept closest to its shape).
+  In a model within its budget, they only go when they're at least 5%
+  of it; a triangle next to one that's seen counts as seen. A
+  first-person model that's also its weapon's model in the world (some
+  tagsets draw one model for both) is left whole: it's seen from every
+  side there. The [heavy] line says how many triangles were never on
+  screen. Measurements are kept with the app's other results and reused.
+  Precipice's CMT weapons (with "Use the Xbox's own weapons, vehicles and
+  player model" off): the rocket launcher's 7,298 > 3,032 (623 never on
+  screen), the shotgun's 6,920 > 2,999 (794), the plasma rifle's 8,510 >
+  4,359 (522).
   Precipice, as made > trimmed (harder; Bungie's density): beam cannon
-  15,327 > 5,156 (2,548; 1,729), its first-person model 15,331 > 8,203
-  (5,162; 3,258), the damaged chaingun warthog 8,580 > 5,435 (3,994;
-  1,973), and with "Use the Xbox's own weapons, vehicles and player
-  model" off, its player model 7,483 > 6,543 (4,529; 3,000), which then
-  gets lower-detail versions too. Tag memory saved: 596 KB (822 KB;
-  1.0 MB).
+  15,327 > 5,156 (2,548; 1,729), its first-person model 15,331 > 5,321
+  (3,455; 3,259; 1,414 never on screen), the damaged chaingun warthog
+  8,580 > 5,435 (3,994; 1,973), and with "Use the Xbox's own weapons,
+  vehicles and player model" off, its player model 7,483 > 6,543 (4,529;
+  3,000), which then gets lower-detail versions too. Tag memory saved:
+  681 KB (875 KB; 1.0 MB).
   Bungie's density: every stock model's most detailed triangles against
   its size (the diagonal of the box around it). Volume doesn't predict
   them: a sniper rifle is about five times a pistol's length and has
@@ -708,15 +811,20 @@ Levels of detail (LODs)
   levels of their own, so each keeps its shape.
   Characters get them too: as when trimming (see Bones above), every
   vertex keeps its bones, so they bend as before at every distance.
+  Cut-out cards (leaves, boughs, grates, fences: parts whose shader cuts
+  holes with its texture's alpha) stay as made in every version: a
+  card's corners can't move without cutting off what's drawn on it, so a
+  tree's leaves would thin out or lose their tops in the distance. The
+  rest of the model (a trunk) is simplified as usual, and the model only
+  gets lower-detail versions when its lowest is still a tenth lighter
+  than as made in all.
   Left alone: first-person models, models whose shape needs most of their
-  triangles, the models listed in skip.txt (below), and stock models
-  unless "Also make and use LODs for Bungie's models" is ticked. Precipice
-  with it: its pines, tree_pine 522 > 448 > 314 (17 on the map) and
-  tree_pine_tall 541 > 467 > 308 (58), about 0.2 MB of tag memory with
-  Bungie's rocket launcher and monitor. They're already lean (each bough
-  a few flat cards), so it saves little: from the map's 97 spawn points
-  the tall pines are always 30 pixels across or more, so they never get
-  their low version, and the pines draw about 12% fewer triangles in all.
+  triangles, models that are mostly cut-out cards, the models listed in
+  skip.txt (below), and stock models unless "Also make and use LODs for
+  Bungie's models" is ticked. Deathtrap: tree_big 2,479 > 2,200 > 1,953
+  (its trunk; 8 on the map), tree_leafycover_mid left as made. Precipice
+  with Bungie's: tree_pine 522 > 441 (17 on the map) and tree_pine_tall
+  left as made, with Bungie's rocket launcher and monitor.
   A model's own choice in the LODs window comes first: made whatever the
   Xbox tab says and however few triangles it has, aiming at the medium
   and low triangles you give (allowed to move the shape up to 5% and 10%
@@ -785,7 +893,9 @@ Levels of detail (LODs)
   have as it was.
   "LODs..." (Xbox tab, beside "Level...") opens the window before any map
   is built, for the map the Xbox tab's "Map" names (see "Which map the
-  Xbox tab's windows are for"): on the last conversion of it with the Xbox tab as it is,
+  Xbox tab's windows are for"): on the last conversion or Unpack of it with
+  the Xbox tab's weapon and vehicle options as they are (its models done
+  again first, in seconds, when the "Heavy models" or LOD options changed),
   or else the map is prepared as far as the window (the tags, the models'
   levels of detail and trims; no build, so it takes about a third of a
   conversion) and the window opens on that. Its button then says "Build
@@ -922,9 +1032,9 @@ The map's own level
   level (levels\test\bloodgulch, levels\a10...). The log says "[keep]".
 
 Which map the Xbox tab's windows are for ("Map", Xbox tab)
-  The Weapons & vehicles, Level and LODs windows work on one map: the
-  Convert tab's map or the Build tab's scenario, whichever "Map" at the top
-  of the Xbox tab shows. The rest of the Xbox tab applies to both tabs.
+  The Scripts, Weapons & vehicles, Level and LODs windows work on one map:
+  the Convert tab's map or the Build tab's scenario, whichever "Map" at the
+  top of the Xbox tab shows. The rest of the Xbox tab applies to both tabs.
   "Map" follows what you do, not which tab you last looked at (clicking
   through the tabs changes nothing): picking a map on the Convert tab, or
   converting one for the Xbox, makes it the Convert tab's; picking a
@@ -966,9 +1076,11 @@ Weapons & vehicles window (Xbox)
   own (Keep or None).
   Measuring takes about as long as a conversion (the app prepares the map and
   builds a test copy, then reads back what each part takes), unless the map
-  was just converted (or prepared for the LODs window) with the Xbox tab as
-  it is and no picks: then it's measured from the tags that conversion
-  prepared, in seconds (Precipice: 13 s instead of a minute). A conversion for
+  was converted or unpacked (or prepared for the LODs window) with the Xbox
+  tab's weapon and vehicle options as they are and no picks: then it's
+  measured from the tags that prepared (the models done again with the
+  "Heavy models" and LOD options now), in seconds (Precipice: 8 s instead
+  of a minute). Unpack measures it on the way. A conversion for
   the Xbox that doesn't fit (memory or file size) measures the map on the way,
   from the tags it already prepared, so the window opens right away after it
   (this happens when no picks are set yet; with picks, the earlier measurement
@@ -1019,7 +1131,8 @@ Level reflections, fog, scenery, weather and more: the "Level..." window (Xbox)
   scenery and weather (see "Fog", "Sky", "Effects", "Tiny scenery" and
   "Weather" below).
   Measuring prepares the map as for a conversion without building it
-  (seconds to a minute).
+  (seconds to a minute), unless a conversion or Unpack (Convert tab) of the
+  map measured it already: then the window opens on that.
   - When converting: keep every reflection (the default), drop the
     suggested ones (the ones that cost the most passes for how little they
     show, until the level costs about what Sidewinder does: cheaper, but
@@ -1126,6 +1239,20 @@ Fog (Xbox)
   where it starts (0: at the camera) and where it's fully opaque (nearer or
   farther than the map's). The start stays short of the opaque distance.
   The map's own skies only; Bungie's levels keep theirs.
+  Where the end lands matters for what stands round the level: the fog is
+  by distance in front of the camera, not distance away, and past its end
+  the sky shows, not the fog's color. A treeline, cliffs or mountains that
+  are partly nearer than the end and partly farther are cut off along a
+  line, and the line moves as you turn (what's straight ahead is cut
+  first; the same trees at the picture's sides are nearer in front of the
+  camera, so they're drawn). Deathtrap's treeline cards
+  (deathtrap_treeline_moving) stand 142 to 346 units from where players
+  play: with the end at 140, their tops go when you look straight at them
+  and come back as you turn. The Level window's status line says when the
+  end runs through something like that, and how far to move it: under
+  109 units the treeline is never drawn, past 357 it's always whole. The
+  log's [fog] line says it too. (The level's own walls round players are
+  cut wherever the fog ends; only what stands past them is named.)
 
 Sky (Xbox, "Level..." window)
   The Xbox draws the sky first in every frame, over the whole view, before
@@ -1285,6 +1412,25 @@ Showcase flythroughs (Xbox, "Level..." window)
   - circling its CTF flags and power items (rocket launchers, sniper
     rifles, fuel rods, flamethrowers, overshields, camouflage): a slow
     100-degree arc a few units off and above, looking at it;
+  - along the routes its game types give players: from one CTF flag to
+    the other, between two King of the Hill hills (the two farthest apart
+    the camera can fly between), between two oddball spawns, and round
+    the race's points in order (its first 35 seconds on a long race). The
+    camera flies through open air a couple of units over the ground,
+    round the walls in its way (a route found over every floor of the
+    area players play in), looking ahead along the way as far as it's in
+    view, and over the last few units at where it's going. Routes that
+    would only stare at walls are left out, as are places only a
+    teleporter reaches (Precipice's flags);
+  - the vehicles a game type spawns, where two or more stand together:
+    beside them, moving along the line they stand in (Blood Gulch's
+    Scorpions), or circling them when they're in a bunch;
+  - flying over the level looking straight down, the camera moving
+    sideways across where players play: as high as the level's air goes
+    (up to 36 units over them), only where nothing is over the camera and
+    the whole picture is the level (no sky, nothing past its edge), and
+    over ground about as far below as it's high rather than the bottom of
+    a pit;
   - looking down on a flag, a power item or the middle of where players
     are, from 5 to 10 units above and 7 to 18 off to the side, moving a
     little way round it (these may be outside where players can go);
@@ -1304,10 +1450,10 @@ Showcase flythroughs (Xbox, "Level..." window)
   around where players are (a few units past it across, from their feet
   to a few units over their heads). On a small map the shots go closer
   together, and gliding and rising shots must look out at least 6 and 8
-  units, not into a wall. Deathtrap gets 8 shots (80 seconds), Precipice
-  11 (128). The log's [showcase] line says what was written; a
-  showcase.txt in the map folder that the app didn't write (its first
-  line doesn't name Halo Map Porter) is kept.
+  units, not into a wall. Deathtrap gets 12 shots (110 seconds),
+  Precipice 16 (222), Blood Gulch 16 (212). The log's [showcase] line
+  says what was written; a showcase.txt in the map folder that the app
+  didn't write (its first line doesn't name Halo Map Porter) is kept.
   "Showcase flythrough..." (top right of the Level window) swaps the list
   for the shots: select one to go to its start and see its path (cyan),
   its keys (yellow) and what it looks at (magenta); grey boxes are the
@@ -1326,18 +1472,24 @@ Showcase flythroughs (Xbox, "Level..." window)
     the last), "Remove it" to take it out (without its first key the shot
     starts at the next one).
   - Orbit: "New orbit here" makes a shot circling what's in the middle of
-    the picture (a surface or an object), looking at it, starting from
-    your side of it: radius units from it across, height units above it,
-    turning that many degrees (360 a whole circle; negative: clockwise),
-    in 12 seconds (Seconds changes it). With an orbit selected, the boxes
-    change it (and its Seconds); moving its keys one by one makes it a
-    shot of keys of its own.
+    the picture (a surface or an object), looking at it, passing your
+    side of it halfway through (it starts half the turn before, and the
+    picture stays where you were): radius units from it across, height
+    units above it, turning that many degrees (360 a whole circle;
+    negative: clockwise), in 12 seconds (Seconds changes it). With an
+    orbit selected, the boxes change it (and its Seconds) round the same
+    middle; moving its keys one by one makes it a shot of keys of its
+    own.
   - A shot you make or change is checked as the made ones are, and the
     line above the list says when the camera goes through a surface,
     leaves the level, or loses sight of what it looks at.
   Delete, move up and down, and "Make again" (back to shots made from the
   level). Once you change a shot they're this map's own, kept with its
-  other Level choices, and every conversion writes them. An orbit is
+  other Level choices, and every conversion writes them. "Save to map
+  folder" writes them now, without converting: into showcase.txt in the
+  converted map's folder (the one with its info.txt, so the map has to
+  have been converted into it once), as a conversion would, and keeps
+  them for the next conversion too (even if you then Cancel the window). An orbit is
   written as its keys, with a "# orbit" comment after its look line (the
   Level window reads it to change it again; Halo 1 Unlimited skips it).
   The file (what Halo 1 Unlimited reads; plain text, so it can be edited

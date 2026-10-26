@@ -7,13 +7,38 @@
 // different bones (a wheel stays separate from the body). The result is stored as Halo's triangle strips.
 #pragma once
 #include <filesystem>
+#include <functional>
+#include <map>
 #include <string>
+#include <vector>
 
 namespace lod {
+
+// How a model's shader draws (by its tag path with extension): opaque, cut out where its texture's alpha is half or
+// less (alpha-tested, and the texture has see-through parts: leaves, grates), or blended (a transparent shader, an
+// alpha-blended decal); from both sides or one. `known` false: its tag couldn't be read.
+struct ShaderLook {
+    enum Kind { kOpaque, kCutOut, kBlended };
+    Kind kind = kOpaque;
+    bool two_sided = false;
+    bool known = false;
+};
+using LookUp = std::function<ShaderLook(const std::string &shader_tag)>;
 
 struct Settings {
     std::filesystem::path library;   // the LOD library folder (empty: make every time, keep nothing)
     int min_triangles = 1000;        // models with fewer (most detailed version) are left alone
+    // The model's shaders (none given: every part is simplified). Parts drawn cut out (leaf cards, grates) stay
+    // exactly as made in every version: a card is a few triangles whose outline is the texture's, and taking a corner
+    // off it takes off the leaves there (the tops of Deathtrap's trees went at a distance).
+    LookUp look;
+};
+
+// How much of the time each triangle of a first-person model is on screen (fpview.hpp): per geometry (its index in the
+// model), per part, per triangle in the part's order (its strip read as triangles); 0 never.
+struct Seen {
+    std::map<int, std::vector<std::vector<float>>> geometry;
+    std::string about;   // what was measured, for the log ("12 animations, 940 frames")
 };
 
 struct Result {
@@ -47,6 +72,9 @@ Result add_lods(const std::filesystem::path &model, const double cutoffs[5], con
 // dropped. Saved in place; the trimmed geometries are kept in the library (.top files) and reused.
 // `density` > 0: the budget is that many times Bungie's for the model's kind and size instead (stock_triangles,
 // `kind`), and a model is only trimmed when it's over its budget by more than `slack` times.
+// `seen` (a first-person model): what's never on screen in its animations is taken out first (even within its budget),
+// keeping the edge between what shows and what doesn't as it is; then, to get to its budget, what's seen least of the
+// time (under 15%) may move three times as far before what's seen more moves at all.
 struct TrimSettings {
     int budget = 4000;
     double max_change = 0.004;
@@ -54,11 +82,13 @@ struct TrimSettings {
     double density = 0;
     char kind = 's';
     double slack = 1.0;
+    const Seen *seen = nullptr;
 };
 struct Trim {
     bool changed = false;
     std::string why;                 // nothing changed: why
     int before = 0, after = 0;       // most detailed triangles, as made and now
+    int unseen = 0;                  // of those taken out, never on screen (`seen`)
     int budget = 0;                  // what it aimed at
     size_t xbox_bytes_saved = 0;     // vertex and triangle data the Xbox map no longer holds (32-byte vertices, strips)
     bool from_library = false;

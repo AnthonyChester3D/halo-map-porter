@@ -116,6 +116,9 @@ struct Mark {
     float p[3] = {0, 0, 0};
     int32_t kind = kFlag;
     char name[32] = {};
+    // A game type place's team index: a CTF flag's team, a hill's number (a hill is the flags with one number), a race
+    // point's place in the race, an oddball spawn's number.
+    int32_t index = 0;
 };
 struct Box { float c[3] = {0, 0, 0}, axis[2][2] = {{1, 0}, {0, 1}}, half[3] = {0, 0, 0}; };   // (axes: turned about z only)
 // The objects in the level when a game starts, drawn where they are: what the scenario places (scenery, machines,
@@ -195,6 +198,20 @@ struct Preview {
 // spots, and its preview. False with `why` when it can't be read.
 bool analyze(const std::filesystem::path &bsp, const std::filesystem::path &scenario, const Find &find, Analysis &a,
              Preview &p, std::string *why = nullptr);
+
+// Upright surfaces fully opaque fog cuts through as players see them: past the fog's opaque distance the engine draws
+// nothing (render.c moves the view's far end there) and the sky shows, so a treeline, a cliff or mountains round the
+// level that's partly nearer than `end` from where players stand and partly farther is cut off along a line, one that
+// moves as the camera turns (the cut is by distance in front of the camera, so it shows at the picture's sides out to
+// 1/0.77 of the end). Per shader (its tag): the distances across from where players stand to its upright parts'
+// nearest and farthest (medians over the measured views), and their area; the backdrop ones (at least half the end
+// away: the level's own walls round players are cut wherever the fog ends) that the end runs through, biggest first
+// (at most `most`).
+struct FogCut { std::string tag; double nearest = 0, farthest = 0, area = 0; };
+std::vector<FogCut> fog_cuts(const Preview &p, double end, size_t most = 3);
+// For people: "the fog's end (140 units) runs through deathtrap_treeline_moving (137 to 346 units from where players
+// stand): ..." ("" when `cuts` is empty).
+std::string fog_cut_text(const std::vector<FogCut> &cuts, double end);
 
 // Which reflections to drop: ones that barely show, then, while the level costs more than stock ones
 // (stock_cost()), the ones that show least for what they cost. Sets Shader::suggested.

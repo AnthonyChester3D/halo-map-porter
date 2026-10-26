@@ -3,6 +3,7 @@
 #include "animcomp.hpp"
 #include "collision.hpp"
 #include "effects.hpp"
+#include "fpview.hpp"
 #include "inflate.hpp"
 #include "lod.hpp"
 #include "perf.hpp"
@@ -19,6 +20,7 @@
 #include <climits>
 #include <cstdint>
 #include <cstdio>
+#include <array>
 #include <cstring>
 #include <cmath>
 #include <chrono>
@@ -346,6 +348,12 @@ struct Job {
     std::string only_model;  // xbox_lods: this model alone (the LODs window's "Make again")
     bool had_picks = false;  // update: the conversion used weapons & vehicles picks
     bool textures_fitted = false;   // the texture memory target was tried (once is enough: "Update the map" keeps it)
+    // A build cut the prepared tags down to fit (textures halved, kept vehicles dropped): building them again isn't
+    // what a conversion from scratch would do with other options (build_prepared won't).
+    bool cut = false;
+    // The scripts window's edits the Xbox build's scripts came from (user_scripts_hash; "" the map's own): "Update the
+    // map" and Convert from prepared tags bring them in again when they changed since (xbox_scripts).
+    std::string scripts_hash;
     struct CollisionChange {   // a model whose collision changed, for that window too
         std::string model, name, text;   // its model (tag), the object it's for, how it changed
         char kind = 's';
@@ -1194,6 +1202,10 @@ static std::string thousands(long long v);
 static std::vector<std::string> performance_lines(Job &job);
 static LodView make_lod_view(Job &job, const std::string &map_name);
 static void convert_scripts(Job &job, const fs::path &dir, Game target);
+static void xbox_scripts(Job &job, const fs::path &xsrc);
+static std::string user_scripts_hash(const Config &cfg);
+static void pc_user_scripts(Job &job, const std::string &scenario);
+static void note_script_tricks(Job &job, const fs::path &xsrc);
 bool prepare_models_for_pc(Job &job, std::string &err);
 
 void keep_user_edits(Job &job);
@@ -1545,6 +1557,8 @@ static void save_update(Job &job, const fs::path &output, const fs::path &lods, 
     line("from", std::to_string((int)job.from));
     line("picks", (job.update ? job.had_picks : !job.cfg.xbox_replace.empty()) ? "1" : "0");
     line("textures_fitted", job.textures_fitted ? "1" : "0");
+    line("cut", job.cut ? "1" : "0");
+    line("scripts", job.scripts_hash);
     for (auto &a : job.extra) line("extra", a);
     for (auto &d : job.lod_deps) line("dep", d);
     int n = 0;
@@ -1587,6 +1601,8 @@ static bool load_update(Job &job, const fs::path &file, UpdateFile &u, std::stri
         else if (k == "from") job.from = (Game)std::atoi(v.c_str());
         else if (k == "picks") u.picks = job.had_picks = v == "1";
         else if (k == "textures_fitted") job.textures_fitted = v == "1";
+        else if (k == "cut") job.cut = v == "1";
+        else if (k == "scripts") job.scripts_hash = v;
         else if (k == "extra") job.extra.push_back(v);
         else if (k == "dep") job.lod_deps.push_back(v);
         else if (k == "made") job.model_created.insert(from_u8(v));
@@ -1656,6 +1672,8 @@ static void keep_collision(LodView &now, const LodView &before) {
     }
 }
 
+static void level_extras_for_update(Job &job);
+
 Result run_build(Job &job, const std::string &scenario, const fs::path &output, bool share) {
     job.scenario = scenario;
     Result r;
@@ -1677,6 +1695,16 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
         xbox_scenery_sizes(job, deps);
         xbox_lods(job, deps);
         xbox_scenery(job, deps);   // (its copies were taken out above with the levels of detail's)
+        if (!job.analysis && !cfg.xbox_prepare_only) level_extras_for_update(job);
+        // The scripts window's edits changed since the tags were prepared (or were taken back): the scripts again, as
+        // they are now (the rest of the map as prepared).
+        if (!job.analysis && !cfg.xbox_prepare_only && user_scripts_hash(cfg) != job.scripts_hash) {
+            job.log(job.scripts_hash.empty() && !user_scripts_hash(cfg).empty()
+                        ? "Bringing in your edited scripts (the scripts window's)..."
+                        : user_scripts_hash(cfg).empty() ? "Going back to the map's own scripts (your edits were taken back)..."
+                                                         : "Bringing in your edited scripts as they are now...");
+            xbox_scripts(job, job.source);
+        }
     } else {
         keep_map_level_tags(job);
         std::string err;
@@ -1734,7 +1762,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
     if (job.target == Game::Xbox && !job.analysis && !job.lod_deps.empty() && !cfg.level_shaders_only)
         r.update = job.work / "update.txt";
     if (cfg.xbox_prepare_only && job.target == Game::Xbox && !job.analysis) {   // (as far as the LODs window)
-        job.log("Prepared for the LODs window: the map isn't built yet (the window's \"Build the map\" builds it).");
+        job.log("Prepared: the map isn't built yet (Convert, or the LODs window's \"Build the map\", builds it from these tags).");
         r.ok = true;
         return r;
     }
@@ -1933,6 +1961,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
                         g_cutout_textures = 0;
                         size_t saved = shrink_textures_to_fit(job, need, n, false);
                         if (saved > 0) {
+                            job.cut = true;
                             texture_rounds++;
                             snprintf(buf, sizeof buf, "[textures] %.1f MB of textures is over the %.1f MB target; halved %d of "
                                      "your textures (saved %.1f MB%s)", use.texture_mb, budget, n, saved / 1048576.0,
@@ -1986,6 +2015,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
             g_cutout_textures = 0;
             size_t saved = shrink_textures_to_fit(job, need, n);
             if (saved > 0) {
+                job.cut = true;
                 shrink_rounds++;
                 job.note("[shrink] " + tb[1].str().substr(0, 5) + " MB is over the limit; halved " + std::to_string(n) +
                          " of your textures (saved " + std::to_string(saved / 1048576.0).substr(0, 4) + " MB" +
@@ -2027,6 +2057,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
         }
         if (std::regex_search(out, tb, tag_space) && job.target == Game::Xbox) measure_for_window();
         if (std::regex_search(out, tb, tag_space) && job.target == Game::Xbox && drop_kept_vehicles(job)) {
+            job.cut = true;
             cmd = make_cmd();
             continue;
         }
@@ -5838,6 +5869,50 @@ static bool analyze_level_kept(Job &job, const fs::path &bsp, const fs::path &sc
     return true;
 }
 
+// A build from prepared tags (job.update): the showcase flythrough and perf tour a conversion makes while it measures
+// the level (xbox_reflections, which isn't done again), made from the level as the prepared tags have it, so the map
+// folder gets them as from a conversion. Your own showcase needs no measuring.
+static void level_extras_for_update(Job &job) {
+    const Config &cfg = job.cfg;
+    bool show = cfg.xbox_showcase, tour = cfg.write_perf_tour;
+    if (show && !cfg.xbox_showcase_text.empty()) {
+        showcase::Showcase own;
+        if (showcase::read(cfg.xbox_showcase_text, own) && !own.shots.empty()) {
+            job.showcase = cfg.xbox_showcase_text;
+            char b[120];
+            snprintf(b, sizeof b, "%zu shots, %.0f seconds", own.shots.size(), own.length());
+            job.showcase_note = std::string("your own from the Level window (") + b + ")";
+            show = false;
+        }
+    }
+    if (!show && !tour) return;
+    std::string scen = job.scenario + ".scenario";
+    fs::path sdir = job.owner(scen);
+    tagfile::Tag stag;
+    if (sdir.empty() || !stag.load(sdir / from_u8(scen))) return;
+    lshade::Find find = [&job](const std::string &t) {
+        fs::path o = job.owner(t);
+        return o.empty() ? fs::path() : o / from_u8(t);
+    };
+    tagfile::Block bsps = stag.root().block("structure bsps");
+    std::string b = bsps.size() ? bsps[0].ref("structure bsp") : std::string();   // (the first level: the one a match loads)
+    fs::path own = b.empty() ? fs::path() : job.owner(b);
+    if (own.empty()) return;
+    lshade::Analysis a;
+    lshade::Preview p;
+    std::string why;
+    if (!analyze_level_kept(job, own / from_u8(b), sdir / from_u8(scen), find, a, p, &why)) return;
+    a.map_name = fs::path(from_u8(job.scenario)).filename().u8string() + (bsps.size() > 1 ? " - " + fs::path(from_u8(b)).stem().u8string() : "");
+    if (tour) job.perf_tour = make_perf_tour(a, p, stag.root(), a.map_name);
+    if (show) {
+        std::string report;
+        showcase::Showcase made = showcase::generate(p, &report);
+        if (!made.shots.empty())
+            job.showcase = showcase::write(made, fs::path(from_u8(job.scenario)).filename().u8string(), "generated from the level");
+        job.showcase_note = "made from the level: " + report;
+    }
+}
+
 void xbox_reflections(Job &job) {
     const Config &cfg = job.cfg;
     if (job.analysis) return;
@@ -6396,6 +6471,129 @@ static std::map<std::string, int> models_on_map(Job &job, std::map<std::string, 
     return per_model;
 }
 
+// How a model's shader draws (lod.hpp ShaderLook), by its tag path; a model's reference may leave out which kind of
+// shader it is, and each kind is tried. Cut out: drawn alpha-tested (as find_alpha_tested has it) with a texture that
+// has see-through parts (a swizzled one, which this can't read, counts as one).
+static lod::ShaderLook shader_look(Job &job, const std::string &tag) {
+    lod::ShaderLook l;
+    static const char *const kinds[] = {".shader_model", ".shader_environment", ".shader_transparent_chicago",
+                                        ".shader_transparent_chicago_extended", ".shader_transparent_generic",
+                                        ".shader_transparent_glass", ".shader_transparent_meter", ".shader_transparent_plasma",
+                                        ".shader_transparent_water"};
+    std::string path = tag;
+    fs::path own = job.owner(path);
+    if (own.empty() || !fs::is_regular_file(own / from_u8(path)))
+        for (const char *k : kinds) {
+            own = job.owner(tag + k);
+            if (!own.empty()) { path = tag + k; break; }
+        }
+    if (own.empty()) return l;
+    std::string ext = fs::path(from_u8(path)).extension().u8string();
+    if (ext == ".shader_transparent_glass" || ext == ".shader_transparent_meter" || ext == ".shader_transparent_plasma" ||
+        ext == ".shader_transparent_water") {   // (blended, both sides: nothing more to read)
+        l.known = l.two_sided = true;
+        l.kind = lod::ShaderLook::kBlended;
+        return l;
+    }
+    tagfile::Tag t;
+    if (!t.load(own / from_u8(path))) return l;
+    l.known = true;
+    tagfile::Elem r = t.root();
+    auto see_through_map = [&](std::string bm) {
+        if (bm.empty()) return false;
+        if (fs::path(from_u8(bm)).extension() != ".bitmap") bm += ".bitmap";
+        fs::path bo = job.owner(bm);
+        tagfile::Tag b;
+        if (bo.empty() || !b.load(bo / from_u8(bm))) return true;   // (unreadable: as if it had)
+        tagfile::Block bd = b.root().block("bitmap data");
+        if (!bd.size()) return true;
+        int w = (int)bd[0].integer("width"), h = (int)bd[0].integer("height"), fmt = (int)bd[0].integer("format");
+        if ((long long)bd[0].integer("flags") & 8) return true;   // (swizzled)
+        std::string pix = b.root().data("processed pixel data");
+        size_t off = (size_t)bd[0].integer("pixel data offset"), n = mip_bytes(w, h, fmt);
+        std::vector<unsigned char> rgba;
+        if (!n || off + n > pix.size() || !decode_level(pix.substr(off, n), w, h, fmt, rgba)) return true;
+        return see_through(rgba);
+    };
+    if (ext == ".shader_model") {
+        long long f = (long long)r.num("shader model flags");
+        l.two_sided = (f & 2) != 0;
+        if (f & 8) l.kind = lod::ShaderLook::kBlended;   // (an alpha-blended decal)
+        else if (!(f & 4) && see_through_map(r.ref("base map"))) l.kind = lod::ShaderLook::kCutOut;
+    } else if (ext == ".shader_environment") {
+        long long f = (long long)r.num("shader environment flags");
+        if ((f & 1) && !(f & 2) && see_through_map(r.ref("bump map"))) l.kind = lod::ShaderLook::kCutOut;
+    } else {
+        l.two_sided = true;
+        l.kind = lod::ShaderLook::kBlended;
+        const char *flags = ext == ".shader_transparent_chicago" ? "shader transparent chicago flags"
+                            : ext == ".shader_transparent_generic" ? "shader transparent generic flags"
+                            : ext == ".shader_transparent_chicago_extended" ? "shader transparent chicago extended flags"
+                                                                            : nullptr;
+        if (flags && ((long long)r.num(flags) & 1)) {   // (alpha tested: cut out, not blended)
+            tagfile::Block maps = r.block(ext == ".shader_transparent_chicago_extended" ? "maps 4 stage" : "maps");
+            if (!maps.size() && ext == ".shader_transparent_chicago_extended") maps = r.block("maps 2 stage");
+            if (maps.size() && see_through_map(maps[0].ref("map"))) l.kind = lod::ShaderLook::kCutOut;
+        }
+    }
+    return l;
+}
+
+// A first-person model as it's seen in its weapon's first-person animations (fpview.hpp), kept between conversions
+// (by the model's, the animations' and its shaders' content). False with `why` when it can't be measured.
+static bool first_person_seen(Job &job, const std::string &model, const std::string &animations, const lod::LookUp &look,
+                              lod::Seen &out, std::string &why) {
+    fs::path mo = job.owner(model), ao = job.owner(animations);
+    if (mo.empty() || ao.empty()) { why = "its first-person animations couldn't be found"; return false; }
+    std::string looks;
+    {
+        tagfile::Tag t;
+        if (t.load(mo / from_u8(model))) {
+            tagfile::Block sh = t.root().block("shaders");
+            for (size_t i = 0; i < sh.size(); i++) {
+                lod::ShaderLook l = look(sh[i].ref("shader"));
+                looks += std::to_string((int)l.kind) + (l.two_sided ? "t" : "o") + (l.known ? "k" : "u") + ",";
+            }
+        }
+    }
+    const std::string key = result_key("first person seen 1\n" + looks, read_all(mo / from_u8(model)) + "\n" + read_all(ao / from_u8(animations)));
+    std::string b, note;
+    if (load_blob(job.cfg, key, b, note) && b.compare(0, 9, "HMPSEEN1\n") == 0) {   // (kept: geometry, parts, triangles' shares)
+        std::istringstream in(b.substr(9));
+        std::getline(in, out.about);
+        int geos = 0;
+        bool ok = (bool)(in >> geos) && geos >= 0 && geos < 1000;
+        for (int g = 0; ok && g < geos; g++) {
+            int id = 0, parts = 0;
+            ok = (bool)(in >> id >> parts) && parts >= 0 && parts < 10000;
+            auto &v = out.geometry[id];
+            v.resize((size_t)std::max(0, parts));
+            for (int p = 0; ok && p < parts; p++) {
+                int n = 0;
+                ok = (bool)(in >> n) && n >= 0 && n < 1000000;
+                v[(size_t)p].resize((size_t)std::max(0, n));
+                for (int k = 0; ok && k < n; k++) ok = (bool)(in >> v[(size_t)p][(size_t)k]);
+            }
+        }
+        if (ok) return true;
+        out = lod::Seen();
+    }
+    auto find = [&](const std::string &tag) { fs::path o = job.owner(tag); return o.empty() ? fs::path() : o / from_u8(tag); };
+    if (!fpview::measure(model, animations, find, look, out, &why)) return false;
+    std::ostringstream o;
+    o << "HMPSEEN1\n" << out.about << "\n" << out.geometry.size() << "\n";
+    for (auto &[id, parts] : out.geometry) {
+        o << id << " " << parts.size() << "\n";
+        for (auto &p : parts) {
+            o << p.size();
+            for (float x : p) o << " " << x;
+            o << "\n";
+        }
+    }
+    store_blob(job.cfg, key, o.str(), "");
+    return true;
+}
+
 // Levels of detail. First, the map's own heavy models (over their kind's budget) get a lighter most detailed version
 // (trimmed: Xbox tab option, on by default), first-person weapons and characters included. Then a model drawn in the
 // world (not first-person) of the map's own with no lower-detail versions gets them made (lod.hpp; Xbox tab option,
@@ -6411,13 +6609,15 @@ static std::map<std::string, int> models_on_map(Job &job, std::map<std::string, 
 void xbox_lods(Job &job, const std::vector<std::string> &deps) {
     job.lod_deps = deps;
     // A model file as it was before this changed it (for "Update the map": done again from there).
+    // (measuring prepared tags, measure_prepared, notes them too: the next build from those tags puts them back)
+    const bool keep = !job.analysis || job.update;
     auto keep_original = [&](const fs::path &file, const std::string &bytes) {
-        if (!job.analysis && !job.model_originals.count(file)) job.model_originals[file] = bytes;
+        if (keep && !job.model_originals.count(file)) job.model_originals[file] = bytes;
     };
     auto editable = [&](const std::string &dep, bool stock_too) {   // (editable_owner, noting the copies it makes)
         bool was = fs::exists(job.fixes / from_u8(dep));
         fs::path ed = editable_owner(job, dep, stock_too);
-        if (!was && !ed.empty() && ed == job.fixes && !job.analysis) job.model_created.insert(job.fixes / from_u8(dep));
+        if (!was && !ed.empty() && ed == job.fixes && keep) job.model_created.insert(job.fixes / from_u8(dep));
         return ed;
     };
     struct Cut { char kind; const char *label; int px[5]; };
@@ -6446,6 +6646,23 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
 
     lod::Settings lod_settings;
     lod_settings.library = !job.cfg.lod_library.empty() ? job.cfg.lod_library : job.cfg.cache_dir / "lod_library";
+    // (how each shader draws: cut-out parts stay as made in every version)
+    std::map<std::string, lod::ShaderLook> looks;
+    lod_settings.look = [&](const std::string &tag) {
+        auto it = looks.find(tag);
+        if (it == looks.end()) it = looks.emplace(tag, shader_look(job, tag)).first;
+        return it->second;
+    };
+    // Each first-person model's animations (its weapon's).
+    std::map<std::string, std::string> fp_animations;
+    for (auto &dep : deps) {
+        if (!has_suffix(dep, ".weapon")) continue;
+        fs::path own = job.owner(dep);
+        tagfile::Tag wt;
+        if (own.empty() || !wt.load(own / from_u8(dep))) continue;
+        std::string m = wt.root().ref("first person model"), a = wt.root().ref("first person animations");
+        if (!m.empty() && !a.empty() && !fp_animations.count(m)) fp_animations[m] = a;
+    }
     // A model's entry in the LODs window (one per model: trimmed, then given LODs or distances, is one entry).
     auto record = [&](const std::string &dep, char kind, const std::string &change) -> LodView::Model & {
         for (auto &m : job.lod_changes)
@@ -6507,7 +6724,7 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
     // as made, or trimmed to the triangles chosen (allowed to move 5% of its size to get there).
     {
         const int mode = job.cfg.xbox_trim_models;
-        bool harder = mode >= 2, by_density = false, by_choice = false, by_setting = false;
+        bool harder = mode >= 2, by_density = false, by_choice = false, by_setting = false, by_first_person = false;
         std::vector<std::string> trimmed, floor;
         size_t saved = 0;
         for (auto &dep : own_models) {
@@ -6539,9 +6756,22 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
                 ts.max_change = fp ? (harder ? 0.0025 : 0.0012) : kind == 'b' ? (harder ? 0.004 : 0.0018) : (harder ? 0.006 : 0.0025);
                 ts.max_units = harder ? 0.015 : 0.006;
             }
+            // A first-person model: what's on screen in its animations, so what never is goes (even within its budget)
+            // and what's seen least is simplified first. Not one that's its weapon's model in the world too (some
+            // tagsets draw the same model in both): other players and the ground see it from every side.
+            lod::Seen seen;
+            bool measured = false;
+            if (fp && kinds.count(dep)) note(dep, "drawn in the world too (its weapon's own model): nothing left out for first person");
+            else if (fp && fp_animations.count(dep)) {
+                std::string why;
+                measured = first_person_seen(job, dep, fp_animations[dep], lod_settings.look, seen, why);
+                if (!measured) note(dep, "not measured in first person: " + why);
+            }
+            if (measured) ts.seen = &seen;
             perf::ModelStats ms = perf::model_stats(own / from_u8(dep));
-            if (!ms.ok || (ts.density <= 0 && ms.triangles <= ts.budget)) continue;
-            if (ts.density > 0 && ms.triangles <= ts.density * lod::stock_triangles(kind, lod::model_size(own / from_u8(dep))) * ts.slack)
+            if (!ms.ok || (!measured && ts.density <= 0 && ms.triangles <= ts.budget)) continue;
+            if (!measured && ts.density > 0 &&
+                ms.triangles <= ts.density * lod::stock_triangles(kind, lod::model_size(own / from_u8(dep))) * ts.slack)
                 continue;   // (within its budget: trim_top would say so too)
             fs::path ed = editable(dep, false);
             if (ed.empty()) continue;
@@ -6559,8 +6789,13 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
                 continue;
             }
             saved += r.xbox_bytes_saved;
-            trimmed.push_back(name_of(dep) + " " + thousands(r.before) + " > " + thousands(r.after) +
-                              (mine ? " (your choice)" : r.after > r.budget * 1.1 ? "" : mode >= 3 ? " (its target)" : " (its budget)"));
+            std::string about = mine ? " (your choice" : r.before <= r.budget * ts.slack ? " (" : r.after > r.budget * 1.1 ? " ("
+                              : mode >= 3 ? " (its target" : " (its budget";
+            if (r.unseen > 0)
+                about += std::string(about.size() > 2 ? "; " : "") + thousands(r.unseen) + " never on screen in its animations";
+            about += ")";
+            trimmed.push_back(name_of(dep) + " " + thousands(r.before) + " > " + thousands(r.after) + (about == " ()" ? "" : about));
+            if (measured) by_first_person = true;
             (mine ? by_choice : mode >= 3 ? by_density : by_setting) = true;
             if (!job.analysis) {
                 job.trim_originals[dep] = std::move(before);
@@ -6574,8 +6809,11 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
             std::string how = by_density ? ", to about 1.5x the triangles Bungie's models of their kind and size have"
                               : by_setting ? (harder ? ", trimmed harder so small details may change" : ", so they look the same")
                                            : ", to the triangles chosen in the LODs window";
+            if (by_first_person)
+                how += "; first-person weapons first lose what's never on screen in their first-person animations, then "
+                       "what's seen least";
             job.note("[heavy] made the most detailed version of " + std::to_string(trimmed.size()) +
-                     (trimmed.size() == 1 ? " heavy model" : " heavy models") + " lighter" + how + " (" + size +
+                     (trimmed.size() == 1 ? " model" : " models") + " lighter" + how + " (" + size +
                      " less of the Xbox's tag memory and map file; triangles as made > now): " + list(trimmed));
         }
         if (!floor.empty())
@@ -6785,6 +7023,7 @@ void xbox_fog(Job &job) {
     tagfile::Block skies = stag.root().block("skies");
     std::set<std::string> done;
     std::vector<std::string> changed;
+    double first_end = 0;   // (the first sky's outdoor fog's opaque distance, once it's fully opaque)
     for (size_t i = 0; i < skies.size(); i++) {
         std::string sky = skies[i].ref("sky");
         if (sky.empty() || !done.insert(sky).second) continue;
@@ -6815,6 +7054,7 @@ void xbox_fog(Job &job) {
             } else if (density >= 0.9 && density < 1.0) {
                 nd = 1.0;
             }
+            if (k == "outdoor" && nd >= 1.0 && first_end <= 0 && i == 0) first_end = no;
             if (nd == density && no == opaque && ns == start) continue;
             tagfile::set_num(r, fd.c_str(), nd);
             tagfile::set_num(r, fo.c_str(), no);
@@ -6837,6 +7077,13 @@ void xbox_fog(Job &job) {
         for (auto &c : changed) list += (list.empty() ? "" : "; ") + c;
         job.note("[fog] made the level's fog fully opaque, so the Xbox draws nothing past it (it moves the view's far end "
                  "there only at full density): " + list);
+    }
+    // What its end cuts through: a treeline or mountains round the level's edge cut off along a line (lshade::fog_cuts).
+    lshade::Analysis la;
+    lshade::Preview lp;
+    if (first_end > 0 && !job.shaders_file.empty() && lshade::load(la, lp, job.shaders_file)) {
+        std::string t = lshade::fog_cut_text(lshade::fog_cuts(lp, first_end), first_end);
+        if (!t.empty()) job.note("[fog] " + t);
     }
 }
 
@@ -9481,6 +9728,96 @@ static void use_map_first_person_hands(Job &job, const fs::path &xsrc) {
     job.note("[xbox-mp] using the map's own first-person arms (" + mh + ") with its own weapons and player" + why);
 }
 
+// ---------------------------------------------------------------- the scripts window's edits
+
+// A folder's .hsc files (not its subfolders'), by name.
+static std::vector<fs::path> hsc_files_in(const fs::path &dir) {
+    std::vector<fs::path> v;
+    std::error_code ec;
+    if (dir.empty()) return v;
+    for (auto it = fs::directory_iterator(dir, ec); !ec && it != fs::directory_iterator(); it.increment(ec))
+        if (it->is_regular_file(ec) && hsc::lower(it->path().extension().u8string()) == ".hsc") v.push_back(it->path());
+    std::sort(v.begin(), v.end());
+    return v;
+}
+
+// The scripts window's edits in use (Config::user_scripts): a hash of their names and text, "" if there are none.
+static std::string user_scripts_hash(const Config &cfg) {
+    std::vector<fs::path> files = hsc_files_in(cfg.user_scripts);
+    if (files.empty()) return "";
+    uint64_t h = 1469598103934665603ull;
+    auto mix = [&](const std::string &t) {
+        for (unsigned char c : t) h = (h ^ c) * 1099511628211ull;
+        h = (h ^ 0x100) * 1099511628211ull;
+    };
+    for (auto &f : files) {
+        std::ifstream in(f, std::ios::binary);
+        mix(hsc::lower(f.filename().u8string()));
+        mix(std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>()));
+    }
+    char b[24];
+    snprintf(b, sizeof b, "%016llx", (unsigned long long)h);
+    return b;
+}
+
+// The scripts window's edits copied into a data folder's scripts folder (`dir`). False if there are none.
+static bool copy_user_scripts(const Config &cfg, const fs::path &dir) {
+    std::vector<fs::path> files = hsc_files_in(cfg.user_scripts);
+    std::error_code ec;
+    if (files.empty()) return false;
+    fs::create_directories(dir, ec);
+    for (auto &f : files) fs::copy_file(f, dir / f.filename(), fs::copy_options::overwrite_existing, ec);
+    return true;
+}
+
+// The Xbox build's scripts, in the work folder's xbox_data and compiled from there (job.extra): the scripts window's
+// edits (Config::user_scripts), else a build's own data folder's, else the map's as invader-recover gets them back
+// out of its scenario tag (in `xsrc`); converted for the Xbox (convert_scripts).
+static void xbox_scripts(Job &job, const fs::path &xsrc) {
+    const Config &cfg = job.cfg;
+    std::error_code ec;
+    std::string out;
+    fs::path xdata = job.work / "xbox_data";
+    fs::path scen_dir = from_u8(job.scenario).parent_path();
+    fs::path data = job.user_data;   // (a build's; "Update the map" knows its tags folder, beside it)
+    if (data.empty() && !job.user_tags.empty() && fs::is_directory(job.user_tags.parent_path() / "data", ec))
+        data = job.user_tags.parent_path() / "data";
+    fs::path user_scripts = data / scen_dir / "scripts";
+    fs::remove_all(xdata, ec);
+    job.extra.clear();
+    job.scripts_hash = user_scripts_hash(cfg);
+    if (!job.scripts_hash.empty()) {
+        copy_user_scripts(cfg, xdata / scen_dir / "scripts");
+        job.log("  Scripts: your edits from the scripts window, instead of the map's own");
+    } else if (!data.empty() && fs::exists(user_scripts, ec)) {
+        fs::create_directories(xdata / scen_dir, ec);
+        copy_tree(user_scripts, xdata / scen_dir / "scripts", true, ec);
+    } else {
+        fs::create_directories(xdata, ec); // invader-recover requires the data folder to exist
+        run_process({u8(tool(cfg, "invader-recover")), "-t", u8(xsrc), "-d", u8(xdata), job.scenario + ".scenario"}, out);
+    }
+    bool any_hsc = false;
+    if (fs::exists(xdata, ec))
+        for (auto &e : fs::recursive_directory_iterator(xdata, ec))
+            if (e.path().extension() == ".hsc") any_hsc = true;
+    if (any_hsc) {
+        convert_scripts(job, xdata, Game::Xbox);
+        job.extra = {"-d", u8(xdata), "-S", "data"};
+    }
+}
+
+// Another game's build with the scripts window's edits (Config::user_scripts): those compiled, converted for it,
+// instead of the map's own (job.extra). Nothing without edits.
+static void pc_user_scripts(Job &job, const std::string &scenario) {
+    std::error_code ec;
+    fs::path sdata = job.work / "script_data";
+    fs::remove_all(sdata, ec);
+    if (!copy_user_scripts(job.cfg, sdata / from_u8(scenario).parent_path() / "scripts")) return;
+    job.log("Scripts: your edits from the scripts window, instead of the map's own");
+    convert_scripts(job, sdata, job.target);
+    job.extra = {"-d", u8(sdata), "-S", "data"};
+}
+
 bool prepare_for_xbox(Job &job, std::string &err) {
     const Config &cfg = job.cfg;
     fs::path xsrc = job.work / "xbox_src";
@@ -9698,24 +10035,8 @@ bool prepare_for_xbox(Job &job, std::string &err) {
     }
 
     // Scripts: PC renamed player_effect_set_max_rumble to ..._vibrate; Xbox only knows rumble.
-    fs::path xdata = job.work / "xbox_data";
-    fs::path scen_dir = from_u8(job.scenario).parent_path();
-    fs::path user_scripts = job.user_data / scen_dir / "scripts";
-    if (!job.user_data.empty() && fs::exists(user_scripts)) {
-        fs::create_directories(xdata / scen_dir, ec);
-        copy_tree(user_scripts, xdata / scen_dir / "scripts", true, ec);
-    } else {
-        fs::create_directories(xdata, ec); // invader-recover requires the data folder to exist
-        run_process({u8(tool(cfg, "invader-recover")), "-t", u8(xsrc), "-d", u8(xdata), job.scenario + ".scenario"}, out);
-    }
-    bool any_hsc = false;
-    if (fs::exists(xdata))
-        for (auto &e : fs::recursive_directory_iterator(xdata))
-            if (e.path().extension() == ".hsc") any_hsc = true;
-    if (any_hsc) {
-        convert_scripts(job, xdata, Game::Xbox);
-        job.extra = {"-d", u8(xdata), "-S", "data"};
-    }
+    xbox_scripts(job, xsrc);
+    if (!job.analysis) note_script_tricks(job, xsrc);
 
     job.source = xsrc;
     return true;
@@ -10061,7 +10382,9 @@ static std::string map_script_text(Job &job, const fs::path &sdir, const std::st
     fs::path scan = job.work / "script_scan", from = scan;
     std::error_code ec;
     std::string out, text;
-    if (!job.user_data.empty() && fs::exists(user_scripts)) {
+    if (!user_scripts_hash(job.cfg).empty()) {   // (the scripts window's edits: what's compiled)
+        from = job.cfg.user_scripts;
+    } else if (!job.user_data.empty() && fs::exists(user_scripts)) {
         from = user_scripts;
     } else {
         fs::remove_all(scan, ec);
@@ -10109,6 +10432,252 @@ static std::set<std::string> script_bound_vehicles(Job &job, const fs::path &xsr
     for (auto &[i, n] : name_of)
         if (obj.count(n) && names.count(obj[n]) && type_of.count(i) && pal.count(type_of[i])) bound.insert(pal[type_of[i]]);
     return bound;
+}
+
+// ---------------------------------------------------------------- old network tricks in a map's scripts
+
+// Halo PC's netcode sends the clients its units and items, but not what the host's scripts do with devices, nor
+// whether the host is the host: maps made for it signal with units. A vehicle placed out of play exists on the
+// host only (its clients get only what the host sends of the game), so "does it exist" (unit_get_health is -1 for
+// none) tells a script it runs on the host; the host drops a vehicle onto a biped placed out of play (or puts a
+// gametype-only item spawn on it), and every console's scripts wait for its death, the deaths being sent.
+// Precipice syncs its beam that way, Coldsnap learns the game type (Halo 1's scripts can't ask it).
+// The original Xbox's system link runs the same game on every console, and OpenCE places the map's own objects on
+// every console: there, every console counts as the host, and a trick for the clients does nothing.
+struct TrickUnit {
+    std::string name, kind, type;   // its name, "vehicle" or "biped", its tag's name
+    double x = 0, y = 0, z = 0;
+};
+
+// Notes on the tricks in `text` (the map's scripts), given its named units and its player spawns. Empty: none.
+static std::vector<std::string> script_trick_notes(const std::string &text, const std::vector<TrickUnit> &units,
+                                                   const std::vector<std::array<double, 3>> &spawns) {
+    std::vector<std::string> notes;
+    std::vector<hsc::Node> top;
+    size_t at = 0;
+    if (units.empty() || spawns.empty() || !hsc::parse(text, at, top, false)) return notes;
+    std::map<std::string, const TrickUnit *> by_name;
+    for (auto &u : units) by_name[hsc::lower(u.name)] = &u;
+    double lo = 1e30, hi = -1e30;
+    for (auto &p : spawns) { lo = std::min(lo, p[2]); hi = std::max(hi, p[2]); }
+    // Out of play: well below every spawn (a room under the map), or far across from all of them.
+    auto out_of_play = [&](const TrickUnit &u) {
+        double closest = 1e30;   // (not "near": a macro on Windows)
+        for (auto &p : spawns) closest = std::min(closest, std::hypot(u.x - p[0], u.y - p[1]));
+        return u.z < lo - 25 || u.z > hi + 150 || closest > 300;
+    };
+    struct Use {
+        std::set<std::string> calls, scripts;   // what it's given to, in which scripts
+        std::set<std::string> exists_in, dies_in, dropped_in;   // scripts that test whether it exists / wait for its
+        std::string dropped_onto;                                // death; teleport it (onto a flag)
+    };
+    std::map<std::string, Use> use;
+    std::map<std::string, std::set<std::string>> global_from;    // a global set from whether these exist
+    auto num = [](const hsc::Node &n, double &v) {
+        if (n.list || n.str || n.atom.empty()) return false;
+        char *e = nullptr;
+        v = strtod(n.atom.c_str(), &e);
+        return e && *e == 0;
+    };
+    // (unit_get_health X) compared: 'e' X exists, 'n' it doesn't, 'd' it's dead or dying, 0 neither.
+    auto health_test = [&](const hsc::Node &cmp, std::string &who) -> char {
+        if (!cmp.list || cmp.kids.size() != 3 || cmp.kids[0].list) return 0;
+        std::string op = cmp.kids[0].atom;
+        const hsc::Node *h = nullptr, *k = nullptr;
+        bool flip = false;
+        for (int i = 1; i <= 2; i++) {
+            const hsc::Node &c = cmp.kids[(size_t)i];
+            if (c.list && c.kids.size() == 2 && !c.kids[0].list && hsc::lower(c.kids[0].atom) == "unit_get_health" && !c.kids[1].list) {
+                h = &c;
+                k = &cmp.kids[(size_t)(3 - i)];
+                flip = i == 2;
+            }
+        }
+        double v = 0;
+        if (!h || !num(*k, v)) return 0;
+        who = hsc::lower(h->kids[1].atom);
+        if (flip) op = op == "<" ? ">" : op == ">" ? "<" : op == "<=" ? ">=" : op == ">=" ? "<=" : op;
+        if ((op == "!=" && v == -1) || (op == ">" && v == -1) || (op == ">=" && v >= -0.5 && v <= 0)) return 'e';
+        if ((op == "=" && v == -1) || (op == "<" && v == 0)) return 'n';
+        if (((op == "<=" || op == "<") && v >= 0 && v <= 0.15) || (op == "=" && v == 0)) return 'd';
+        return 0;
+    };
+    std::function<void(const hsc::Node &, const std::string &, const std::set<std::string> &)> walk =
+        [&](const hsc::Node &n, const std::string &script, const std::set<std::string> &cond_exists) {
+            if (!n.list || n.kids.empty()) return;
+            std::string f = n.kids[0].list ? "" : hsc::lower(n.kids[0].atom);
+            for (size_t i = 1; i < n.kids.size(); i++) {
+                const hsc::Node &a = n.kids[i];
+                if (a.list || a.str) continue;
+                auto u = by_name.find(hsc::lower(a.atom));
+                if (u == by_name.end()) continue;
+                use[u->first].calls.insert(f);
+                use[u->first].scripts.insert(script);
+                if (f == "object_teleport" && i == 1 && n.kids.size() > 2) {
+                    use[u->first].dropped_in.insert(script);
+                    if (!n.kids[2].list) use[u->first].dropped_onto = n.kids[2].atom;
+                }
+            }
+            std::string who;
+            if (char t = health_test(n, who); t && by_name.count(who))
+                (t == 'd' ? use[who].dies_in : use[who].exists_in).insert(script);
+            // (if <does X exist> ... (set G ...)): G says whether X exists; (set G <does X exist>) too
+            std::set<std::string> inner = cond_exists;
+            if (f == "if" && n.kids.size() > 2) {
+                std::string w;
+                if (char t = health_test(n.kids[1], w); (t == 'e' || t == 'n') && by_name.count(w)) inner.insert(w);
+            }
+            if (f == "set" && n.kids.size() == 3 && !n.kids[1].list) {
+                std::string w;
+                if (char t = health_test(n.kids[2], w); (t == 'e' || t == 'n') && by_name.count(w))
+                    global_from[hsc::lower(n.kids[1].atom)].insert(w);
+                for (auto &c : cond_exists) global_from[hsc::lower(n.kids[1].atom)].insert(c);
+            }
+            for (size_t i = 1; i < n.kids.size(); i++) walk(n.kids[i], script, i == 2 && f == "if" ? inner : cond_exists);
+        };
+    for (auto &t : top) {
+        std::string name = t.list && t.kids.size() > 2 && !t.kids[0].list && hsc::lower(t.kids[0].atom) == "script"
+                               ? (t.kids.size() > 3 && !t.kids[2].list ? t.kids[2].atom : "") : "";
+        if (t.list && t.kids.size() > 3 && !t.kids[3].list && hsc::lower(t.kids[0].atom) == "script" &&
+            (hsc::lower(t.kids[1].atom) == "static" || hsc::lower(t.kids[1].atom) == "stub"))
+            name = t.kids[3].atom;   // (script static <type> <name> ...)
+        for (auto &k : t.kids) walk(k, name, {});
+    }
+    // The units out of play the scripts use only to signal (or don't use at all).
+    static const std::set<std::string> signal_calls = {"unit_get_health", "object_teleport", "object_destroy",
+        "object_create", "object_create_anew", "object_create_containing", "object_create_anew_containing",
+        "object_destroy_containing", "unit_kill", "damage_object", "objects_attach", "objects_detach"};
+    std::vector<const TrickUnit *> props;
+    for (auto &u : units) {
+        if (!out_of_play(u)) continue;
+        auto it = use.find(hsc::lower(u.name));
+        bool only_signals = true;
+        if (it != use.end())
+            for (auto &c : it->second.calls) only_signals &= signal_calls.count(c) > 0;
+        bool tested = it != use.end() && (!it->second.exists_in.empty() || !it->second.dies_in.empty() || !it->second.dropped_in.empty());
+        bool unused = it == use.end();
+        if (only_signals && (tested || unused)) props.push_back(&u);
+    }
+    bool any_test = false;
+    for (auto *u : props) {
+        auto it = use.find(hsc::lower(u->name));
+        any_test |= it != use.end() && (!it->second.exists_in.empty() || !it->second.dies_in.empty());
+    }
+    if (props.empty() || !any_test) return notes;
+    auto join = [](const std::set<std::string> &v) {
+        std::string s;
+        size_t i = 0;
+        for (auto &x : v) s += (i++ ? (i == v.size() ? " and " : ", ") : "") + (x.empty() ? std::string("a script") : x);
+        return s;
+    };
+    auto stem = [](const std::string &t) { return fs::path(from_u8(t)).stem().u8string(); };
+    int vehicles = 0, bipeds = 0;
+    double zmin = 1e30;
+    bool all_under = true;
+    std::vector<std::string> what;
+    bool gametype = false;
+    for (auto *u : props) {
+        (u->kind == "vehicle" ? vehicles : bipeds)++;
+        zmin = std::min(zmin, u->z);
+        all_under &= u->z < lo - 25;
+        auto it = use.find(hsc::lower(u->name));
+        std::string w = u->name + " (" + stem(u->type) + ": ";
+        if (it == use.end()) w += "no script uses it";
+        else {
+            std::vector<std::string> parts;
+            const Use &x = it->second;
+            if (!x.exists_in.empty()) {
+                std::set<std::string> globals;
+                for (auto &[g, from] : global_from) if (from.count(hsc::lower(u->name))) globals.insert(g);
+                bool one = x.exists_in.size() == 1;
+                parts.push_back(join(x.exists_in) + (globals.empty() ? std::string(one ? " tests" : " test") + " whether it exists"
+                                                                      : (one ? " sets " : " set ") + join(globals) + " from whether it exists"));
+            }
+            if (!x.dropped_in.empty())
+                parts.push_back(join(x.dropped_in) + " teleport" + (x.dropped_in.size() == 1 ? "s" : "") + " it" +
+                                (x.dropped_onto.empty() ? std::string() : " to " + x.dropped_onto));
+            if (!x.dies_in.empty()) {
+                parts.push_back(join(x.dies_in) + " wait" + (x.dies_in.size() == 1 ? "s" : "") + " for it to die");
+                std::string l = hsc::lower(u->name);
+                for (const char *g : {"ctf", "slayer", "race", "oddball", "king", "koth"}) gametype |= l == g;
+            }
+            if (parts.empty()) w += "no script tests it";
+            for (size_t i = 0; i < parts.size(); i++) w += (i ? "; " : "") + parts[i];
+        }
+        what.push_back(w + ")");
+    }
+    std::string list;
+    for (size_t i = 0; i < what.size(); i++) list += (i ? ", " : "") + what[i];
+    char where[96];
+    snprintf(where, sizeof where, "%.0f", zmin);
+    std::string count = std::to_string(props.size()) + " unit" + (props.size() == 1 ? "" : "s") + " (" +
+                        (vehicles ? std::to_string(vehicles) + " vehicle" + (vehicles == 1 ? "" : "s") : std::string()) +
+                        (vehicles && bipeds ? ", " : "") +
+                        (bipeds ? std::to_string(bipeds) + " biped" + (bipeds == 1 ? "" : "s") : std::string()) + ")";
+    if (gametype)
+        notes.push_back("game type trick: " + count + " placed out of play only for the scripts, which learn the game "
+                        "type from which one a gametype-only spawn kills (Halo 1's scripts can't ask it): " + list +
+                        ". It works on every console, so it stays; the units cost little.");
+    else
+        notes.push_back("network trick, potential saving: " + count + " placed out of play (" +
+                        (all_under ? "under the map, down to " + std::string(where) + "; players spawn from " +
+                                         std::to_string((int)std::floor(lo)) + " to " + std::to_string((int)std::ceil(hi))
+                                   : std::string("far from where players spawn")) +
+                        ") only for Halo PC's netcode: " + list +
+                        ". On the original Xbox every console runs the same game, and OpenCE places " +
+                        (props.size() == 1 ? "it" : "them") + " on every console (each counts as the host), so the "
+                        "trick does nothing there: the scripts can do without it (the scripts window) and " +
+                        (props.size() == 1 ? "the unit" : "the units") + " can go.");
+    return notes;
+}
+
+// script_trick_notes for `text` (the map's scripts) with the named vehicles and bipeds and the player spawns of the
+// scenario tag `scen` (in `sdir`).
+static std::vector<std::string> trick_notes_from_tag(const Config &cfg, const fs::path &sdir, const std::string &scen,
+                                                     const std::string &text) {
+    if (text.find("unit_get_health") == std::string::npos) return {};
+    std::map<int, std::string> names;
+    std::map<std::string, std::map<int, std::string>> pal;
+    struct P { int name = -1, type = -1; double x = 0, y = 0, z = 0; };
+    std::map<std::string, std::map<int, P>> placed;
+    std::map<int, std::array<double, 3>> spawns;
+    static const std::regex obj_re(R"(^object_names\[(\d+)\]\.name$)"), pal_re(R"(^(vehicle|biped)_palette\[(\d+)\]\.name$)"),
+        place_re(R"(^(vehicles|bipeds)\[(\d+)\]\.(name|type|position)$)"),
+        spawn_re(R"(^player_starting_locations\[(\d+)\]\.position$)");
+    auto xyz = [](const std::string &v, double &x, double &y, double &z) {
+        return sscanf(v.c_str(), "%lf,%lf,%lf", &x, &y, &z) == 3;
+    };
+    for (auto &[k, v] : list_values(cfg, sdir, scen)) {
+        std::smatch m;
+        if (std::regex_match(k, m, obj_re)) names[std::stoi(m[1])] = v;
+        else if (std::regex_match(k, m, pal_re)) pal[m[1]][std::stoi(m[2])] = norm_rel(v);
+        else if (std::regex_match(k, m, place_re)) {
+            P &p = placed[m[1]][std::stoi(m[2])];
+            if (m[3] == "position") xyz(v, p.x, p.y, p.z);
+            else if (!v.empty() && isdigit((unsigned char)v[0])) (m[3] == "name" ? p.name : p.type) = std::atoi(v.c_str());
+        } else if (std::regex_match(k, m, spawn_re)) {
+            std::array<double, 3> a{};
+            if (xyz(v, a[0], a[1], a[2])) spawns[std::stoi(m[1])] = a;
+        }
+    }
+    std::vector<TrickUnit> units;
+    for (auto &[block, list] : placed)
+        for (auto &[i, p] : list) {
+            if (!names.count(p.name)) continue;
+            std::string kind = block == "vehicles" ? "vehicle" : "biped";
+            TrickUnit u{names[p.name], kind, pal[kind].count(p.type) ? pal[kind][p.type] : std::string(), p.x, p.y, p.z};
+            units.push_back(u);
+        }
+    std::vector<std::array<double, 3>> sp;
+    for (auto &[i, a] : spawns) sp.push_back(a);
+    return script_trick_notes(text, units, sp);
+}
+
+// The old network tricks in the scripts the Xbox build compiles, in the log (an Xbox conversion's).
+static void note_script_tricks(Job &job, const fs::path &xsrc) {
+    std::string scen = job.scenario + ".scenario";
+    fs::path sdir = fs::exists(job.fixes / from_u8(scen)) ? job.fixes : xsrc;
+    for (auto &n : trick_notes_from_tag(job.cfg, sdir, scen, map_script_text(job, sdir, scen))) job.note("[scripts] " + n);
 }
 
 // The seat in `have` (the player's animations) closest to the map player's seat `label` in `own`: the one whose
@@ -11683,6 +12252,7 @@ static Result convert_map_impl(const Config &cfg, const fs::path &input, Game in
         r.error = "No scenario tag found in the map. It may be protected or damaged; try an unprotected copy.";
         return r;
     }
+    if (out_game != Game::Xbox) pc_user_scripts(job, tag_path_noext(scen));   // (the Xbox's: prepare_for_xbox)
     return run_build(job, tag_path_noext(scen), output, share);
 }
 
@@ -11721,7 +12291,8 @@ static Result build_from_tags_impl(const Config &cfg, const fs::path &scenario_f
     }
 
     fs::path scripts = data / rel.parent_path() / "scripts";
-    if (out_game != Game::Xbox && fs::exists(scripts)) {
+    if (out_game != Game::Xbox) pc_user_scripts(job, scenario);   // (the Xbox's: prepare_for_xbox)
+    if (out_game != Game::Xbox && job.extra.empty() && fs::exists(scripts)) {
         // Compile a converted copy, so functions the target game doesn't have don't stop the build.
         fs::path sdata = job.work / "script_data";
         std::error_code ec;
@@ -11748,6 +12319,143 @@ std::string convert_script_text(Game target, const std::string &text, std::vecto
     return t;
 }
 
+// ---------------------------------------------------------------- the scripts window (scripts_win.hpp)
+
+// The .hsc files under `dir` (its subfolders too), by name.
+static std::vector<ScriptFile> read_script_tree(const fs::path &dir) {
+    std::vector<ScriptFile> files;
+    std::error_code ec;
+    for (auto it = fs::recursive_directory_iterator(dir, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec))
+        if (it->is_regular_file(ec) && hsc::lower(it->path().extension().u8string()) == ".hsc") {
+            std::ifstream f(it->path(), std::ios::binary);
+            files.push_back({it->path().filename().u8string(),
+                             std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>())});
+        }
+    std::sort(files.begin(), files.end(), [](const ScriptFile &a, const ScriptFile &b) { return hsc::lower(a.name) < hsc::lower(b.name); });
+    return files;
+}
+
+bool read_map_scripts(const Config &cfg, const fs::path &input, std::vector<ScriptFile> &files, std::string &err,
+                      std::vector<std::string> *tricks) {
+    files.clear();
+    if (!invader_ok(cfg)) { err = "Invader wasn't found. Set it up in Settings."; return false; }
+    std::error_code ec;
+    if (!fs::exists(input, ec)) { err = "The map isn't there any more: " + u8(input); return false; }
+    fs::path tmp = cfg.cache_dir / "work" / "scripts_read";
+    fs::remove_all(tmp, ec);
+    fs::create_directories(tmp / "tags", ec);
+    fs::create_directories(tmp / "data", ec);
+    std::string out;
+    if (hsc::lower(input.extension().u8string()) == ".scenario") {
+        // A scenario in a tags folder: the scripts its build compiles (its data folder's), else the tag's own.
+        fs::path tags;
+        for (fs::path p = input.parent_path(); !p.empty() && p != p.root_path(); p = p.parent_path())
+            if (hsc::lower(p.filename().u8string()) == "tags") { tags = p; break; }
+        if (tags.empty()) { err = "The scenario needs to be inside a folder named \"tags\"."; return false; }
+        fs::path rel = fs::relative(input, tags), own = tags.parent_path() / "data" / rel.parent_path() / "scripts";
+        files = read_script_tree(own);
+        if (files.empty())
+            run_process({u8(tool(cfg, "invader-recover")), "-t", u8(tags), "-d", u8(tmp / "data"), tag_path_noext(rel) + ".scenario"}, out);
+        if (files.empty()) files = read_script_tree(tmp / "data");
+        if (tricks) {
+            std::string all;
+            for (auto &f : files) all += f.text + "\n";
+            *tricks = trick_notes_from_tag(cfg, tags, tag_path_noext(rel) + ".scenario", all);
+        }
+    } else {
+        // A map: its scenario tag alone (no resource maps needed for it), and its scripts got back out of that.
+        int rc = run_process({u8(tool(cfg, "invader-extract")), "-G", "-t", u8(tmp / "tags"), "-s", "*.scenario", u8(input)}, out);
+        fs::path scen = rc == 0 ? find_scenario(tmp / "tags") : fs::path();
+        if (scen.empty()) {
+            err = "Couldn't read the map's scenario tag:\n" + out.substr(out.size() > 1500 ? out.size() - 1500 : 0);
+            fs::remove_all(tmp, ec);
+            return false;
+        }
+        run_process({u8(tool(cfg, "invader-recover")), "-t", u8(tmp / "tags"), "-d", u8(tmp / "data"), tag_path_noext(scen) + ".scenario"}, out);
+        files = read_script_tree(tmp / "data");
+        if (tricks) {
+            std::string all;
+            for (auto &f : files) all += f.text + "\n";
+            *tricks = trick_notes_from_tag(cfg, tmp / "tags", tag_path_noext(scen) + ".scenario", all);
+        }
+    }
+    fs::remove_all(tmp, ec);
+    if (files.empty()) { err = "This map has no scripts."; return false; }
+    return true;
+}
+
+std::vector<ScriptFile> convert_script_files(const Config &cfg, Game target, const std::vector<ScriptFile> &files,
+                                             std::vector<std::string> &notes) {
+    // (as convert_scripts does a build's)
+    ScriptConverter conv(target);
+    conv.rider_ai_off = target == Game::Xbox && cfg.xbox_rider_ai_off;
+    conv.poll_volumes = target == Game::Xbox;
+    for (auto &f : files) conv.collect_user_names(f.text);
+    std::vector<ScriptFile> out = files;
+    for (auto &f : out)
+        if (!conv.convert(f.text)) notes.push_back(f.name + " can't be read (see Check), so nothing in it was converted");
+    for (auto &[name, c] : conv.changes)
+        notes.push_back(name + " (not in " + game_name(target) + "): " + c.second + " (" + std::to_string(c.first) + "x)");
+    for (auto &[name, c] : conv.fixes) notes.push_back(name + ": " + c.second);
+    return out;
+}
+
+std::string script_syntax_problem(const std::string &s) {
+    auto line_of = [&](size_t at) {
+        return 1 + (int)std::count(s.begin(), s.begin() + (std::ptrdiff_t)std::min(at, s.size()), '\n');
+    };
+    std::vector<size_t> open;   // where each ( still open is
+    for (size_t i = 0; i < s.size(); i++) {
+        char c = s[i];
+        if (c == ';') {
+            if (i + 1 < s.size() && s[i + 1] == '*') {
+                size_t end = s.find("*;", i + 2);
+                if (end == std::string::npos)
+                    return "Line " + std::to_string(line_of(i)) + ": this comment (;*) is never closed with *;";
+                i = end + 1;
+            } else {
+                while (i < s.size() && s[i] != '\n') i++;
+            }
+        } else if (c == '"') {
+            size_t end = s.find('"', i + 1), eol = s.find('\n', i + 1);
+            if (end == std::string::npos || (eol != std::string::npos && eol < end))
+                return "Line " + std::to_string(line_of(i)) + ": this \" isn't closed on its line";
+            i = end;
+        } else if (c == '(') {
+            if (open.empty()) {   // (a script or a global: anything else out here means a ) above closed one early)
+                size_t w = s.find_first_not_of(" \t\r\n", i + 1), we = w;
+                while (we < s.size() && !isspace((unsigned char)s[we]) && s[we] != '(' && s[we] != ')') we++;
+                std::string word = w == std::string::npos ? "" : hsc::lower(s.substr(w, we - w));
+                if (word != "script" && word != "global")
+                    return "Line " + std::to_string(line_of(i)) + ": (" + s.substr(w == std::string::npos ? i : w, std::min<size_t>(we - w, 40)) +
+                           " ...) is outside any (script ...) or (global ...): is there a ) too many above it?";
+            }
+            open.push_back(i);
+        } else if (c == ')') {
+            if (open.empty()) return "Line " + std::to_string(line_of(i)) + ": this ) closes nothing (one too many)";
+            open.pop_back();
+            // A script or global starts at the left edge: one that starts while another is still open means a )
+            // is missing above it.
+        }
+        if (i < s.size() && s[i] == '\n' && i + 1 < s.size() && s[i + 1] == '(' && !open.empty()) {
+            static const char *tops[] = {"(script ", "(global "};
+            for (const char *t : tops)
+                if (s.compare(i + 1, strlen(t), t) == 0)
+                    return "Line " + std::to_string(line_of(open.back())) + ": this ( is never closed (line " +
+                           std::to_string(line_of(i + 1)) + " starts another " + std::string(t + 1, strlen(t) - 2) +
+                           " inside it)";
+        }
+    }
+    if (!open.empty()) return "Line " + std::to_string(line_of(open.back())) + ": this ( is never closed";
+    std::vector<hsc::Node> top;
+    size_t i = 0;
+    if (!hsc::parse(s, i, top, false)) return "The scripts can't be read (a bracket or quote out of place)";
+    for (auto &n : top)
+        if (!n.list) return "Line " + std::to_string(line_of(n.b)) + ": \"" + n.atom.substr(0, 40) +
+                            "\" is outside any (script ...) or (global ...)";
+    return "";
+}
+
 } // namespace porter
 
 namespace porter {
@@ -11759,6 +12467,85 @@ Result update_xbox_models(const Config &cfg, const fs::path &file, const Log &lo
     bool built = fs::exists(u.output);
     log(std::string(built ? "Updating " : "Building ") + u.output.filename().u8string() +
         " (the models' levels of detail and trims; everything else as converted)");
+    return run_build(job, u.scenario, u.output, u.share);
+}
+
+std::string xbox_prepare_key(const Config &c) {
+    std::ostringstream k;
+    k << "HMP prepare 1\n";
+    auto path = [&](const char *n, const fs::path &p) { k << n << "=" << u8(p) << "\n"; };
+    path("invader", c.invader_dir);
+    path("ce", c.ce_dir);
+    path("mcc", c.mcc_maps_dir);
+    path("ek", c.ek_dir);
+    path("xtags", c.xbox_tags_dir);
+    path("xmaps", c.xbox_maps_dir);
+    path("cache", c.cache_dir);
+    k << "shrink=" << c.xbox_shrink << " max=" << c.xbox_max_mb << " texmb=" << c.xbox_texture_target_mb << "\n";
+    for (auto &v : c.xbox_vehicle_slots) k << "slot=" << v << "\n";
+    k << "allveh=" << c.xbox_keep_all_vehicles << " stock=" << c.xbox_use_stock_versions << "\n";
+    for (auto &w : c.xbox_keep_weapons) k << "keep=" << w << "\n";
+    for (auto &[w, r] : c.xbox_weapon_replacements) k << "repl=" << w << "=" << r << "\n";
+    k << "other=" << c.xbox_other_weapons << "\n";
+    for (auto &[w, r] : c.xbox_replace) k << "pick=" << w << "=" << r << "\n";
+    k << "anim=" << c.xbox_compress_animations << " coll=" << c.xbox_collision << " portals=" << c.xbox_add_portals
+      << c.xbox_replan_portals << "\n";
+    k << "fog=" << c.xbox_fog << " " << c.xbox_fog_scale << " " << c.xbox_fog_distance << " " << c.xbox_fog_start << "\n";
+    k << "fx=" << c.xbox_effects << " sky=" << c.xbox_sky << " weather=" << c.xbox_weather << " riders=" << c.xbox_rider_ai_off
+      << " props=" << c.xbox_detailed_props_off << " lights=" << c.xbox_object_lights << "\n";
+    k << "refl=" << c.xbox_drop_reflections << c.xbox_reflection_picks_set << "\n";
+    for (auto &t : c.xbox_reflection_picks) k << "drop=" << t << "\n";
+    k << "tex=" << c.xbox_max_texture << " lm=" << c.xbox_max_lightmap << " lvl=" << c.xbox_level_texture_mb
+      << " obj=" << c.xbox_max_object_texture << "\n";
+    // The models' options too: a build from prepared tags does their levels of detail and trims again, but not what
+    // was worked out from them while preparing (collision fitted to a model's shape), and tiny scenery only ever
+    // raises the switch sizes the preparation set.
+    k << "tiny=" << c.xbox_scenery_pixels << " lods=" << c.xbox_make_lods << c.xbox_lod_stock_models << " trim="
+      << c.xbox_trim_models << "\n";
+    path("lodlib", c.lod_library);
+    return k.str();
+}
+
+bool can_build_prepared(const fs::path &update, const fs::path &output, bool share, std::string &why) {
+    Config cfg;
+    const Log quiet = [](const std::string &) {};
+    Job job(cfg, quiet, Game::Xbox);
+    UpdateFile u;
+    if (!load_update(job, update, u, why)) return false;
+    auto norm = [](const fs::path &p) {
+        std::error_code ec;
+        std::string t = u8(fs::weakly_canonical(p, ec).make_preferred());
+        if (ec) t = u8(p);
+        for (auto &ch : t) ch = (char)tolower((unsigned char)ch);   // (Windows paths: any case)
+        return t;
+    };
+    if (u.output.empty() || norm(u.output) != norm(output)) {
+        why = "they were prepared for another map file (" + u8(u.output.filename()) + ")";
+        return false;
+    }
+    if (u.share != share) { why = "they were prepared with the other \"shared bitmaps / sounds\" choice"; return false; }
+    if (job.cut) { why = "a build since cut them down to fit (textures halved or vehicles dropped)"; return false; }
+    return true;
+}
+
+Result build_prepared(const Config &cfg, const fs::path &update, const Log &log) {
+    Result r;
+    Job job(cfg, log, Game::Xbox);
+    UpdateFile u;
+    if (!load_update(job, update, u, r.error)) return r;
+    log("Building " + u.output.filename().u8string() + " from the tags prepared before (the map and every option they "
+        "were prepared with are as they were; the models are done again with the Xbox tab's options and the LODs "
+        "window's choices now). The report keeps what preparing them changed.");
+    return run_build(job, u.scenario, u.output, u.share);
+}
+
+Result redo_xbox_models(const Config &cfg_in, const fs::path &update, const Log &log) {
+    Config cfg = cfg_in;
+    cfg.xbox_prepare_only = true;
+    Result r;
+    Job job(cfg, log, Game::Xbox);
+    UpdateFile u;
+    if (!load_update(job, update, u, r.error)) return r;
     return run_build(job, u.scenario, u.output, u.share);
 }
 
@@ -12313,6 +13100,7 @@ bool measure_prepared(const Config &cfg_in, const fs::path &update, ContentAnaly
     std::string err;
     if (!load_update(job, update, u, err)) { out.error = err; return false; }
     if (u.picks) { out.error = "The conversion used your weapons & vehicles picks."; return false; }
+    const bool optimized = job.optimize;
     job.optimize = false;   // (the window works out what Invader's optimize option saves itself)
     log("Measuring the map for the weapons & vehicles window, from the tags the conversion prepared...");
     // As the window measures a map (the models as the conversion trimmed them, without lower-detail versions), under
@@ -12325,6 +13113,9 @@ bool measure_prepared(const Config &cfg_in, const fs::path &update, ContentAnaly
     fs::path bak = job.work / "choices_backup.scenario";
     if (!job.choices_scenario.empty() && fs::exists(bak)) fs::copy_file(bak, job.choices_scenario, fs::copy_options::overwrite_existing, ec);
     fs::remove_all(job.work / "measure", ec);
+    // (the models were done again with the options now: what's kept for the next build from these tags says so, so
+    // it takes them back to as the map made them, copies included)
+    if (!job.lod_deps.empty()) save_update(job, u.output, u.lods, u.share, optimized);
     if (!r.ok) {
         out.error = r.error.empty() ? "The map couldn't be measured." : r.error;
         return false;

@@ -7,8 +7,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <map>
+#include <queue>
 #include <set>
 #include <sstream>
+#include <tuple>
 
 namespace showcase {
 
@@ -292,6 +295,256 @@ bool sees_out(const World &w, const Shot &s, double most = 6) {
     return true;
 }
 
+
+// ---- routes: the camera through open air from one place to another (flag to flag, hill to hill, the race), round
+// the walls in its way. Its stops: over every floor of the box where players play, on a grid (straight down from the
+// top of the box, every surface met, each floor's air a couple of units up where the camera can be); two stops next to
+// each other join when nothing is between them and the camera stays clear of every surface on the way.
+struct Router {
+    const World &w;
+    std::function<bool(const V3 &)> inside;
+    std::vector<V3> nodes;
+    std::vector<std::vector<std::pair<int, double>>> near_nodes;   // (each stop's neighbours, by distance)
+    std::map<std::pair<int, int>, bool> known;
+    double step = 3, margin = 0.4;
+    int checks = 0;
+
+    Router(const World &wd, V3 lo, V3 hi, std::function<bool(const V3 &)> in, double across) : w(wd), inside(std::move(in)) {
+        step = std::clamp(across / 70, 1.8, 4.0);
+        const int nx = std::max(1, (int)std::ceil((hi[0] - lo[0]) / step)), ny = std::max(1, (int)std::ceil((hi[1] - lo[1]) / step));
+        if ((long long)nx * ny > 60000) step *= std::sqrt((double)nx * ny / 60000.0);   // (a huge box: a coarser grid)
+        std::map<std::pair<int, int>, std::vector<int>> column;
+        for (int ix = 0; lo[0] + ix * step <= hi[0]; ix++)
+            for (int iy = 0; lo[1] + iy * step <= hi[1]; iy++) {
+                double x = lo[0] + ix * step, y = lo[1] + iy * step, z = hi[2];
+                for (int floors = 0; floors < 8 && z > lo[2]; floors++) {
+                    double most = z - lo[2], d = w.reach({x, y, z}, {0, 0, -1}, most);
+                    if (d >= most - 1e-6) break;
+                    double floor_z = z - d;
+                    for (double h : {1.5, 2.8}) {
+                        V3 n{x, y, floor_z + h};
+                        if ((inside && !inside(n)) || !w.open(n, 0.45)) continue;
+                        column[{ix, iy}].push_back((int)nodes.size());
+                        nodes.push_back(n);
+                    }
+                    z = floor_z - 0.05;
+                }
+            }
+        near_nodes.assign(nodes.size(), {});
+        const double reach = step * 1.5;
+        for (auto &[c, ids] : column)
+            for (int dx = -1; dx <= 1; dx++)
+                for (int dy = -1; dy <= 1; dy++) {
+                    auto it = column.find({c.first + dx, c.second + dy});
+                    if (it == column.end()) continue;
+                    for (int i : ids)
+                        for (int j : it->second) {
+                            if (j <= i) continue;
+                            V3 d = sub(nodes[(size_t)j], nodes[(size_t)i]);
+                            double l = len(d);
+                            if (l > reach || std::fabs(d[2]) > 3.2 || l < 0.3) continue;
+                            near_nodes[(size_t)i].push_back({j, l});
+                            near_nodes[(size_t)j].push_back({i, l});
+                        }
+                }
+    }
+    // The camera can go straight from a to b: no surface between (glass neither) and clear of them all the way.
+    bool clear(V3 a, V3 b) const {
+        if (!w.sees(a, b, true)) return false;
+        double L = len(sub(b, a));
+        int n = std::max(1, (int)std::ceil(L / 0.8));
+        for (int k = 1; k < n; k++) {
+            V3 q = lerp(a, b, (double)k / n);
+            if (!w.open(q, margin) || (inside && !inside(q))) return false;
+        }
+        return true;
+    }
+    bool edge(int i, int j) {
+        auto key = std::make_pair(std::min(i, j), std::max(i, j));
+        auto it = known.find(key);
+        if (it != known.end()) return it->second;
+        checks++;
+        return known[key] = clear(nodes[(size_t)i], nodes[(size_t)j]);
+    }
+    // The stops nearest q that it reaches in a straight line (the route's ends join the network there).
+    std::vector<int> joins(V3 q) const {
+        std::vector<std::pair<double, int>> by;
+        for (size_t i = 0; i < nodes.size(); i++) {
+            double d = len(sub(nodes[i], q));
+            if (d <= step * 2.5) by.push_back({d, (int)i});
+        }
+        std::sort(by.begin(), by.end());
+        std::vector<int> out;
+        for (auto &[d, i] : by) {
+            if (out.size() >= 4) break;
+            if (clear(q, nodes[(size_t)i])) out.push_back(i);
+        }
+        return out;
+    }
+    // A route from a to b (both where the camera can be), as corners; empty when there's none. A* over the stops, each
+    // join checked only when the search takes it (lazily), then straightened (each corner to the farthest it sees).
+    std::vector<V3> route(V3 a, V3 b) {
+        if (clear(a, b)) return {a, b};
+        std::vector<int> from = joins(a), to = joins(b);
+        if (from.empty() || to.empty()) return {};
+        std::set<int> goal(to.begin(), to.end());
+        const int N = (int)nodes.size();
+        std::vector<double> g(N, 1e30);
+        std::vector<int> parent(N, -2);   // (-1: joined from a)
+        std::vector<char> closed(N, 0);
+        using Entry = std::tuple<double, double, int, int>;   // f, g, node, from
+        std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> open;
+        auto h = [&](int i) { return len(sub(b, nodes[(size_t)i])); };
+        for (int i : from) open.push({len(sub(nodes[(size_t)i], a)) + h(i), len(sub(nodes[(size_t)i], a)), i, -1});
+        int end = -1, pops = 0;
+        while (!open.empty() && pops < 60000 && checks < 30000) {
+            auto [f, gi, i, par] = open.top();
+            open.pop();
+            if (closed[(size_t)i]) continue;
+            pops++;
+            if (par >= 0 && !edge(par, i)) continue;   // (lazily: this way in is blocked; another may not be)
+            closed[(size_t)i] = 1;
+            g[(size_t)i] = gi;
+            parent[(size_t)i] = par;
+            if (goal.count(i)) { end = i; break; }
+            for (auto &[j, d] : near_nodes[(size_t)i]) {
+                if (closed[(size_t)j]) continue;
+                double gj = gi + d;
+                open.push({gj + h(j), gj, j, i});
+            }
+        }
+        if (end < 0) return {};
+        std::vector<V3> pts{b};
+        for (int i = end; i >= 0; i = parent[(size_t)i]) pts.push_back(nodes[(size_t)i]);
+        pts.push_back(a);
+        std::reverse(pts.begin(), pts.end());
+        std::vector<V3> out{pts[0]};
+        for (size_t i = 0; i + 1 < pts.size();) {
+            size_t j = pts.size() - 1;
+            while (j > i + 1 && !clear(pts[i], pts[j])) j--;
+            out.push_back(pts[j]);
+            i = j;
+        }
+        return out;
+    }
+};
+
+// The length along corners, and the point `s` units along them (past the end: on along the last leg).
+double route_length(const std::vector<V3> &c) {
+    double L = 0;
+    for (size_t i = 0; i + 1 < c.size(); i++) L += len(sub(c[i + 1], c[i]));
+    return L;
+}
+V3 along(const std::vector<V3> &c, double s) {
+    for (size_t i = 0; i + 1 < c.size(); i++) {
+        double l = len(sub(c[i + 1], c[i]));
+        if (s <= l || i + 2 == c.size()) return l > 1e-9 ? lerp(c[i], c[i + 1], s / l) : c[i];
+        s -= l;
+    }
+    return c.empty() ? V3{} : c.back();
+}
+
+// A shot along corners at `speed` units a second (eased in and out), looking ahead along the way and a little down,
+// then, over its last stretch, at `goal` (where the route goes: a flag, a hill), stopping a few units short of the end
+// so it's in view. Its keys: at every corner, half a unit either side of it, and every couple of units between, so the
+// curve through them keeps to the straight legs and only rounds the corners a little.
+Shot route_shot(const World &w, std::vector<V3> c, double speed, double down, V3 goal, const std::string &label) {
+    const double full = route_length(c), ahead = std::clamp(speed * 1.6, 5.0, 14.0);
+    double stop = std::min(5.0, full * 0.2);
+    for (double d : {5.0, 7.0, 9.0, 3.5, 12.0})   // (where the goal's in view, when it is from somewhere near the end)
+        if (d <= full * 0.35 && w.sees(along(c, full - d), short_of(along(c, full - d), goal), true)) { stop = d; break; }
+    {   // (the corners up to the stop)
+        std::vector<V3> cut{c[0]};
+        double want = full - stop, sofar = 0;
+        for (size_t i = 1; i < c.size() && sofar < want - 1e-9; i++) {
+            double l = len(sub(c[i], c[i - 1]));
+            cut.push_back(sofar + l <= want ? c[i] : lerp(c[i - 1], c[i], (want - sofar) / l));
+            sofar += l;
+        }
+        c = cut;
+    }
+    const double L = route_length(c), seconds = std::clamp(L / speed, 6.0, 40.0);
+    const V3 end = c.back();
+    std::vector<double> at_s{0};
+    double sofar = 0;
+    for (size_t i = 0; i + 1 < c.size(); i++) {
+        double l = len(sub(c[i + 1], c[i]));
+        double a = sofar + std::min(0.5, l / 3), b = sofar + l - std::min(0.5, l / 3);
+        at_s.push_back(a);
+        int n = std::max(1, (int)std::ceil((b - a) / 2.0));
+        for (int k = 1; k <= n; k++) at_s.push_back(a + (b - a) * k / n);
+        sofar += l;
+        at_s.push_back(sofar);
+    }
+    std::sort(at_s.begin(), at_s.end());
+    at_s.erase(std::unique(at_s.begin(), at_s.end(), [](double x, double y) { return y - x < 0.05; }), at_s.end());
+    if (at_s.back() < L - 0.05) at_s.push_back(L);
+    // (the time each is reached: ease's inverse, by halving)
+    auto time_of = [&](double s) {
+        double lo = 0, hi = 1, want = std::clamp(s / std::max(L, 1e-9), 0.0, 1.0);
+        for (int k = 0; k < 40; k++) {
+            double mid = (lo + hi) / 2;
+            (ease(mid) < want ? lo : hi) = mid;
+        }
+        return seconds * (lo + hi) / 2;
+    };
+    Shot sh;
+    sh.label = label.substr(0, 31);
+    sh.seconds = seconds;
+    for (double s : at_s) {
+        Key k;
+        k.t = time_of(s);
+        k.p = along(c, s);
+        // (ahead along the way as far as it's in view: round a corner, at the way out of it, not at the wall)
+        double look = ahead;
+        while (look > 1.5 && !w.sees(k.p, along(c, s + look), false)) look -= 1.0;
+        V3 f = add(along(c, s + look), {0, 0, -down * look / ahead});
+        if (len2d(sub(f, k.p)) < 0.5) f = add(k.p, sub(end, along(c, std::max(0.0, L - 1))));
+        double x = std::clamp((s - (L - ahead)) / std::max(1.0, ahead), 0.0, 1.0), g = x * x * (3 - 2 * x);   // (to the goal)
+        V3 to_goal = sub(goal, k.p);
+        if (len2d(to_goal) > 0.5 && g > 0) {
+            V3 fa = mul(sub(f, k.p), 1 / std::max(1e-6, len(sub(f, k.p)))), fg = mul(to_goal, 1 / len(to_goal));
+            f = add(k.p, lerp(fa, fg, g));
+        }
+        k.yaw = yaw_to(k.p, f);
+        k.pitch = std::clamp(deg(std::atan2(f[2] - k.p[2], std::max(1e-6, len2d(sub(f, k.p))))), -35.0, 8.0);
+        sh.keys.push_back(k);
+    }
+    sh.keys.front().t = 0;
+    sh.keys.back().t = seconds;
+    return sh;
+}
+
+// Where the camera can start or end a route at a place on the ground: over it, or beside it when that's too tight (a
+// flag in a doorway, under a low roof), somewhere open that sees it; the nearest first, at most 12.
+std::vector<V3> camera_spots(const World &w, V3 ground, const std::function<bool(const V3 &)> &inside) {
+    std::vector<V3> out;
+    V3 look = add(ground, {0, 0, 0.3});
+    for (double r : {0.0, 0.8, 1.6, 2.4})
+        for (double h : {2.2, 1.4, 3.2, 0.9})
+            for (int a = 0; a < (r > 0 ? 8 : 1) && out.size() < 12; a++) {
+                V3 q = add(ground, {r * std::cos(a * kPi / 4), r * std::sin(a * kPi / 4), h});
+                if (w.open(q, 0.4) && (!inside || inside(q)) && w.sees(q, look, true)) out.push_back(q);
+            }
+    return out;
+}
+
+// Looking straight down: every part of the picture (a grid of directions over a widescreen or 4:3 view, 70 degrees
+// across) meets the level within `most` units, so none of it is the sky or the void past the level's edge.
+bool all_level_below(const World &w, const View &v, double most) {
+    V3 f = dir_of(v.yaw, v.pitch), r = cross(f, {0, 0, 1});
+    if (len(r) < 1e-6) r = {1, 0, 0};
+    r = mul(r, 1 / len(r));
+    V3 u = cross(r, f);
+    const double tx = std::tan(rad(v.fov / 2)), ty = tx * 0.75;
+    for (int i = 0; i <= 8; i++)
+        for (int j = 0; j <= 6; j++) {
+            V3 d = add(f, add(mul(r, tx * (i / 4.0 - 1)), mul(u, ty * (j / 3.0 - 1))));
+            d = mul(d, 1 / len(d));
+            if (w.reach(v.eye, d, most) >= most - 1e-6) return false;
+        }
+    return true;
+}
 }   // namespace
 
 Shot orbit_shot(const V3 &at, double radius, double height, double start, double sweep, double seconds,
@@ -773,20 +1026,282 @@ Showcase generate(const lshade::Preview &p, std::string *report) {
         }
     }
 
-    // In turn: the reveal, then circling, looking down, gliding and sight lines, one of each at a time.
+
+    // Along the routes a game type gives players: from one CTF flag to the other, one hill to the next, one oddball
+    // spawn to another, round the race's points in order. Through open air, round the walls in the way, a couple of
+    // units over the ground, looking ahead.
+    std::vector<Shot> runs;
+    std::vector<std::string> run_kinds;
+    {
+        Router router(w, {plo[0] - 3, plo[1] - 3, plo[2] - kEye - 0.5}, {phi[0] + 3, phi[1] + 3, phi[2] + 3.5}, in_play, across);
+        auto run = [&](const std::vector<V3> &grounds, double speed, double cap, bool partial, const std::string &label) -> bool {
+            std::vector<V3> ends;
+            for (auto &gq : grounds) {
+                bool found = false;
+                for (auto &q : camera_spots(w, gq, in_play))   // (one the routes reach)
+                    if (!router.joins(q).empty()) { ends.push_back(q); found = true; break; }
+                if (!found) {
+                    if (partial && ends.size() >= 2) break;
+                    return false;
+                }
+            }
+            std::vector<V3> corners;
+            std::vector<std::pair<double, size_t>> legs;   // (each leg's end: the length so far, and which place)
+            for (size_t i = 0; i + 1 < ends.size(); i++) {
+                std::vector<V3> leg = router.route(ends[i], ends[i + 1]);
+                if (leg.empty()) {
+                    if (partial && corners.size() >= 2) break;
+                    return false;
+                }
+                if (!corners.empty()) leg.erase(leg.begin());
+                corners.insert(corners.end(), leg.begin(), leg.end());
+                legs.push_back({route_length(corners), i + 1});
+                if (route_length(corners) / speed >= cap) break;
+            }
+            if (corners.size() < 2 || route_length(corners) < 6) return false;
+            if (route_length(corners) > cap * speed) {   // (a long race: the first part of it)
+                std::vector<V3> cut{corners[0]};
+                double want = cap * speed, sofar = 0;
+                for (size_t i = 1; i < corners.size() && sofar < want - 1e-9; i++) {
+                    double l = len(sub(corners[i], corners[i - 1]));
+                    cut.push_back(sofar + l <= want ? corners[i] : lerp(corners[i - 1], corners[i], (want - sofar) / l));
+                    sofar += l;
+                }
+                corners = cut;
+            }
+            // (looking, at the end, at the place the leg it ends on goes to)
+            size_t goal = legs.back().second;
+            for (auto &[l, g] : legs)
+                if (l >= route_length(corners) - 1e-6) { goal = g; break; }
+            Shot s = route_shot(w, corners, speed, 1.2, add(grounds[goal], {0, 0, 0.5}), label);
+            if (flyable(w, s, 0.9, in_play, 0.3) < 0) return false;
+            // (looking out ahead, not at a wall it's passing: at least 3 units clear in front nearly all the way, and
+            // never a wall filling the picture)
+            int n = 0, clear_ahead = 0;
+            for (double t = 0; t <= s.seconds + 1e-9; t += 0.5, n++) {
+                View v = at(s, t);
+                double r = w.reach(v.eye, dir_of(v.yaw, v.pitch), 6);
+                if (r < 1.2) { n = -1; break; }
+                if (r >= 3) clear_ahead++;
+            }
+            if (n < 0 || clear_ahead < n * 0.85) return false;
+            runs.push_back(s);
+            return true;
+        };
+        auto ground = [](const lshade::Mark &m) { return V3{m.p[0], m.p[1], m.p[2]}; };
+        const lshade::Mark *red = nullptr, *blue = nullptr;
+        for (auto &m : p.marks)
+            if (m.kind == lshade::Mark::kFlag) {
+                if (m.index == 1) { if (!blue) blue = &m; }
+                else if (!red) red = &m;
+            }
+        if (red && blue && run({ground(*red), ground(*blue)}, 7, 30, false, "red flag to blue flag")) run_kinds.push_back("flag to flag");
+        // (a hill: the middle of the flags with its number; oddball spawns and race points: by their numbers)
+        std::map<int, std::pair<V3, int>> hills;
+        std::vector<std::pair<int, V3>> balls, race;
+        for (auto &m : p.marks) {
+            if (m.kind != lshade::Mark::kPlace) continue;
+            std::string n = m.name;
+            if (n == "hill") {
+                auto &hl = hills[m.index];
+                hl.first = add(hl.first, ground(m));
+                hl.second++;
+            } else if (n == "oddball") {
+                balls.push_back({m.index, ground(m)});
+            } else if (n == "race point") {
+                race.push_back({m.index, ground(m)});
+            }
+        }
+        // (a hill is three flags or more round it; one or two with a number are something else)
+        std::vector<V3> hill_at;
+        for (auto &[k, hl] : hills)
+            if (hl.second >= 3) hill_at.push_back(mul(hl.first, 1.0 / hl.second));
+        // Two of them: the farthest apart first (at least 8 units), the next pair when the camera can't get between them.
+        auto pair_run = [&](const std::vector<V3> &at, const std::string &label) {
+            std::vector<std::tuple<double, size_t, size_t>> pairs;
+            for (size_t i = 0; i < at.size(); i++)
+                for (size_t j = i + 1; j < at.size(); j++) {
+                    double d = len(sub(at[j], at[i]));
+                    if (d >= 8) pairs.push_back({d, i, j});
+                }
+            std::sort(pairs.begin(), pairs.end(), [](const auto &a, const auto &b) { return std::get<0>(a) > std::get<0>(b); });
+            for (size_t k = 0; k < pairs.size() && k < 6; k++)
+                if (run({at[std::get<1>(pairs[k])], at[std::get<2>(pairs[k])]}, 7, 30, false, label)) return true;
+            return false;
+        };
+        if (pair_run(hill_at, "hill to hill")) run_kinds.push_back("hill to hill");
+        {
+            std::vector<V3> ball_at;
+            for (auto &b : balls) ball_at.push_back(b.second);
+            if (pair_run(ball_at, "oddball to oddball")) run_kinds.push_back("oddball");
+        }
+        if (race.size() >= 2) {
+            std::stable_sort(race.begin(), race.end(), [](const std::pair<int, V3> &a, const std::pair<int, V3> &b) { return a.first < b.first; });
+            std::vector<V3> pts;
+            for (auto &r : race) pts.push_back(r.second);
+            pts.push_back(race[0].second);   // (a lap)
+            if (run(pts, 11, 35, true, "the race")) run_kinds.push_back("race");
+        }
+    }
+
+    // The vehicles a game type spawns, where several stand together: along them, when they stand in a line (the
+    // camera beside the line, moving along it, looking at them), else circling them.
+    std::vector<Shot> rides;
+    {
+        std::vector<const lshade::Mark *> veh;
+        for (auto &m : p.marks)
+            if (m.kind == lshade::Mark::kVehicle) veh.push_back(&m);
+        std::vector<int> group(veh.size());
+        for (size_t i = 0; i < veh.size(); i++) group[i] = (int)i;
+        std::function<int(int)> top = [&](int i) { return group[(size_t)i] == i ? i : group[(size_t)i] = top(group[(size_t)i]); };
+        for (size_t i = 0; i < veh.size(); i++)
+            for (size_t j = i + 1; j < veh.size(); j++) {
+                V3 a{veh[i]->p[0], veh[i]->p[1], veh[i]->p[2]}, b{veh[j]->p[0], veh[j]->p[1], veh[j]->p[2]};
+                if (len(sub(a, b)) <= 7 && std::fabs(a[2] - b[2]) <= 3) group[(size_t)top((int)i)] = top((int)j);
+            }
+        std::map<int, std::vector<size_t>> clusters;
+        for (size_t i = 0; i < veh.size(); i++) clusters[top((int)i)].push_back(i);
+        std::vector<std::vector<size_t>> order;
+        for (auto &[k, v] : clusters)
+            if (v.size() >= 2) order.push_back(v);
+        std::stable_sort(order.begin(), order.end(), [](const std::vector<size_t> &a, const std::vector<size_t> &b) { return a.size() > b.size(); });
+        for (auto &cl : order) {
+            if (rides.size() >= 2) break;
+            V3 c{0, 0, 0};
+            std::map<std::string, int> names;
+            for (size_t i : cl) {
+                c = add(c, {veh[i]->p[0], veh[i]->p[1], veh[i]->p[2]});
+                names[veh[i]->name]++;
+            }
+            c = mul(c, 1.0 / cl.size());
+            if (!far_from_used(c, apart * 0.5)) continue;
+            std::string what;
+            int most = 0;
+            for (auto &[n, k] : names)
+                if (k > most) { most = k; what = n; }
+            std::string label = "vehicles: " + what + (cl.size() > 1 ? " x" + std::to_string(cl.size()) : "");
+            // (the line through them: their spread's long axis)
+            double sxx = 0, syy = 0, sxy = 0, spread = 0;
+            for (size_t i : cl) {
+                double dx = veh[i]->p[0] - c[0], dy = veh[i]->p[1] - c[1];
+                sxx += dx * dx; syy += dy * dy; sxy += dx * dy;
+                spread = std::max(spread, std::hypot(dx, dy));
+            }
+            double ang = 0.5 * std::atan2(2 * sxy, sxx - syy);
+            V3 ax{std::cos(ang), std::sin(ang), 0}, pr{-std::sin(ang), std::cos(ang), 0};
+            double alo = 1e30, ahi = -1e30, plo = 1e30, phi = -1e30;
+            for (size_t i : cl) {
+                V3 d = sub({veh[i]->p[0], veh[i]->p[1], veh[i]->p[2]}, c);
+                alo = std::min(alo, dot(d, ax)); ahi = std::max(ahi, dot(d, ax));
+                plo = std::min(plo, dot(d, pr)); phi = std::max(phi, dot(d, pr));
+            }
+            bool made = false;
+            if (ahi - alo >= 6 && ahi - alo >= 2.5 * (phi - plo)) {   // (in a line: along it)
+                for (double d : {6.0, 8.0, 4.5, 10.0})
+                    for (double hgt : {1.8, 2.8})
+                        for (int side : {1, -1})
+                            for (int way : {1, -1}) {
+                                if (made) break;
+                                V3 base = add(c, mul(pr, side * (d + (side > 0 ? phi : -plo))));
+                                double from = way > 0 ? alo - 2 : ahi + 2, to = way > 0 ? ahi + 2 : alo - 2;
+                                double seconds = std::clamp(std::fabs(to - from) / 2.5, 8.0, 14.0), yaw = yaw_to(base, c);
+                                Shot s = keyed(label, seconds, 2, [&](double u) {
+                                    Key k;
+                                    k.p = add(add(base, mul(ax, from + (to - from) * ease(u))), {0, 0, hgt});
+                                    k.yaw = yaw;
+                                    k.pitch = deg(std::atan2(c[2] + 0.6 - k.p[2], d + 0.01));
+                                    return k;
+                                });
+                                if (flyable(w, s, 0.9, in_play) < 0) continue;
+                                bool seen = true;   // (what's straight ahead, on the line, in view at its start, middle and end)
+                                for (double u : {0.0, 0.5, 1.0}) {
+                                    V3 eye = at(s, s.seconds * u).eye, foot = add(add(c, mul(ax, dot(sub(eye, c), ax))), {0, 0, 0.6});
+                                    if (!w.sees(eye, short_of(eye, foot), true)) seen = false;
+                                }
+                                if (!seen) continue;
+                                rides.push_back(s);
+                                made = true;
+                            }
+            }
+            if (!made) {   // (circling them)
+                Shot best;
+                double best_seen = -1;
+                for (double r : {spread + 4.0, spread + 5.5, spread + 3.0, spread + 7.0})
+                    for (double hgt : {1.8, 3.0, 1.0})
+                        for (int a0 = 0; a0 < 360 && best_seen < 0.999; a0 += 20) {
+                            Shot s = orbit_shot(add(c, {0, 0, 0.6}), r, hgt, a0, rides.size() % 2 ? -100 : 100, 12, label);
+                            double seen = flyable(w, s, 0.85, in_play);
+                            if (seen > best_seen) { best_seen = seen; best = s; }
+                        }
+                if (best_seen >= 0) { rides.push_back(best); made = true; }
+            }
+            if (made) used.push_back(c);
+        }
+    }
+
+    // Flying over the level, looking straight down, the camera moving sideways across where players play (along its
+    // long side): as high as the level's air goes (up to 36 units over them), and only where the whole picture is the
+    // level (no sky, nothing past its edge).
+    std::vector<Shot> flyovers;
+    {
+        double sxx = 0, syy = 0, sxy = 0;
+        for (auto &q : spots) {
+            double dx = q[0] - middle[0], dy = q[1] - middle[1];
+            sxx += dx * dx; syy += dy * dy; sxy += dx * dy;
+        }
+        double ang = 0.5 * std::atan2(2 * sxy, sxx - syy);
+        V3 ax{std::cos(ang), std::sin(ang), 0}, pr{-std::sin(ang), std::cos(ang), 0};
+        const double run_len = std::clamp(across * 0.45, 10.0, 40.0);
+        // (first where the ground it looks down on is about as far below as it's high, not the bottom of a pit; then
+        // anywhere)
+        for (int pass = 0; pass < 2 && flyovers.empty(); pass++)
+            for (double H : {36.0, 28.0, 22.0, 17.0, 13.0, 10.0})
+                for (double off : {0.0, -0.18, 0.18, -0.32, 0.32})
+                    for (int way : {1, -1}) {
+                        if (!flyovers.empty()) break;
+                        V3 c = add(middle, add(mul(pr, off * across), {0, 0, H}));
+                        double yaw = deg(ang) + (way > 0 ? 90 : -90);   // (moving to the picture's right)
+                        Shot s = keyed("flying over the level", 12, 2, [&](double u) {
+                            Key k;
+                            k.p = add(c, mul(ax, way * (ease(u) - 0.5) * run_len));
+                            k.yaw = yaw;
+                            k.pitch = -88;   // (straight down: the engine's camera needs a direction it can turn its up from)
+                            return k;
+                        });
+                        if (flyable(w, s, 0.9, nullptr, 1.0) < 0) continue;
+                        bool all = true;   // (out in the open, nothing over it: above the level, not inside a hall)
+                        double below = 0;
+                        int n = 0;
+                        for (double t = 0; t <= s.seconds + 1e-9 && all; t += 1.0, n++) {
+                            View v = at(s, t);
+                            all = w.reach(v.eye, {0, 0, 1}, 60) >= 60 - 1e-6 && all_level_below(w, v, H * 3 + 60);
+                            below += w.reach(v.eye, {0, 0, -1}, H * 3 + 60);
+                        }
+                        if (all && (pass == 1 || below / std::max(1, n) <= H * 1.6)) flyovers.push_back(s);
+                    }
+    }
+
+    // In turn: the reveal, then circling, a route, looking down, vehicles, gliding, flying over and sight lines, one
+    // of each at a time.
     for (auto &s : reveals) sc.shots.push_back(s);
     for (size_t k = 0; k < 4; k++) {
         if (k < orbits.size()) sc.shots.push_back(orbits[k]);
+        if (k < runs.size()) sc.shots.push_back(runs[k]);
         if (k < overviews.size()) sc.shots.push_back(overviews[k]);
+        if (k < rides.size()) sc.shots.push_back(rides[k]);
         if (k < glides.size()) sc.shots.push_back(glides[k]);
+        if (k < flyovers.size()) sc.shots.push_back(flyovers[k]);
         if (k < lines.size()) sc.shots.push_back(lines[k]);
     }
     if (report) {
-        char b[240];
-        snprintf(b, sizeof b, "%zu shots, %.0f seconds: %zu circling (%d flags, %d power items), %zu looking down, %zu gliding, "
-                 "%zu down sight lines, %zu rising",
-                 sc.shots.size(), sc.length(), orbits.size(), flags, powers, overviews.size(), glides.size(), lines.size(),
-                 reveals.size());
+        std::string kinds;
+        for (auto &k : run_kinds) kinds += (kinds.empty() ? "" : ", ") + k;
+        char b[400];
+        snprintf(b, sizeof b, "%zu shots, %.0f seconds: %zu circling (%d flags, %d power items), %zu along routes%s%s%s, %zu at "
+                 "vehicles, %zu looking down, %zu gliding, %zu flying over, %zu down sight lines, %zu rising",
+                 sc.shots.size(), sc.length(), orbits.size(), flags, powers, runs.size(), kinds.empty() ? "" : " (",
+                 kinds.c_str(), kinds.empty() ? "" : ")", rides.size(), overviews.size(), glides.size(), flyovers.size(),
+                 lines.size(), reveals.size());
         *report = sc.shots.empty() ? "no shot kept the camera clear of the level's walls" : b;
     }
     return sc;

@@ -6,7 +6,7 @@ set -e
 CXX=${CXX:-x86_64-w64-mingw32-g++}; CC=${CC:-x86_64-w64-mingw32-gcc}; WINDRES=${WINDRES:-x86_64-w64-mingw32-windres}
 mkdir -p build
 $WINDRES app.rc -O coff -o build/app.res
-for f in core perflog showcase gui_win inflate mapcard mapcard_win maplist_edit maplist_win mappack contents_win lodview_win modelview_win perf portals levelshaders shaders_win glpreview_win preview render tagfile tagedit lod animcomp collision sky effects; do
+for f in core perflog showcase gui_win inflate mapcard mapcard_win maplist_edit maplist_win mappack contents_win lodview_win modelview_win perf portals levelshaders shaders_win scripts_win glpreview_win preview render tagfile tagedit lod fpview animcomp collision sky effects; do
   echo "CXX $f.cpp"
   $CXX -std=c++17 -O2 -municode -DUNICODE -D_UNICODE -c $f.cpp -o build/$f.o
 done

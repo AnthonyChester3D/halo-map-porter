@@ -97,11 +97,20 @@ using Point = std::array<float, 3>;
 // Layers: a part that repeats another part's triangles exactly, as a layer drawn over it (a character's shield
 // shimmer is its whole body again with the shield's shader; a weapon's hologram over its gauge), isn't simplified on
 // its own: the part below is, and the layer gets the same triangles on its own vertices.
+// Cut-out parts (`keep`: per model shader, 1 for one drawn cut out) stay exactly as made: leaf cards, grates.
+// `seen` (kTop, a first-person model): per part, per triangle, how much of the time it's on screen. Triangles never
+// on screen go first, and the vertices on the edge between them and the rest stay where they are; then what's seen
+// under 15% of the time is simplified first, allowed three times the change, with what's seen more held still, and
+// then the whole as usual.
 enum How { kLower, kTop };
-static TagNode simplify_geometry(const TagNode &geo, const Level &level, double size, How how = kLower) {
+static TagNode simplify_geometry(const TagNode &geo, const Level &level, double size, How how = kLower,
+                                 const std::vector<char> *keep = nullptr, const std::vector<std::vector<float>> *seen = nullptr,
+                                 int *unseen_out = nullptr) {
     bool top = how != kLower;
     TagNode g = geo;
     std::vector<TagNode> &parts = *tagfile::block(g, "parts");
+    if (unseen_out) *unseen_out = 0;
+    if (seen && seen->size() != parts.size()) seen = nullptr;   // (measured on another version of it)
     // All the parts' vertices in one list (each remembering its part), and each part's triangles.
     std::vector<size_t> first(parts.size() + 1, 0);
     std::vector<std::vector<uint32_t>> own(parts.size());
@@ -170,9 +179,28 @@ static TagNode simplify_geometry(const TagNode &geo, const Level &level, double 
             flipped[q] = facing == 2;
         }
     std::vector<uint32_t> list;
-    for (size_t p = 0; p < parts.size(); p++)
-        if (layer_of[p] < 0) list.insert(list.end(), own[p].begin(), own[p].end());
-    if (list.size() / 3 < 24 || n == 0) return g;   // too small to be worth it
+    std::set<Point> unseen_at;   // (where triangles never on screen were: the edge with the rest stays)
+    int unseen = 0;
+    for (size_t p = 0; p < parts.size(); p++) {
+        if (layer_of[p] >= 0) continue;
+        if (seen && (*seen)[p].size() == own[p].size() / 3) {
+            for (size_t t = 0; t + 2 < own[p].size(); t += 3) {
+                if ((*seen)[p][t / 3] > 0) {
+                    list.insert(list.end(), {own[p][t], own[p][t + 1], own[p][t + 2]});
+                } else {
+                    unseen++;
+                    for (int j = 0; j < 3; j++) unseen_at.insert(at(own[p][t + j]));
+                }
+            }
+        } else {
+            list.insert(list.end(), own[p].begin(), own[p].end());
+        }
+    }
+    if (unseen_out) *unseen_out = unseen;
+    if (list.size() / 3 < 24 || n == 0) {   // too small to be worth it
+        if (!unseen) return g;
+        if (list.empty()) return geo;   // (nothing seen at all: the measurement didn't fit it)
+    }
     std::vector<float> normal(n * 3);
     for (size_t i = 0; i < n; i++)
         for (int c = 0; c < 3; c++) normal[i * 3 + c] = attr[i * 5 + 2 + c];
@@ -243,17 +271,48 @@ static TagNode simplify_geometry(const TagNode &geo, const Level &level, double 
                 if (sheet.count(at((uint32_t)i))) lock[i] = meshopt_SimplifyVertex_Lock;
     }
 
+    // Cut-out parts: every vertex stays.
+    if (keep)
+        for (size_t i = 0; i < n; i++) {
+            int sh = (int)tagfile::get_num(parts[part_of[i]], "shader index");
+            if (sh >= 0 && (size_t)sh < keep->size() && (*keep)[(size_t)sh]) lock[i] = meshopt_SimplifyVertex_Lock;
+        }
+    // Where what's never seen was taken out: the edge stays.
+    if (!unseen_at.empty())
+        for (uint32_t i : list)
+            if (unseen_at.count(at(i))) lock[i] = meshopt_SimplifyVertex_Lock;
+
     // (Sparse when some vertices aren't in the list, a layer's or the copies standing behind one: otherwise the
     // simplifier counts them as more copies at their place, and a place with too many it never moves.)
-    bool sparse = top || std::find_if(layer_of.begin(), layer_of.end(), [](int l) { return l >= 0; }) != layer_of.end();
-    size_t target = std::max<size_t>(3, (size_t)(list.size() / 3 * level.ratio) * 3);
-    std::vector<uint32_t> out(list.size());
+    bool sparse = top || unseen || std::find_if(layer_of.begin(), layer_of.end(), [](int l) { return l >= 0; }) != layer_of.end();
+    // (the target: the share of the triangles as made, the unseen ones included)
+    size_t made = 0;
+    for (size_t p = 0; p < parts.size(); p++)
+        if (layer_of[p] < 0) made += own[p].size();
+    size_t target = std::max<size_t>(3, (size_t)(made / 3 * level.ratio) * 3);
+    const unsigned options = (how == kTop ? 0u : (unsigned)meshopt_SimplifyPermissive) | (sparse ? (unsigned)meshopt_SimplifySparse : 0u) |
+                             meshopt_SimplifyErrorAbsolute;
+    std::vector<uint32_t> out = list;
     float err = 0;
-    out.resize(meshopt_simplifyWithAttributes(out.data(), list.data(), list.size(), pos.data(), n, 12, attr.data(), 20, w, 5,
-                                              lock.data(), target, (float)(size * level.error),
-                                              (how == kTop ? 0u : (unsigned)meshopt_SimplifyPermissive) |
-                                                  (sparse ? (unsigned)meshopt_SimplifySparse : 0u) |
-                                                  meshopt_SimplifyErrorAbsolute, &err));
+    if (seen && out.size() > target) {   // (first what's seen least, with what's seen more held still)
+        std::vector<unsigned char> held = lock;
+        for (size_t p = 0; p < parts.size(); p++) {
+            if (layer_of[p] >= 0 || (*seen)[p].size() != own[p].size() / 3) continue;
+            for (size_t t = 0; t + 2 < own[p].size(); t += 3)
+                if ((*seen)[p][t / 3] >= 0.15f)
+                    for (int j = 0; j < 3; j++) held[own[p][t + j]] = meshopt_SimplifyVertex_Lock;
+        }
+        std::vector<uint32_t> first(out.size());
+        first.resize(meshopt_simplifyWithAttributes(first.data(), out.data(), out.size(), pos.data(), n, 12, attr.data(), 20, w, 5,
+                                                    held.data(), target, (float)(size * level.error * 3), options, &err));
+        out = std::move(first);
+    }
+    if (out.size() > target) {
+        std::vector<uint32_t> next(out.size());
+        next.resize(meshopt_simplifyWithAttributes(next.data(), out.data(), out.size(), pos.data(), n, 12, attr.data(), 20, w, 5,
+                                                   lock.data(), target, (float)(size * level.error), options, &err));
+        out = std::move(next);
+    }
     // Hard edges: each corner takes the copy whose normal is nearest its triangle's facing.
     if (top)
         for (size_t t = 0; t + 2 < out.size(); t += 3) {
@@ -513,9 +572,15 @@ bool set_choice(const Settings &settings, const std::string &model_tag, const Ch
 
 // The versions of one geometry: from the library, or made now (and kept there).
 // `levels`: what to aim for (other than kLevels: keys of their own).
+static std::string keep_text(const std::vector<char> &keep) {   // (for library keys: "" when nothing's kept as made)
+    std::string t;
+    for (char k : keep) t += k ? '1' : '0';
+    return t.find('1') == std::string::npos ? "" : "|cut " + t;
+}
 static std::vector<TagNode> versions(const TagNode &geo, uint32_t checksum, double size, const Level *levels,
-                                     const Settings &settings, bool &from_library, std::string &key) {
-    std::string key_text = std::string(kVersion) + "|" + std::to_string(checksum) + "|" + tagfile::write_node(geo);
+                                     const Settings &settings, bool &from_library, std::string &key,
+                                     const std::vector<char> &keep = {}) {
+    std::string key_text = std::string(kVersion) + "|" + std::to_string(checksum) + "|" + tagfile::write_node(geo) + keep_text(keep);
     bool usual = true;
     for (int i = 0; i < 2; i++) usual = usual && levels[i].ratio == kLevels[i].ratio && levels[i].error == kLevels[i].error;
     if (!usual) {
@@ -544,7 +609,7 @@ static std::vector<TagNode> versions(const TagNode &geo, uint32_t checksum, doub
             return got;
         }
     }
-    for (int i = 0; i < 2; i++) out.push_back(simplify_geometry(geo, levels[i], size));
+    for (int i = 0; i < 2; i++) out.push_back(simplify_geometry(geo, levels[i], size, kLower, keep.empty() ? nullptr : &keep));
     if (!file.empty()) {
         std::error_code ec;
         fs::create_directories(settings.library, ec);
@@ -586,6 +651,31 @@ static double geometries_size(std::vector<TagNode> &geos, const std::set<int> &w
 }
 
 static const char *kLevelNames[5] = {"super high", "high", "medium", "low", "super low"};
+
+// Per model shader: 1 when it's drawn cut out (Settings::look), its parts kept as made. Empty without a look-up.
+static std::vector<char> cut_out_shaders(const fs::path &model, const Settings &settings) {
+    std::vector<char> keep;
+    if (!settings.look) return keep;
+    tagfile::Tag t;
+    if (!t.load(model)) return keep;
+    tagfile::Block sh = t.root().block("shaders");
+    for (size_t i = 0; i < sh.size(); i++) {
+        std::string ref = sh[i].ref("shader");
+        keep.push_back(!ref.empty() && settings.look(ref).kind == ShaderLook::kCutOut);
+    }
+    if (std::find(keep.begin(), keep.end(), 1) == keep.end()) keep.clear();
+    return keep;
+}
+// The triangles of a geometry's parts drawn with those shaders.
+static int kept_triangles(TagNode geo, const std::vector<char> &keep) {
+    int n = 0;
+    for (auto &p : *tagfile::block(geo, "parts")) {
+        int sh = (int)tagfile::get_num(p, "shader index");
+        if (sh >= 0 && (size_t)sh < keep.size() && keep[(size_t)sh])
+            n += (int)strip_to_list(*tagfile::block(p, "triangles"), tagfile::block(p, "uncompressed vertices")->size()).size() / 3;
+    }
+    return n;
+}
 
 // Bungie's stock models (every object in the Xbox tags: each one's most detailed triangles against the diagonal of the
 // box around them), fitted as a x size^b on a log scale. Their volume doesn't predict them (a sniper rifle is about
@@ -643,10 +733,20 @@ static int top_triangles(std::vector<TagNode> &geos, std::vector<TagNode> &regio
 
 // One geometry trimmed: from the library, or made now (and kept there).
 static TagNode trimmed_version(const TagNode &geo, uint32_t checksum, double ratio, double size, double error, How how,
-                               const Settings &settings, bool &from_library, std::string &key) {
+                               const Settings &settings, bool &from_library, std::string &key, const std::vector<char> &keep = {},
+                               const std::vector<std::vector<float>> *seen = nullptr, int *unseen = nullptr) {
     char params[96];
     snprintf(params, sizeof params, "|%.4f|%.6g|%d|", ratio, size * error, (int)how);
-    key = hex(fnv(std::string(kTrimVersion) + "|" + std::to_string(checksum) + params + tagfile::write_node(geo)));
+    std::string seen_text;
+    if (seen) {   // (what's on screen how often, in steps of 1%: a measurement that changes only a little reuses it)
+        seen_text = "|seen";
+        for (auto &part : *seen) {
+            seen_text += '|';
+            for (float v : part) seen_text += v <= 0 ? '0' : (char)('1' + std::min(99, (int)(v * 100)) / 10);
+        }
+    }
+    key = hex(fnv(std::string(kTrimVersion) + "|" + std::to_string(checksum) + params + tagfile::write_node(geo) + keep_text(keep) +
+                  seen_text));
     fs::path file = settings.library.empty() ? fs::path() : settings.library / (key + ".top");
     if (!file.empty() && fs::exists(file)) {
         std::ifstream in(file, std::ios::binary);
@@ -655,10 +755,11 @@ static TagNode trimmed_version(const TagNode &geo, uint32_t checksum, double rat
         TagNode n;
         if (b.compare(0, 8, "HMPTOP1\n") == 0 && tagfile::read_node(b, pos, n) && pos == b.size()) {
             from_library = true;
+            if (unseen) *unseen = -1;   // (unknown: from the library)
             return n;
         }
     }
-    TagNode out = simplify_geometry(geo, Level{ratio, error}, size, how);
+    TagNode out = simplify_geometry(geo, Level{ratio, error}, size, how, keep.empty() ? nullptr : &keep, seen, unseen);
     if (!file.empty()) {
         std::error_code ec;
         fs::create_directories(settings.library, ec);
@@ -676,7 +777,9 @@ Trim trim_top(const fs::path &model, const TrimSettings &ts, const Settings &set
     if (!geos || !regions) { r.why = "not a model"; return r; }
     r.before = r.after = top_triangles(*geos, *regions);
     r.budget = ts.budget;
-    if (ts.density <= 0 && r.before <= ts.budget) { r.why = "within its budget"; return r; }
+    // (with what's on screen measured, what never is goes even within the budget)
+    const bool cull = ts.seen && !ts.seen->geometry.empty();
+    if (ts.density <= 0 && r.before <= ts.budget && !cull) { r.why = "within its budget"; return r; }
 
     // Every permutation's most detailed geometry is trimmed by the same share (variants like "~damaged" too), so the
     // model as a whole comes down to its budget; how far is up to how much each one can lose and still look the same.
@@ -684,10 +787,12 @@ Trim trim_top(const fs::path &model, const TrimSettings &ts, const Settings &set
     double size = top_size(*geos, *regions, &tops);
     if (ts.density > 0) {
         r.budget = std::max(1, (int)std::lround(ts.density * stock_triangles(ts.kind, size)));
-        if (r.before <= r.budget * ts.slack) { r.why = "within its budget"; return r; }
+        if (r.before <= r.budget * ts.slack && !cull) { r.why = "within its budget"; return r; }
     }
     if (!(size > 0)) { r.why = "has no size"; return r; }
-    double ratio = (double)r.budget / r.before, error = std::min(ts.max_change, ts.max_units / size);
+    double ratio = std::min(1.0, (double)r.budget / r.before), error = std::min(ts.max_change, ts.max_units / size);
+    if (r.before <= r.budget * ts.slack) ratio = 1;   // (only what's never seen goes)
+    const std::vector<char> keep = cut_out_shaders(model, settings);
     uint32_t checksum = (uint32_t)(long long)tagfile::get_num(root, "node list checksum");
     std::vector<int> tris(geos->size(), -1);
     auto count = [&](int g) {
@@ -702,9 +807,18 @@ Trim trim_top(const fs::path &model, const TrimSettings &ts, const Settings &set
         if (full < 24) continue;
         bool lib = false;
         std::string key;
-        TagNode v = trimmed_version((*geos)[g], checksum, ratio, size, error, kTop, settings, lib, key);
+        const std::vector<std::vector<float>> *seen = nullptr;
+        if (cull) {
+            auto it = ts.seen->geometry.find(g);
+            if (it != ts.seen->geometry.end()) seen = &it->second;
+        }
+        int unseen = 0;
+        TagNode v = trimmed_version((*geos)[g], checksum, ratio, size, error, kTop, settings, lib, key, keep, seen, &unseen);
         int n = list_triangles(v);
         if (n <= 0 || n > full * 0.95) continue;   // (hardly lighter: kept as it was)
+        if (seen)
+            for (auto &part : *seen)
+                for (float x : part) r.unseen += x <= 0;
         if (lib) r.from_library = true;
         else files += (files.empty() ? "" : " ") + key + ".top";
         bytes_before += geometry_xbox_bytes((*geos)[g]);
@@ -713,7 +827,11 @@ Trim trim_top(const fs::path &model, const TrimSettings &ts, const Settings &set
         tris[g] = n;
         any = true;
     }
-    if (!any) { r.why = "can't lose triangles without changing its shape or how its textures sit"; return r; }
+    if (!any) {
+        r.why = cull && r.before <= r.budget * ts.slack ? "within its budget, and nearly all of it shows in first person"
+                                                       : "can't lose triangles without changing its shape or how its textures sit";
+        return r;
+    }
 
     // A lower level that's now as detailed as the level above it (made for the old, heavier version) draws that one
     // instead; geometries nothing draws any more are dropped.
@@ -851,6 +969,7 @@ Result add_lods(const fs::path &model, const double cutoffs[5], const Settings &
     for (int i = 0; i < 2 && targets && r.triangles > 0; i++)
         if (targets[i] > 0) levels[i] = Level{std::min(1.0, (double)targets[i] / r.triangles), i == 0 ? 0.05 : 0.1};
     uint32_t checksum = (uint32_t)(long long)tagfile::get_num(root, "node list checksum");
+    const std::vector<char> keep = cut_out_shaders(model, settings);
     std::map<int, int> medium, low;   // geometry -> the version used for medium / low and super low
     int base_tris = 0, tris[2] = {0, 0};
     bool any_a = false, any_b = false, made = false;
@@ -858,7 +977,7 @@ Result add_lods(const fs::path &model, const double cutoffs[5], const Settings &
     for (int g : single) {
         bool lib = false;
         std::string key;
-        std::vector<TagNode> vs = versions((*geos)[g], checksum, size, levels, settings, lib, key);
+        std::vector<TagNode> vs = versions((*geos)[g], checksum, size, levels, settings, lib, key, keep);
         r.from_library = r.from_library || lib;
         if (!lib) {
             made = true;
@@ -877,7 +996,22 @@ Result add_lods(const fs::path &model, const double cutoffs[5], const Settings &
         medium[g] = ia;
         low[g] = ib;
     }
-    if (r.bytes_added == 0) { r.why = "couldn't be simplified much (its shape needs most of its triangles)"; return r; }
+    // And the model as a whole: its lowest version 10% lighter than as made, or none (a tree whose leaf cards stay as
+    // made, with only its trunk simplified, isn't worth the memory of another copy).
+    if (r.bytes_added > 0 && base_tris > 0 && tris[1] > base_tris * 0.9) {
+        r.bytes_added = 0;
+        r.xbox_bytes = 0;
+    }
+    if (r.bytes_added == 0) {
+        int cut = 0, all = 0;
+        for (int g : single) {
+            cut += keep.empty() ? 0 : kept_triangles((*geos)[g], keep);
+            all += list_triangles((*geos)[g]);
+        }
+        r.why = all > 0 && cut * 2 >= all ? "most of it is cut-out cards (leaves, grates), which stay as made"
+                                          : "couldn't be simplified much (its shape needs most of its triangles)";
+        return r;
+    }
     if (geos->size() > 256) { r.why = "would have too many geometries"; return r; }
     for (size_t ri = 0; ri < regions->size(); ri++) {
         auto &perms = *tagfile::block((*regions)[ri], "permutations");

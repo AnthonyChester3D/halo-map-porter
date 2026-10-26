@@ -146,6 +146,10 @@ struct Config {
     int xbox_max_object_texture = 256; // props, vehicles, effects (not the level or sky); 0 = same as xbox_max_texture
     // Weapons & vehicles window picks: weapon/vehicle tag -> replacement tag ("" = none).
     std::map<std::string, std::string> xbox_replace;
+    // The scripts window's edits for this map: a folder of .hsc files compiled instead of the map's own scripts (or a
+    // build's data folder's), for every game, converted for it as the map's own are. Empty, or a folder without .hsc
+    // files: the map's own.
+    fs::path user_scripts;
 };
 
 // A model to show in the weapons & vehicles window: its most detailed version (each region's first permutation),
@@ -300,6 +304,24 @@ Result build_from_tags(const Config &cfg, const fs::path &scenario_file, Game ou
 // Fails (r.error) when those tags are gone: another conversion or build since.
 Result update_xbox_models(const Config &cfg, const fs::path &update, const Log &log);
 
+// What an Xbox conversion's prepared tags depend on besides the map itself: every option the preparation reads,
+// including the weapons & vehicles picks, the Level window's choices and the models' options (not the showcase or
+// the perf tour: made as the map is built). The same text (and the same models' choices in the LOD library) means
+// tags prepared with these options are what a conversion with them would prepare.
+std::string xbox_prepare_key(const Config &cfg);
+
+// Convert's shortcut (the Convert tab's "Unpack", then Convert): the tags a conversion or Unpack prepared (`update`:
+// Result::update), built as a conversion would build them; for when the caller has checked that the map, the models'
+// choices and xbox_prepare_key are as they were. can_build_prepared: false with `why`
+// when they can't be used: gone, prepared for another output, or cut down to fit by a build since (textures halved,
+// vehicles dropped), which a conversion from scratch with other options might not need.
+bool can_build_prepared(const fs::path &update, const fs::path &output, bool share, std::string &why);
+Result build_prepared(const Config &cfg, const fs::path &update, const Log &log);
+
+// The models done again on prepared tags with the options in `cfg` (their levels of detail and trims), and the LODs
+// window's file written again, without building the map: seconds, for the LODs window after those options changed.
+Result redo_xbox_models(const Config &cfg, const fs::path &update, const Log &log);
+
 // The LODs window's "Make again": one model (`model`, its tag path) done again on the tags a conversion prepared (the
 // LodView `view_file`'s), from the model as the map made it: its trim and lower-detail versions with its choice now
 // (choices.txt) and the Xbox tab's options in `cfg`, and its entry in the window's file drawn again. The map isn't
@@ -313,6 +335,23 @@ bool measure_prepared(const Config &cfg, const fs::path &update, ContentAnalysis
 
 // Rewrites HSC script text for the target game (functions/globals it lacks get equivalents or stand-ins).
 std::string convert_script_text(Game target, const std::string &text, std::vector<std::string> *notes);
+
+// The scripts window (scripts_win.hpp). A script file: its name ("extracted.hsc") and text.
+struct ScriptFile { std::string name, text; };
+// The map's own scripts: each .hsc file as invader-recover gets it back out of the map's scenario tag (for a scenario
+// in a tags folder: its data folder's scripts, which its build compiles, else the tag's). False (`err`) when there are
+// none or they can't be read.
+// `tricks` (when given): the old network tricks the scripts play (a host check from whether a unit placed out of
+// play exists, a unit dropped on another to signal its death), as the Xbox conversion's log notes them.
+bool read_map_scripts(const Config &cfg, const fs::path &input, std::vector<ScriptFile> &files, std::string &err,
+                      std::vector<std::string> *tricks = nullptr);
+// `files` as a build for `target` compiles them: converted together as a build converts the map's (the target's
+// function names, stand-ins for what it lacks, `cfg`'s script options). `notes`: what changed.
+std::vector<ScriptFile> convert_script_files(const Config &cfg, Game target, const std::vector<ScriptFile> &files,
+                                             std::vector<std::string> &notes);
+// What stops HSC text being read at all ("Line 12: this ( is never closed"), or "" if nothing does. (The build
+// compiles the scripts against the map's objects and tags, and says what else is wrong, with the line.)
+std::string script_syntax_problem(const std::string &text);
 
 // Runs a process, returns exit code, captures combined stdout/stderr.
 int run_process(const std::vector<std::string> &args, std::string &output);

@@ -39,9 +39,14 @@ struct Picks {
     std::string showcase;
 };
 
+// The showcase's "Save to map folder": writes its shots now, without a conversion. `text`: showcase.txt's; `own`: the
+// map's own shots (else made from the level, as a conversion makes them). Returns what happened, for the status line.
+using SaveShowcase = std::function<std::string(const std::string &text, bool own)>;
+
 // Modal. `key` identifies the map and what changes its level (a measurement is reused while it's the same).
 // Returns true on OK with `picks` updated.
-bool edit(HWND owner, const std::wstring &title, const std::string &key, Measure measure, Picks &picks);
+bool edit(HWND owner, const std::wstring &title, const std::string &key, Measure measure, Picks &picks,
+          SaveShowcase save_showcase = nullptr);
 
 // Where measurements are kept between runs of the app.
 void set_cache_folder(const std::filesystem::path &dir);

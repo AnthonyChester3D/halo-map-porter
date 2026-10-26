@@ -161,6 +161,7 @@ int main(int argc, char **argv) {
     if (getenv("XSKY")) cfg.xbox_sky = atoi(getenv("XSKY"));                      // 1 the skies as made
     if (getenv("XFX")) cfg.xbox_effects = atoi(getenv("XFX"));                    // 1 as made, 2 lighter
     cfg.xbox_rider_ai_off = getenv("XRIDERS") != nullptr;                          // riders without AI
+    if (getenv("XSCRIPTS")) cfg.user_scripts = getenv("XSCRIPTS");                 // the scripts window's edits (a folder)
     cfg.xbox_detailed_props_off = getenv("XPROPS") != nullptr;                     // detailed props without collision
     if (getenv("XLIGHTS")) cfg.xbox_object_lights = atoi(getenv("XLIGHTS"));     // lights on the map's objects: 1 no specular, 2 off
     cfg.write_perf_tour = getenv("XTOUR") != nullptr;                              // a perf log camera tour beside the map
@@ -246,8 +247,50 @@ int main(int argc, char **argv) {
         dump(an);
         return 0;
     }
+    if (mode == "scripts") {   // cli_test scripts <map|scenario> <out folder> x: the scripts window's texts
+        std::vector<ScriptFile> files;
+        std::string err;
+        if (!read_map_scripts(cfg, argv[2], files, err)) { std::cout << "ERROR: " << err << "\n"; return 1; }
+        std::vector<std::string> notes;
+        auto conv = convert_script_files(cfg, Game::Xbox, files, notes);
+        std::filesystem::create_directories(argv[3]);
+        for (size_t i = 0; i < files.size(); i++) {
+            std::ofstream(std::filesystem::path(argv[3]) / ("map_" + files[i].name), std::ios::binary) << files[i].text;
+            std::ofstream(std::filesystem::path(argv[3]) / ("xbox_" + files[i].name), std::ios::binary) << conv[i].text;
+            std::string p = script_syntax_problem(files[i].text);
+            std::cout << files[i].name << ": " << files[i].text.size() << " bytes, syntax: " << (p.empty() ? "ok" : p) << "\n";
+        }
+        for (auto &n : notes) std::cout << "  note: " << n << "\n";
+        return 0;
+    }
+    if (mode == "tricks") {   // cli_test tricks <map|scenario> x x: the old network tricks in its scripts
+        std::vector<ScriptFile> files;
+        std::vector<std::string> tricks;
+        std::string err;
+        if (!read_map_scripts(cfg, argv[2], files, err, &tricks)) { std::cout << "(" << err << ")\n"; return 0; }
+        for (auto &t : tricks) std::cout << t << "\n";
+        if (tricks.empty()) std::cout << "(none)\n";
+        return 0;
+    }
+    if (mode == "syntax") {   // cli_test syntax <file.hsc> x x: script_syntax_problem
+        std::ifstream in(argv[2], std::ios::binary);
+        std::string t((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        std::string p = script_syntax_problem(t);
+        std::cout << (p.empty() ? "ok" : p) << "\n";
+        return 0;
+    }
+    if (mode == "prepkey") {   // cli_test prepkey x x x: xbox_prepare_key with these options
+        std::cout << xbox_prepare_key(cfg);
+        return 0;
+    }
     if (mode == "update") {   // cli_test update <cache>/work/convert/update.txt x x: the LODs window's "Update the map"
         r = update_xbox_models(cfg, argv[2], log);
+    } else if (mode == "buildprep") {   // cli_test buildprep <update.txt> <output.map> x: Convert from the tags Unpack prepared
+        std::string why;
+        if (!can_build_prepared(argv[2], argv[3], true, why)) { std::cout << "CAN'T: " << why << "\n"; return 1; }
+        r = build_prepared(cfg, argv[2], log);
+    } else if (mode == "redomodels") {   // cli_test redomodels <update.txt> x x: the models done again for the LODs window
+        r = redo_xbox_models(cfg, argv[2], log);
     } else if (mode == "redo") {   // cli_test redo <lods view file> <model tag> x: the LODs window's "Make again"
         r = redo_model_lods(cfg, argv[2], argv[3], log);
     } else if (mode == "convert") {

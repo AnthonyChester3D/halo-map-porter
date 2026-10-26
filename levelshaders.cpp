@@ -266,6 +266,7 @@ static void read_marks(const tagfile::Elem &sc, const Find &find, Preview &p) {
         long long type = flags[i].integer("type");
         Mark m;
         for (int k = 0; k < 3; k++) m.p[k] = (float)flags[i].num("position", k);
+        m.index = (int32_t)flags[i].integer("usage id");
         if (type == 0) {   // (a CTF flag's spot)
             m.kind = Mark::kFlag;
             snprintf(m.name, sizeof m.name, "%s flag", flags[i].integer("usage id") == 1 ? "blue" : "red");   // (CTF: 0 red, 1 blue)
@@ -1578,9 +1579,75 @@ int pick(const Preview &p, const Camera &cam, int w, int h, double x, double y, 
     return best;
 }
 
+const double kSide = 0.77;   // (the cosine of 40 degrees: the picture's side, widescreen's a little past Halo's 35)
+std::vector<FogCut> fog_cuts(const Preview &p, double end, size_t most) {
+    std::vector<FogCut> out;
+    if (end <= 0 || p.views.empty()) return out;
+    // Each material's upright triangles: their corners (at most 600, spread) and area.
+    std::map<int, std::vector<std::array<float, 2>>> pts;
+    std::map<int, double> area;
+    for (auto &t : p.triangles) {
+        if (t.material < 0) continue;
+        float e1[3], e2[3], n[3];
+        for (int k = 0; k < 3; k++) { e1[k] = t.v[1].p[k] - t.v[0].p[k]; e2[k] = t.v[2].p[k] - t.v[0].p[k]; }
+        n[0] = e1[1] * e2[2] - e1[2] * e2[1]; n[1] = e1[2] * e2[0] - e1[0] * e2[2]; n[2] = e1[0] * e2[1] - e1[1] * e2[0];
+        double l = std::sqrt((double)n[0] * n[0] + (double)n[1] * n[1] + (double)n[2] * n[2]);
+        if (l <= 1e-9 || std::fabs(n[2]) / l > 0.5) continue;   // (upright: walls, cards, cliffs; not floors)
+        area[t.material] += l / 2;
+        for (auto &v : t.v) pts[t.material].push_back({v.p[0], v.p[1]});
+    }
+    size_t step = std::max<size_t>(1, p.views.size() / 150);
+    for (auto &[m, ps] : pts) {
+        if (area[m] < 20) continue;
+        std::vector<std::array<float, 2>> q;
+        size_t every = std::max<size_t>(1, ps.size() / 600);
+        for (size_t i = 0; i < ps.size(); i += every) q.push_back(ps[i]);
+        std::vector<double> nearest, farthest;
+        for (size_t v = 0; v < p.views.size(); v += step) {
+            double lo = 1e30, hi = 0;
+            for (auto &c : q) {
+                double d = std::hypot(c[0] - p.views[v].eye[0], c[1] - p.views[v].eye[1]);
+                lo = std::min(lo, d);
+                hi = std::max(hi, d);
+            }
+            nearest.push_back(lo);
+            farthest.push_back(hi);
+        }
+        std::sort(nearest.begin(), nearest.end());
+        std::sort(farthest.begin(), farthest.end());
+        // (the cut is by distance in front of the camera: something nearer than the end draws at the picture's sides
+        // as it turns, out to kSide of its distance; and the level's own walls round players are cut wherever the fog
+        // ends, the backdrop past them is what shows it)
+        double a = nearest[nearest.size() / 2], b = farthest[farthest.size() / 2];
+        if (a * kSide < end && b > end && a >= end * 0.5 && (size_t)m < p.material_tags.size())
+            out.push_back({p.material_tags[(size_t)m], a, b, area[m]});
+    }
+    std::sort(out.begin(), out.end(), [](const FogCut &x, const FogCut &y) { return x.area > y.area; });
+    if (out.size() > most) out.resize(most);
+    return out;
+}
+
+std::string fog_cut_text(const std::vector<FogCut> &cuts, double end) {
+    if (cuts.empty()) return "";
+    auto num = [](double v) { char b[32]; snprintf(b, sizeof b, "%.0f", v); return std::string(b); };
+    double lo = 1e30, hi = 0;
+    std::string names;
+    for (size_t i = 0; i < cuts.size(); i++) {
+        lo = std::min(lo, cuts[i].nearest);
+        hi = std::max(hi, cuts[i].farthest);
+        names += (i ? ", " : "") + fs::path(cuts[i].tag).stem().u8string() + " (" + num(cuts[i].nearest) + " to " +
+                 num(cuts[i].farthest) + (i ? ")" : " units from where players stand)");
+    }
+    bool one = cuts.size() == 1;
+    return "the fog's end (" + num(end) + " units) runs through " + names + ": past it the Xbox draws nothing and the sky "
+           "shows, so " + (one ? "it's" : "they're") + " cut off along a line that moves as the camera turns. Under " +
+           num(std::max(1.0, std::floor(lo * kSide))) + " units " + (one ? "it's" : "they're") + " never drawn; past " +
+           num(std::ceil(hi * 1.03)) + ", always whole";
+}
+
 // The file: a magic, then each part as counts and raw values (this machine's byte order: the file is a cache).
 namespace {
-const char kMagic[8] = {'H', 'M', 'P', 'L', 'S', 'H', 'D', 'B'};
+const char kMagic[8] = {'H', 'M', 'P', 'L', 'S', 'H', 'D', 'C'};
 struct Out {
     std::ofstream f;
     template <class T> void raw(const T &v) { f.write((const char *)&v, sizeof v); }
