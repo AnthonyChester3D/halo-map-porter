@@ -235,6 +235,100 @@ Cost stock_cost() {
     return Cost{3350, 8260};
 }
 
+namespace {
+// A model's box (the corners of every geometry's vertices), in its own space; false if it has none.
+bool model_box(const fs::path &file, float lo[3], float hi[3]) {
+    tagfile::Tag t;
+    if (!t.load(file)) return false;
+    for (int k = 0; k < 3; k++) { lo[k] = 1e30f; hi[k] = -1e30f; }
+    tagfile::Block geos = t.root().block("geometries");
+    for (size_t g = 0; g < geos.size(); g++) {
+        tagfile::Block parts = geos[g].block("parts");
+        for (size_t q = 0; q < parts.size(); q++) {
+            tagfile::Block vs = parts[q].block("uncompressed vertices");
+            if (!vs.size()) vs = parts[q].block("compressed vertices");
+            for (size_t v = 0; v < vs.size(); v++)
+                for (int k = 0; k < 3; k++) {
+                    float x = (float)vs[v].num("position", k);
+                    lo[k] = std::min(lo[k], x);
+                    hi[k] = std::max(hi[k], x);
+                }
+        }
+    }
+    return lo[0] <= hi[0];
+}
+}   // namespace
+
+// The scenario's CTF flags, power items and placed objects' boxes (Preview::marks, boxes).
+static void read_marks(const tagfile::Elem &sc, const Find &find, Preview &p) {
+    tagfile::Block flags = sc.block("netgame flags");
+    for (size_t i = 0; i < flags.size(); i++) {
+        if (flags[i].integer("type") != 0) continue;   // (0: a CTF flag's spot)
+        Mark m;
+        for (int k = 0; k < 3; k++) m.p[k] = (float)flags[i].num("position", k);
+        m.kind = Mark::kFlag;
+        snprintf(m.name, sizeof m.name, "%s flag", flags[i].integer("usage id") == 1 ? "blue" : "red");   // (CTF: 0 red, 1 blue)
+        p.marks.push_back(m);
+    }
+    static const char *const kPower[] = {"rocket", "sniper", "fuel", "flame", "overshield", "over shield", "camo", "invis"};
+    tagfile::Block eq = sc.block("netgame equipment");
+    for (size_t i = 0; i < eq.size(); i++) {
+        std::string ref = eq[i].ref("item collection"), stem = fs::path(ref).stem().string(), low = stem;
+        for (auto &c : low) c = (char)std::tolower((unsigned char)c);
+        bool power = false;
+        for (const char *w : kPower) power = power || low.find(w) != std::string::npos;
+        if (!power) continue;
+        Mark m;
+        for (int k = 0; k < 3; k++) m.p[k] = (float)eq[i].num("position", k);
+        m.kind = Mark::kPower;
+        snprintf(m.name, sizeof m.name, "%s", stem.c_str());
+        p.marks.push_back(m);
+    }
+    static const char *const kinds[][2] = {{"scenery", "scenery palette"}, {"machines", "machine palette"},
+                                           {"controls", "control palette"}, {"light fixtures", "light fixture palette"}};
+    std::map<std::string, std::array<float, 6>> box_of;   // object -> its model's box (lo, hi; empty: none)
+    for (auto &k : kinds) {
+        tagfile::Block items = sc.block(k[0]), pal = sc.block(k[1]);
+        for (size_t i = 0; i < items.size(); i++) {
+            long long t = items[i].integer("type");
+            if (t < 0 || (size_t)t >= pal.size()) continue;
+            std::string o = pal[(size_t)t].ref("name");
+            if (o.empty()) continue;
+            auto it = box_of.find(o);
+            if (it == box_of.end()) {
+                std::array<float, 6> b{1, 1, 1, 0, 0, 0};   // (lo > hi: none)
+                fs::path of = find(o);
+                tagfile::Tag ot;
+                if (!of.empty() && ot.load(of)) {
+                    std::string m = ot.root().ref("model");
+                    fs::path mf = m.empty() ? fs::path() : find(m);
+                    float lo[3], hi[3];
+                    if (!mf.empty() && model_box(mf, lo, hi)) b = {lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]};
+                }
+                it = box_of.emplace(o, b).first;
+            }
+            const auto &b = it->second;
+            if (b[0] > b[3]) continue;
+            double yaw = items[i].num("rotation", 0), pitch = items[i].num("rotation", 1), roll = items[i].num("rotation", 2);
+            Box x;
+            double cx = (b[0] + b[3]) / 2, cy = (b[1] + b[4]) / 2, cz = (b[2] + b[5]) / 2;
+            double hx = (b[3] - b[0]) / 2, hy = (b[4] - b[1]) / 2, hz = (b[5] - b[2]) / 2;
+            if (std::fabs(pitch) > 0.05 || std::fabs(roll) > 0.05) {   // (tipped over: a cube around it, upright)
+                double r = std::sqrt(hx * hx + hy * hy + hz * hz);
+                hx = hy = hz = r;
+            }
+            double c = std::cos(yaw), s = std::sin(yaw);
+            x.c[0] = (float)(items[i].num("position", 0) + c * cx - s * cy);
+            x.c[1] = (float)(items[i].num("position", 1) + s * cx + c * cy);
+            x.c[2] = (float)(items[i].num("position", 2) + cz);
+            x.axis[0][0] = (float)c; x.axis[0][1] = (float)s;
+            x.axis[1][0] = (float)-s; x.axis[1][1] = (float)c;
+            x.half[0] = (float)hx; x.half[1] = (float)hy; x.half[2] = (float)hz;
+            p.boxes.push_back(x);
+        }
+    }
+}
+
 bool analyze(const fs::path &bsp_file, const fs::path &scenario, const Find &find, Analysis &a, Preview &p, std::string *why) {
     auto fail = [&](const char *w) { if (why) *why = w; return false; };
     a = Analysis();
@@ -526,6 +620,7 @@ bool analyze(const fs::path &bsp_file, const fs::path &scenario, const Find &fin
                 ln += (ln.empty() ? "" : ", ") + fs::path(l).stem().string() + " (" + std::to_string(n) + " placed)";
             }
             snprintf(p.content.light_names, sizeof p.content.light_names, "%s", ln.c_str());
+            read_marks(sc.root(), find, p);
         }
         for (size_t c = 0; c < clusters.size(); c++) {
             long long sky = clusters[c].integer("sky");
@@ -879,7 +974,7 @@ void draw(const Preview &p, const Camera &cam, const std::vector<char> &reflecti
     if (total_out) *total_out = total;
 }
 
-int pick(const Preview &p, const Camera &cam, int w, int h, double x, double y) {
+int pick(const Preview &p, const Camera &cam, int w, int h, double x, double y, std::array<double, 3> *hit) {
     if (w <= 0 || h <= 0) return -1;
     const double tx = std::tan(35.0 * 3.14159265358979 / 180), ty = tx * h / w;
     V3 eye{cam.eye[0], cam.eye[1], cam.eye[2]};
@@ -911,12 +1006,13 @@ int pick(const Preview &p, const Camera &cam, int w, int h, double x, double y) 
         best = (int)i;
         best_t = dist;
     }
+    if (hit && best >= 0) *hit = {eye[0] + d[0] * best_t, eye[1] + d[1] * best_t, eye[2] + d[2] * best_t};
     return best;
 }
 
 // The file: a magic, then each part as counts and raw values (this machine's byte order: the file is a cache).
 namespace {
-const char kMagic[8] = {'H', 'M', 'P', 'L', 'S', 'H', 'D', '8'};
+const char kMagic[8] = {'H', 'M', 'P', 'L', 'S', 'H', 'D', '9'};
 struct Out {
     std::ofstream f;
     template <class T> void raw(const T &v) { f.write((const char *)&v, sizeof v); }
@@ -981,6 +1077,8 @@ bool save(const Analysis &a, const Preview &p, const fs::path &file) {
     o.raw(p.content);
     o.vec(p.tree);
     o.vec(p.leaf_room);
+    o.vec(p.marks);
+    o.vec(p.boxes);
     return (bool)o.f;
 }
 
@@ -1034,6 +1132,8 @@ bool load(Analysis &a, Preview &p, const fs::path &file) {
     in.raw(p.content);
     in.vec(p.tree);
     in.vec(p.leaf_room);
+    in.vec(p.marks);
+    in.vec(p.boxes);
     return in.ok && a.drawn.size() == (size_t)a.views * a.shaders.size();
 }
 

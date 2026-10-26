@@ -437,6 +437,53 @@ void Renderer::draw(const Frame &f) {
         gl.glBindBuffer(GL_ARRAY_BUFFER, 0);
         glDisable(GL_CULL_FACE);
 
+        // The showcase's shot: the boxes the camera keeps clear of (grey), its path (cyan) and keys (yellow), and what
+        // it looks at (magenta), drawn over the level where nothing is in front of them.
+        if (f.boxes || !f.path.empty() || !f.keys.empty()) {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDepthMask(GL_FALSE);
+            glDepthFunc(GL_LEQUAL);
+            if (f.boxes) {
+                glLineWidth(1.0f);
+                glColor4f(0.85f, 0.85f, 0.85f, 0.55f);
+                for (auto &b : *f.boxes) {
+                    float q[8][3];
+                    for (int k = 0; k < 8; k++) {
+                        float sx = (k & 1) ? b.half[0] : -b.half[0], sy = (k & 2) ? b.half[1] : -b.half[1], sz = (k & 4) ? b.half[2] : -b.half[2];
+                        q[k][0] = b.c[0] + sx * b.axis[0][0] + sy * b.axis[1][0];
+                        q[k][1] = b.c[1] + sx * b.axis[0][1] + sy * b.axis[1][1];
+                        q[k][2] = b.c[2] + sz;
+                    }
+                    static const int edge[12][2] = {{0, 1}, {1, 3}, {3, 2}, {2, 0}, {4, 5}, {5, 7}, {7, 6}, {6, 4}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};
+                    glBegin(GL_LINES);
+                    for (auto &e : edge) { glVertex3fv(q[e[0]]); glVertex3fv(q[e[1]]); }
+                    glEnd();
+                }
+            }
+            glLineWidth(3.0f);
+            glColor4f(0.2f, 0.95f, 1.0f, 0.9f);
+            glBegin(GL_LINE_STRIP);
+            for (auto &q : f.path) glVertex3f(q[0], q[1], q[2]);
+            glEnd();
+            glPointSize(8.0f);
+            glColor4f(1.0f, 0.9f, 0.15f, 1.0f);
+            glBegin(GL_POINTS);
+            for (auto &q : f.keys) glVertex3f(q[0], q[1], q[2]);
+            glEnd();
+            if (f.look) {
+                glColor4f(1.0f, 0.3f, 0.9f, 1.0f);
+                glPointSize(12.0f);
+                glBegin(GL_POINTS);
+                glVertex3f(f.look_at[0], f.look_at[1], f.look_at[2]);
+                glEnd();
+            }
+            glPointSize(1.0f);
+            glLineWidth(1.0f);
+            glDepthFunc(GL_LESS);
+            glDepthMask(GL_TRUE);
+            glDisable(GL_BLEND);
+        }
         // The portals: a glow where you see through one, and its outline (as lshade::draw's).
         if (f.portals && !f.what_it_loses) {
             glEnable(GL_BLEND);

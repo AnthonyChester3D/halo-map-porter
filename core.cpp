@@ -7,6 +7,7 @@
 #include "lod.hpp"
 #include "perf.hpp"
 #include "levelshaders.hpp"
+#include "showcase.hpp"
 #include "portals.hpp"
 #include "preview.hpp"
 #include "sky.hpp"
@@ -307,6 +308,8 @@ struct Job {
     fs::path overlay;  // stock tags of target game (optional)
     std::set<std::string> alpha_tested;   // bitmaps a shader alpha-tests (find_alpha_tested: halve_cutout)
     std::string perf_tour;                // a camera tour for the map (make_perf_tour), written beside it
+    std::string showcase;                 // its showcase flythrough (showcase.hpp), written into its map folder
+    std::string showcase_note;            // (what it is, for the log)
     fs::path source;   // tags of the map being converted / user's tags
     fs::path user_tags; // build-from-tags: the user's own tags folder (never modified)
     fs::path user_data; // build-from-tags: the user's data folder (scripts, sounds)
@@ -2152,6 +2155,24 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
             job.note("[tour] wrote a camera tour for Halo 1 Unlimited's perf log (" + std::to_string(n) + " stops): " + u8(tour) +
                      ". Copy it to perf\\tours beside the XBE. The log names the map by how the Xbox lists it (in a folder "
                      "\"_Unsorted\": _Unsorted_" + name + "), so rename the file to match the CSV's name if it differs");
+        }
+    }
+    if (job.target == Game::Xbox && !job.showcase.empty() && fs::exists(output.parent_path() / "info.txt", ec)) {
+        // Into the map's folder, beside info.txt (Halo 1 Unlimited's showcase screensaver reads it there), unless one
+        // the app didn't write is there already (a map maker's own).
+        fs::path sf = output.parent_path() / "showcase.txt";
+        std::string had;
+        {
+            std::ifstream in(sf, std::ios::binary);
+            if (in) had.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        }
+        if (!had.empty() && !showcase::ours(had)) {
+            job.note("[showcase] kept the map folder's own showcase.txt (not one this app wrote): " + u8(sf));
+        } else {
+            std::ofstream of(sf, std::ios::binary | std::ios::trunc);
+            if (of << job.showcase)
+                job.note("[showcase] wrote the flythrough Halo 1 Unlimited's showcase screensaver flies on this map, " +
+                         job.showcase_note + ": " + u8(sf));
         }
     }
     r.changes = job.changes;
@@ -5852,6 +5873,22 @@ void xbox_reflections(Job &job) {
         }
         if (cfg.write_perf_tour && !cfg.level_shaders_only && job.perf_tour.empty())   // (the first level: the one a match loads)
             job.perf_tour = make_perf_tour(a, p, stag.root(), a.map_name);
+        if (cfg.xbox_showcase && !cfg.level_shaders_only && job.showcase.empty() && !job.update) {
+            showcase::Showcase own;
+            std::string why;
+            if (!cfg.xbox_showcase_text.empty() && showcase::read(cfg.xbox_showcase_text, own, &why) && !own.shots.empty()) {
+                job.showcase = cfg.xbox_showcase_text;
+                char b[120];
+                snprintf(b, sizeof b, "%zu shots, %.0f seconds", own.shots.size(), own.length());
+                job.showcase_note = std::string("your own from the Level window (") + b + ")";
+            } else {
+                std::string report;
+                showcase::Showcase made = showcase::generate(p, &report);
+                if (!made.shots.empty())
+                    job.showcase = showcase::write(made, fs::path(from_u8(job.scenario)).filename().u8string(), "generated from the level");
+                job.showcase_note = "made from the level: " + report;
+            }
+        }
         std::vector<char> none(a.shaders.size(), 0), drop(a.shaders.size(), 0);
         int reflective = 0;
         for (size_t s = 0; s < a.shaders.size(); s++) {

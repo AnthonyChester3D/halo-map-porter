@@ -106,6 +106,17 @@ struct Content {
     int32_t object_lights = 0;
     char light_names[160] = {};          // "headlights light (3 placed), ..."
 };
+// What the showcase's shots look at and keep clear of (showcase.hpp), from the scenario: its CTF flags and power items
+// (rocket launchers, sniper rifles, fuel rods, flamethrowers, overshields, camouflage), and the boxes around the
+// objects it places (scenery, machines, controls, light fixtures: each model's box, turned as placed), which the
+// level's own triangles don't have.
+struct Mark {
+    enum Kind : int32_t { kFlag = 0, kPower = 1 };
+    float p[3] = {0, 0, 0};
+    int32_t kind = kFlag;
+    char name[32] = {};
+};
+struct Box { float c[3] = {0, 0, 0}, axis[2][2] = {{1, 0}, {0, 1}}, half[3] = {0, 0, 0}; };   // (axes: turned about z only)
 struct Preview {
     std::vector<Triangle> triangles;
     std::vector<Material> materials;
@@ -121,6 +132,8 @@ struct Preview {
     std::vector<int16_t> room_sky;
     Weather weather;
     Content content;
+    std::vector<Mark> marks;
+    std::vector<Box> boxes;
     // Which room a point is in: the level's BSP tree (child: a node, ~leaf for a leaf (-2 and less), -1 solid).
     struct Node { float n[3] = {0, 0, 0}; float d = 0; int32_t front = -1, back = -1; };
     std::vector<Node> tree;
@@ -155,7 +168,8 @@ void draw(const Preview &p, const Camera &c, const std::vector<char> &reflection
 
 // The surface at pixel (x, y) of a w x h picture drawn from `c` (as draw and the window's picture see it: the nearest
 // triangle there that's drawn, facing the camera unless see-through, not cut away by its cut-out): its triangle, or -1.
-int pick(const Preview &p, const Camera &c, int w, int h, double x, double y);
+// `hit`: where the ray meets it.
+int pick(const Preview &p, const Camera &c, int w, int h, double x, double y, std::array<double, 3> *hit = nullptr);
 
 // The analysis and preview in a file (for the level shaders window), and back.
 bool save(const Analysis &a, const Preview &p, const std::filesystem::path &file);

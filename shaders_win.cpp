@@ -6,6 +6,7 @@
 
 #include "glpreview_win.hpp"
 #include "levelshaders.hpp"
+#include "showcase.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -27,6 +28,8 @@ enum {
     IDC_CHANGES, IDC_HILITE, IDC_COST, IDC_REMEASURE, IDC_OKB, IDC_CANCELB, IDC_ABOUT, IDC_PORTALS, IDC_FOG_LBL, IDC_FOG,
     IDC_FAR_LBL, IDC_FAR, IDC_FOG_DIST, IDC_FOG_UNITS, IDC_WEATHER_LBL, IDC_WEATHER, IDC_RIDERS_LBL, IDC_RIDERS, IDC_PROPS_LBL,
     IDC_PROPS, IDC_SKY_LBL, IDC_SKY, IDC_FX_LBL, IDC_FX, IDC_LIGHTS_LBL, IDC_LIGHTS,
+    IDC_SHOWCASE, IDC_SC_LIST, IDC_SC_PLAY, IDC_SC_PLAYSHOT, IDC_SC_STOP, IDC_SC_NEW, IDC_SC_ADD, IDC_SC_UNDO, IDC_SC_SECS_LBL,
+    IDC_SC_SECS, IDC_SC_LOOK, IDC_SC_DELETE, IDC_SC_UP, IDC_SC_DOWN, IDC_SC_REMAKE, IDC_SC_HINT,
 };
 #define WM_LS_LOG (WM_APP + 60)
 #define WM_LS_DONE (WM_APP + 61)
@@ -64,6 +67,16 @@ struct State {
     bool ticking = false, dirty = false, coarse = false;
     LARGE_INTEGER last_tick{};
     bool keep_camera = false;   // (a shader selected by double-clicking the picture: the view stays where it is)
+    // The showcase flythrough (showcase.hpp; the "Showcase flythrough" button swaps the list for its shots): made from
+    // the level, or this map's own once changed here (`custom`); one shot or all of them played in the picture.
+    bool sc_mode = false, sc_ready = false, sc_custom = false, sc_filling = false;
+    showcase::Showcase sc;
+    std::string sc_report;
+    int sc_sel = -1;
+    HWND sc_list = nullptr;
+    bool playing = false;
+    int play_shot = -1;   // (-1: all of them, round and round)
+    LARGE_INTEGER play_start{};
 };
 State *St = nullptr;
 
@@ -185,6 +198,16 @@ void render(bool fast) {
         f.portals = St->portals;
         f.fog_on = true;
         f.fog = fog_for(c);
+        if (St->sc_mode) {   // (the showcase: the objects' boxes, and the selected shot's path, keys and look point)
+            f.boxes = &St->data->p.boxes;
+            if (!St->playing && St->sc_sel >= 0 && (size_t)St->sc_sel < St->sc.shots.size()) {
+                const showcase::Shot &shot = St->sc.shots[(size_t)St->sc_sel];
+                for (auto &q : showcase::path(shot, 0.1)) f.path.push_back({(float)q[0], (float)q[1], (float)q[2]});
+                for (auto &k : shot.keys) f.keys.push_back({(float)k.p[0], (float)k.p[1], (float)k.p[2]});
+                f.look = shot.look;
+                f.look_at = {(float)shot.at[0], (float)shot.at[1], (float)shot.at[2]};
+            }
+        }
         St->gl->draw(f);
         ValidateRect(St->view, nullptr);
         return;
@@ -219,6 +242,174 @@ void render(bool fast) {
     St->pw = w;
     St->ph = h;
     InvalidateRect(St->view, nullptr, FALSE);
+}
+
+// ---- the showcase flythrough (showcase.hpp): its shots in place of the list, played and changed in the picture
+void start_ticking();
+double deg_of(double r) { return r * 180 / 3.14159265358979; }
+double rad_of(double d) { return d * 3.14159265358979 / 180; }
+showcase::Key key_here() {
+    showcase::Key k;
+    k.p = St->cam.eye;
+    k.yaw = deg_of(St->cam.yaw);
+    k.pitch = deg_of(St->cam.pitch);
+    return k;
+}
+void camera_to(const showcase::View &v) {
+    St->cam.eye = v.eye;
+    St->cam.yaw = rad_of(v.yaw);
+    St->cam.pitch = std::clamp(rad_of(v.pitch), -1.5, 1.5);
+}
+std::wstring secs(double v) {
+    wchar_t b[32];
+    swprintf(b, 32, L"%.1f", v);
+    return b;
+}
+std::wstring sc_summary() {
+    return std::to_wstring(St->sc.shots.size()) + (St->sc.shots.size() == 1 ? L" shot, " : L" shots, ") +
+           secs(St->sc.length()) + L" seconds";
+}
+void sc_status() {
+    std::wstring t;
+    if (St->sc.shots.empty())
+        t = St->sc_custom ? L"No shots: add some with \"New shot here\", or \"Make again\" for shots made from the level."
+                          : L"No shots could be made from the level (" + W(St->sc_report) + L"): add your own with \"New shot here\".";
+    else if (St->sc_custom)
+        t = L"This map's own showcase flythrough: " + sc_summary() + L" (changed here).";
+    else
+        t = L"Showcase flythrough made from the level: " + W(St->sc_report) + L".";
+    SetWindowTextW(item(IDC_STATUS), t.c_str());
+}
+void sc_select(int row, bool move_camera);
+void sc_fill() {
+    St->sc_filling = true;
+    ListView_DeleteAllItems(St->sc_list);
+    for (size_t i = 0; i < St->sc.shots.size(); i++) {
+        const showcase::Shot &shot = St->sc.shots[i];
+        std::wstring name = std::to_wstring(i + 1) + L". " + W(shot.label.empty() ? std::string("shot") : shot.label);
+        LVITEMW it{};
+        it.mask = LVIF_TEXT;
+        it.iItem = (int)i;
+        it.pszText = (LPWSTR)name.c_str();
+        ListView_InsertItem(St->sc_list, &it);
+        std::wstring cells[3] = {secs(shot.seconds), std::to_wstring(shot.keys.size()), shot.look ? L"a point" : L""};
+        for (int c = 0; c < 3; c++) ListView_SetItemText(St->sc_list, (int)i, c + 1, (LPWSTR)cells[c].c_str());
+    }
+    if (St->sc_sel >= (int)St->sc.shots.size()) St->sc_sel = (int)St->sc.shots.size() - 1;
+    if (St->sc_sel >= 0) {
+        ListView_SetItemState(St->sc_list, St->sc_sel, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+        ListView_EnsureVisible(St->sc_list, St->sc_sel, FALSE);
+    }
+    St->sc_filling = false;
+    sc_select(St->sc_sel, false);
+}
+// The selected shot: its seconds and look in the boxes under the list; the camera to its start.
+void sc_select(int row, bool move_camera) {
+    St->sc_sel = row;
+    bool have = row >= 0 && (size_t)row < St->sc.shots.size();
+    St->sc_filling = true;
+    SetWindowTextW(item(IDC_SC_SECS), have ? secs(St->sc.shots[(size_t)row].seconds).c_str() : L"");
+    CheckDlgButton(St->wnd, IDC_SC_LOOK, have && St->sc.shots[(size_t)row].look ? BST_CHECKED : BST_UNCHECKED);
+    St->sc_filling = false;
+    for (int id : {IDC_SC_PLAYSHOT, IDC_SC_ADD, IDC_SC_UNDO, IDC_SC_SECS, IDC_SC_LOOK, IDC_SC_DELETE, IDC_SC_UP, IDC_SC_DOWN})
+        EnableWindow(item(id), have);
+    EnableWindow(item(IDC_SC_PLAY), !St->sc.shots.empty());
+    if (have && move_camera && !St->playing) camera_to(showcase::at(St->sc.shots[(size_t)row], 0));
+    render(false);
+}
+// A change made here: the shots are this map's own from now on.
+void sc_changed() {
+    St->sc_custom = true;
+    sc_fill();
+    sc_status();
+}
+void sc_prepare() {
+    if (St->sc_ready || !St->data) return;
+    showcase::Showcase own;
+    if (!St->picks.showcase.empty() && showcase::read(St->picks.showcase, own)) {
+        St->sc = own;
+        St->sc_custom = true;
+    } else {
+        St->sc = showcase::generate(St->data->p, &St->sc_report);
+        St->sc_custom = false;
+    }
+    St->sc_sel = St->sc.shots.empty() ? -1 : 0;
+    St->sc_ready = true;
+}
+void sc_stop() {
+    if (!St->playing) return;
+    St->playing = false;
+    EnableWindow(item(IDC_SC_STOP), FALSE);
+    sc_status();
+    render(false);
+}
+void sc_play(int shot) {
+    if (St->sc.shots.empty()) return;
+    St->playing = true;
+    St->play_shot = shot;
+    QueryPerformanceCounter(&St->play_start);
+    EnableWindow(item(IDC_SC_STOP), TRUE);
+    SetFocus(St->view);
+    start_ticking();
+}
+// Each frame while playing: the camera where the shot has it now (one shot once; all of them round and round).
+void sc_tick() {
+    LARGE_INTEGER now, freq;
+    QueryPerformanceCounter(&now);
+    QueryPerformanceFrequency(&freq);
+    double t = (double)(now.QuadPart - St->play_start.QuadPart) / (double)freq.QuadPart;
+    const auto &shots = St->sc.shots;
+    size_t i = 0;
+    if (St->play_shot >= 0 && (size_t)St->play_shot < shots.size()) {
+        i = (size_t)St->play_shot;
+        if (t >= shots[i].seconds) {
+            camera_to(showcase::at(shots[i], shots[i].seconds));
+            St->dirty = true;
+            sc_stop();
+            return;
+        }
+    } else {
+        double total = St->sc.length();
+        if (total <= 0) { sc_stop(); return; }
+        t = std::fmod(t, total);
+        while (i + 1 < shots.size() && t >= shots[i].seconds) t -= shots[i++].seconds;
+    }
+    camera_to(showcase::at(shots[i], t));
+    St->dirty = true;
+    static int shown = -1;
+    int tenth = (int)(t * 4) + (int)i * 100000;
+    if (tenth != shown) {
+        shown = tenth;
+        std::wstring line = L"Playing shot " + std::to_wstring(i + 1) + L" of " + std::to_wstring(shots.size()) + L", " +
+                            W(shots[i].label) + L": " + secs(t) + L" of " + secs(shots[i].seconds) + L" seconds. "
+                            L"Click the picture or Stop to stop.";
+        SetWindowTextW(item(IDC_STATUS), line.c_str());
+    }
+}
+std::wstring g_status_text;   // (the list's status line, back when leaving the showcase)
+void set_sc_mode(bool on) {
+    if (on && !St->data) return;
+    if (on) sc_prepare();
+    else sc_stop();
+    St->sc_mode = on;
+    ShowWindow(St->list, on ? SW_HIDE : SW_SHOW);
+    for (int id = IDC_SC_LIST; id <= IDC_SC_HINT; id++) ShowWindow(item(id), on ? SW_SHOW : SW_HIDE);
+    SetWindowTextW(item(IDC_SHOWCASE), on ? L"Back to the reflections" : L"Showcase flythrough...");
+    if (on) {
+        sc_fill();
+        sc_status();
+        sc_select(St->sc_sel, true);
+        EnableWindow(item(IDC_SC_STOP), FALSE);
+    } else {
+        SetWindowTextW(item(IDC_STATUS), g_status_text.c_str());
+        render(false);
+    }
+}
+// The point in the middle of the picture (what a shot looks at), if there's a surface there.
+bool middle_point(std::array<double, 3> &at) {
+    RECT rc;
+    GetClientRect(St->view, &rc);
+    return lshade::pick(St->data->p, St->cam, rc.right, rc.bottom, rc.right / 2.0, rc.bottom / 2.0, &at) >= 0;
 }
 
 void go_to_view() {
@@ -463,7 +654,8 @@ void fill_list() {
     const auto &pv = St->data->p;
     s += L" The level has " + std::to_wstring(pv.rooms) + (pv.rooms == 1 ? L" room (cluster)" : L" rooms (clusters)") + L" and " +
          std::to_wstring(pv.portals.size()) + (pv.portals.size() == 1 ? L" portal." : L" portals.");
-    SetWindowTextW(item(IDC_STATUS), s.c_str());
+    g_status_text = s;
+    if (!St->sc_mode) SetWindowTextW(item(IDC_STATUS), s.c_str());
     update_cost();
     fill_fog();
     fill_weather();
@@ -551,6 +743,8 @@ void tick() {
     double dt = std::clamp((double)(now.QuadPart - St->last_tick.QuadPart) / (double)freq.QuadPart, 0.0, 0.1);
     St->last_tick = now;
     bool keys = GetFocus() == St->view && moving_keys();
+    if (St->playing && keys) sc_stop();
+    if (St->playing && St->data) sc_tick();
     if (keys && St->data) {
         double speed = 3.0 * (key(VK_SHIFT) ? 3.0 : 1.0) * (key(VK_CONTROL) ? 0.3 : 1.0) * dt;   // (world units: 3 m)
         lshade::Camera &c = St->cam;
@@ -577,7 +771,7 @@ void tick() {
         render(false);
         St->coarse = false;
     }
-    if (!keys && !St->dragging) {
+    if (!keys && !St->dragging && !St->playing) {
         KillTimer(St->view, kTick);
         St->ticking = false;
     }
@@ -655,6 +849,7 @@ LRESULT CALLBACK view_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_LBUTTONDOWN:
     case WM_RBUTTONDOWN:
         if (!St || !St->data) return 0;
+        if (St->playing) sc_stop();
         if (St->tips) {   // (the how-to-fly tip: not again once you're flying)
             TOOLINFOW ti{};
             ti.cbSize = sizeof(ti);
@@ -742,6 +937,42 @@ void create_controls() {
         c.pszText = (LPWSTR)cols[i].name;
         ListView_InsertColumn(St->list, i, &c);
     }
+    // The showcase flythrough: its shots in place of the list (hidden until "Showcase flythrough...").
+    add(L"BUTTON", L"Showcase flythrough...", BS_PUSHBUTTON | WS_TABSTOP, 968, 10, 200, 26, IDC_SHOWCASE);
+    St->sc_list = add(WC_LISTVIEWW, L"", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP, 12, 68, 548, 396, IDC_SC_LIST);
+    ListView_SetExtendedListViewStyle(St->sc_list, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+    {
+        struct Col { const wchar_t *name; int w; } scols[] = {{L"Shot", 290}, {L"Seconds", 74}, {L"Keys", 56}, {L"Looks at", 100}};
+        for (int i = 0; i < 4; i++) {
+            LVCOLUMNW c{};
+            c.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT;
+            c.fmt = i ? LVCFMT_RIGHT : LVCFMT_LEFT;
+            c.cx = S(scols[i].w);
+            c.pszText = (LPWSTR)scols[i].name;
+            ListView_InsertColumn(St->sc_list, i, &c);
+        }
+    }
+    add(L"BUTTON", L"Play them all", BS_PUSHBUTTON | WS_TABSTOP, 12, 472, 116, 26, IDC_SC_PLAY);
+    add(L"BUTTON", L"Play this shot", BS_PUSHBUTTON | WS_TABSTOP, 134, 472, 116, 26, IDC_SC_PLAYSHOT);
+    add(L"BUTTON", L"Stop", BS_PUSHBUTTON | WS_TABSTOP, 256, 472, 80, 26, IDC_SC_STOP);
+    add(L"BUTTON", L"New shot here", BS_PUSHBUTTON | WS_TABSTOP, 12, 506, 116, 26, IDC_SC_NEW);
+    add(L"BUTTON", L"Add key here", BS_PUSHBUTTON | WS_TABSTOP, 134, 506, 116, 26, IDC_SC_ADD);
+    add(L"BUTTON", L"Remove last key", BS_PUSHBUTTON | WS_TABSTOP, 256, 506, 124, 26, IDC_SC_UNDO);
+    add(L"STATIC", L"Seconds:", SS_NOTIFY, 12, 544, 56, 20, IDC_SC_SECS_LBL);
+    add(L"EDIT", L"", ES_RIGHT | ES_AUTOHSCROLL | WS_TABSTOP, 70, 541, 58, 22, IDC_SC_SECS, WS_EX_CLIENTEDGE);
+    SendMessageW(item(IDC_SC_SECS), EM_SETLIMITTEXT, 6, 0);
+    add(L"BUTTON", L"Keep looking at what's in the middle of the picture", BS_AUTOCHECKBOX | WS_TABSTOP, 140, 542, 380, 22, IDC_SC_LOOK);
+    add(L"BUTTON", L"Delete shot", BS_PUSHBUTTON | WS_TABSTOP, 12, 574, 116, 26, IDC_SC_DELETE);
+    add(L"BUTTON", L"Move up", BS_PUSHBUTTON | WS_TABSTOP, 134, 574, 90, 26, IDC_SC_UP);
+    add(L"BUTTON", L"Move down", BS_PUSHBUTTON | WS_TABSTOP, 230, 574, 90, 26, IDC_SC_DOWN);
+    add(L"BUTTON", L"Make again", BS_PUSHBUTTON | WS_TABSTOP, 444, 574, 116, 26, IDC_SC_REMAKE);
+    add(L"STATIC",
+        L"These shots play in order in Halo 1 Unlimited's showcase screensaver. New shot here starts one where the picture "
+        L"is; fly on and click Add key here at each next spot (3 seconds apart; Seconds makes it slower or faster). Tick the "
+        L"box while aiming at something to keep it in view. Cyan: the shot's path. Grey: objects the picture leaves out. "
+        L"Changed shots are this map's own: each Xbox conversion puts them in the map folder's showcase.txt.",
+        0, 12, 608, 548, 104, IDC_SC_HINT);
+    for (int id = IDC_SC_LIST; id <= IDC_SC_HINT; id++) ShowWindow(item(id), SW_HIDE);
     St->view = CreateWindowExW(WS_EX_CLIENTEDGE, L"HMPLevelView", L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_TABSTOP,
                                S(572), S(68), S(596), S(447), St->wnd,
                                (HMENU)(INT_PTR)IDC_VIEW, GetModuleHandleW(nullptr), nullptr);
@@ -928,6 +1159,14 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_NOTIFY: {
         NMHDR *n = (NMHDR *)lp;
+        if (n->idFrom == IDC_SC_LIST && n->code == LVN_ITEMCHANGED && !St->sc_filling) {
+            NMLISTVIEW *lv = (NMLISTVIEW *)lp;
+            if ((lv->uChanged & LVIF_STATE) && (lv->uNewState & LVIS_SELECTED) && !(lv->uOldState & LVIS_SELECTED)) {
+                sc_stop();
+                sc_select(lv->iItem, true);
+            }
+            return 0;
+        }
         if (n->idFrom == IDC_LIST && n->code == LVN_ITEMCHANGED && !St->filling && St->data) {
             NMLISTVIEW *lv = (NMLISTVIEW *)lp;
             if (lv->iItem < 0 || (size_t)lv->iItem >= St->row_shader.size()) return 0;
@@ -1053,7 +1292,112 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case IDC_REMEASURE:
             start_measure();
             return 0;
+        case IDC_SHOWCASE:
+            set_sc_mode(!St->sc_mode);
+            return 0;
+        case IDC_SC_PLAY: case IDC_SC_PLAYSHOT:
+            sc_play(id == IDC_SC_PLAY ? -1 : St->sc_sel);
+            return 0;
+        case IDC_SC_STOP:
+            sc_stop();
+            return 0;
+        case IDC_SC_NEW: {
+            if (!St->data) return 0;
+            sc_stop();
+            showcase::Shot shot;
+            shot.label = "shot " + std::to_string(St->sc.shots.size() + 1);
+            shot.seconds = 4;
+            shot.keys.push_back(key_here());
+            size_t at = St->sc_sel >= 0 ? (size_t)St->sc_sel + 1 : St->sc.shots.size();
+            St->sc.shots.insert(St->sc.shots.begin() + (long)std::min(at, St->sc.shots.size()), shot);
+            St->sc_sel = (int)std::min(at, St->sc.shots.size() - 1);
+            sc_changed();
+            return 0;
+        }
+        case IDC_SC_ADD: case IDC_SC_UNDO: case IDC_SC_DELETE: case IDC_SC_UP: case IDC_SC_DOWN: {
+            int sel = St->sc_sel;
+            if (sel < 0 || (size_t)sel >= St->sc.shots.size()) return 0;
+            sc_stop();
+            auto &shots = St->sc.shots;
+            showcase::Shot &shot = shots[(size_t)sel];
+            if (id == IDC_SC_ADD) {
+                showcase::Key k = key_here();
+                k.t = (shot.keys.empty() ? 0 : shot.keys.back().t) + 3;
+                if (shot.keys.empty()) k.t = 0;
+                shot.keys.push_back(k);
+                shot.seconds = std::max(k.t, 1.0);
+            } else if (id == IDC_SC_UNDO) {
+                if (shot.keys.size() <= 1) return 0;
+                shot.keys.pop_back();
+                if (shot.keys.back().t > 0) shot.seconds = shot.keys.back().t;
+            } else if (id == IDC_SC_DELETE) {
+                shots.erase(shots.begin() + sel);
+                St->sc_sel = std::min(sel, (int)shots.size() - 1);
+            } else if (id == IDC_SC_UP) {
+                if (sel == 0) return 0;
+                std::swap(shots[(size_t)sel], shots[(size_t)sel - 1]);
+                St->sc_sel = sel - 1;
+            } else {
+                if ((size_t)sel + 1 >= shots.size()) return 0;
+                std::swap(shots[(size_t)sel], shots[(size_t)sel + 1]);
+                St->sc_sel = sel + 1;
+            }
+            sc_changed();
+            return 0;
+        }
+        case IDC_SC_SECS:
+            if (HIWORD(wp) == EN_CHANGE && !St->sc_filling && St->sc_sel >= 0 && (size_t)St->sc_sel < St->sc.shots.size()) {
+                wchar_t b[16] = {};
+                GetWindowTextW(item(IDC_SC_SECS), b, 16);
+                double v = _wtof(b);
+                showcase::Shot &shot = St->sc.shots[(size_t)St->sc_sel];
+                if (v < 0.5 || v > 600 || std::fabs(v - shot.seconds) < 1e-9) return 0;
+                // (the keys spread out or closer together with it: the same path, slower or faster)
+                if (shot.keys.size() > 1 && shot.seconds > 0)
+                    for (auto &k : shot.keys) k.t *= v / shot.seconds;
+                shot.seconds = v;
+                St->sc_custom = true;
+                ListView_SetItemText(St->sc_list, St->sc_sel, 1, (LPWSTR)secs(v).c_str());
+                sc_status();
+                render(false);
+            }
+            return 0;
+        case IDC_SC_LOOK:
+            if (HIWORD(wp) == BN_CLICKED && !St->sc_filling && St->sc_sel >= 0 && (size_t)St->sc_sel < St->sc.shots.size()) {
+                showcase::Shot &shot = St->sc.shots[(size_t)St->sc_sel];
+                if (IsDlgButtonChecked(h, IDC_SC_LOOK) == BST_CHECKED) {
+                    std::array<double, 3> at{};
+                    if (!middle_point(at)) {
+                        CheckDlgButton(h, IDC_SC_LOOK, BST_UNCHECKED);
+                        SetWindowTextW(item(IDC_STATUS), L"Nothing of the level in the middle of the picture to look at: aim at it first.");
+                        return 0;
+                    }
+                    shot.look = true;
+                    shot.at = at;
+                } else {
+                    shot.look = false;
+                }
+                sc_changed();
+            }
+            return 0;
+        case IDC_SC_REMAKE:
+            if (!St->data) return 0;
+            if (St->sc_custom && MessageBoxW(h, L"Replace this map's own shots with ones made from the level?", L"Showcase flythrough",
+                                             MB_YESNO | MB_ICONQUESTION) != IDYES)
+                return 0;
+            sc_stop();
+            St->sc = showcase::generate(St->data->p, &St->sc_report);
+            St->sc_custom = false;
+            St->sc_sel = St->sc.shots.empty() ? -1 : 0;
+            sc_fill();
+            sc_status();
+            sc_select(St->sc_sel, true);
+            return 0;
         case IDC_OKB:
+            if (St->sc_ready)   // (shots changed here are the map's own; untouched, the conversion makes them)
+                St->picks.showcase = St->sc_custom ? showcase::write(St->sc, St->data ? St->data->a.map_name : std::string(),
+                                                                       "made in its Level window")
+                                                   : std::string();
             St->ok = true;
             St->done = true;
             return 0;

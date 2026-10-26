@@ -1047,6 +1047,9 @@ Level reflections, fog, scenery, weather and more: the "Level..." window (Xbox)
     reflect is tinted and named in the line above the list, as is a
     see-through one. The line also says when it's alpha-tested. The picture
     has the level only: objects (scenery, machines, vehicles) aren't in it.
+  - "Showcase flythrough...": the camera shots for Halo 1 Unlimited's
+    showcase screensaver, played and made in the picture (see "Showcase
+    flythroughs" below).
   - "Show portals": each portal outlined in yellow, glowing orange where
     you can see through it, and each room (cluster) tinted a colour of its
     own. The engine draws the room you're in, then only the rooms it can
@@ -1238,6 +1241,61 @@ Lights (Xbox, "Level..." window)
   The window lists the lights and how many of the map's objects carry
   one: attached to them, or made by an effect attached to them. The log's
   [lights] line names them.
+
+Showcase flythroughs (Xbox, "Level..." window)
+  Halo 1 Unlimited's showcase screensaver (planned: in place of the attract
+  movie, the idle main menu loads a map and flies the camera through it
+  while bots play) needs camera shots for each map. Each Xbox conversion
+  into a map folder (the folder with the map's info.txt) writes them as
+  showcase.txt beside the map, so a map maker can ship theirs with a map.
+  Made from the level, unless you make your own:
+  - circling its CTF flags and power items (rocket launchers, sniper
+    rifles, fuel rods, flamethrowers, overshields, camouflage): a slow
+    100-degree arc a few units off and above, looking at it;
+  - gliding between two places players stand that see each other;
+  - looking down its longest sight lines, the camera drifting forward;
+  - rising over open ground near the middle, tilting down to take the
+    level in.
+  Every shot is checked every quarter of a second: the camera stays
+  inside the level, at least 0.6 units from any surface and outside the
+  boxes around the map's placed objects (scenery, machines, controls,
+  light fixtures: each model's box, turned as placed), never passes
+  through a wall between two checks, and sees what it circles at the start,
+  the end and most of the way. On a small map the shots go closer
+  together, and gliding and rising shots must look out at least 6 and 8
+  units, not into a wall. Deathtrap gets 6 shots (64 seconds), Precipice
+  8 (88). The log's [showcase] line says what was written; a showcase.txt
+  in the map folder that the app didn't write (its first line doesn't
+  name Halo Map Porter) is kept.
+  "Showcase flythrough..." (top right of the Level window) swaps the list
+  for the shots: select one to go to its start and see its path (cyan),
+  its keys (yellow) and what it looks at (magenta); grey boxes are the
+  map's objects, which the picture doesn't draw. "Play them all" and "Play
+  this shot" fly the picture through them (click the picture or Stop to
+  stop). To make your own: fly to where a shot starts, "New shot here",
+  fly on and "Add key here" at each next spot (keys 3 seconds apart;
+  Seconds makes the shot slower or faster, keeping its path); tick "Keep
+  looking at what's in the middle of the picture" while aiming at
+  something to keep it in view. Delete, move up and down, and "Make again"
+  (back to shots made from the level). Once you change a shot they're this
+  map's own, kept with its other Level choices, and every conversion
+  writes them.
+  The file (what Halo 1 Unlimited reads; plain text, so it can be edited
+  by hand too):
+    # a comment (anything after # on a line)
+    fade 0.5                 seconds of the fade to black between shots
+    shot 12 orbit: red flag  a shot: its seconds, then a label
+    look 12.3 -4.2 1.1       (optional) a point kept in the middle of the
+                             view
+    key 0 x y z yaw pitch    a keyframe: seconds into the shot, the
+                             camera's position, its direction in degrees
+                             (yaw 0 = +x, counterclockwise; pitch up
+                             positive, as the camera tour's stops), then
+                             the horizontal field of view (optional, 70)
+  Shots play in order, then start again. Between keys the camera moves on
+  a smooth curve through them in time (Catmull-Rom tangents from the
+  neighbouring keys, Hermite between two; yaw the short way round); with a
+  look point it turns to keep it in the middle.
 
 Camera tours (Xbox, Settings tab)
   Halo 1 Unlimited's perf log (perf_log = 1 in opence.ini, test build 34
@@ -1830,6 +1888,8 @@ The log lists every automatic change:
           "Weather" above).
   [props] Small props with very detailed collision lost it (see "Detailed
           props" above).
+  [showcase] The map folder's showcase.txt was written, or kept (see
+          "Showcase flythroughs" above).
   [tour]  A camera tour for Halo 1 Unlimited's perf log was written (see
           "Camera tours" above).
   [lights] Dynamic lights that would have the Xbox draw most of the level

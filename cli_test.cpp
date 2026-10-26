@@ -4,6 +4,8 @@
 #include "core.hpp"
 #include "render.hpp"
 #include "perflog.hpp"
+#include "showcase.hpp"
+#include "levelshaders.hpp"
 #include <algorithm>
 #include <cstdlib>
 #include <fstream>
@@ -61,6 +63,21 @@ static Game parse(const std::string &s) {
 }
 
 int main(int argc, char **argv) {
+    if (argc >= 3 && std::string(argv[1]) == "showcase") {   // cli_test showcase <level.lsh> [out.txt]: the generated flythrough
+        lshade::Analysis a;
+        lshade::Preview p;
+        if (!lshade::load(a, p, argv[2])) { std::cout << "can't read " << argv[2] << "\n"; return 1; }
+        std::string report;
+        showcase::Showcase sc = showcase::generate(p, &report);
+        std::string text = showcase::write(sc, a.map_name, "generated from the level");
+        showcase::Showcase back;
+        std::string err;
+        bool ok = showcase::read(text, back, &err) && back.shots.size() == sc.shots.size();
+        std::cout << report << "\n" << p.marks.size() << " marks, " << p.boxes.size() << " boxes; read back " << (ok ? "ok" : "FAILED " + err) << "\n";
+        if (argc >= 4) std::ofstream(argv[3], std::ios::binary) << text;
+        else std::cout << text;
+        return ok ? 0 : 1;
+    }
     if (argc >= 3 && std::string(argv[1]) == "perflog") { // cli_test perflog <log.csv> [more.csv...]: the perf log report
         std::vector<perflog::Log> logs;
         for (int i = 2; i < argc; i++) {

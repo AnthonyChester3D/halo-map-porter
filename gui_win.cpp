@@ -1193,11 +1193,25 @@ static shadersui::Picks load_shader_picks(const fs::path &input) {
         else if (k == "lights") picks.lights = std::clamp(atoi(v.c_str()), 0, 2);
         // (an older "scenery" line, a distance, is left out: it popped big things in and out of view)
     }
+    // (the map's own showcase flythrough: a file of its own beside them, showcase.txt's text)
+    fs::path sf = shader_picks_file(input);
+    sf.replace_extension(L".showcase.txt");
+    std::ifstream sc(sf, std::ios::binary);
+    if (sc) picks.showcase.assign((std::istreambuf_iterator<char>(sc)), std::istreambuf_iterator<char>());
     return picks;
 }
 static void save_shader_picks(const fs::path &input, const shadersui::Picks &picks) {
     fs::path p = shader_picks_file(input);
     std::error_code ec;
+    {
+        fs::path sf = p;
+        sf.replace_extension(L".showcase.txt");
+        if (picks.showcase.empty()) fs::remove(sf, ec);
+        else {
+            fs::create_directories(sf.parent_path(), ec);
+            std::ofstream(sf, std::ios::binary | std::ios::trunc) << picks.showcase;
+        }
+    }
     shadersui::Picks defaults;
     if (picks.mode == defaults.mode && picks.fog == defaults.fog && picks.tiny_px == defaults.tiny_px &&
         picks.weather == defaults.weather && picks.riders == defaults.riders && picks.props == defaults.props &&
@@ -1226,6 +1240,7 @@ static void apply_shader_picks(Config &cfg, const fs::path &input) {
     cfg.xbox_fog_scale = picks.fog_scale;
     cfg.xbox_fog_distance = picks.fog_distance;
     cfg.xbox_scenery_pixels = picks.tiny_px;
+    cfg.xbox_showcase_text = picks.showcase;
     cfg.xbox_weather = picks.weather;
     cfg.xbox_rider_ai_off = picks.riders == 1;
     cfg.xbox_detailed_props_off = picks.props == 1;
@@ -1288,7 +1303,8 @@ static void open_shaders() {
                    (picks.weather == 1 ? L"lighter" : picks.weather == 2 ? L"half the drops" : picks.weather == 3 ? L"off" : L"as made") +
                    L"; sky " + (picks.sky ? L"as made" : L"in fewer layers") + L"; effects " +
                    (picks.effects == 1 ? L"as made" : picks.effects == 2 ? L"lighter" : L"no busier than Bungie's") +
-                   (picks.riders ? L"; riders without AI" : L"") + (picks.props ? L"; detailed props without collision" : L"") + L".");
+                   (picks.riders ? L"; riders without AI" : L"") + (picks.props ? L"; detailed props without collision" : L"") +
+                   (picks.showcase.empty() ? L"; showcase flythrough made from the level" : L"; showcase flythrough your own") + L".");
     }
 }
 

@@ -32,6 +32,9 @@ struct Picks {
     int sky = 0;       // 0: the map's own skies drawn in fewer layers, looking the same; 1 as made (Config::xbox_sky)
     int effects = 0;   // 0: the map's own effects no busier than Bungie's; 1 as made; 2 lighter (Config::xbox_effects)
     int lights = 0;    // dynamic lights on the map's objects: 0 as made, 1 no specular, 2 off (Config::xbox_object_lights)
+    // The map's own showcase flythrough (showcase.txt's text, showcase.hpp), made in the window; empty: the
+    // conversion makes one from the level (Config::xbox_showcase_text).
+    std::string showcase;
 };
 
 // Modal. `key` identifies the map and what changes its level (a measurement is reused while it's the same).

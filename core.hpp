@@ -113,6 +113,12 @@ struct Config {
     // With an Xbox build: a camera tour for Halo 1 Unlimited's perf log (its spawns, busiest and typical views),
     // written to perf\tours\<map>.txt beside the map.
     bool write_perf_tour = false;
+    // With an Xbox build into a map folder (one with its info.txt): showcase.txt beside the map, the flythrough Halo
+    // 1 Unlimited's showcase screensaver flies while bots play (showcase.hpp). This map's own shots from the Level
+    // window when it has some (the file's text), else ones made from the level. A showcase.txt there that the app
+    // didn't write is left as it is.
+    bool xbox_showcase = true;
+    std::string xbox_showcase_text;
     // Scenery and devices not drawn once smaller on screen than this many pixels across (their models' smallest
     // switch size raised to it; 0: as the map has them).
     double xbox_scenery_pixels = 0;
