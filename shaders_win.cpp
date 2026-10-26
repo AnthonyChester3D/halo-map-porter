@@ -63,6 +63,7 @@ struct State {
     // the frame loop (while the camera moves): a timer that moves it by the keys held and redraws
     bool ticking = false, dirty = false, coarse = false;
     LARGE_INTEGER last_tick{};
+    bool keep_camera = false;   // (a shader selected by double-clicking the picture: the view stays where it is)
 };
 State *St = nullptr;
 
@@ -582,6 +583,44 @@ void tick() {
     }
 }
 
+// Double-clicking the picture: the shader of the surface there, selected in the list (the view stays), or named in the
+// status line when the list doesn't have it (it doesn't reflect, or it's see-through).
+void pick_at(int x, int y) {
+    const lshade::Preview &p = St->data->p;
+    RECT rc;
+    GetClientRect(St->view, &rc);
+    int t = lshade::pick(p, St->cam, rc.right, rc.bottom, x, y);
+    if (t < 0) {
+        SetWindowTextW(item(IDC_STATUS), L"Double-clicked: no surface of the level there (the sky, or an object: the picture "
+                                         L"has the level only).");
+        return;
+    }
+    int m = p.triangles[(size_t)t].material;
+    const lshade::Material &mt = p.materials[(size_t)m];
+    std::string tag = (size_t)m < p.material_tags.size() ? p.material_tags[(size_t)m] : "";
+    std::wstring name = tag.empty() ? L"(no shader)" : fs::path(W(tag)).stem().wstring();
+    int row = -1;
+    for (size_t r = 0; r < St->row_shader.size() && mt.shader >= 0; r++)
+        if (St->row_shader[r] == mt.shader) row = (int)r;
+    std::wstring what = L"Double-clicked: " + name;
+    St->keep_camera = true;
+    if (row >= 0) {
+        ListView_SetItemState(St->list, row, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+        ListView_EnsureVisible(St->list, row, FALSE);
+        what += L", selected in the list.";
+    } else {
+        ListView_SetItemState(St->list, -1, 0, LVIS_SELECTED);
+        St->selected = mt.shader;
+        pick_views();
+        render(false);
+        what += mt.see_through ? L" (see-through; the list has the shaders that reflect)."
+                               : L" (it doesn't reflect, so it isn't in the list; tinted in the picture).";
+    }
+    St->keep_camera = false;
+    if (mt.cutout >= 0) what += L" It's alpha-tested: cut out where its bump map's alpha is under half.";
+    SetWindowTextW(item(IDC_STATUS), what.c_str());
+}
+
 LRESULT CALLBACK view_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_ERASEBKGND:
@@ -628,6 +667,9 @@ LRESULT CALLBACK view_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         St->dragging = true;
         St->drag_from = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
         start_ticking();
+        return 0;
+    case WM_LBUTTONDBLCLK:
+        if (St && St->data) pick_at(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
         return 0;
     case WM_MOUSEMOVE:
         if (St && St->dragging) {
@@ -856,7 +898,8 @@ void create_controls() {
     tip(IDC_LIGHTS, lights_tip);
     tip(IDC_LIGHTS_LBL, lights_tip);
     tip(IDC_VIEW, L"Click here, then fly: drag with the mouse to look around, W A S D to move where you look, Q / E to go "
-                  L"down and up (Shift faster, Ctrl slower), the mouse wheel to step forward and back.");
+                  L"down and up (Shift faster, Ctrl slower), the mouse wheel to step forward and back. Double-click a "
+                  L"surface to find its shader.");
     tip(IDC_PREV, L"The previous view (the selected shader's, or the ones that see most of the level).");
     tip(IDC_NEXT, L"The next view.");
 }
@@ -908,7 +951,8 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if ((lv->uChanged & LVIF_STATE) && (lv->uNewState & LVIS_SELECTED) && !(lv->uOldState & LVIS_SELECTED)) {
                 St->selected = s;
                 pick_views();
-                go_to_view();
+                if (St->keep_camera) render(false);
+                else go_to_view();
             }
         }
         return 0;
@@ -1055,7 +1099,7 @@ bool edit(HWND owner, const std::wstring &title, const std::string &key, Measure
         RegisterClassExW(&wc);
         WNDCLASSEXW vc{sizeof(vc)};
         vc.hInstance = inst;
-        vc.style = CS_OWNDC;   // (OpenGL draws on it)
+        vc.style = CS_OWNDC | CS_DBLCLKS;   // (OpenGL draws on it; double-clicks pick a surface)
         vc.hCursor = LoadCursor(nullptr, IDC_HAND);
         vc.lpfnWndProc = view_proc;
         vc.hbrBackground = nullptr;

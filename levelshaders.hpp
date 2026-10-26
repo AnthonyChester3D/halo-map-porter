@@ -70,6 +70,10 @@ struct Material {
     float perpendicular[3] = {0, 0, 0}, parallel[3] = {0, 0, 0};   // reflection colour x brightness
     float lightmap_scale = 1;        // how much the reflection keeps where the lightmap is dark (1: all of it)
     bool see_through = false;
+    // Alpha-tested: its cut-out, the bump map's alpha (drawn only where it's over half, as the game draws it), and
+    // the bump map's scale on the texture coordinates.
+    int cutout = -1;
+    float cutout_scale = 1;
 };
 struct Vertex { float p[3], n[3], uv[2], luv[2]; };
 struct Triangle { Vertex v[3]; int material = -1, lightmap = -1; };   // lightmap: texture of its lightmap page
@@ -105,6 +109,7 @@ struct Content {
 struct Preview {
     std::vector<Triangle> triangles;
     std::vector<Material> materials;
+    std::vector<std::string> material_tags;   // per material: its shader's tag path
     std::vector<Texture> textures;
     std::vector<portals::SampleView> views;   // from where players play (drawn surfaces left out to keep it small)
     std::vector<Portal> portals;
@@ -147,6 +152,10 @@ struct Extras { bool portals = false; bool fog_on = false; Fog fog; };
 void draw(const Preview &p, const Camera &c, const std::vector<char> &reflections, int highlight, int w, int h,
           std::vector<uint32_t> &px, std::vector<Shown> *shown = nullptr, double *total = nullptr,
           const Extras *extras = nullptr);
+
+// The surface at pixel (x, y) of a w x h picture drawn from `c` (as draw and the window's picture see it: the nearest
+// triangle there that's drawn, facing the camera unless see-through, not cut away by its cut-out): its triangle, or -1.
+int pick(const Preview &p, const Camera &c, int w, int h, double x, double y);
 
 // The analysis and preview in a file (for the level shaders window), and back.
 bool save(const Analysis &a, const Preview &p, const std::filesystem::path &file);

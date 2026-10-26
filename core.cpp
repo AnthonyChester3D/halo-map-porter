@@ -2762,8 +2762,65 @@ static bool block_halvable(int w, int h) { return w >= 8 && h >= 8 && (w / 2) % 
 // level is made again from the one above, its alpha scaled so the same share of it stays solid as in the full-size
 // texture (alpha coverage, as texture tools do for foliage).
 
-// One level's pixels as RGBA (A8 / Y8 / AY8: the one channel in R; A8Y8: R and G), in any of halve_pixels' formats.
-// DXT levels smaller than a block are read from their one block.
+// The Xbox's bump maps are palettized (P8): a byte per pixel, picking one of 256 directions from the palette the Xbox
+// sets for every texture stage at startup (rasterizer_xbox.c, global_vector_palette in bitmaps.c; Invader's p8_palette
+// is the same). Bungie's PC copies are 32-bit, a quarter of the memory per pixel for the Xbox's. The first 249 are
+// normals (alpha opaque); the rest are see-through (the last a flat normal).
+static const uint32_t kXboxBumpPalette[256] = {
+    0xFF7A19CC, 0xFF7E19CC, 0xFF8019CC, 0xFF8119CC, 0xFF8519CC, 0xFF742FE2, 0xFF7A2FE2, 0xFF7E2FE2,
+    0xFF802FE2, 0xFF812FE2, 0xFF852FE2, 0xFF8B2FE2, 0xFF6B42ED, 0xFF7442EE, 0xFF7A42EF, 0xFF7E42EF,
+    0xFF8042EF, 0xFF8142EF, 0xFF8542EF, 0xFF8B42EE, 0xFF9442ED, 0xFF6052F2, 0xFF6B52F5, 0xFF7452F6,
+    0xFF7A52F7, 0xFF7E52F7, 0xFF8052F7, 0xFF8152F7, 0xFF8552F7, 0xFF8B52F6, 0xFF9452F5, 0xFF9F52F2,
+    0xFF5260F2, 0xFF6060F7, 0xFF6B60F9, 0xFF7460FB, 0xFF7A60FB, 0xFF7E60FB, 0xFF8060FB, 0xFF8160FB,
+    0xFF8560FB, 0xFF8B60FB, 0xFF9460F9, 0xFF9F60F7, 0xFFAD60F2, 0xFF426BED, 0xFF526BF5, 0xFF606BF9,
+    0xFF6B6BFC, 0xFF746BFD, 0xFF7A6BFD, 0xFF7E6BFD, 0xFF806BFD, 0xFF816BFD, 0xFF856BFD, 0xFF8B6BFD,
+    0xFF946BFC, 0xFF9F6BF9, 0xFFAD6BF5, 0xFFBD6BED, 0xFF2F74E2, 0xFF4274EE, 0xFF5274F6, 0xFF6074FB,
+    0xFF6B74FD, 0xFF7474FE, 0xFF7A74FE, 0xFF7E74FE, 0xFF8074FE, 0xFF8174FE, 0xFF8574FE, 0xFF8B74FE,
+    0xFF9474FD, 0xFF9F74FB, 0xFFAD74F6, 0xFFBD74EE, 0xFFD074E2, 0xFF197ACC, 0xFF2F7AE2, 0xFF427AEF,
+    0xFF527AF7, 0xFF607AFB, 0xFF6B7AFD, 0xFF747AFE, 0xFF7A7AFF, 0xFF7E7AFF, 0xFF807AFF, 0xFF817AFF,
+    0xFF857AFF, 0xFF8B7AFE, 0xFF947AFD, 0xFF9F7AFB, 0xFFAD7AF7, 0xFFBD7AEF, 0xFFD07AE2, 0xFFE57ACC,
+    0xFF197ECC, 0xFF2F7EE2, 0xFF427EEF, 0xFF527EF7, 0xFF607EFB, 0xFF6B7EFD, 0xFF747EFE, 0xFF7A7EFF,
+    0xFF7E7EFF, 0xFF807EFF, 0xFF817EFF, 0xFF857EFF, 0xFF8B7EFE, 0xFF947EFD, 0xFF9F7EFB, 0xFFAD7EF7,
+    0xFFBD7EEF, 0xFFD07EE2, 0xFFE57ECC, 0xFF1980CC, 0xFF2F80E2, 0xFF4280EF, 0xFF5280F7, 0xFF6080FB,
+    0xFF6B80FD, 0xFF7480FE, 0xFF7A80FF, 0xFF7E80FF, 0xFF8080FF, 0xFF8180FF, 0xFF8580FF, 0xFF8B80FE,
+    0xFF9480FD, 0xFF9F80FB, 0xFFAD80F7, 0xFFBD80EF, 0xFFD080E2, 0xFFE580CC, 0xFF1981CC, 0xFF2F81E2,
+    0xFF4281EF, 0xFF5281F7, 0xFF6081FB, 0xFF6B81FD, 0xFF7481FE, 0xFF7A81FF, 0xFF7E81FF, 0xFF8081FF,
+    0xFF8181FF, 0xFF8581FF, 0xFF8B81FE, 0xFF9481FD, 0xFF9F81FB, 0xFFAD81F7, 0xFFBD81EF, 0xFFD081E2,
+    0xFFE581CC, 0xFF1985CC, 0xFF2F85E2, 0xFF4285EF, 0xFF5285F7, 0xFF6085FB, 0xFF6B85FD, 0xFF7485FE,
+    0xFF7A85FF, 0xFF7E85FF, 0xFF8085FF, 0xFF8185FF, 0xFF8585FF, 0xFF8B85FE, 0xFF9485FD, 0xFF9F85FB,
+    0xFFAD85F7, 0xFFBD85EF, 0xFFD085E2, 0xFFE585CC, 0xFF2F8BE2, 0xFF428BEE, 0xFF528BF6, 0xFF608BFB,
+    0xFF6B8BFD, 0xFF748BFE, 0xFF7A8BFE, 0xFF7E8BFE, 0xFF808BFE, 0xFF818BFE, 0xFF858BFE, 0xFF8B8BFE,
+    0xFF948BFD, 0xFF9F8BFB, 0xFFAD8BF6, 0xFFBD8BEE, 0xFFD08BE2, 0xFF4294ED, 0xFF5294F5, 0xFF6094F9,
+    0xFF6B94FC, 0xFF7494FD, 0xFF7A94FD, 0xFF7E94FD, 0xFF8094FD, 0xFF8194FD, 0xFF8594FD, 0xFF8B94FD,
+    0xFF9494FC, 0xFF9F94F9, 0xFFAD94F5, 0xFFBD94ED, 0xFF529FF2, 0xFF609FF7, 0xFF6B9FF9, 0xFF749FFB,
+    0xFF7A9FFB, 0xFF7E9FFB, 0xFF809FFB, 0xFF819FFB, 0xFF859FFB, 0xFF8B9FFB, 0xFF949FF9, 0xFF9F9FF7,
+    0xFFAD9FF2, 0xFF60ADF2, 0xFF6BADF5, 0xFF74ADF6, 0xFF7AADF7, 0xFF7EADF7, 0xFF80ADF7, 0xFF81ADF7,
+    0xFF85ADF7, 0xFF8BADF6, 0xFF94ADF5, 0xFF9FADF2, 0xFF6BBDED, 0xFF74BDEE, 0xFF7ABDEF, 0xFF7EBDEF,
+    0xFF80BDEF, 0xFF81BDEF, 0xFF85BDEF, 0xFF8BBDEE, 0xFF94BDED, 0xFF74D0E2, 0xFF7AD0E2, 0xFF7ED0E2,
+    0xFF80D0E2, 0xFF81D0E2, 0xFF85D0E2, 0xFF8BD0E2, 0xFF7AE5CC, 0xFF7EE5CC, 0xFF80E5CC, 0xFF81E5CC,
+    0xFF85E5CC, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x008080FF,
+};
+
+// The palette entry nearest a normal (by red and green, as Bungie's tools and Invader pick it), red * 256 + green.
+static const std::vector<uint8_t> &p8_nearest() {
+    static std::vector<uint8_t> nearest;
+    if (nearest.empty()) {
+        nearest.resize(65536);
+        for (int r = 0; r < 256; r++)
+            for (int g = 0; g < 256; g++) {
+                int best = 0, bd = INT32_MAX;
+                for (int k = 0; k < 249; k++) {
+                    int dr = (int)((kXboxBumpPalette[k] >> 16) & 255) - r, dg = (int)((kXboxBumpPalette[k] >> 8) & 255) - g;
+                    if (dr * dr + dg * dg < bd) { bd = dr * dr + dg * dg; best = k; }
+                }
+                nearest[r * 256 + g] = (uint8_t)best;
+            }
+    }
+    return nearest;
+}
+
+// One level's pixels as RGBA (A8 / Y8 / AY8: the one channel in R; A8Y8: R and G), in any of halve_pixels' formats,
+// and P8 (kXboxBumpPalette). DXT levels smaller than a block are read from their one block.
 static bool decode_level(const std::string &d, int w, int h, int fmt, std::vector<unsigned char> &rgba) {
     rgba.assign((size_t)w * h * 4, 0);
     if (fmt == 14 || fmt == 15 || fmt == 16 || fmt == 18) {
@@ -2783,6 +2840,15 @@ static bool decode_level(const std::string &d, int w, int h, int fmt, std::vecto
                         if (x < w && y < h) memcpy(&rgba[((size_t)y * w + x) * 4], blk + (r * 4 + c) * 4, 4);
                     }
             }
+        return true;
+    }
+    if (fmt == 17) {   // P8, the Xbox's bump format: its palette's directions (and see-through entries)
+        if (d.size() < (size_t)w * h) return false;
+        for (size_t i = 0; i < (size_t)w * h; i++) {
+            uint32_t c = kXboxBumpPalette[(unsigned char)d[i]];
+            unsigned char *q = &rgba[i * 4];
+            q[0] = (unsigned char)(c >> 16); q[1] = (unsigned char)(c >> 8); q[2] = (unsigned char)c; q[3] = (unsigned char)(c >> 24);
+        }
         return true;
     }
     int bpp = fmt <= 2 ? 1 : (fmt == 3 || fmt == 6 || fmt == 8 || fmt == 9) ? 2 : (fmt == 10 || fmt == 11) ? 4 : 0;
@@ -2881,6 +2947,7 @@ static std::string encode_level(const std::vector<unsigned char> &rgba, int w, i
         unsigned v;
         switch (fmt) {
         case 0: case 1: case 2: out += (char)q[0]; break;
+        case 17: out += (char)(q[3] < 128 ? 255 : p8_nearest()[q[0] * 256 + q[1]]); break;   // (255: see-through)
         case 3: out += (char)q[0]; out += (char)q[1]; break;
         case 6: v = ((q[0] * 31 + 127) / 255) << 11 | ((q[1] * 63 + 127) / 255) << 5 | ((q[2] * 31 + 127) / 255);
                 out += (char)(v & 255); out += (char)(v >> 8); break;
@@ -2909,7 +2976,7 @@ static void box_half(const std::vector<unsigned char> &in, int w, int h, std::ve
             }
 }
 
-static bool alpha_format(int fmt) { return fmt == 14 || fmt == 15 || fmt == 16 || fmt == 8 || fmt == 9 || fmt == 11; }
+static bool alpha_format(int fmt) { return fmt == 14 || fmt == 15 || fmt == 16 || fmt == 8 || fmt == 9 || fmt == 11 || fmt == 17; }
 // The share of pixels at least half opaque, with alpha scaled by `s`.
 static double alpha_coverage(const std::vector<unsigned char> &rgba, double s) {
     size_t n = rgba.size() / 4, on = 0;
@@ -2976,7 +3043,7 @@ static bool halve_cutout(std::string &data, int &w, int &h, int &fmt, int &mips)
 static int g_remade_tops = 0;   // (for the log)
 static bool halve_unlike_mip(std::string &data, int w, int h, int fmt, int &mips) {
     size_t m0 = mip_bytes(w, h, fmt), m1 = mip_bytes(std::max(1, w / 2), std::max(1, h / 2), fmt);
-    if (!m0 || mips < 1 || data.size() < m0 + m1 || fmt == 18) return false;   // (BC7 can't be written)
+    if (!m0 || mips < 1 || data.size() < m0 + m1 || fmt == 18 || fmt == 17) return false;   // (BC7 can't be written; P8 bumps keep theirs)
     std::vector<unsigned char> top, own, avg;
     if (!decode_level(data.substr(0, m0), w, h, fmt, top) || !decode_level(data.substr(m0, m1), std::max(1, w / 2), std::max(1, h / 2), fmt, own))
         return false;
@@ -3440,45 +3507,6 @@ int reorder_multipurpose_bitmap_tag(const fs::path &p, bool to_xbox, bool alpha_
     return done;
 }
 
-// The Xbox's bump maps are palettized (P8): a byte per pixel, picking one of 256 directions from the palette the Xbox
-// sets for every texture stage at startup (rasterizer_xbox.c, global_vector_palette in bitmaps.c; Invader's p8_palette
-// is the same). Bungie's PC copies are 32-bit, a quarter of the memory per pixel for the Xbox's. The first 249 are
-// normals (alpha opaque); the rest are see-through (the last a flat normal).
-static const uint32_t kXboxBumpPalette[256] = {
-    0xFF7A19CC, 0xFF7E19CC, 0xFF8019CC, 0xFF8119CC, 0xFF8519CC, 0xFF742FE2, 0xFF7A2FE2, 0xFF7E2FE2,
-    0xFF802FE2, 0xFF812FE2, 0xFF852FE2, 0xFF8B2FE2, 0xFF6B42ED, 0xFF7442EE, 0xFF7A42EF, 0xFF7E42EF,
-    0xFF8042EF, 0xFF8142EF, 0xFF8542EF, 0xFF8B42EE, 0xFF9442ED, 0xFF6052F2, 0xFF6B52F5, 0xFF7452F6,
-    0xFF7A52F7, 0xFF7E52F7, 0xFF8052F7, 0xFF8152F7, 0xFF8552F7, 0xFF8B52F6, 0xFF9452F5, 0xFF9F52F2,
-    0xFF5260F2, 0xFF6060F7, 0xFF6B60F9, 0xFF7460FB, 0xFF7A60FB, 0xFF7E60FB, 0xFF8060FB, 0xFF8160FB,
-    0xFF8560FB, 0xFF8B60FB, 0xFF9460F9, 0xFF9F60F7, 0xFFAD60F2, 0xFF426BED, 0xFF526BF5, 0xFF606BF9,
-    0xFF6B6BFC, 0xFF746BFD, 0xFF7A6BFD, 0xFF7E6BFD, 0xFF806BFD, 0xFF816BFD, 0xFF856BFD, 0xFF8B6BFD,
-    0xFF946BFC, 0xFF9F6BF9, 0xFFAD6BF5, 0xFFBD6BED, 0xFF2F74E2, 0xFF4274EE, 0xFF5274F6, 0xFF6074FB,
-    0xFF6B74FD, 0xFF7474FE, 0xFF7A74FE, 0xFF7E74FE, 0xFF8074FE, 0xFF8174FE, 0xFF8574FE, 0xFF8B74FE,
-    0xFF9474FD, 0xFF9F74FB, 0xFFAD74F6, 0xFFBD74EE, 0xFFD074E2, 0xFF197ACC, 0xFF2F7AE2, 0xFF427AEF,
-    0xFF527AF7, 0xFF607AFB, 0xFF6B7AFD, 0xFF747AFE, 0xFF7A7AFF, 0xFF7E7AFF, 0xFF807AFF, 0xFF817AFF,
-    0xFF857AFF, 0xFF8B7AFE, 0xFF947AFD, 0xFF9F7AFB, 0xFFAD7AF7, 0xFFBD7AEF, 0xFFD07AE2, 0xFFE57ACC,
-    0xFF197ECC, 0xFF2F7EE2, 0xFF427EEF, 0xFF527EF7, 0xFF607EFB, 0xFF6B7EFD, 0xFF747EFE, 0xFF7A7EFF,
-    0xFF7E7EFF, 0xFF807EFF, 0xFF817EFF, 0xFF857EFF, 0xFF8B7EFE, 0xFF947EFD, 0xFF9F7EFB, 0xFFAD7EF7,
-    0xFFBD7EEF, 0xFFD07EE2, 0xFFE57ECC, 0xFF1980CC, 0xFF2F80E2, 0xFF4280EF, 0xFF5280F7, 0xFF6080FB,
-    0xFF6B80FD, 0xFF7480FE, 0xFF7A80FF, 0xFF7E80FF, 0xFF8080FF, 0xFF8180FF, 0xFF8580FF, 0xFF8B80FE,
-    0xFF9480FD, 0xFF9F80FB, 0xFFAD80F7, 0xFFBD80EF, 0xFFD080E2, 0xFFE580CC, 0xFF1981CC, 0xFF2F81E2,
-    0xFF4281EF, 0xFF5281F7, 0xFF6081FB, 0xFF6B81FD, 0xFF7481FE, 0xFF7A81FF, 0xFF7E81FF, 0xFF8081FF,
-    0xFF8181FF, 0xFF8581FF, 0xFF8B81FE, 0xFF9481FD, 0xFF9F81FB, 0xFFAD81F7, 0xFFBD81EF, 0xFFD081E2,
-    0xFFE581CC, 0xFF1985CC, 0xFF2F85E2, 0xFF4285EF, 0xFF5285F7, 0xFF6085FB, 0xFF6B85FD, 0xFF7485FE,
-    0xFF7A85FF, 0xFF7E85FF, 0xFF8085FF, 0xFF8185FF, 0xFF8585FF, 0xFF8B85FE, 0xFF9485FD, 0xFF9F85FB,
-    0xFFAD85F7, 0xFFBD85EF, 0xFFD085E2, 0xFFE585CC, 0xFF2F8BE2, 0xFF428BEE, 0xFF528BF6, 0xFF608BFB,
-    0xFF6B8BFD, 0xFF748BFE, 0xFF7A8BFE, 0xFF7E8BFE, 0xFF808BFE, 0xFF818BFE, 0xFF858BFE, 0xFF8B8BFE,
-    0xFF948BFD, 0xFF9F8BFB, 0xFFAD8BF6, 0xFFBD8BEE, 0xFFD08BE2, 0xFF4294ED, 0xFF5294F5, 0xFF6094F9,
-    0xFF6B94FC, 0xFF7494FD, 0xFF7A94FD, 0xFF7E94FD, 0xFF8094FD, 0xFF8194FD, 0xFF8594FD, 0xFF8B94FD,
-    0xFF9494FC, 0xFF9F94F9, 0xFFAD94F5, 0xFFBD94ED, 0xFF529FF2, 0xFF609FF7, 0xFF6B9FF9, 0xFF749FFB,
-    0xFF7A9FFB, 0xFF7E9FFB, 0xFF809FFB, 0xFF819FFB, 0xFF859FFB, 0xFF8B9FFB, 0xFF949FF9, 0xFF9F9FF7,
-    0xFFAD9FF2, 0xFF60ADF2, 0xFF6BADF5, 0xFF74ADF6, 0xFF7AADF7, 0xFF7EADF7, 0xFF80ADF7, 0xFF81ADF7,
-    0xFF85ADF7, 0xFF8BADF6, 0xFF94ADF5, 0xFF9FADF2, 0xFF6BBDED, 0xFF74BDEE, 0xFF7ABDEF, 0xFF7EBDEF,
-    0xFF80BDEF, 0xFF81BDEF, 0xFF85BDEF, 0xFF8BBDEE, 0xFF94BDED, 0xFF74D0E2, 0xFF7AD0E2, 0xFF7ED0E2,
-    0xFF80D0E2, 0xFF81D0E2, 0xFF85D0E2, 0xFF8BD0E2, 0xFF7AE5CC, 0xFF7EE5CC, 0xFF80E5CC, 0xFF81E5CC,
-    0xFF85E5CC, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x008080FF,
-};
-
 // A level's bump map made smaller in memory without losing pixels: in the Xbox's own bump format (P8,
 // kXboxBumpPalette: each pixel the palette normal nearest its own, by red and green as Bungie's tools and Invader pick
 // it), or as DXT1, whichever keeps its directions closer (the root mean square of the angle each pixel turns, over its
@@ -3490,19 +3518,7 @@ static const uint32_t kXboxBumpPalette[256] = {
 // `fmt` gets what it became (17 P8, 14 DXT1). Returns how many of its textures were rewritten (0: none could gain),
 // -1 if the tag can't be read.
 int compact_bump_bitmap_tag(const fs::path &p, bool alpha_tested, int *fmt_out = nullptr) {
-    static std::vector<uint8_t> nearest;   // red * 256 + green -> palette entry
-    if (nearest.empty()) {
-        nearest.resize(65536);
-        for (int r = 0; r < 256; r++)
-            for (int g = 0; g < 256; g++) {
-                int best = 0, bd = INT32_MAX;
-                for (int k = 0; k < 249; k++) {
-                    int dr = (int)((kXboxBumpPalette[k] >> 16) & 255) - r, dg = (int)((kXboxBumpPalette[k] >> 8) & 255) - g;
-                    if (dr * dr + dg * dg < bd) { bd = dr * dr + dg * dg; best = k; }
-                }
-                nearest[r * 256 + g] = (uint8_t)best;
-            }
-    }
+    const std::vector<uint8_t> &nearest = p8_nearest();   // red * 256 + green -> palette entry
     auto p8_of = [&](const unsigned char *c) -> uint8_t { return alpha_tested && c[3] < 128 ? 255 : nearest[c[0] * 256 + c[1]]; };
     // The angle (degrees, squared) between two encoded normals.
     auto turn2 = [](const unsigned char *a, const unsigned char *b) {
@@ -4945,9 +4961,11 @@ void cap_effects(Job &job, const std::vector<std::string> &deps) {
 // their largest), their bump, detail and cube maps at 256, small items (equipment, garbage, projectiles) at 256;
 // everything else (effects, decals, particles) at xbox_max_object_texture (256); lightmaps at xbox_max_lightmap.
 // The bitmaps whose alpha a shader alpha-tests (a pixel drawn only where it's over half): a model shader's base map
-// unless it's "not alpha tested" or an alpha-blended decal, an environment shader's base map when "alpha tested", a
-// transparent shader's first map when "alpha tested" (rasterizer_xbox_models.c, _environment.c,
-// _transparent_geometry.c). Their see-through parts are what halve_cutout keeps when they're made smaller.
+// unless it's "not alpha tested" or an alpha-blended decal, an environment shader's bump map when "alpha tested" (its
+// lightmap pass draws with the bump map in the first stage and tests its alpha; the base map's alpha is a detail
+// blend or specular mask there, on PC and MCC too), a transparent shader's first map when "alpha tested"
+// (rasterizer_xbox_models.c, _environment.c, _transparent_geometry.c). Their see-through parts are what halve_cutout
+// keeps when they're made smaller.
 static void find_alpha_tested(Job &job, const std::vector<std::string> &deps) {
     for (auto &dep : deps) {
         std::string ext = fs::path(from_u8(dep)).extension().u8string();
@@ -4963,7 +4981,8 @@ static void find_alpha_tested(Job &job, const std::vector<std::string> &deps) {
             long long f = (long long)r.num("shader model flags");
             if (!(f & 4) && !(f & 8)) map = r.ref("base map");
         } else if (ext == ".shader_environment") {
-            if ((long long)r.num("shader environment flags") & 1) map = r.ref("base map");
+            long long f = (long long)r.num("shader environment flags");
+            if ((f & 1) && !(f & 2)) map = r.ref("bump map");   // (2: "bump map is specular mask": none in that stage)
         } else {
             const char *flags = ext == ".shader_transparent_chicago" ? "shader transparent chicago flags"
                               : ext == ".shader_transparent_generic" ? "shader transparent generic flags"
@@ -5060,8 +5079,10 @@ void cap_texture_sizes(Job &job, const std::vector<std::string> &deps) {
         if (!lightmap && object && cfg.xbox_max_object_texture > 0 && cfg.xbox_max_texture > 0) {
             auto it = model_cap.find(dep);
             if (it != model_cap.end()) {
-                // an object's own texture: its kind's size (bump, detail and vector maps, and cube maps, smaller)
-                int c = usage == 2 || usage == 3 || usage == 5 || type == 2 ? std::min(it->second.cap, 256) : it->second.cap;
+                // an object's own texture: its kind's size (bump, detail and vector maps, and cube maps, smaller; not
+                // a bump map a shader alpha-tests, which is the surface's shape)
+                bool shape = usage == 2 && job.alpha_tested.count(dep);
+                int c = (usage == 2 && !shape) || usage == 3 || usage == 5 || type == 2 ? std::min(it->second.cap, 256) : it->second.cap;
                 cap = std::min(std::max(cap, c), cfg.xbox_max_texture);
                 model = true;
             }
@@ -5071,6 +5092,19 @@ void cap_texture_sizes(Job &job, const std::vector<std::string> &deps) {
             if (c > 0) compressed += c;
         }
         if (cap <= 0) continue;
+        // A bump map a shader alpha-tests is its surface's shape (a grate's holes, a railing's bars): capped by area
+        // instead, as many pixels as a square of the cap, so a long strip keeps its detail along its length (Bungie's
+        // a10 "alpha test bump", which Deathtrap's grates and railings use upscaled to 2048x512, is 1024x256 on the
+        // Xbox).
+        if (usage == 2 && job.alpha_tested.count(dep)) {
+            BitmapParts bp;
+            if (bp.read(own / from_u8(dep)) && bp.nbd > 0) {
+                long long w = be16(bp.b, bp.bd_off + 4), h = be16(bp.b, bp.bd_off + 6), lo = std::min(w, h), hi = std::max(w, h);
+                long long side = cap;
+                while (side * 2 <= hi && lo > 0 && side * 2 * (side * 2 * lo / hi) <= (long long)cap * cap) side *= 2;
+                cap = (int)side;
+            }
+        }
         int n = cap_bitmap_tag(own / from_u8(dep), cap, job.alpha_tested.count(dep) > 0);
         if (n > 0) (lightmap ? lightmaps : model ? model_textures : object && cap < cfg.xbox_max_texture ? objects : textures) += n;
     }
@@ -5157,15 +5191,30 @@ void cap_texture_sizes(Job &job, const std::vector<std::string> &deps) {
         size_t budget = (size_t)(cfg.xbox_level_texture_mb * 1048576), total = level_before;
         std::map<std::string, bool> bumps = level_bump_maps(job, deps);   // the map's own bump maps
         std::set<std::string> packed_tried;
+        // A bump map a shader alpha-tests is the surface's shape: stored smaller without losing pixels straight away,
+        // and halved only once everything else is as small as it goes.
+        auto shape = [&](const Tex &t) { return bumps.count(t.tag) && bumps[t.tag]; };
+        for (auto &t : tex) {
+            if (total <= budget || !shape(t)) continue;
+            fs::path ed = editable_owner(job, t.tag, true);
+            int nf = 0;
+            if (ed.empty() || !packed_tried.insert(t.tag).second || compact_bump_kept(cfg, ed / from_u8(t.tag), true, &nf) <= 0) continue;
+            int side = 0;
+            size_t now = bitmap_tag_memory(ed / from_u8(t.tag), &side);
+            if (now >= t.bytes) continue;
+            total -= t.bytes - now;
+            t.bytes = now;
+            (nf == 17 ? bumps_p8 : bumps_dxt1)++;
+        }
         while (total > budget) {
             // Bump, detail and vector maps first (down to 128 px), then the biggest color textures
-            // (down to 128 px). Ties go to the widest texture. A bump map of the map's own is first stored
-            // smaller without losing pixels (compact_bump_bitmap_tag), and only halved after that.
+            // (down to 128 px), then alpha-tested bump maps. Ties go to the widest texture. A bump map of the map's
+            // own is first stored smaller without losing pixels (compact_bump_bitmap_tag), and only halved after that.
             Tex *pick = nullptr;
-            for (int pass = 0; pass < 2 && !pick; pass++)
+            for (int pass = 0; pass < 3 && !pick; pass++)
                 for (auto &t : tex) {
-                    bool cheap = t.usage == 2 || t.usage == 3 || t.usage == 5 || bumps.count(t.tag);
-                    if (t.done || t.side <= 128 || (pass == 0 && !cheap)) continue;
+                    bool cheap = !shape(t) && (t.usage == 2 || t.usage == 3 || t.usage == 5 || bumps.count(t.tag));
+                    if (t.done || t.side <= 128 || (pass == 0 && !cheap) || (pass == 1 && shape(t)) || (pass == 2 && !shape(t))) continue;
                     if (!pick || t.bytes > pick->bytes || (t.bytes == pick->bytes && t.side > pick->side)) pick = &t;
                 }
             if (!pick) break;
@@ -6044,15 +6093,16 @@ void xbox_lights(Job &job, const std::vector<std::string> &deps) {
 }
 
 // ---- Materials whose alpha doesn't match how they use it
-// An alpha-tested surface (a shader_environment with "alpha tested"; a shader_model unless "not alpha tested" or "alpha
-// blended decal") draws a pixel on the Xbox only where its base map's alpha is above half (rasterizer_xbox: alpha
-// reference 0x7F, "greater"); a blended one (shader_transparent_*) is drawn with the see-through surfaces, sorted, not
-// hiding what's behind it. Fixed, as the map looks elsewhere:
+// An alpha-tested surface draws a pixel on the Xbox only where its mask's alpha is above half (rasterizer_xbox: alpha
+// reference 0x7F, "greater"): a shader_model's base map unless "not alpha tested" or "alpha blended decal"; a
+// shader_environment's bump map when "alpha tested" (its lightmap pass tests the bump map's alpha, as PC and MCC do;
+// with "bump map is specular mask" there's nothing to test, so it's left alone). A blended one (shader_transparent_*)
+// is drawn with the see-through surfaces, sorted, not hiding what's behind it. Fixed, as the map looks elsewhere:
 // - alpha-tested with nothing see-through in the texture (no alpha, or all of it above half): the test never cuts a
 //   pixel, so it's turned off (one less test each time it's drawn, and in the shadows);
 // - alpha-tested where almost nothing reaches half (1% or less) and next to nothing is clear: the Xbox would leave the
-//   surface out, while Halo PC and MCC draw it (Deathtrap's tech grates, MCC BC7 textures whose alpha stays between
-//   6% and 55%): drawn solid instead (alpha test off; any fully clear specks are filled in).
+//   surface out, while Halo PC and MCC draw it (MCC BC7 textures whose alpha stays between 6% and 55%): drawn solid
+//   instead (alpha test off; any fully clear specks are filled in).
 // Noted only (they look as made either way): alpha-tested ones that hardly draw but are mostly clear, and blended ones
 // whose first map has nothing see-through (could be solid) or is a cut-out (could be alpha-tested, which is cheaper).
 struct AlphaShare {
@@ -6117,8 +6167,8 @@ void xbox_materials(Job &job, const std::vector<std::string> &deps) {
         if (env || model) {
             const char *field = env ? "shader environment flags" : "shader model flags";
             const int f = (int)r.integer(field);
-            const bool tested = env ? (f & 1) != 0 : !(f & 4) && !(f & 8);
-            std::string bm = r.ref("base map");
+            const bool tested = env ? (f & 1) != 0 && !(f & 2) : !(f & 4) && !(f & 8);
+            std::string bm = r.ref(env ? "bump map" : "base map");
             if (!tested || bm.empty()) continue;
             AlphaShare a = alpha_of(bm);
             if (!a.ok || !a.px) continue;

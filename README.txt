@@ -228,7 +228,9 @@ pass, see HUD textures; menu art is left alone):
   stock outdoor maps (Blood Gulch 3.3 MB, Sidewinder 5.3 MB). If the level
   needs more, the map's own bump maps are first packed into less memory
   at their size (see "Bump maps" below), then bump and detail maps are
-  halved (not below 128 px), then the biggest color textures. Objects
+  halved (not below 128 px), then the biggest color textures, and only
+  then bump maps a shader cuts holes with (see "Cut-out bump maps"
+  below). Objects
   get the largest Bungie's own of their kind have: a vehicle's,
   character's, weapon's (first-person model too), the first-person arms'
   and scenery's textures at most 512 px (their bump, detail and cube maps
@@ -253,7 +255,7 @@ again instead:
   most of them under half, so leaves and grates thin out and a couple of
   halvings down all but vanish. For a texture a shader alpha-tests (a
   model shader's base map unless "not alpha tested", an environment
-  shader's base map when "alpha tested", a transparent shader's first map
+  shader's bump map when "alpha tested", a transparent shader's first map
   when "alpha tested"), if the usual way would leave less than 90% as
   much of it solid, each smaller level is made from the one above and its
   alpha scaled so as much of it stays solid as at full size.
@@ -281,6 +283,22 @@ as they are; a shader that alpha-tests through one keeps its see-through
 pixels. "Lightmaps" scales the map's lightmaps (its baked lighting);
 "Max 256" is like stock maps and the default. 512 looks sharper but costs
 about three times the memory, which big outdoor maps may not have to spare.
+
+Cut-out bump maps: an environment shader with "alpha tested" cuts its
+holes with its bump map's alpha, not its base map's (the Xbox, Halo PC and
+MCC alike: its first pass draws with the bump map and tests its alpha),
+so that bump map is the surface's shape: a grate's slots, a railing's
+mesh. Those are capped by area rather than by side (as many pixels as a
+512x512 texture, so a long strip keeps its detail along its length:
+Deathtrap's "alpha test bump upscaled", 2048x512, becomes 1024x256, the
+size of Bungie's own a10 "alpha test bump" on the Xbox), packed into P8
+or DXT1 straight away when the level is over its budget (both keep every
+see-through pixel), halved only after every other level texture is as
+small as it goes, and kept as solid as at full size when they are. (They
+used to be halved first with the other bump maps: Deathtrap's went down
+to 128x32, which blurred its slots and mesh away, so its railings
+vanished, its covers came out solid and its floors lost some of their
+holes.)
 
 Other Xbox fixes (automatic):
 - Layered transparent shaders: shaders that stack extra layers on top of
@@ -1021,6 +1039,14 @@ Level reflections, fog, scenery, weather and more: the "Level..." window (Xbox)
     with the mouse to look and hold W A S D to move the way you're looking
     (Q / E down and up, the arrow keys turn and move too; Shift faster,
     Ctrl slower); the mouse wheel steps forward and back.
+    Alpha-tested surfaces (grates, railings, treelines) are cut out by
+    their bump map's alpha, as the game cuts them, so a material whose bump
+    map and color map don't line up shows that here too.
+  - Double-click a surface in the picture to find its shader: one in the
+    list is selected there (the view stays where it is); one that doesn't
+    reflect is tinted and named in the line above the list, as is a
+    see-through one. The line also says when it's alpha-tested. The picture
+    has the level only: objects (scenery, machines, vehicles) aren't in it.
   - "Show portals": each portal outlined in yellow, glowing orange where
     you can see through it, and each room (cluster) tinted a colour of its
     own. The engine draws the room you're in, then only the rooms it can
@@ -1283,18 +1309,19 @@ Materials' see-through parts (Xbox)
   low (alpha-tested: leaves, grates, fences), or blends with what's behind
   it (glass, smoke; drawn after everything else, sorted, without hiding
   what's behind it, which costs more). The Xbox cuts a pixel out unless
-  its alpha is above half. Every Xbox conversion checks the map's own
-  materials against the alpha their textures actually have:
+  its alpha is above half. Which texture's alpha: a model shader's base
+  map, an environment (level) shader's bump map. Every Xbox conversion
+  checks the map's own materials against the alpha their textures
+  actually have:
   - Alpha-tested, but nothing in the texture is see-through (no alpha, or
     all of it above half): the test never cuts anything, so it's turned
     off (one less test each time the surface is drawn, and in its shadow).
     Deathtrap: the tires, turret, barrel, horn, airfield, bulletin board,
-    fan, tree trunks and treelines.
+    fan and tree trunks.
   - Alpha-tested, but 1% or less of the texture's alpha reaches half, and
     hardly any of it is fully clear: the Xbox would leave the surface out
-    entirely, while Halo PC and MCC draw it (Deathtrap's two grate
-    materials, MCC BC7 textures whose alpha stays between 6% and 55%). They
-    are drawn solid instead.
+    entirely, while Halo PC and MCC draw it (MCC BC7 textures whose alpha
+    stays between 6% and 55%). They are drawn solid instead.
   Noted only, since they look as made either way: alpha-tested materials
   that hardly draw but are mostly clear, blended materials whose first
   texture has nothing see-through (they could be solid) and blended ones

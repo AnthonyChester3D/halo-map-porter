@@ -44,7 +44,7 @@ bool decode(const fs::path &file, int index, int max_side, Texture &out) {
     int faces = type == 2 ? 6 : 1;                                                 // (2: cube map)
     std::string pix = r.data("processed pixel data");
     size_t off = (size_t)e.integer("pixel data offset");
-    bool dxt = fmt == 14 || fmt == 15 || fmt == 16;
+    bool dxt = fmt == 14 || fmt == 15 || fmt == 16 || fmt == 18;   // (18: MCC's BC7)
     int bpp = fmt <= 2 || fmt == 17 ? 1 : (fmt == 3 || fmt == 6 || fmt == 8 || fmt == 9) ? 2 : (fmt == 10 || fmt == 11) ? 4 : 0;
     if (!dxt && !bpp) return false;
     size_t face_bytes = dxt ? (size_t)((w + 3) / 4) * ((h + 3) / 4) * (fmt == 14 ? 8 : 16) : (size_t)w * h * bpp;
@@ -67,6 +67,7 @@ bool decode(const fs::path &file, int index, int max_side, Texture &out) {
                     const unsigned char *src = p + ((size_t)by * bw + bx) * bs;
                     if (fmt == 14) bcdec_bc1(src, block, 16);
                     else if (fmt == 15) bcdec_bc2(src, block, 16);
+                    else if (fmt == 18) bcdec_bc7(src, block, 16);
                     else bcdec_bc3(src, block, 16);
                     for (int y = 0; y < 4 && by * 4 + y < h; y++)
                         for (int x = 0; x < 4 && bx * 4 + x < w; x++)
@@ -78,7 +79,8 @@ bool decode(const fs::path &file, int index, int max_side, Texture &out) {
                 unsigned v = bpp == 2 ? p[i * 2] | (p[i * 2 + 1] << 8) : 0;
                 switch (fmt) {
                 case 0: q[0] = q[1] = q[2] = 255; q[3] = p[i]; break;
-                case 1: case 2: case 17: q[0] = q[1] = q[2] = p[i]; break;
+                case 1: case 2: q[0] = q[1] = q[2] = p[i]; break;
+                case 17: q[0] = q[1] = q[2] = p[i]; q[3] = p[i] >= 249 ? 0 : 255; break;   // (P8: the Xbox palette's last 7 are see-through)
                 case 3: q[0] = q[1] = q[2] = p[i * 2]; q[3] = p[i * 2 + 1]; break;
                 case 6: q[0] = (v >> 11) * 255 / 31; q[1] = ((v >> 5) & 63) * 255 / 63; q[2] = (v & 31) * 255 / 31; break;
                 case 8: q[0] = ((v >> 10) & 31) * 255 / 31; q[1] = ((v >> 5) & 31) * 255 / 31; q[2] = (v & 31) * 255 / 31; q[3] = v & 0x8000 ? 255 : 0; break;
@@ -163,6 +165,18 @@ void room_colour(int room, double out[3]) {
     double f = h - i, p_ = v * (1 - s), q = v * (1 - s * f), t = v * (1 - s * (1 - f));
     double c[6][3] = {{v, t, p_}, {q, v, p_}, {p_, v, t}, {p_, q, v}, {t, p_, v}, {v, p_, q}};
     for (int k = 0; k < 3; k++) out[k] = c[i % 6][k];
+}
+
+// Whether a triangle's cut-out (its material's, Material::cutout) cuts it away at barycentrics (l1, l2) of its 2nd and
+// 3rd corners: drawn only where the alpha is over half (the Xbox's alpha reference 0x7F, "greater").
+bool cut_away(const Preview &p, const Triangle &t, double l1, double l2) {
+    const Material &m = p.materials[(size_t)t.material];
+    if (m.cutout < 0 || (size_t)m.cutout >= p.textures.size()) return false;
+    double l0 = 1 - l1 - l2;
+    double u = t.v[0].uv[0] * l0 + t.v[1].uv[0] * l1 + t.v[2].uv[0] * l2, v = t.v[0].uv[1] * l0 + t.v[1].uv[1] * l1 + t.v[2].uv[1] * l2;
+    float c[4];
+    sample(p.textures[(size_t)m.cutout], u * m.cutout_scale, v * m.cutout_scale, true, c);
+    return c[3] * 255 <= 127;
 }
 
 struct Textures {
@@ -263,6 +277,10 @@ bool analyze(const fs::path &bsp_file, const fs::path &scenario, const Find &fin
                 m.detail = tex.get(bitmap_ref(s, "primary detail map"), 0, 64);
                 m.detail_scale = (float)(s.num("primary detail map scale") > 0 ? s.num("primary detail map scale") : 1);
                 long long flags = (long long)s.num("shader environment flags");
+                if ((flags & 1) && !(flags & 2)) {   // alpha tested (and the bump map isn't a specular mask)
+                    m.cutout = tex.get(bitmap_ref(s, "bump map"), 0, 1024);
+                    m.cutout_scale = (float)(s.num("bump map scale") > 0 ? s.num("bump map scale") : 1);
+                }
                 m.mask_by_base_alpha = s.num("shader environment type") == 0 && !(flags & 2);
                 if (refl) {
                     m.cube = tex.get(cube, 0, 32);
@@ -287,6 +305,7 @@ bool analyze(const fs::path &bsp_file, const fs::path &scenario, const Find &fin
         }
         int id = (int)p.materials.size();
         p.materials.push_back(m);
+        p.material_tags.push_back(tag);
         material_of[tag] = id;
         return id;
     };
@@ -719,9 +738,10 @@ void draw(const Preview &p, const Camera &cam, const std::vector<char> &reflecti
         if (t.material < 0) continue;
         if (p.materials[(size_t)t.material].see_through) { clear.push_back((int)i); continue; }
         if (!front(t)) continue;
+        const bool cut = p.materials[(size_t)t.material].cutout >= 0;
         raster((int)i, [&](int x, int y, float z, float l1, float l2) {
             size_t o = (size_t)y * w + x;
-            if (z < zb[o]) { zb[o] = z; tid[o] = (int)i; b1[o] = l1; b2[o] = l2; }
+            if (z < zb[o] && !(cut && cut_away(p, t, l1, l2))) { zb[o] = z; tid[o] = (int)i; b1[o] = l1; b2[o] = l2; }
         });
     }
     // Shading.
@@ -859,9 +879,44 @@ void draw(const Preview &p, const Camera &cam, const std::vector<char> &reflecti
     if (total_out) *total_out = total;
 }
 
+int pick(const Preview &p, const Camera &cam, int w, int h, double x, double y) {
+    if (w <= 0 || h <= 0) return -1;
+    const double tx = std::tan(35.0 * 3.14159265358979 / 180), ty = tx * h / w;
+    V3 eye{cam.eye[0], cam.eye[1], cam.eye[2]};
+    V3 fwd{std::cos(cam.yaw) * std::cos(cam.pitch), std::sin(cam.yaw) * std::cos(cam.pitch), std::sin(cam.pitch)};
+    V3 right = norm(cross(fwd, V3{0, 0, 1})), up = cross(right, fwd);
+    const double sx = ((x + 0.5) / w * 2 - 1) * tx, sy = (1 - (y + 0.5) / h * 2) * ty;
+    // (the ray through the pixel, one unit ahead of the camera per unit along it: its distances are depths)
+    V3 d{fwd[0] + right[0] * sx + up[0] * sy, fwd[1] + right[1] * sx + up[1] * sy, fwd[2] + right[2] * sx + up[2] * sy};
+    int best = -1;
+    double best_t = 1e30;
+    for (size_t i = 0; i < p.triangles.size(); i++) {
+        const Triangle &t = p.triangles[i];
+        if (t.material < 0 || (size_t)t.material >= p.materials.size()) continue;
+        V3 a{t.v[0].p[0], t.v[0].p[1], t.v[0].p[2]}, b{t.v[1].p[0], t.v[1].p[1], t.v[1].p[2]}, c{t.v[2].p[0], t.v[2].p[1], t.v[2].p[2]};
+        V3 e1 = sub(b, a), e2 = sub(c, a);
+        // (Halo winds a surface's corners clockwise seen from the front; see-through ones are drawn from both sides)
+        if (!p.materials[(size_t)t.material].see_through && dot(cross(e1, e2), sub(eye, a)) >= 0) continue;
+        V3 pv = cross(d, e2);
+        double det = dot(e1, pv);
+        if (std::fabs(det) < 1e-12) continue;
+        V3 tv = sub(eye, a);
+        double l1 = dot(tv, pv) / det;
+        if (l1 < 0 || l1 > 1) continue;
+        V3 q = cross(tv, e1);
+        double l2 = dot(d, q) / det;
+        if (l2 < 0 || l1 + l2 > 1) continue;
+        double dist = dot(e2, q) / det;
+        if (dist < 0.02 || dist >= best_t || cut_away(p, t, l1, l2)) continue;
+        best = (int)i;
+        best_t = dist;
+    }
+    return best;
+}
+
 // The file: a magic, then each part as counts and raw values (this machine's byte order: the file is a cache).
 namespace {
-const char kMagic[8] = {'H', 'M', 'P', 'L', 'S', 'H', 'D', '7'};
+const char kMagic[8] = {'H', 'M', 'P', 'L', 'S', 'H', 'D', '8'};
 struct Out {
     std::ofstream f;
     template <class T> void raw(const T &v) { f.write((const char *)&v, sizeof v); }
@@ -909,6 +964,8 @@ bool save(const Analysis &a, const Preview &p, const fs::path &file) {
     o.vec(a.drawn); o.vec(a.other); o.vec(a.shows);
     o.vec(p.triangles);
     o.vec(p.materials);
+    o.raw((uint32_t)p.material_tags.size());
+    for (auto &t : p.material_tags) o.str(t);
     o.raw((uint32_t)p.textures.size());
     for (auto &t : p.textures) { o.raw(t.w); o.raw(t.h); o.vec(t.rgba); }
     o.raw((uint32_t)p.views.size());
@@ -952,6 +1009,10 @@ bool load(Analysis &a, Preview &p, const fs::path &file) {
     in.vec(a.drawn); in.vec(a.other); in.vec(a.shows);
     in.vec(p.triangles);
     in.vec(p.materials);
+    in.raw(n);
+    if (!in.ok || n > 100000) return false;
+    p.material_tags.resize(n);
+    for (auto &t : p.material_tags) in.str(t);
     in.raw(n);
     if (!in.ok || n > 100000) return false;
     p.textures.resize(n);

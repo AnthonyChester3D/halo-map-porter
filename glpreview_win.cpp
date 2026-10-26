@@ -52,13 +52,15 @@ void main() {
 
 // As lshade::draw: base x 2 x detail (at most 1) x lightmap x 2, plus the reflection (the cube map in the reflected
 // direction, between its parallel and perpendicular colour by how straight on it's seen, masked by the base map's
-// alpha and, with a lightmap brightness scale under 1, dimmed where the lightmap is dark).
+// alpha and, with a lightmap brightness scale under 1, dimmed where the lightmap is dark). Alpha-tested surfaces are
+// cut by their bump map's alpha.
 const char *kFragment = R"(#version 110
 uniform sampler2D u_base;
 uniform sampler2D u_detail;
 uniform sampler2D u_lm;
 uniform samplerCube u_cube;
-uniform float u_has_base, u_has_detail, u_has_lm, u_has_cube;
+uniform sampler2D u_cut;
+uniform float u_has_base, u_has_detail, u_has_lm, u_has_cube, u_has_cut, u_cut_scale;
 uniform float u_detail_scale, u_mask_alpha, u_lm_scale;
 uniform float u_made, u_converted, u_loses, u_highlight, u_rooms, u_see_through;
 uniform vec3 u_perp, u_para, u_eye;
@@ -87,6 +89,8 @@ vec3 room_colour(float r) {
     return vec3(v, p, q);
 }
 void main() {
+    // (alpha-tested: drawn only where its cut-out, the bump map's alpha, is over half, as the Xbox's 0x7F "greater")
+    if (u_has_cut > 0.5 && texture2D(u_cut, v_uv * u_cut_scale).a <= 0.498) discard;
     vec4 b = u_has_base > 0.5 ? texture2D(u_base, v_uv) : vec4(0.6, 0.6, 0.6, 1.0);
     if (u_see_through > 0.5) {
         gl_FragColor = vec4(fogged(u_has_base > 0.5 ? b.rgb : vec3(0.55, 0.65, 0.75)), 0.35);
@@ -228,7 +232,7 @@ void Renderer::set_scene(const lshade::Preview *p) {
     std::vector<char> is_cube(p->textures.size(), 0), is_flat(p->textures.size(), 0);
     for (auto &m : p->materials) {
         if (m.cube >= 0 && (size_t)m.cube < is_cube.size()) is_cube[(size_t)m.cube] = 1;
-        for (int t : {m.base, m.detail})
+        for (int t : {m.base, m.detail, m.cutout})
             if (t >= 0 && (size_t)t < is_flat.size()) is_flat[(size_t)t] = 1;
     }
     for (auto &t : p->triangles)
@@ -364,6 +368,7 @@ void Renderer::draw(const Frame &f) {
         gl.glUniform1i(d->u("u_detail"), 1);
         gl.glUniform1i(d->u("u_lm"), 2);
         gl.glUniform1i(d->u("u_cube"), 3);
+        gl.glUniform1i(d->u("u_cut"), 4);
         gl.glUniform3f(d->u("u_eye"), (float)c.eye[0], (float)c.eye[1], (float)c.eye[2]);
         gl.glUniform1f(d->u("u_loses"), f.what_it_loses ? 1.0f : 0.0f);
         gl.glUniform1f(d->u("u_rooms"), f.portals && !f.what_it_loses ? 1.0f : 0.0f);
@@ -399,6 +404,8 @@ void Renderer::draw(const Frame &f) {
                 bind2d(0, mt.base, "u_has_base");
                 bind2d(1, mt.detail, "u_has_detail");
                 bind2d(2, g.lightmap, "u_has_lm");
+                bind2d(4, mt.cutout, "u_has_cut");
+                gl.glUniform1f(d->u("u_cut_scale"), mt.cutout_scale);
                 GLuint cube = mt.cube >= 0 && (size_t)mt.cube < d->cube.size() ? d->cube[(size_t)mt.cube] : 0;
                 gl.glActiveTexture(GL_TEXTURE3);
                 glBindTexture(GL_TEXTURE_CUBE_MAP, cube);
@@ -416,7 +423,7 @@ void Renderer::draw(const Frame &f) {
             }
         }
         gl.glUseProgram(0);
-        for (int k = 3; k >= 0; k--) {
+        for (int k = 4; k >= 0; k--) {
             gl.glActiveTexture(GL_TEXTURE0 + k);
             glBindTexture(GL_TEXTURE_2D, 0);
             glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
