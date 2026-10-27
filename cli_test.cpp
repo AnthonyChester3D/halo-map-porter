@@ -49,8 +49,9 @@ static void write_previews(const ContentAnalysis &a) {
 
 static void print_items(const ContentAnalysis &a) {
     for (auto &it : a.items)
-        printf("%s %-34s %7.3f MB mem %7.3f MB file  %-40s %s seats=%d [%s] piece_of=%s preview=%d tris=%d tex=%zu\n",
+        printf("%s %-34s %7.3f MB mem %7.3f MB file  %-40s %s%s seats=%d [%s] piece_of=%s preview=%d tris=%d tex=%zu\n",
                it.vehicle ? "V" : "W", it.name.c_str(), it.memory_mb, it.file_mb, it.used_by.c_str(), it.in_map ? "" : "[stock]",
+               it.automatic ? (" [automatic: " + (it.automatic_to.empty() ? std::string("none") : it.automatic_to) + "]").c_str() : "",
                it.seats, it.seat_roles.c_str(), it.piece_of.c_str(), it.preview,
                it.preview >= 0 ? a.previews[it.preview].triangles() : 0,
                it.preview >= 0 ? a.previews[it.preview].textures.size() : (size_t)0);

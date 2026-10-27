@@ -114,6 +114,11 @@ const ContentItem *find_item(const std::string &tag) {
     for (auto &it : St->an->items) if (it.tag == tag) return &it;
     return nullptr;
 }
+bool is_gravity(const std::string &tag) { return fs::path(tag).stem().u8string() == "gravity rifle"; }
+bool is_needler(const std::string &tag) {
+    std::string s = fs::path(tag).stem().u8string();
+    return s == "needler" || s == "mp_needler" || s == "needler_mp";
+}
 std::wstring item_label(const ContentItem &it) { return (it.in_map ? L"" : L"Xbox ") + W(it.name); }
 // The map's vehicles that are pieces of `tag` (its scripts make them and attach them to it).
 std::vector<const ContentItem *> pieces_of(const std::string &tag) {
@@ -131,10 +136,14 @@ std::wstring thousands(long long n) {
 std::wstring pick_text(const ContentItem &it) {
     if (!it.in_map) return L"";
     auto p = St->picks.find(it.tag);
-    if (p == St->picks.end()) return L"Keep";
-    if (p->second.empty()) return L"None (removed)";
-    const ContentItem *t = find_item(p->second);
-    return t ? item_label(*t) : W(p->second);
+    auto name = [](const std::string &to) {
+        if (to.empty()) return std::wstring(L"None (removed)");
+        const ContentItem *t = find_item(to);
+        return t ? item_label(*t) : W(fs::path(to).stem().u8string());
+    };
+    if (p == St->picks.end()) return it.automatic ? L"Automatic: " + name(it.automatic_to) : L"Keep";
+    if (p->second == it.tag) return L"Keep";
+    return name(p->second);
 }
 
 void set_row_pick(int row) {
@@ -146,7 +155,7 @@ void set_row_pick(int row) {
 void update_totals() {
     if (!St->an) return;
     const ContentAnalysis &a = *St->an;
-    ContentEstimate e = estimate_contents(a, St->picks);
+    ContentEstimate e = estimate_contents(a, effective_picks(a, St->picks));
     // Without the optimize rebuild the figure is exact; what that rebuild saves is an estimate (within ~0.1 MB).
     std::wstring t = L"With your picks: " + mb(e.memory_mb) + L" MB of the " + mb(a.limit_mb) + L" MB";
     bool opt = a.optimize_saves_mb > 0 && e.memory_mb > a.limit_mb;
@@ -203,6 +212,9 @@ void update_combo() {
         SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)text.c_str());
         St->combo_tags.push_back(tag);
     };
+    bool any_auto = false;
+    for (int r : rows) any_auto = any_auto || St->an->items[St->row_item[r]].automatic;
+    if (any_auto) add(L"Automatic (what a conversion does with it)", "\x04");
     add(L"Keep", "\x01");
     add(L"None (remove it)", "");
     for (auto &it : St->an->items) {
@@ -215,7 +227,8 @@ void update_combo() {
     std::string common = "\x02";
     for (auto &t : sel) {
         auto p = St->picks.find(t);
-        std::string v = p == St->picks.end() ? "\x01" : p->second;
+        const ContentItem *ti = find_item(t);
+        std::string v = p == St->picks.end() ? (ti && ti->automatic ? "\x04" : "\x01") : p->second == t ? "\x01" : p->second;
         if (common == "\x02") common = v;
         else if (common != v) { common = "\x03"; break; }
     }
@@ -230,19 +243,23 @@ void apply_combo() {
     for (int r : selected_rows()) {
         const ContentItem &it = St->an->items[St->row_item[r]];
         if (!it.in_map) continue;
-        if (to == "\x01") St->picks.erase(it.tag);
+        // (Keep: no pick, or, for one a conversion would replace by itself, "replaced with itself")
+        if (to == "\x04" || (to == "\x01" && !it.automatic)) St->picks.erase(it.tag);
+        else if (to == "\x01") St->picks[it.tag] = it.tag;
         else St->picks[it.tag] = to;
         // Its pieces go with it (and come back with it): the scripts would attach them to whatever replaces it.
         for (const ContentItem *p : pieces_of(it.tag)) {
-            if (to == "\x01") St->picks.erase(p->tag);
+            if (to == "\x01" || to == "\x04") St->picks.erase(p->tag);
             else St->picks[p->tag] = "";
         }
         // Others that were replaced with this one follow it.
         for (auto &[from, t] : St->picks)
-            if (t == it.tag && from != it.tag) t = to == "\x01" ? it.tag : to;
+            if (t == it.tag && from != it.tag) t = to == "\x01" || to == "\x04" ? it.tag : to;
     }
-    for (auto it = St->picks.begin(); it != St->picks.end();)   // "replaced with itself" = keep
-        it = it->first == it->second ? St->picks.erase(it) : std::next(it);
+    for (auto it = St->picks.begin(); it != St->picks.end();) {   // "replaced with itself" = keep (kept as a pick only
+        const ContentItem *ti = find_item(it->first);                // for one a conversion would replace by itself)
+        it = it->first == it->second && !(ti && ti->automatic) ? St->picks.erase(it) : std::next(it);
+    }
     int n = ListView_GetItemCount(St->list);
     for (int r = 0; r < n; r++) set_row_pick(r);
     update_totals();
@@ -269,6 +286,13 @@ void update_preview() {
     else t += L"Vehicle";
     if (m) t += L"\r\n" + thousands(m->triangles()) + L" triangles";
     if (!it.in_map) t += L"\r\nAn Xbox one the map doesn't have: picking it adds what it costs.";
+    if (it.automatic) {
+        std::wstring to = it.automatic_to.empty() ? L"removed" : L"replaced with " + W(fs::path(it.automatic_to).stem().u8string());
+        t += is_needler(it.tag) ? L"\r\nOne of the map's needlers players can't get: a conversion uses the one they can (or the "
+                                  L"Xbox's) instead (" + to + L") unless you pick something else."
+                                : std::wstring(is_gravity(it.tag) ? L"\r\nHalo's cut gravity rifle" : L"\r\nIt's only in the weapon list") +
+                                  L": nothing on the map spawns it, so a conversion leaves it out (" + to + L") unless you pick Keep.";
+    }
     if (!it.piece_of.empty()) {
         std::wstring parent = W(fs::path(it.piece_of).stem().u8string());
         if (const ContentItem *p = find_item(it.piece_of)) parent = W(p->name);

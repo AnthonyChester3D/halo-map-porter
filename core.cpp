@@ -1109,6 +1109,7 @@ void correct_xbox_tagset(Job &job);
 void trim_unobtainable(Job &job, const fs::path &xsrc);
 void fix_seat_labels(Job &job, const fs::path &xsrc);
 static void apply_replacements(Job &job, const fs::path &xsrc);
+static void tidy_weapon_list(Job &job);
 static bool fix_script_none(Job &job, const std::string &err, std::string &what);
 static bool fix_script_shadow(Job &job, const std::string &err, std::string &what);
 static bool fix_script_navpoint(Job &job, const std::string &err, std::string &what);
@@ -10846,6 +10847,7 @@ bool prepare_for_xbox(Job &job, std::string &err) {
     trim_unobtainable(job, xsrc);
     trim_machines(job, xsrc);
     apply_replacements(job, xsrc);
+    tidy_weapon_list(job);
     fix_seat_labels(job, xsrc);
     trim_pickup_extras(job, xsrc);
 
@@ -12430,7 +12432,8 @@ void fix_kept_weapons(Job &job, const fs::path &xsrc) {
     // 1. Weapon list entries.
     const std::string g = "globals/globals.globals";
     if (fs::exists(job.overlay / from_u8(g))) {
-        const std::string stand_in = "weapons/gravity rifle/gravity rifle.weapon";
+        const std::string stand_in = "";   // (an empty slot: the list is by position, and nothing gets a weapon from one;
+                                           // the gravity rifle used to stand in, a cut weapon that then came along)
         static const std::regex wep_re(R"(^weapon_list\[(\d+)\]\.weapon$)");
         fs::path gdir = fs::exists(job.fixes / from_u8(g)) ? job.fixes : job.overlay;
         for (auto &[k, v] : list_values(cfg, gdir, g)) {
@@ -13479,7 +13482,7 @@ Result update_xbox_models(const Config &cfg, const fs::path &file, const Log &lo
 
 std::string xbox_prepare_key(const Config &c) {
     std::ostringstream k;
-    k << "HMP prepare 1\n";
+    k << "HMP prepare 2\n";   // (2: automatic picks, the gravity rifle and spare needlers)
     auto path = [&](const char *n, const fs::path &p) { k << n << "=" << u8(p) << "\n"; };
     path("invader", c.invader_dir);
     path("ce", c.ce_dir);
@@ -13619,6 +13622,10 @@ Result convert_map(const Config &cfg, const fs::path &input, Game in_game, Game 
 Result build_from_tags(const Config &cfg, const fs::path &scenario_file, Game out_game,
                        const fs::path &output, bool share, const Log &log, ContentAnalysis *measure) {
     return build_from_tags_impl(cfg, scenario_file, out_game, output, share, log, nullptr, measure);
+}
+std::map<std::string, std::string> automatic_picks(const std::map<std::string, bool> &weapons) { return automatic_picks_impl(weapons); }
+std::map<std::string, std::string> effective_picks(const ContentAnalysis &a, const std::map<std::string, std::string> &picks) {
+    return effective_picks_impl(a, picks);
 }
 ContentEstimate estimate_contents(const ContentAnalysis &a, const std::map<std::string, std::string> &picks) {
     return estimate_contents_impl(a, picks);
@@ -13816,6 +13823,7 @@ bool load_content_analysis(ContentAnalysis &out, const fs::path &file) {
     fs::path models = file;
     models += ".models";
     if (!load_previews(a.previews, models)) a.previews.clear();
+    set_automatic_picks(a);   // (from what each row says uses it: the same for a file measured before)
     for (auto &it : a.items)
         if (it.preview < -1 || it.preview >= (int)a.previews.size() || (it.preview >= 0 && a.previews[it.preview].tris.empty()))
             it.preview = -1;

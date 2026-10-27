@@ -187,7 +187,6 @@ static void save_settings() {
     ini_set(L"x_portals", std::to_wstring(std::max(0, sel(ID_X_PORTALS))));
     ini_set(L"x_tex2", std::to_wstring(sel(ID_X_TEX)));
     ini_set(L"x_lm", std::to_wstring(sel(ID_X_LM)));
-    ini_set(L"x_w2", std::to_wstring(sel(ID_X_W2)));
     ini_set(L"share", checked(ID_SHARE) ? L"1" : L"0");
     ini_set(L"x_shrink", checked(ID_X_SHRINK) ? L"1" : L"0");
     ini_set(L"write_tour", checked(ID_S_TOUR) ? L"1" : L"0");
@@ -195,8 +194,6 @@ static void save_settings() {
     ini_set(L"x_v0", std::to_wstring(sel(ID_X_V0)));
     ini_set(L"x_v1", std::to_wstring(sel(ID_X_V1)));
     ini_set(L"x_v2", std::to_wstring(sel(ID_X_V2)));
-    ini_set(L"x_w0", std::to_wstring(sel(ID_X_W0)));
-    ini_set(L"x_w1", std::to_wstring(sel(ID_X_W1)));
     ini_set(L"pk_size", std::to_wstring(std::max(0, sel(ID_PK_SIZE))));
     ini_set(L"pk_corner", std::to_wstring(std::max(0, sel(ID_PK_CORNER))));
 }
@@ -367,11 +364,6 @@ static const struct { const wchar_t *label; const char *tag; } kVehicleChoices[]
     {L"Covenant turret (untested)", "vehicles/c gun turret/c gun turret_mp.vehicle"},
 };
 static const int kVehicleDefaults[3] = {0, 3, 5};
-static const struct { const wchar_t *label; const char *name; } kWeaponChoices[] = {
-    {L"Keep it (works on Xbox)", ""},       {L"Assault rifle", "assault rifle"}, {L"Pistol", "pistol"},
-    {L"Sniper rifle", "sniper rifle"},      {L"Rocket launcher", "rocket launcher"}, {L"Shotgun", "shotgun"},
-    {L"Plasma pistol", "plasma pistol"},    {L"Plasma rifle", "plasma rifle"},   {L"Needler", "needler"},
-};
 static const char *kPcWeaponTags[2] = {"weapons/flamethrower/flamethrower.weapon", "weapons/plasma_cannon/plasma_cannon.weapon"};
 
 static void list_combo(int page, int x, int y, int w, int id, const std::vector<const wchar_t *> &items) {
@@ -470,20 +462,15 @@ static void apply_xbox_options(Config &cfg) {
         cfg.xbox_level_texture_mb = t == 0 ? 6 : 0;
         cfg.xbox_max_lightmap = lm[l >= 0 && l < 3 ? l : 0];
     }
-    {
-        int k = sel(ID_X_W2);
-        cfg.xbox_other_weapons = k > 0 && k < (int)(sizeof(kWeaponChoices) / sizeof(kWeaponChoices[0])) ? kWeaponChoices[k].name : "";
-    }
+    // Weapons: the map's own, all of them (the flamethrower and fuel rod gun work on the Xbox), each replaced only as
+    // the weapons & vehicles window says (and its automatic picks: one nothing spawns goes).
+    cfg.xbox_other_weapons.clear();
+    cfg.xbox_keep_weapons.assign(std::begin(kPcWeaponTags), std::end(kPcWeaponTags));
+    cfg.xbox_weapon_replacements.clear();
     const int vids[3] = {ID_X_V0, ID_X_V1, ID_X_V2};
     for (int i = 0; i < 3; i++) {
         int k = sel(vids[i]);
         if (k >= 0 && k < (int)(sizeof(kVehicleChoices) / sizeof(kVehicleChoices[0]))) cfg.xbox_vehicle_slots[i] = kVehicleChoices[k].tag;
-    }
-    const int wids[2] = {ID_X_W0, ID_X_W1};
-    for (int i = 0; i < 2; i++) {
-        int k = sel(wids[i]);
-        if (k <= 0) cfg.xbox_keep_weapons.push_back(kPcWeaponTags[i]);
-        else cfg.xbox_weapon_replacements[kPcWeaponTags[i]] = kWeaponChoices[k].name;
     }
 }
 
@@ -2356,28 +2343,10 @@ static void create_controls() {
     check(2, L"Keep every vehicle (Halo Universal XBE)", 410, y - 79, 324, ID_X_ALLVEH);
     add(2, L"STATIC", L"", 0, 410, y - 55, 324, 54, ID_X_VHINT);
     y += 2;
-    add(2, L"STATIC", L"Weapons Xbox multiplayer doesn't have:", 0, 26, y, 480, 20, ID_X_WLBL);
+    add(2, L"STATIC", L"Weapons and vehicles: what each costs, and what to replace with what (the flamethrower and fuel rod gun "
+                      L"work on the Xbox):", 0, 26, y - 2, 500, 34, ID_X_WLBL);
     button(2, L"Weapons && vehicles...", 534, y - 4, 200, ID_X_CONTENTS);
-    y += 22;
-    {
-        std::vector<const wchar_t *> w;
-        for (auto &c : kWeaponChoices) w.push_back(c.label);
-        label(2, L"Flamethrower:", 46, y, 120, ID_X_W0_LBL);
-        list_combo(2, 170, y, 220, ID_X_W0, w);
-        add(2, L"STATIC", L"Kept weapons get the PC pickup animations and icons automatically.", 0, 410, y + 3, 324, 40,
-            ID_X_WHINT);
-        y += 27;
-        label(2, L"Fuel rod gun:", 46, y, 120, ID_X_W1_LBL);
-        list_combo(2, 170, y, 220, ID_X_W1, w);
-        y += 27;
-        std::vector<const wchar_t *> o = w;
-        o[0] = L"Keep them";
-        label(2, L"Other custom ones:", 46, y, 124, ID_X_W2_LBL);
-        list_combo(2, 170, y, 220, ID_X_W2, o);
-        add(2, L"STATIC", L"e.g. a custom tagset's beam rifle. Replacing them saves memory on big maps.", 0, 410, y - 2, 324, 36,
-            ID_X_W2_HINT);
-    }
-    y += 30;
+    y += 40;
     check(2, L"Make lower-detail versions (LODs) when a model has none", 26, y, 380, ID_X_MAKELOD);
     label(2, L"Heavy models:", 410, y - 2, 86, ID_X_TRIM_LBL);
     list_combo(2, 500, y - 2, 234, ID_X_TRIM,
@@ -2499,10 +2468,6 @@ static void create_controls() {
         int k = _wtoi(ini_get(key, def).c_str());
         SendDlgItemMessageW(g_wnd, id, CB_SETCURSEL, k < 0 || k > mx ? 0 : k, 0);
     }
-    {
-        int k = _wtoi(ini_get(L"x_w2", L"0").c_str());
-        SendDlgItemMessageW(g_wnd, ID_X_W2, CB_SETCURSEL, k < 0 ? 0 : k, 0);
-    }
     std::wstring inv = ini_get(L"invader_dir");
     if (inv.empty()) {
         wchar_t exe[MAX_PATH];
@@ -2538,11 +2503,6 @@ static void create_controls() {
         for (int i = 0; i < 3; i++) {
             int k = _wtoi(ini_get((L"x_v" + std::to_wstring(i)).c_str(), std::to_wstring(kVehicleDefaults[i]).c_str()).c_str());
             SendDlgItemMessageW(g_wnd, vids[i], CB_SETCURSEL, k < 0 ? kVehicleDefaults[i] : k, 0);
-        }
-        const int wids[2] = {ID_X_W0, ID_X_W1};
-        for (int i = 0; i < 2; i++) {
-            int k = _wtoi(ini_get((L"x_w" + std::to_wstring(i)).c_str(), L"0").c_str());
-            SendDlgItemMessageW(g_wnd, wids[i], CB_SETCURSEL, k < 0 ? 0 : k, 0);
         }
     }
     set_check(ID_B_XBOX, ini_get(L"b_xbox", L"0") == L"1");

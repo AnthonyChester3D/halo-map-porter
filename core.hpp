@@ -40,8 +40,9 @@ struct Config {
     // Halo Universal XBE: every placed vehicle can spawn (with the gametype's vehicles on Default), so keep
     // vehicles that have no slot of their own type instead of swapping them for a slotted one or removing them.
     bool xbox_keep_all_vehicles = false;
-    // PC-only weapons to keep on Xbox instead of swapping them for an Xbox weapon (weapon tag paths).
-    std::vector<std::string> xbox_keep_weapons;
+    // PC-only weapons to keep on Xbox instead of swapping them for an Xbox weapon (weapon tag paths). Both, as the app
+    // sets it: the weapons & vehicles window's picks (and its automatic ones) decide what's replaced.
+    std::vector<std::string> xbox_keep_weapons{"weapons/flamethrower/flamethrower.weapon", "weapons/plasma_cannon/plasma_cannon.weapon"};
     // PC-only weapons that are NOT kept: weapon tag path -> Xbox weapon name (e.g. "shotgun").
     // Missing entries use the default replacement (flamethrower -> shotgun, fuel rod -> rocket launcher).
     std::map<std::string, std::string> xbox_weapon_replacements;
@@ -183,6 +184,11 @@ struct ContentItem {
     std::string seat_roles;    // e.g. "driver, gunner, 2 passengers"
     std::string piece_of;      // a vehicle with no seats the map's scripts create and attach to this one (its tag)
     int preview = -1;          // its model in ContentAnalysis::previews (-1: none)
+    // What a conversion does with it when you pick nothing (automatic_picks): `automatic` true, replaced with
+    // `automatic_to` ("" none). The gravity rifle (Halo's cut weapon) when nothing spawns it; the needlers when a map
+    // has more than one: the one players can get, or the Xbox's.
+    bool automatic = false;
+    std::string automatic_to;
 };
 struct ContentAnalysis {
     std::string error;
@@ -202,6 +208,16 @@ struct ContentAnalysis {
     std::vector<ModelPreview> previews;                                  // the items' models (shared ones once)
 };
 struct ContentEstimate { double memory_mb = 0, memory_optimized_mb = 0, file_mb = 0; };   // optimized: roughly, after Invader's optimize
+// The replacements a conversion makes for weapons nobody picked anything for. `weapons`: the map's weapon tags, each
+// with whether players can get it (a spawn point, placed, a starting weapon, the player's own). The gravity rifle (a
+// cut weapon: only in the weapon list), the flamethrower and the fuel rod gun (in every PC and MCC weapon list) -> none
+// unless players can get them. The needlers (needler, mp_needler,
+// needler_mp), when there are two or more: the ones players can't get -> the one they can (if one); none of them
+// gettable: all -> the Xbox's needler.
+std::map<std::string, std::string> automatic_picks(const std::map<std::string, bool> &weapons);
+// `picks` with the automatic ones (ContentItem::automatic) for weapons not picked, and without "replaced with itself"
+// (a kept one): what a conversion uses.
+std::map<std::string, std::string> effective_picks(const ContentAnalysis &a, const std::map<std::string, std::string> &picks);
 // Tag memory and file size with these picks (weapon/vehicle tag -> replacement tag, "" = none).
 ContentEstimate estimate_contents(const ContentAnalysis &a, const std::map<std::string, std::string> &picks);
 // Runs the Xbox preparation of a map (input = a .map, or a .scenario in a tags folder when in_game is Unknown)

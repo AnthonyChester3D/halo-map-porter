@@ -1058,8 +1058,12 @@ Custom weapons and "Use the Xbox's own weapons, vehicles and player model"
       shields, so the script would keep wrecking and respawning it.
 
 PC-only weapons (flamethrower, fuel rod gun)
-  "Keep it" (default) keeps them, and both work on Xbox. The app
-  automatically:
+  Both work on the Xbox, and a map keeps them unless the Weapons & vehicles
+  window says otherwise: there, replace either with any weapon, or none.
+  Most maps only have them because PC and MCC put them in every weapon
+  list: with nothing picked for them, one nothing spawns (no spawn point,
+  not placed, not a starting weapon) is left out automatically, and one
+  players can get stays. For one that stays, the app:
     - uses the PC player animations, so they can be picked up (the Xbox
       ones don't include the fuel rod),
     - uses the PC pickup icon sheet, so "Press X to pick up" shows the
@@ -1074,10 +1078,16 @@ PC-only weapons (flamethrower, fuel rod gun)
     - takes them out of the Xbox weapon list, because the Xbox gametype
       weapon sets swap listed weapons by position (that's why a
       flamethrower turned into a rocket launcher). Side effect: special
-      weapon sets like "Rocket launchers only" don't replace kept weapons.
-  Or pick an Xbox weapon to replace it with (assault rifle, pistol,
-  sniper rifle, rocket launcher, shotgun, plasma pistol, plasma rifle,
-  needler).
+      weapon sets like "Rocket launchers only" don't replace them.
+  The weapon list's slots go by position, and the game finds a weapon's
+  place by its first slot: the flamethrower's and gravity rifle's slots
+  turn whatever's in them into a rocket launcher. So after replacing, a
+  weapon is only left in its own slot (a shotgun put in the flamethrower's
+  slot made every shotgun a rocket launcher), and the log's "[xbox]
+  emptied weapon list slots" line says which were emptied.
+  (The Xbox tab's old "Weapons Xbox multiplayer doesn't have" options are
+  gone: the Weapons & vehicles window does all of it, per weapon. Custom
+  weapons with no Xbox original stay too, unless you replace them there.)
 
 The map's own level
   Tags the map has at the same path as a stock tag normally use the target
@@ -1111,10 +1121,22 @@ Weapons & vehicles window (Xbox)
     only free up when all of them go, so pick those together;
   - Map size: how much of the map file it takes (textures and sounds
     included);
-  - Replace with: Keep, None (remove it), another of the map's weapons or
+  - Replace with: Automatic (below; for the ones it applies to), Keep,
+    None (remove it), another of the map's weapons or
     vehicles, or an Xbox one (the list shows what an Xbox one would add).
+  - Automatic: what a conversion does by itself when you pick nothing:
+    - the gravity rifle (Halo's cut weapon, in every map's weapon list but
+      never a real weapon), the flamethrower and the fuel rod gun (in every
+      PC and MCC weapon list) go, unless something on the map spawns them;
+    - a map with more than one needler (needler, mp_needler, needler_mp)
+      keeps the one players can get (a spawn point, placed, a starting
+      weapon) and the others use it; when players can get none of them,
+      they all use the Xbox's needler.
+    They're listed all the same, as "Automatic: ...": pick Keep (or
+    anything else) to override it. The log lists them as a "[replace]
+    automatically" line.
   The top says how much the map needs and how much has to go; the line under
-  the list adds up your picks as you make them. Select several rows with
+  the list adds up your picks (and the automatic ones) as you make them. Select several rows with
   Ctrl or Shift to set them all at once.
   Click a row to see it: the model shows on the right (its most detailed
   version, with its textures; drag to turn it, mouse wheel to zoom,
@@ -1744,8 +1766,8 @@ Custom weapons, vehicles and player model
   (".../sniper_rifle.item_collection" -> sniper rifle, ".../ghost_mp.vehicle"
   -> ghost, ...). This saves a lot of space and memory. The log lists
   every swap as [xbox-mp] lines.
-  "Other custom ones" covers custom weapons with no Xbox original (for
-  example a beam rifle): keep them, or replace them with an Xbox weapon.
+  Custom weapons with no Xbox original (for example a beam rifle) stay;
+  the Weapons & vehicles window can replace them with an Xbox weapon.
   Their models, effects, projectiles and animations take some of the Xbox's
   22 MB of memory (on the Xbox a model's geometry is kept with the tag
   data), so replacing them can be what makes a big map fit.

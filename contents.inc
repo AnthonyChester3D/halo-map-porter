@@ -2,6 +2,8 @@
 // and applying the picks (replace with another one, or with none) when converting.
 // Included by core.cpp (uses its Job and helpers).
 
+static void set_automatic_picks(ContentAnalysis &a);   // (below: automatic picks)
+
 // Xbox stock weapons and vehicles offered as replacements (when the Xbox tags have them).
 static const char *kStockWeaponChoices[] = {
     "weapons/assault rifle/assault rifle.weapon", "weapons/pistol/pistol.weapon",
@@ -526,7 +528,124 @@ static bool analyze_built_map(Job &job, const fs::path &map, const std::set<std:
         return x.memory_mb > y.memory_mb;
     });
     a.items = items;
+    set_automatic_picks(a);
     return true;
+}
+
+// ---------------------------------------------------------------- automatic picks
+static const char *kXboxNeedler = "weapons/needler/needler.weapon";
+static bool is_gravity_rifle(const std::string &tag) { return lc(fs::path(from_u8(tag)).stem().u8string()) == "gravity rifle"; }
+// (the flamethrower and the fuel rod gun: in every PC and MCC weapon list, on few maps)
+static bool is_listed_only(const std::string &tag) {
+    std::string s = lc(fs::path(from_u8(tag)).stem().u8string());
+    return s == "flamethrower" || s == "plasma_cannon" || s == "fuel rod gun" || s == "fuel_rod_gun";
+}
+static bool is_needler(const std::string &tag) {
+    std::string s = lc(fs::path(from_u8(tag)).stem().u8string());
+    return s == "needler" || s == "mp_needler" || s == "needler_mp";
+}
+static std::map<std::string, std::string> automatic_picks_impl(const std::map<std::string, bool> &weapons) {
+    std::map<std::string, std::string> r;
+    std::vector<std::string> needlers, got;
+    for (auto &[t, play] : weapons) {
+        if ((is_gravity_rifle(t) || is_listed_only(t)) && !play) r[t] = "";
+        if (is_needler(t)) {
+            needlers.push_back(t);
+            if (play) got.push_back(t);
+        }
+    }
+    if (needlers.size() >= 2 && got.size() <= 1) {
+        std::string to = got.empty() ? kXboxNeedler : got[0];
+        for (auto &t : needlers)
+            if (t != to) r[t] = to;
+    }
+    return r;
+}
+// (the analysis: whether players can get each weapon, from what its row says uses it)
+static void set_automatic_picks(ContentAnalysis &a) {
+    std::map<std::string, bool> weapons;
+    for (auto &it : a.items) {
+        if (it.vehicle || !it.in_map) continue;
+        const std::string &u = it.used_by;
+        weapons[it.tag] = u.find("spawn point") != std::string::npos || u.find("placed") != std::string::npos ||
+                          u.find("starting weapon") != std::string::npos || u.find("players spawn with it") != std::string::npos;
+    }
+    auto r = automatic_picks_impl(weapons);
+    for (auto &it : a.items) {
+        auto p = r.find(it.tag);
+        it.automatic = p != r.end();
+        it.automatic_to = it.automatic ? p->second : "";
+    }
+}
+static std::map<std::string, std::string> effective_picks_impl(const ContentAnalysis &a, const std::map<std::string, std::string> &picks) {
+    std::map<std::string, std::string> r = picks;
+    for (auto &it : a.items)
+        if (it.automatic && !picks.count(it.tag)) r[it.tag] = it.automatic_to;
+    for (auto it = r.begin(); it != r.end();) it = it->first == it->second ? r.erase(it) : std::next(it);
+    return r;
+}
+
+// (a conversion: the same from the tags it builds with)
+static std::map<std::string, std::string> automatic_picks_for(Job &job, const fs::path &xsrc) {
+    const Config &cfg = job.cfg;
+    std::string scen = job.scenario + ".scenario", out;
+    fs::path sdir = fs::exists(job.fixes / from_u8(scen)) ? job.fixes : xsrc;
+    if (!fs::exists(sdir / from_u8(scen))) return {};
+    for (const std::string root : {scen, std::string("globals/globals.globals")}) {   // (the build adds the globals itself)
+        std::vector<std::string> dep{u8(tool(cfg, "invader-dependency")), "-r"};
+        for (auto &d : job.dirs()) dep.insert(dep.end(), {"-t", u8(d)});   // (as the build finds them)
+        dep.push_back(root);
+        std::string o;
+        run_process(dep, o);
+        out += o + "\n";
+    }
+    std::map<std::string, bool> weapons;
+    {
+        std::istringstream ss(out);
+        std::string l;
+        while (std::getline(ss, l)) {
+            l = norm_rel(l);
+            if (fs::path(from_u8(l)).extension() == ".weapon" && (is_gravity_rifle(l) || is_listed_only(l) || is_needler(l)))
+                weapons[l] = false;
+        }
+    }
+    if (weapons.empty()) return {};
+    auto values = [&](const std::string &tag) {   // (the copy the build uses: a stock Xbox tag over the map's)
+        fs::path d = job.owner(tag);
+        return d.empty() ? std::vector<std::pair<std::string, std::string>>() : list_values(cfg, d, tag);
+    };
+    std::set<std::string> collections;
+    std::map<std::string, std::string> palette;
+    static const std::regex ne(R"(^netgame_equipment\[\d+\]\.item_collection$)");
+    static const std::regex se(R"(^starting_equipment\[\d+\]\.item_collection_\d$)");
+    static const std::regex pal(R"(^weapon_palette\[(\d+)\]\.name$)");
+    static const std::regex plc(R"(^weapons\[\d+\]\.type$)");
+    auto play = [&](const std::string &w) { if (weapons.count(w)) weapons[w] = true; };
+    auto sv = values(scen);
+    for (auto &[k, v] : sv) {
+        std::smatch m;
+        if (v.empty()) continue;
+        if (std::regex_match(k, ne) || std::regex_match(k, se)) collections.insert(norm_rel(v));
+        else if (std::regex_match(k, m, pal)) palette[m[1].str()] = norm_rel(v);
+    }
+    for (auto &[k, v] : sv)   // (placed)
+        if (std::regex_match(k, plc) && palette.count(v)) play(palette[v]);
+    static const std::regex item(R"(^permutations\[\d+\]\.item$)");
+    for (auto &c : collections)
+        for (auto &[k, v] : values(c))
+            if (std::regex_match(k, item)) play(norm_rel(v));
+    // (the multiplayer player's own weapons)
+    for (auto &[k, v] : values("globals/globals.globals"))
+        if (k == "multiplayer_information[0].unit" && !v.empty()) {
+            static const std::regex uw(R"(^weapons\[\d+\]\.weapon$)");
+            for (auto &[k2, v2] : values(norm_rel(v)))
+                if (std::regex_match(k2, uw)) play(norm_rel(v2));
+        }
+    auto r = automatic_picks_impl(weapons);
+    // (the Xbox's needler has to be there to replace with)
+    for (auto it = r.begin(); it != r.end();)
+        it = it->second == kXboxNeedler && job.owner(kXboxNeedler).empty() ? r.erase(it) : std::next(it);
+    return r;
 }
 
 // ---------------------------------------------------------------- applying the picks
@@ -555,25 +674,88 @@ static void remove_item_collection_uses(Job &job, const fs::path &xsrc, const st
     if (cmd.size() > 4) run_process(cmd, out);
 }
 
+// The globals weapon list, put right after weapons were replaced in it. The game finds a weapon's place in the list by
+// its first slot, and the place decides what the gametype's weapon sets turn it into; the flamethrower's and gravity
+// rifle's places turn it into a rocket launcher, always (Halo 1 Unlimited: neither is an Xbox multiplayer weapon). A
+// replacement written into their slot (flamethrower -> shotgun) made every shotgun on Snow Space a rocket launcher. So:
+// those two slots hold only their own weapon, and a weapon in more than one slot keeps the one of its name (else its
+// last); the others are emptied (the list is by place, and an empty slot gives nothing).
+static void tidy_weapon_list(Job &job) {
+    const Config &cfg = job.cfg;
+    const std::string g = "globals/globals.globals";
+    fs::path d = job.owner(g);
+    if (d.empty()) return;
+    static const char *kSlots[] = {"assault rifle", "flamethrower", "gravity rifle", "needler", "pistol", "plasma pistol",
+                                   "plasma rifle", "rocket launcher", "shotgun", "sniper rifle", "ball", "flag",
+                                   "frag grenade", "plasma grenade"};
+    static const std::regex wl(R"(^weapon_list\[(\d+)\]\.weapon$)");
+    std::map<int, std::string> slots;
+    for (auto &[k, v] : list_values(cfg, d, g)) {
+        std::smatch m;
+        if (std::regex_match(k, m, wl) && !v.empty() && v[0] != '.') slots[std::stoi(m[1])] = norm_rel(v);
+    }
+    auto name = [](const std::string &t) {
+        std::string s = lc(fs::path(from_u8(t)).stem().u8string());
+        if (s == "plasma_cannon" || s == "fuel rod gun") return std::string("fuel rod gun");
+        return s;
+    };
+    std::set<int> empty;
+    for (auto &[i, t] : slots)
+        if ((i == 1 || i == 2) && name(t) != kSlots[i]) empty.insert(i);   // (would be a rocket launcher in a game)
+    std::map<std::string, std::vector<int>> where;
+    for (auto &[i, t] : slots)
+        if (!empty.count(i)) where[t].push_back(i);
+    for (auto &[t, at] : where) {
+        if (at.size() < 2) continue;
+        int keep = at.back();
+        for (int i : at)
+            if (i < 14 && name(t) == kSlots[i]) keep = i;
+        for (int i : at)
+            if (i != keep) empty.insert(i);
+    }
+    if (empty.empty()) return;
+    if (d != job.fixes && !job.to_fixes(g, d)) return;
+    std::vector<std::string> cmd{u8(tool(cfg, "invader-edit")), "-t", u8(job.fixes), g};
+    std::string list, out;
+    for (int i : empty) {
+        cmd.insert(cmd.end(), {"-S", "weapon_list[" + std::to_string(i) + "].weapon", ""});
+        list += (list.empty() ? "" : ", ") + std::string("#") + std::to_string(i) + " (" + fs::path(from_u8(slots[i])).stem().u8string() + ")";
+    }
+    if (run_process(cmd, out) == 0)
+        job.note("[xbox] emptied weapon list slots " + list + ": a weapon whose first slot is another's is turned into what "
+                 "that one would be (the flamethrower's and gravity rifle's slots: a rocket launcher, every game)");
+}
+
 // Replace (or remove) the picked weapons and vehicles everywhere the map refers to them. Runs at the end of the
 // Xbox preparation, on the tags the build uses.
 static void apply_replacements(Job &job, const fs::path &xsrc) {
     const Config &cfg = job.cfg;
-    if (cfg.xbox_replace.empty()) return;
+    // Your picks, and the automatic ones for weapons you picked nothing for (not when measuring: the weapons &
+    // vehicles window shows them as they are, with what a conversion does)
+    std::map<std::string, std::string> picks = cfg.xbox_replace;
+    std::set<std::string> automatic;
+    if (!job.analysis)
+        for (auto &[from, to] : automatic_picks_for(job, xsrc))
+            if (!picks.count(from)) {
+                picks[from] = to;
+                automatic.insert(from);
+            }
+    if (picks.empty()) return;
     std::string out;
-    std::vector<std::string> notes;
+    std::vector<std::string> notes, auto_notes;
     int emptied_all = 0;
-    job.log("Applying your weapons & vehicles picks...");
+    job.log(automatic.size() == picks.size() ? "Leaving out weapons nothing spawns..." : "Applying your weapons & vehicles picks...");
     // Tags that refer to each picked one (and each replacement, for a later pick of it), found in one pass over
     // the tags the map uses (following references from its scenario and globals, so a full Xbox tagset isn't read).
     std::set<std::string> targets;
-    for (auto &[from, to] : cfg.xbox_replace) {
+    for (auto &[from, to] : picks) {
         if (!from.empty()) targets.insert(from);
         if (!to.empty()) targets.insert(to);
     }
     auto referrers = find_referrers({job.fixes, xsrc, job.overlay}, targets, {job.scenario + ".scenario", "globals/globals.globals"});
-    for (auto &[from, to] : cfg.xbox_replace) {
+    for (auto &[from, to] : picks) {
         if (from.empty() || from == to) continue;
+        auto &said = automatic.count(from) ? auto_notes : notes;
         bool stock_from = !job.overlay.empty() && fs::exists(job.overlay / from_u8(from));
         std::vector<std::string> refs;
         for (auto &l : referrers[from])
@@ -589,7 +771,7 @@ static void apply_replacements(Job &job, const fs::path &xsrc) {
         };
         std::string label = fs::path(from_u8(from)).stem().u8string();
         int same = 0;   // two picks with this name: say which folder
-        for (auto &[f2, t2] : cfg.xbox_replace) same += fs::path(from_u8(f2)).stem().u8string() == label;
+        for (auto &[f2, t2] : picks) same += fs::path(from_u8(f2)).stem().u8string() == label;
         if (same > 1) label += " (" + fs::path(from_u8(from)).parent_path().filename().u8string() + ")";
         if (!to.empty()) {
             int changed = 0;
@@ -601,7 +783,7 @@ static void apply_replacements(Job &job, const fs::path &xsrc) {
                     referrers[to].insert(r);   // now refers to the replacement
                 }
             }
-            if (changed) notes.push_back(label + " -> " + fs::path(from_u8(to)).stem().u8string());
+            if (changed) said.push_back(label + " -> " + fs::path(from_u8(to)).stem().u8string());
             continue;
         }
         // None: take it out of each list that refers to it.
@@ -682,8 +864,15 @@ static void apply_replacements(Job &job, const fs::path &xsrc) {
             }
             if (other) left.push_back(r);
         }
-        notes.push_back(label + " -> none" + (left.empty() ? "" : " (still used by " + left[0] + ", so it stays in the map)"));
+        said.push_back(label + " -> none" + (left.empty() ? "" : " (still used by " + left[0] + ", so it stays in the map)"));
         emptied_all += emptied;
+    }
+    if (!auto_notes.empty()) {
+        std::string list = auto_notes[0];
+        for (size_t i = 1; i < auto_notes.size(); i++) list += ", " + auto_notes[i];
+        job.note("[replace] automatically (nothing picked for them in the weapons & vehicles window): " + list +
+                 " (the gravity rifle, the flamethrower and the fuel rod gun go when they're only in the weapon list; of a "
+                 "map's needlers, the one players can get stays, or the Xbox's)");
     }
     if (!notes.empty()) {
         std::string list = notes[0];
