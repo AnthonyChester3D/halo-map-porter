@@ -2,7 +2,7 @@
 // while bots play on it (the idle main menu, in place of the attract movie). A map's own folder on the Xbox holds them
 // in showcase.txt, beside info.txt and preview.bin, so a map maker can ship theirs with the map; a map without one
 // gets the shots generate() makes from its level (circling its flags and power items, along its game types' routes:
-// flag to flag, hill to hill, oddball to oddball, the race; at its vehicles, looking down on them from above, flying
+// flag to flag, hill to hill, oddball to oddball; at its vehicles, looking down on them from above, flying
 // over it looking straight down, down the longest sight lines players have, gliding between where players stand,
 // rising over its open ground).
 //

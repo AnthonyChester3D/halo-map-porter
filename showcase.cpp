@@ -296,7 +296,7 @@ bool sees_out(const World &w, const Shot &s, double most = 6) {
 }
 
 
-// ---- routes: the camera through open air from one place to another (flag to flag, hill to hill, the race), round
+// ---- routes: the camera through open air from one place to another (flag to flag, hill to hill, oddball), round
 // the walls in its way. Its stops: over every floor of the box where players play, on a grid (straight down from the
 // top of the box, every surface met, each floor's air a couple of units up where the camera can be); two stops next to
 // each other join when nothing is between them and the camera stays clear of every surface on the way.
@@ -1186,7 +1186,7 @@ Showcase generate(const lshade::Preview &p, std::string *report) {
 
 
     // Along the routes a game type gives players: from one CTF flag to the other, one hill to the next, one oddball
-    // spawn to another, round the race's points in order. Through open air, round the walls in the way, a couple of
+    // spawn to another. Through open air, round the walls in the way, a couple of
     // units over the ground, looking ahead.
     std::vector<Shot> runs;
     std::vector<std::string> run_kinds;
@@ -1217,7 +1217,7 @@ Showcase generate(const lshade::Preview &p, std::string *report) {
                 if (route_length(corners) / speed >= cap) break;
             }
             if (corners.size() < 2 || route_length(corners) < 6) return false;
-            if (route_length(corners) > cap * speed) {   // (a long race: the first part of it)
+            if (route_length(corners) > cap * speed) {   // (a long one: the first part of it)
                 std::vector<V3> cut{corners[0]};
                 double want = cap * speed, sofar = 0;
                 for (size_t i = 1; i < corners.size() && sofar < want - 1e-9; i++) {
@@ -1254,9 +1254,9 @@ Showcase generate(const lshade::Preview &p, std::string *report) {
                 else if (!red) red = &m;
             }
         if (red && blue && run({ground(*red), ground(*blue)}, 7, 30, false, "red flag to blue flag")) run_kinds.push_back("flag to flag");
-        // (a hill: the middle of the flags with its number; oddball spawns and race points: by their numbers)
+        // (a hill: the middle of the flags with its number; oddball spawns by their numbers)
         std::map<int, std::pair<V3, int>> hills;
-        std::vector<std::pair<int, V3>> balls, race;
+        std::vector<std::pair<int, V3>> balls;
         for (auto &m : p.marks) {
             if (m.kind != lshade::Mark::kPlace) continue;
             std::string n = m.name;
@@ -1266,8 +1266,6 @@ Showcase generate(const lshade::Preview &p, std::string *report) {
                 hl.second++;
             } else if (n == "oddball") {
                 balls.push_back({m.index, ground(m)});
-            } else if (n == "race point") {
-                race.push_back({m.index, ground(m)});
             }
         }
         // (a hill is three flags or more round it; one or two with a number are something else)
@@ -1293,13 +1291,8 @@ Showcase generate(const lshade::Preview &p, std::string *report) {
             for (auto &b : balls) ball_at.push_back(b.second);
             if (pair_run(ball_at, "oddball to oddball")) run_kinds.push_back("oddball");
         }
-        if (race.size() >= 2) {
-            std::stable_sort(race.begin(), race.end(), [](const std::pair<int, V3> &a, const std::pair<int, V3> &b) { return a.first < b.first; });
-            std::vector<V3> pts;
-            for (auto &r : race) pts.push_back(r.second);
-            pts.push_back(race[0].second);   // (a lap)
-            if (run(pts, 11, 35, true, "the race")) run_kinds.push_back("race");
-        }
+        // (No race shot: round every race point in a lap is too much turning for a flythrough; it was jarring on
+        // every map tried.)
     }
 
     // The vehicles a game type spawns, where several stand together: along them, when they stand in a line (the

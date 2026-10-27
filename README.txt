@@ -1469,8 +1469,8 @@ Showcase flythroughs (Xbox, "Level..." window)
     100-degree arc a few units off and above, looking at it;
   - along the routes its game types give players: from one CTF flag to
     the other, between two King of the Hill hills (the two farthest apart
-    the camera can fly between), between two oddball spawns, and round
-    the race's points in order (its first 35 seconds on a long race). The
+    the camera can fly between) and between two oddball spawns (not the
+    race: a lap round its points turned too much to watch). The
     camera flies through open air a couple of units over the ground,
     round the walls in its way (a route found over every floor of the
     area players play in), at one even speed all the way (Pace below),
