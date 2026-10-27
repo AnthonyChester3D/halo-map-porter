@@ -1906,4 +1906,255 @@ Result add_portals(const fs::path &file, const Options &options) {
     return r;
 }
 
+WaterResult water_volumes(const fs::path &bsp_file, const fs::path &scenario,
+                          const std::function<bool(const std::string &)> &is_water, bool write) {
+    WaterResult res;
+    // The volumes (as the engine tests a trigger volume: PlayArea::Box).
+    struct Vol { std::string name, suffix; PlayArea::Box box; V3 lo{}, hi{}, mid{}; };
+    std::vector<Vol> vols;
+    {
+        tagfile::Tag t;
+        if (!t.load(scenario)) { res.why = "its scenario can't be read"; return res; }
+        tagfile::Block tv = t.root().block("trigger volumes");
+        for (size_t i = 0; i < tv.size(); i++) {
+            std::string name = tv[i].str("name"), low = name;
+            for (auto &ch : low) ch = (char)std::tolower((unsigned char)ch);
+            if (low.compare(0, 5, "water") != 0) continue;
+            Vol v;
+            v.name = name;
+            v.suffix = low.substr(5);
+            while (!v.suffix.empty() && (v.suffix[0] == '_' || v.suffix[0] == ' ' || v.suffix[0] == '-')) v.suffix.erase(0, 1);
+            PlayArea::Box &b = v.box;
+            for (size_t k = 0; k < 3; k++) {
+                b.forward[k] = tv[i].num("rotation vector forward", (int)k);
+                b.up[k] = tv[i].num("rotation vector up", (int)k);
+                b.corner[k] = tv[i].num("starting corner", (int)k);
+                b.extents[k] = tv[i].num("ending corner offset", (int)k);
+            }
+            if (len(b.forward) < 1e-6 || len(b.up) < 1e-6) { b.forward = {1, 0, 0}; b.up = {0, 0, 1}; }
+            b.forward = b.forward * (1 / len(b.forward));
+            b.up = b.up * (1 / len(b.up));
+            b.left = cross(b.up, b.forward);
+            v.lo = {1e30, 1e30, 1e30};
+            v.hi = {-1e30, -1e30, -1e30};
+            for (int c = 0; c < 8; c++) {
+                V3 p = b.corner + b.forward * ((c & 1) ? b.extents[0] : 0) + b.left * ((c & 2) ? b.extents[1] : 0) +
+                       b.up * ((c & 4) ? b.extents[2] : 0);
+                for (size_t k = 0; k < 3; k++) { v.lo[k] = std::min(v.lo[k], p[k]); v.hi[k] = std::max(v.hi[k], p[k]); }
+            }
+            v.mid = (v.lo + v.hi) * 0.5;
+            vols.push_back(v);
+        }
+    }
+    if (vols.empty()) return res;
+    res.any = true;
+    auto in_box = [](const PlayArea::Box &b, const V3 &p) {
+        V3 d = p - b.corner;
+        double x = dot(d, b.forward), y = dot(d, b.left), z = dot(d, b.up);
+        return x > 0 && y > 0 && z > 0 && x < b.extents[0] && y < b.extents[1] && z < b.extents[2];
+    };
+
+    tagfile::Tag t;
+    if (!t.load(bsp_file)) { res.why = "its level can't be read"; return res; }
+    tagfile::Elem r = t.root();
+    Bsp b;
+    if (!load_bsp(r, b, &res.why)) return res;
+    tagfile::Block sl = r.block("leaves"), cls = r.block("clusters");
+    const int nc = (int)cls.size();
+    if (nc == 0) { res.why = "has no clusters"; return res; }
+    std::vector<int> leaf_cluster((size_t)b.leaves, -1);
+    for (int i = 0; i < b.leaves; i++) {
+        int c = (int)sl[(size_t)i].integer("cluster");
+        leaf_cluster[(size_t)i] = c >= 0 && c < nc ? c : -1;
+    }
+    auto cluster_at = [&](const V3 &p) {
+        int l = b.leaf_at(p);
+        return l < 0 ? -1 : leaf_cluster[(size_t)l];
+    };
+
+    // The level's fog: which fog regions are water.
+    tagfile::Block fpal = r.block("fog palette"), freg = r.block("fog regions"), fpl = r.block("fog planes");
+    std::vector<char> pal_water(fpal.size(), 0);
+    for (size_t i = 0; i < fpal.size(); i++) {
+        std::string f = fpal[i].ref("fog");
+        if (!f.empty() && fs::path(f).extension().empty()) f += ".fog";   // (a group it has no extension for)
+        pal_water[i] = !f.empty() && is_water && is_water(f);
+    }
+    auto region_water = [&](long long reg) {
+        if (reg < 0 || reg >= (long long)freg.size()) return false;
+        long long p = freg[(size_t)reg].integer("fog");
+        return p >= 0 && p < (long long)fpal.size() && pal_water[(size_t)p];
+    };
+    auto cluster_water = [&](int c) {
+        long long f = cls[(size_t)c].integer("fog");
+        if (f == 0xFFFF) return false;
+        if (f & 0x8000) {
+            long long k = f & 0x7FFF;
+            return k < (long long)fpl.size() && region_water(fpl[(size_t)k].integer("front region"));
+        }
+        return region_water(f);
+    };
+    int add_region_pal = -1;   // no water region, but a water fog in the palette: a region for it is added
+    std::vector<int> water_regions;
+    for (size_t i = 0; i < freg.size(); i++)
+        if (region_water((long long)i)) water_regions.push_back((int)i);
+    if (water_regions.empty())
+        for (size_t i = 0; i < fpal.size(); i++)
+            if (pal_water[i]) { add_region_pal = (int)i; break; }
+    if (water_regions.empty() && add_region_pal < 0) {
+        res.why = "has no water fog (a fog tag with \"is water\" in its fog palette): give a lake or the river a water "
+                  "fog plane in the level first, so there's a water fog to use";
+        for (auto &v : vols) res.untouched.push_back(v.name);
+        return res;
+    }
+
+    // Each volume's open space in each cluster (a grid over the volume), then each cluster it touches as a whole (a
+    // grid over the box around its surfaces and portals, up to the level's top: open sky above a floor is in it).
+    std::vector<double> total((size_t)nc, 0);
+    struct Rest { double w = 0; V3 sum{}; double lo = 1e30, hi = -1e30; };
+    std::vector<std::map<int, Rest>> rest(vols.size());   // per volume: each touched cluster's part outside it
+    std::vector<std::vector<double>> inside(vols.size(), std::vector<double>((size_t)nc, 0));
+    std::vector<char> touched((size_t)nc, 0);
+    for (size_t vi = 0; vi < vols.size(); vi++) {
+        Vol &v = vols[vi];
+        V3 lo = v.lo, hi = v.hi;
+        for (size_t k = 0; k < 3; k++) { lo[k] = std::max(lo[k], b.lo[k]); hi[k] = std::min(hi[k], b.hi[k]); }
+        if (lo[0] >= hi[0] || lo[1] >= hi[1] || lo[2] >= hi[2]) continue;
+        V3 s = hi - lo;
+        double hv = std::max(0.05, std::cbrt(s[0] * s[1] * s[2] / 1.5e6));
+        double cell = hv * hv * hv;
+        for (double x = lo[0] + hv / 2; x < hi[0]; x += hv)
+            for (double y = lo[1] + hv / 2; y < hi[1]; y += hv)
+                for (double z = lo[2] + hv / 2; z < hi[2]; z += hv) {
+                    V3 p{x, y, z};
+                    if (!in_box(v.box, p)) continue;
+                    int c = cluster_at(p);
+                    if (c >= 0) inside[vi][(size_t)c] += cell;
+                }
+        for (int c = 0; c < nc; c++)
+            if (inside[vi][(size_t)c] > 0) { rest[vi][c]; touched[(size_t)c] = 1; }
+    }
+    tagfile::Block cps = r.block("cluster portals");
+    for (int c = 0; c < nc; c++) {
+        if (!touched[(size_t)c]) continue;
+        V3 lo{1e30, 1e30, 1e30}, hi{-1e30, -1e30, -1e30};
+        auto grow = [&](const V3 &p) { for (size_t k = 0; k < 3; k++) { lo[k] = std::min(lo[k], p[k]); hi[k] = std::max(hi[k], p[k]); } };
+        tagfile::Block subs = cls[(size_t)c].block("subclusters");
+        for (size_t i = 0; i < subs.size(); i++) {
+            grow({subs[i].num("world bounds x", 0), subs[i].num("world bounds y", 0), subs[i].num("world bounds z", 0)});
+            grow({subs[i].num("world bounds x", 1), subs[i].num("world bounds y", 1), subs[i].num("world bounds z", 1)});
+        }
+        for (size_t i = 0; i < cps.size(); i++) {
+            if (cps[i].integer("front cluster") != c && cps[i].integer("back cluster") != c) continue;
+            tagfile::Block vs = cps[i].block("vertices");
+            for (size_t k = 0; k < vs.size(); k++) grow({vs[k].num("point", 0), vs[k].num("point", 1), vs[k].num("point", 2)});
+        }
+        for (size_t vi = 0; vi < vols.size(); vi++)
+            if (inside[vi][(size_t)c] > 0) { grow(vols[vi].lo); grow(vols[vi].hi); }
+        for (size_t k = 0; k < 3; k++) { lo[k] = std::max(lo[k] - 1, b.lo[k]); hi[k] = std::min(hi[k] + 1, b.hi[k]); }
+        hi[2] = b.hi[2];
+        if (lo[0] >= hi[0] || lo[1] >= hi[1] || lo[2] >= hi[2]) continue;
+        V3 s = hi - lo;
+        double h = std::max(0.05, std::cbrt(s[0] * s[1] * s[2] / 3e6));
+        double cell = h * h * h;
+        for (double x = lo[0] + h / 2; x < hi[0]; x += h)
+            for (double y = lo[1] + h / 2; y < hi[1]; y += h)
+                for (double z = lo[2] + h / 2; z < hi[2]; z += h) {
+                    V3 p{x, y, z};
+                    if (cluster_at(p) != c) continue;
+                    total[(size_t)c] += cell;
+                    for (size_t vi = 0; vi < vols.size(); vi++) {
+                        auto it = rest[vi].find(c);
+                        if (it == rest[vi].end() || in_box(vols[vi].box, p)) continue;
+                        Rest &q = it->second;
+                        q.w += 1;
+                        q.sum = q.sum + p;
+                        q.lo = std::min(q.lo, z);
+                        q.hi = std::max(q.hi, z);
+                    }
+                }
+    }
+
+    // Which fog region each volume uses: a water fog whose palette name has the volume's name in it ("water_lake":
+    // "lake"), else the one whose fog plane is nearest, else the first.
+    auto pick_region = [&](const Vol &v) {
+        if (water_regions.empty()) return -1;
+        if (!v.suffix.empty())
+            for (int reg : water_regions) {
+                std::string n = fpal[(size_t)freg[(size_t)reg].integer("fog")].str("name");
+                for (auto &ch : n) ch = (char)std::tolower((unsigned char)ch);
+                if (n.find(v.suffix) != std::string::npos) return reg;
+            }
+        int best = water_regions[0];
+        double bd = 1e30;
+        for (size_t i = 0; i < fpl.size(); i++) {
+            int reg = (int)fpl[i].integer("front region");
+            if (std::find(water_regions.begin(), water_regions.end(), reg) == water_regions.end()) continue;
+            tagfile::Block vs = fpl[i].block("vertices");
+            for (size_t k = 0; k < vs.size(); k++) {
+                V3 p{vs[k].num("point", 0), vs[k].num("point", 1), vs[k].num("point", 2)};
+                double d = len(p - v.mid);
+                if (d < bd) { bd = d; best = reg; }
+            }
+        }
+        return best;
+    };
+
+    std::vector<int> set_to((size_t)nc, -1);
+    int new_region = add_region_pal >= 0 ? (int)freg.size() : -1;
+    for (size_t vi = 0; vi < vols.size(); vi++) {
+        WaterVolume wv;
+        wv.name = vols[vi].name;
+        wv.region = new_region >= 0 ? new_region : pick_region(vols[vi]);
+        int pal = new_region >= 0 ? add_region_pal : (int)freg[(size_t)wv.region].integer("fog");
+        wv.fog = fpal[(size_t)pal].ref("fog");
+        if (!wv.fog.empty() && fs::path(wv.fog).extension().empty()) wv.fog += ".fog";
+        for (int c = 0; c < nc; c++) {
+            double in = inside[vi][(size_t)c];
+            if (in <= 0) continue;
+            WaterCluster w;
+            w.cluster = c;
+            w.inside = total[(size_t)c] > 0 ? std::min(1.0, in / total[(size_t)c]) : 1.0;
+            w.was_water = cluster_water(c);
+            const Rest &q = rest[vi][c];
+            if (q.w > 0) {
+                w.rest = q.sum * (1 / q.w);
+                w.rest_lo = q.lo;
+                w.rest_hi = q.hi;
+            }
+            // (a sliver in the volume, under a grid cell of the level: the volume's edge just reaching it)
+            if (in < std::min(1.0, 0.02 * total[(size_t)c]) && w.inside < 0.02) continue;
+            if (w.inside >= 0.5) {
+                wv.water.push_back(w);
+                set_to[(size_t)c] = wv.region;
+            }
+            if (w.inside < 0.9 && w.inside >= 0.05) wv.partly.push_back(w);
+        }
+        if (wv.water.empty() && wv.partly.empty()) res.untouched.push_back(wv.name);
+        else res.volumes.push_back(wv);
+    }
+    for (int c = 0; c < nc; c++)
+        if (set_to[(size_t)c] >= 0 && cls[(size_t)c].integer("fog") != set_to[(size_t)c]) res.needs = true;
+    if (!write || !res.needs) return res;
+    tagfile::EditTag et;
+    if (!et.load(bsp_file)) { res.why = "its level can't be edited"; return res; }
+    tagfile::TagNode &root = et.root();
+    std::vector<tagfile::TagNode> *clusters = tagfile::block(root, "clusters");
+    if (!clusters || (int)clusters->size() != nc) { res.why = "its level can't be edited"; return res; }
+    if (new_region >= 0) {
+        std::vector<tagfile::TagNode> *regs = tagfile::block(root, "fog regions");
+        if (!regs) { res.why = "its level can't be edited"; return res; }
+        tagfile::TagNode n = tagfile::new_node(tagfile::block_struct(root, "fog regions"));
+        tagfile::set_num(n, "fog", add_region_pal);
+        tagfile::set_num(n, "weather palette", 0xFFFF);
+        regs->push_back(n);
+        res.region_added = true;
+    }
+    for (int c = 0; c < nc; c++)
+        if (set_to[(size_t)c] >= 0) tagfile::set_num((*clusters)[(size_t)c], "fog", set_to[(size_t)c]);
+    if (!et.save(bsp_file)) { res.why = "its level can't be saved"; return res; }
+    res.changed = true;
+    return res;
+}
+
 }   // namespace portals

@@ -183,6 +183,36 @@ Good to know:
 - Prefer MCC's official tools for your MCC build? Untick MCC and use this
   tab only for the Custom Edition build.
 
+Water at more than one height (water volumes)
+  A level's water is its fog planes: each is one flat surface, and what's
+  below it is underwater. Water at another height (a river running between
+  a high lake and a low one, a waterfall's pool) can't be one of them. The
+  engine also lets a whole cluster be underwater with no surface at all,
+  and that's what water volumes do. It works the same in MCC, Custom
+  Edition and on the Xbox, with no change to the game.
+  1. In Sapien, place a trigger volume around each part that's underwater
+     and name it starting with "water" (water_river, water_pool).
+  2. Build. The clusters mostly inside each volume are made underwater:
+     the camera's water fog and muffled sound, splashes, the effects that
+     only work underwater (or only above it), and vehicles and objects
+     floating or sinking as in deep water, as in the level's other water.
+     The log's [water] line says which clusters.
+  3. Tool's BSP compile resets the clusters, so this is done on every
+     build (your tags aren't changed).
+  A cluster is underwater all through or not at all, so where the volume's
+  edge cuts through a cluster (the river's surface, where it meets a lake)
+  the log says how much of that cluster is inside, and where the rest of it
+  is. Put a portal there in your level (a +portal surface along the water's
+  surface and at the river's ends), or move the volume's edge onto one, so
+  the water stops where it should. Without one, a cluster mostly inside is
+  underwater up to its top, and one mostly outside stays dry.
+  The water uses a water fog the level already has (one of its fog
+  planes' fogs): the one whose fog palette name has the volume's name in
+  it ("water_lake": a fog named "lake water"), else the nearest. A level
+  with no water fog at all gets none; the log says so. Underwater clusters
+  have no surface to draw, so seen from above, the river looks like it
+  does now (its water shader); the fog is what you see once you're in.
+
 
 XBOX OUTPUT: WHAT THE APP DOES FOR YOU
 --------------------------------------
@@ -2188,6 +2218,8 @@ The log lists every automatic change:
   [lod]   Lower-detail versions were made for models, or models got
           switch distances for theirs (see "Levels of detail" above).
   [portals] A level made without portals got them (see "Portals" above).
+  [water] Clusters inside a water volume were made underwater (see "Water
+          at more than one height" above).
   [reflections] Level reflections were dropped, as chosen in the Level
           shaders window (see "Level reflections" above).
   [fog]   The level's fog was made fully opaque (see "Fog" above).

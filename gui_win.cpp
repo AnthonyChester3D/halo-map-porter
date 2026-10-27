@@ -46,7 +46,7 @@ enum {
     ID_OUT_BROWSE, ID_SHARE, ID_CONVERT, ID_CONV_HINT,
     // build page
     ID_SCEN_LBL, ID_SCEN, ID_SCEN_BROWSE, ID_B_MCC, ID_B_MCC_OUT, ID_B_MCC_BROWSE, ID_B_CE, ID_B_CE_OUT,
-    ID_B_CE_BROWSE, ID_B_XBOX, ID_B_XBOX_NOTE, ID_BUILD, ID_BUILD_HINT, ID_B_SHARE,
+    ID_B_CE_BROWSE, ID_B_XBOX, ID_B_XBOX_NOTE, ID_BUILD, ID_BUILD_HINT, ID_B_WATER_HINT, ID_B_SHARE,
     // settings page
     ID_S_CE_LBL, ID_S_CE, ID_S_CE_BROWSE, ID_S_MCC_LBL, ID_S_MCC, ID_S_MCC_BROWSE, ID_S_EK_LBL, ID_S_EK,
     ID_S_EK_BROWSE, ID_S_INV_LBL, ID_S_INV, ID_S_INV_BROWSE, ID_S_INV_DL, ID_S_INV_STATUS, ID_S_HINT,
@@ -2298,6 +2298,11 @@ static void create_controls() {
     button(1, L"Build", 140, y, 140, ID_BUILD, true);
     add(1, L"STATIC", L"Re-run after every change. Your tags folder is never modified.",
         0, 292, y + 5, 440, 20, ID_BUILD_HINT);
+    y += 40;
+    add(1, L"STATIC", L"Water at more than one height (a river between two lakes): in Sapien, put a trigger volume named "
+        L"water_... (water_river) around each part that's underwater. Each build makes the clusters inside it underwater; "
+        L"the log says which, and where a portal is needed for the water to stop at the volume's edge.",
+        0, 140, y, 590, 52, ID_B_WATER_HINT);
 
     // Xbox page
     y = 44;

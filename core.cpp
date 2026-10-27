@@ -1189,6 +1189,7 @@ std::map<std::string, bool> level_bump_maps(Job &job, const std::vector<std::str
 std::vector<std::string> tag_dependencies(Job &job, const std::string &tag, bool recursive);
 void xbox_lods(Job &job, const std::vector<std::string> &deps);
 void xbox_portals(Job &job);
+void water_volumes(Job &job);
 void xbox_lights(Job &job, const std::vector<std::string> &deps);
 void xbox_materials(Job &job, const std::vector<std::string> &deps);
 void xbox_reflections(Job &job);
@@ -1718,6 +1719,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
         if (job.target != Game::MCC) convert_bc7_textures(job);
         if (job.target == Game::Xbox) xbox_content_passes(job);
         else if (job.from == Game::Xbox) reorder_multipurpose_maps(job, tag_dependencies(job, job.scenario + ".scenario", true));
+        water_volumes(job);
         place_kept_level_tags(job);
     }
     std::vector<std::string> performance;   // the report's "Performance" section (Xbox)
@@ -6415,6 +6417,94 @@ void xbox_portals(Job &job) {
             job.log("  [portals] the level" + name + "'s own portals kept: it " + pr.why);
         }
     }
+}
+
+// Water without a fog plane (portals::water_volumes): the clusters inside the scenario's "water..." trigger volumes
+// are made underwater, so water at more than one height (a river between two lakes) works. Every build: compiling
+// the level again in Tool resets its clusters' fog.
+void water_volumes(Job &job) {
+    if (job.analysis || job.cfg.level_shaders_only) return;
+    std::string scen = job.scenario + ".scenario";
+    fs::path sdir = job.owner(scen);
+    tagfile::Tag stag;
+    if (sdir.empty() || !stag.load(sdir / from_u8(scen))) return;
+    auto is_water = [&job](const std::string &fog) {
+        fs::path own = job.owner(fog);
+        if (own.empty()) return false;
+        std::ifstream f(own / from_u8(fog), std::ios::binary);
+        unsigned char h[68];
+        if (!f.read((char *)h, sizeof h)) return false;
+        if (memcmp(h + 36, "fog ", 4) != 0) return false;
+        return (h[67] & 1) != 0;   // (the flags, big endian: "is water")
+    };
+    auto fmt = [](double v) {
+        char b[32];
+        snprintf(b, sizeof b, "%.1f", v);
+        return std::string(b);
+    };
+    auto where = [&](const portals::WaterCluster &w) {
+        return "around (" + fmt(w.rest[0]) + ", " + fmt(w.rest[1]) + ", " + fmt(w.rest[2]) + "), heights " + fmt(w.rest_lo) +
+               " to " + fmt(w.rest_hi);
+    };
+    tagfile::Block bsps = stag.root().block("structure bsps");
+    std::set<std::string> done, touched, all;
+    bool any = false;
+    for (size_t i = 0; i < bsps.size(); i++) {
+        std::string b = bsps[i].ref("structure bsp");
+        if (b.empty() || !done.insert(b).second) continue;
+        fs::path own = job.owner(b);
+        if (own.empty()) continue;
+        std::string name = bsps.size() > 1 ? " (" + fs::path(from_u8(b)).stem().u8string() + ")" : "";
+        portals::WaterResult wr = portals::water_volumes(own / from_u8(b), sdir / from_u8(scen), is_water, false);
+        if (!wr.any) return;   // (no water volumes)
+        if (!any) job.log("Making the water volumes' clusters underwater...");
+        any = true;
+        for (auto &v : wr.untouched) all.insert(v);
+        if (!wr.why.empty()) {
+            job.note("[water] the level" + name + "'s water volumes weren't used: it " + wr.why);
+            continue;
+        }
+        if (wr.needs) {
+            fs::path ed = editable_owner(job, b, true);
+            if (ed.empty()) {
+                job.note("[water] the level" + name + " can't be changed here (a stock level), so its water volumes weren't used");
+                continue;
+            }
+            wr = portals::water_volumes(ed / from_u8(b), sdir / from_u8(scen), is_water, true);
+            if (!wr.why.empty()) {
+                job.note("[water] the level" + name + "'s water volumes weren't used: it " + wr.why);
+                continue;
+            }
+        }
+        for (auto &v : wr.volumes) {
+            touched.insert(v.name);
+            std::string l = "[water] " + v.name + name + ": ";
+            if (v.water.empty()) {
+                l += "no cluster is mostly inside it, so none is underwater.";
+            } else {
+                l += v.water.size() == 1 ? "cluster " : "clusters ";
+                for (size_t k = 0; k < v.water.size(); k++)
+                    l += (k ? (k + 1 == v.water.size() ? " and " : ", ") : "") + std::to_string(v.water[k].cluster);
+                l += std::string(v.water.size() == 1 ? " is" : " are") + " underwater (the fog " + v.fog + ", no fog plane)" +
+                     (wr.region_added ? "; a fog region was added for it" : "") + ".";
+            }
+            for (auto &w : v.partly) {
+                int pct = (int)std::lround(w.inside * 100);
+                if (w.inside >= 0.5)
+                    l += " Cluster " + std::to_string(w.cluster) + " is only " + std::to_string(pct) + "% inside, so its other " +
+                         std::to_string(100 - pct) + "% (" + where(w) + ") is underwater too.";
+                else
+                    l += " Cluster " + std::to_string(w.cluster) + " is " + std::to_string(pct) +
+                         "% inside, so it stays as it was" + (w.was_water ? " (water already)" : " (dry)") + ": the water stops at it.";
+            }
+            if (!v.partly.empty())
+                l += " A cluster is all water or none: put a portal where the volume's edge crosses one (the water's surface, "
+                     "where the river ends), or move the volume's edge onto a portal.";
+            job.note(l);
+        }
+    }
+    for (auto &v : all)
+        if (!touched.count(v)) job.note("[water] " + v + " has no open space of the level inside it (it's inside walls or outside the level), so it does nothing");
 }
 
 // The kind of object each model is drawn for in the world (v vehicle, b biped, s scenery and devices, w weapons and

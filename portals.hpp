@@ -153,4 +153,37 @@ struct LevelChunks {
 // the culling); the sound data is each pair's distance through the portals.
 Result add_portals(const std::filesystem::path &bsp, const Options &options = Options());
 
+// Water without a fog plane: the clusters inside the scenario's trigger volumes named "water..." ("water_river")
+// are made underwater as a whole (each cluster's fog: a water fog region, no plane), as the engine
+// (scenario_location_underwater) tests it: so a river between two lakes at different heights can be water, which a
+// level's fog planes (one height each) can't be. A cluster is water when most of its open space is in a volume; the
+// engine has no finer say than a cluster, so a cluster only partly in one is reported (put a portal where the
+// volume's edge crosses it: the water's surface, its ends).
+struct WaterCluster {
+    int cluster = -1;
+    double inside = 0;          // its share of open space in the volume (0..1)
+    V3 rest{};                  // the middle of its part on the other side of the volume's edge
+    double rest_lo = 0, rest_hi = 0;   // and that part's height (z) range
+    bool was_water = false;     // it was underwater already (a fog plane's water or a water region)
+};
+struct WaterVolume {
+    std::string name;
+    std::vector<WaterCluster> water;     // made water (inside >= 0.5)
+    std::vector<WaterCluster> partly;    // touched but not water, or water with much of it outside
+    int region = -1;                     // the fog region used
+    std::string fog;                     // its fog tag
+};
+struct WaterResult {
+    bool any = false;          // the scenario has water volumes
+    bool needs = false;        // a cluster's fog is to change
+    bool changed = false;      // the BSP was saved
+    std::string why;           // couldn't: why
+    std::vector<WaterVolume> volumes;   // the ones touching this BSP's open space
+    std::vector<std::string> untouched; // ones that don't
+    bool region_added = false;
+};
+// `is_water`: whether a fog tag ("path/name.fog") is water (its "is water" flag). `write` false: only report.
+WaterResult water_volumes(const std::filesystem::path &bsp, const std::filesystem::path &scenario,
+                          const std::function<bool(const std::string &fog)> &is_water, bool write = true);
+
 }   // namespace portals
