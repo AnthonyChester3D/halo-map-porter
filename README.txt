@@ -867,19 +867,19 @@ Levels of detail (LODs)
   Characters get them too: as when trimming (see Bones above), every
   vertex keeps its bones, so they bend as before at every distance.
   Cut-out cards (leaves, boughs, grates, fences: parts whose shader cuts
-  holes with its texture's alpha) stay as made in every version: a
-  card's corners can't move without cutting off what's drawn on it, so a
-  tree's leaves would thin out or lose their tops in the distance. The
-  rest of the model (a trunk) is simplified as usual, and the model only
-  gets lower-detail versions when its lowest is still a tenth lighter
-  than as made in all.
+  holes with its texture's alpha) are simplified like the rest, so a
+  tree's leaf clusters come down too: check them in the LODs window's
+  preview and change its numbers if they thin out too much. (Only
+  trimming a model's most detailed version keeps cut-out triangles as
+  made, and only where they reach the see-through part of the texture:
+  the solid panels round a see-through grille are trimmed as usual.)
   Left alone: first-person models, models whose shape needs most of their
-  triangles, models that are mostly cut-out cards, the models listed in
+  triangles, the models listed in
   skip.txt (below), and stock models unless "Also make and use LODs for
-  Bungie's models" is ticked. Deathtrap: tree_big 2,479 > 2,200 > 1,953
-  (its trunk; 8 on the map), tree_leafycover_mid left as made. Precipice
-  with Bungie's: tree_pine 522 > 441 (17 on the map) and tree_pine_tall
-  left as made, with Bungie's rocket launcher and monitor.
+  Bungie's models" is ticked. Deathtrap: phone booth 1,142 > 570 > 399
+  (3 on the map). Precipice with Bungie's: tree_pine 522 > 448 > 314 (17
+  on the map), tree_pine_tall 541 > 467 > 308 (58), with Bungie's rocket
+  launcher and monitor.
   A model's own choice in the LODs window comes first: made whatever the
   Xbox tab says and however few triangles it has, aiming at the medium
   and low triangles you give (allowed to move the shape up to 5% and 10%
@@ -1473,8 +1473,9 @@ Showcase flythroughs (Xbox, "Level..." window)
     the race's points in order (its first 35 seconds on a long race). The
     camera flies through open air a couple of units over the ground,
     round the walls in its way (a route found over every floor of the
-    area players play in), looking ahead along the way as far as it's in
-    view, and over the last few units at where it's going. Routes that
+    area players play in), at one even speed all the way (Pace below),
+    looking ahead along the way as far as it's in view, and over the
+    last few units at where it's going. Routes that
     would only stare at walls are left out, as are places only a
     teleporter reaches (Precipice's flags);
   - the vehicles a game type spawns, where two or more stand together:
@@ -1515,17 +1516,35 @@ Showcase flythroughs (Xbox, "Level..." window)
   ones around the map's placed objects, which the camera keeps clear of. "Play them all" and "Play
   this shot" fly the picture through them (click the picture or Stop to
   stop). To make your own: fly to where a shot starts, "New shot here",
-  fly on and "Add key here" at each next spot (keys 3 seconds apart;
-  Seconds makes the shot slower or faster, keeping its path); tick "Keep
+  fly on and "Add key here" at each next spot (the camera goes along
+  them at an even speed: Seconds makes the shot slower or faster,
+  keeping its path); tick "Keep
   looking at what's in the middle of the picture" while aiming at
   something to keep it in view. Name: the shot's name (31 characters).
   - Keys: the arrows pick one of the selected shot's keys (orange in the
     picture; or double-click a yellow key in the picture) and take the
     picture there; "Go to it" goes back to it. Fly somewhere and "Move it
-    here" to move it (it keeps its time in the shot), "Add key here" to
-    put a new one after it (halfway to the next key, or 3 seconds after
-    the last), "Remove it" to take it out (without its first key the shot
-    starts at the next one).
+    here" to move it, "Add key here" to put a new one after it (a new
+    last one makes the shot 3 seconds longer), "Remove it" to take it
+    out. The shot is timed again along its keys each time.
+  - Pace (beside Seconds): how a shot spends its seconds. "Even speed"
+    (new shots and the routes): the camera goes along its keys at one
+    speed from start to end, the Seconds setting how fast, however near
+    or far apart its keys are (a key isn't a stop: add keys to shape the
+    path, not to change the pace). Turning on the spot (keys in one
+    place, facing different ways) counts as a unit of travel for each 20
+    degrees, so it takes its share of the time too.
+    "Slow in" starts it from still, speeding up over up to 2 seconds
+    (45% of a short shot), for a held start; "Slow out" brings it to
+    rest the same way at the end; "Slow in and out" both (up to 2
+    seconds each, 35% of a short shot). "Times as keyed": each key's own
+    time in the shot, as the file has them (the made orbits, glides and
+    the rest, which space theirs evenly in time); Seconds stretches
+    them. The key lines written for a paced shot are made from its path:
+    one every half second, closer when it's quick (about a unit apart),
+    and one where it passes each of your keys. Halo 1 Unlimited plays
+    them as it plays any keys; the path and pace go in comments (below),
+    so the Level window can change them again.
   - Orbit: "New orbit here" makes a shot circling what's in the middle of
     the picture (a surface or an object), looking at it, passing your
     side of it halfway through (it starts half the turn before, and the
@@ -1546,7 +1565,10 @@ Showcase flythroughs (Xbox, "Level..." window)
   have been converted into it once), as a conversion would, and keeps
   them for the next conversion too (even if you then Cancel the window). An orbit is
   written as its keys, with a "# orbit" comment after its look line (the
-  Level window reads it to change it again; Halo 1 Unlimited skips it).
+  Level window reads it to change it again; Halo 1 Unlimited skips it),
+  and a paced shot with "# pace even" (in, out, both) and its own keys as
+  "# via x y z yaw pitch [field of view]" comments before its key lines
+  (take the "# pace" line out to time its keys by hand).
   The file (what Halo 1 Unlimited reads; plain text, so it can be edited
   by hand too):
     # a comment (anything after # on a line)

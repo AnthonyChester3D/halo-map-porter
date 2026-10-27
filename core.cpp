@@ -6499,7 +6499,9 @@ static lod::ShaderLook shader_look(Job &job, const std::string &tag) {
     if (!t.load(own / from_u8(path))) return l;
     l.known = true;
     tagfile::Elem r = t.root();
-    auto see_through_map = [&](std::string bm) {
+    // (and where: l.mask, a grid over the texture, up to 64 cells a side, a cell set when any pixel in it is clear;
+    // `us`, `vs`: how many times the texture repeats across the model)
+    auto see_through_map = [&](std::string bm, double us = 1, double vs = 1) {
         if (bm.empty()) return false;
         if (fs::path(from_u8(bm)).extension() != ".bitmap") bm += ".bitmap";
         fs::path bo = job.owner(bm);
@@ -6513,16 +6515,28 @@ static lod::ShaderLook shader_look(Job &job, const std::string &tag) {
         size_t off = (size_t)bd[0].integer("pixel data offset"), n = mip_bytes(w, h, fmt);
         std::vector<unsigned char> rgba;
         if (!n || off + n > pix.size() || !decode_level(pix.substr(off, n), w, h, fmt, rgba)) return true;
-        return see_through(rgba);
+        if (!see_through(rgba)) return false;
+        auto m = std::make_shared<lod::ClearMask>();
+        m->w = std::min(64, std::max(1, w));
+        m->h = std::min(64, std::max(1, h));
+        m->u_scale = us == 0 ? 1 : us;
+        m->v_scale = vs == 0 ? 1 : vs;
+        m->clear.assign((size_t)m->w * m->h, 0);
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+                if (rgba[((size_t)y * w + x) * 4 + 3] < 128) m->clear[(size_t)(y * m->h / h) * m->w + x * m->w / w] = 1;
+        l.mask = m;
+        return true;
     };
     if (ext == ".shader_model") {
         long long f = (long long)r.num("shader model flags");
         l.two_sided = (f & 2) != 0;
         if (f & 8) l.kind = lod::ShaderLook::kBlended;   // (an alpha-blended decal)
-        else if (!(f & 4) && see_through_map(r.ref("base map"))) l.kind = lod::ShaderLook::kCutOut;
+        else if (!(f & 4) && see_through_map(r.ref("base map"), r.num("map u scale"), r.num("map v scale"))) l.kind = lod::ShaderLook::kCutOut;
     } else if (ext == ".shader_environment") {
         long long f = (long long)r.num("shader environment flags");
         if ((f & 1) && !(f & 2) && see_through_map(r.ref("bump map"))) l.kind = lod::ShaderLook::kCutOut;
+        l.mask = nullptr;   // (its bump map's own scale: the whole part counts)
     } else {
         l.two_sided = true;
         l.kind = lod::ShaderLook::kBlended;
@@ -6533,7 +6547,8 @@ static lod::ShaderLook shader_look(Job &job, const std::string &tag) {
         if (flags && ((long long)r.num(flags) & 1)) {   // (alpha tested: cut out, not blended)
             tagfile::Block maps = r.block(ext == ".shader_transparent_chicago_extended" ? "maps 4 stage" : "maps");
             if (!maps.size() && ext == ".shader_transparent_chicago_extended") maps = r.block("maps 2 stage");
-            if (maps.size() && see_through_map(maps[0].ref("map"))) l.kind = lod::ShaderLook::kCutOut;
+            if (maps.size() && see_through_map(maps[0].ref("map"), maps[0].num("map u scale"), maps[0].num("map v scale")))
+                l.kind = lod::ShaderLook::kCutOut;
         }
     }
     return l;

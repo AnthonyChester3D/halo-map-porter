@@ -31,7 +31,7 @@ enum {
     IDC_SHOWCASE, IDC_SC_LIST, IDC_SC_PLAY, IDC_SC_PLAYSHOT, IDC_SC_STOP, IDC_SC_NEW, IDC_SC_ADD, IDC_SC_UNDO, IDC_SC_SECS_LBL,
     IDC_SC_SECS, IDC_SC_LOOK, IDC_SC_DELETE, IDC_SC_UP, IDC_SC_DOWN, IDC_SC_REMAKE, IDC_SC_NAME_LBL, IDC_SC_NAME,
     IDC_SC_KEYS_LBL, IDC_SC_KPREV, IDC_SC_KEY, IDC_SC_KNEXT, IDC_SC_KGO, IDC_SC_KMOVE, IDC_SC_ORBIT_LBL, IDC_SC_ORAD_LBL,
-    IDC_SC_ORAD, IDC_SC_OHGT_LBL, IDC_SC_OHGT, IDC_SC_OAR_LBL, IDC_SC_OAR, IDC_SC_ORBIT, IDC_SC_SAVE, IDC_SC_HINT,
+    IDC_SC_ORAD, IDC_SC_OHGT_LBL, IDC_SC_OHGT, IDC_SC_OAR_LBL, IDC_SC_OAR, IDC_SC_ORBIT, IDC_SC_SAVE, IDC_SC_PACE, IDC_SC_HINT,
     IDC_FOG_START, IDC_FOG_TO, IDC_OBJECTS,
 };
 #define WM_LS_LOG (WM_APP + 60)
@@ -222,8 +222,8 @@ void render(bool fast) {
             if (!St->playing && St->sc_sel >= 0 && (size_t)St->sc_sel < St->sc.shots.size()) {
                 const showcase::Shot &shot = St->sc.shots[(size_t)St->sc_sel];
                 for (auto &q : showcase::path(shot, 0.1)) f.path.push_back({(float)q[0], (float)q[1], (float)q[2]});
-                for (auto &k : shot.keys) f.keys.push_back({(float)k.p[0], (float)k.p[1], (float)k.p[2]});
-                f.key = St->sc_key >= 0 && (size_t)St->sc_key < shot.keys.size() ? St->sc_key : -1;
+                for (auto &k : showcase::path_keys(shot)) f.keys.push_back({(float)k.p[0], (float)k.p[1], (float)k.p[2]});
+                f.key = St->sc_key >= 0 && (size_t)St->sc_key < showcase::path_keys(shot).size() ? St->sc_key : -1;
                 f.look = shot.look;
                 f.look_at = {(float)shot.at[0], (float)shot.at[1], (float)shot.at[2]};
             }
@@ -313,7 +313,7 @@ void sc_fill() {
         it.iItem = (int)i;
         it.pszText = (LPWSTR)name.c_str();
         ListView_InsertItem(St->sc_list, &it);
-        std::wstring cells[3] = {secs(shot.seconds), std::to_wstring(shot.keys.size()),
+        std::wstring cells[3] = {secs(shot.seconds), std::to_wstring(showcase::path_keys(shot).size()),
                                  shot.orbit.on ? L"circling it" : shot.look ? L"a point" : L""};
         for (int c = 0; c < 3; c++) ListView_SetItemText(St->sc_list, (int)i, c + 1, (LPWSTR)cells[c].c_str());
     }
@@ -334,16 +334,17 @@ std::wstring num_text(double v) {
 // The selected key: which of the shot's it is, and when.
 void sc_key_show() {
     showcase::Shot *shot = sc_shot();
-    bool have = shot && !shot->keys.empty();
-    if (have) St->sc_key = std::clamp(St->sc_key, 0, (int)shot->keys.size() - 1);
-    std::wstring t = have ? L"Key " + std::to_wstring(St->sc_key + 1) + L" of " + std::to_wstring(shot->keys.size()) + L", at " +
-                                secs(shot->keys[(size_t)St->sc_key].t) + L" s"
+    const std::vector<showcase::Key> *keys = shot ? &showcase::path_keys(*shot) : nullptr;
+    bool have = keys && !keys->empty();
+    if (have) St->sc_key = std::clamp(St->sc_key, 0, (int)keys->size() - 1);
+    std::wstring t = have ? L"Key " + std::to_wstring(St->sc_key + 1) + L" of " + std::to_wstring(keys->size()) + L", at " +
+                                secs((*keys)[(size_t)St->sc_key].t) + L" s"
                           : L"";
     SetWindowTextW(item(IDC_SC_KEY), t.c_str());
     EnableWindow(item(IDC_SC_KPREV), have && St->sc_key > 0);
-    EnableWindow(item(IDC_SC_KNEXT), have && St->sc_key + 1 < (int)shot->keys.size());
+    EnableWindow(item(IDC_SC_KNEXT), have && St->sc_key + 1 < (int)keys->size());
     for (int id : {IDC_SC_KGO, IDC_SC_KMOVE, IDC_SC_ADD}) EnableWindow(item(id), have);
-    EnableWindow(item(IDC_SC_UNDO), have && shot->keys.size() > 1);
+    EnableWindow(item(IDC_SC_UNDO), have && keys->size() > 1);
 }
 // The orbit boxes: the selected shot's when it's an orbit, else the ones "New orbit here" uses.
 void sc_orbit_show() {
@@ -377,8 +378,14 @@ void sc_select(int row, bool move_camera) {
     SetWindowTextW(item(IDC_SC_SECS), have ? secs(shot->seconds).c_str() : L"");
     SetWindowTextW(item(IDC_SC_NAME), have ? W(shot->label).c_str() : L"");
     CheckDlgButton(St->wnd, IDC_SC_LOOK, have && shot->look ? BST_CHECKED : BST_UNCHECKED);
+    {
+        int pace = !have ? -1 : shot->pace == showcase::Pace::even ? 0 : shot->pace == showcase::Pace::in ? 1
+                              : shot->pace == showcase::Pace::out ? 2 : shot->pace == showcase::Pace::both ? 3 : 4;
+        SendMessageW(item(IDC_SC_PACE), CB_SETCURSEL, (WPARAM)pace, 0);
+    }
     St->sc_filling = false;
-    for (int id : {IDC_SC_PLAYSHOT, IDC_SC_SECS, IDC_SC_NAME, IDC_SC_LOOK, IDC_SC_DELETE, IDC_SC_UP, IDC_SC_DOWN}) EnableWindow(item(id), have);
+    for (int id : {IDC_SC_PLAYSHOT, IDC_SC_SECS, IDC_SC_NAME, IDC_SC_LOOK, IDC_SC_DELETE, IDC_SC_UP, IDC_SC_DOWN, IDC_SC_PACE})
+        EnableWindow(item(id), have);
     EnableWindow(item(IDC_SC_PLAY), !St->sc.shots.empty());
     sc_key_show();
     sc_orbit_show();
@@ -900,8 +907,9 @@ bool pick_key(int x, int y, int w, int h) {
     double up[3] = {right[1] * fwd[2] - right[2] * fwd[1], right[2] * fwd[0] - right[0] * fwd[2], right[0] * fwd[1] - right[1] * fwd[0]};
     int best = -1;
     double best_d = 12.0 * St->dpi / 96;
-    for (size_t k = 0; k < shot->keys.size(); k++) {
-        double d[3] = {shot->keys[k].p[0] - c.eye[0], shot->keys[k].p[1] - c.eye[1], shot->keys[k].p[2] - c.eye[2]};
+    const auto &pk = showcase::path_keys(*shot);
+    for (size_t k = 0; k < pk.size(); k++) {
+        double d[3] = {pk[k].p[0] - c.eye[0], pk[k].p[1] - c.eye[1], pk[k].p[2] - c.eye[2]};
         double z = d[0] * fwd[0] + d[1] * fwd[1] + d[2] * fwd[2];
         if (z < 0.05) continue;
         double sx = ((d[0] * right[0] + d[1] * right[1]) / z / tx * 0.5 + 0.5) * w;
@@ -1116,6 +1124,9 @@ void create_controls() {
     add(L"STATIC", L"Seconds:", SS_NOTIFY, 316, 315, 56, 20, IDC_SC_SECS_LBL);
     add(L"EDIT", L"", ES_RIGHT | ES_AUTOHSCROLL | WS_TABSTOP, 374, 312, 58, 22, IDC_SC_SECS, WS_EX_CLIENTEDGE);
     SendMessageW(item(IDC_SC_SECS), EM_SETLIMITTEXT, 6, 0);
+    add(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 440, 312, 120, 200, IDC_SC_PACE);
+    for (const wchar_t *p : {L"Even speed", L"Slow in", L"Slow out", L"Slow in and out", L"Times as keyed"})
+        SendMessageW(item(IDC_SC_PACE), CB_ADDSTRING, 0, (LPARAM)p);
     add(L"BUTTON", L"Keep looking at what's in the middle of the picture", BS_AUTOCHECKBOX | WS_TABSTOP, 12, 340, 420, 22, IDC_SC_LOOK);
     add(L"BUTTON", L"Play them all", BS_PUSHBUTTON | WS_TABSTOP, 12, 368, 116, 26, IDC_SC_PLAY);
     add(L"BUTTON", L"Play this shot", BS_PUSHBUTTON | WS_TABSTOP, 134, 368, 116, 26, IDC_SC_PLAYSHOT);
@@ -1145,7 +1156,8 @@ void create_controls() {
     add(L"BUTTON", L"New orbit here", BS_PUSHBUTTON | WS_TABSTOP, 444, 511, 116, 26, IDC_SC_ORBIT);
     add(L"STATIC",
         L"These shots play in order in Halo 1 Unlimited's showcase screensaver. New shot here starts one where the picture "
-        L"is; fly on and click Add key here at each next spot (3 seconds on; Seconds makes the shot slower or faster). The "
+        L"is; fly on and click Add key here at each next spot. The camera goes along them at an even speed, over the shot's "
+        L"Seconds (more seconds: slower); Slow in or out starts it from still or brings it to rest. The "
         L"arrows pick a key (or double-click a yellow one in the picture): Go to it, then fly somewhere and Move it here, or "
         L"Add key here to put a new one after it. New orbit here circles what's in the middle of the picture, passing where "
         L"you are halfway through: radius units across from it, height above it, turning that many degrees (negative: the "
@@ -1253,8 +1265,14 @@ void create_controls() {
     tip(IDC_SC_KEY, L"The picked key (orange in the picture). Double-click a yellow key in the picture to pick it.");
     tip(IDC_SC_KGO, L"Puts the picture where the picked key is, looking as it does.");
     tip(IDC_SC_KMOVE, L"Moves the picked key to where the picture is now, looking the way it does (at the same time in the shot).");
-    tip(IDC_SC_ADD, L"A new key where the picture is, after the picked one: halfway to the next key, or 3 seconds after the last "
-                    L"(the shot gets longer).");
+    tip(IDC_SC_ADD, L"A new key where the picture is, after the picked one. At an even speed the shot's timing follows (a new "
+                    L"last key makes it 3 seconds longer); with times as keyed, halfway to the next key, or 3 seconds after "
+                    L"the last.");
+    tip(IDC_SC_PACE, L"How the shot spends its seconds. Even speed: the camera moves along its keys at one speed all the way, "
+                     L"however close or far apart the keys are, the seconds setting how fast. Slow in: it starts from still "
+                     L"(up to 2 seconds of speeding up), for a held start; Slow out: it comes to rest at the end; or both. "
+                     L"Times as keyed: each key's own time, as the file had them (a key every so often: even time between "
+                     L"keys, not even speed).");
     tip(IDC_SC_UNDO, L"Removes the picked key. Without the first, the shot starts at the next one; without the last, it ends at "
                      L"the one before.");
     tip(IDC_SC_SAVE, L"Writes these shots into the map folder's showcase.txt now (beside the converted map and its info.txt, "
@@ -1541,7 +1559,9 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             showcase::Shot shot;
             shot.label = "shot " + std::to_string(St->sc.shots.size() + 1);
             shot.seconds = 4;
-            shot.keys.push_back(key_here());
+            shot.pace = showcase::Pace::even;   // (its keys timed along the path: add keys, set the seconds)
+            shot.via.push_back(key_here());
+            showcase::retime(shot);
             size_t at = St->sc_sel >= 0 ? (size_t)St->sc_sel + 1 : St->sc.shots.size();
             St->sc.shots.insert(St->sc.shots.begin() + (long)std::min(at, St->sc.shots.size()), shot);
             St->sc_sel = (int)std::min(at, St->sc.shots.size() - 1);
@@ -1573,11 +1593,12 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         // The selected shot's keys: pick one, go to it, move it, add one after it, remove it.
         case IDC_SC_KPREV: case IDC_SC_KNEXT: case IDC_SC_KGO: {
             showcase::Shot *shot = sc_shot();
-            if (!shot || shot->keys.empty()) return 0;
+            if (!shot || showcase::path_keys(*shot).empty()) return 0;
             sc_stop();
-            if (id != IDC_SC_KGO) St->sc_key = std::clamp(St->sc_key + (id == IDC_SC_KNEXT ? 1 : -1), 0, (int)shot->keys.size() - 1);
+            const auto &pk = showcase::path_keys(*shot);
+            if (id != IDC_SC_KGO) St->sc_key = std::clamp(St->sc_key + (id == IDC_SC_KNEXT ? 1 : -1), 0, (int)pk.size() - 1);
             sc_key_show();
-            camera_to(showcase::at(*shot, shot->keys[(size_t)St->sc_key].t));
+            camera_to(showcase::at(*shot, pk[(size_t)St->sc_key].t));
             render(false);
             return 0;
         }
@@ -1585,9 +1606,19 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             showcase::Shot *shot = sc_shot();
             if (!shot) return 0;
             sc_stop();
-            auto &keys = shot->keys;
+            const bool paced = shot->pace != showcase::Pace::keyed;   // (then its keys' times come from the path: retime)
+            auto &keys = showcase::path_keys(*shot);
             int k = keys.empty() ? -1 : std::clamp(St->sc_key, 0, (int)keys.size() - 1);
-            if (id == IDC_SC_ADD) {   // (after the picked key: halfway to the next one, or 3 seconds after the last)
+            if (id == IDC_SC_ADD && paced) {   // (after the picked key; a new last one makes the shot 3 seconds longer)
+                showcase::Key nk = key_here();
+                if (k >= 0 && (size_t)k + 1 == keys.size()) shot->seconds = std::min(600.0, shot->seconds + 3);
+                keys.insert(keys.begin() + (k + 1), nk);
+                St->sc_key = k + 1;
+            } else if (id == IDC_SC_UNDO && paced) {
+                if (k < 0 || keys.size() <= 1) return 0;
+                keys.erase(keys.begin() + k);
+                St->sc_key = std::min(k, (int)keys.size() - 1);
+            } else if (id == IDC_SC_ADD) {   // (after the picked key: halfway to the next one, or 3 seconds after the last)
                 showcase::Key nk = key_here();
                 if (k < 0) {
                     nk.t = 0;
@@ -1622,10 +1653,30 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 St->sc_key = std::min(k, (int)keys.size() - 1);
             }
             shot->orbit.on = false;   // (its own keys now)
+            showcase::retime(*shot);
             sc_changed();
             sc_check(*shot);
             return 0;
         }
+        case IDC_SC_PACE:
+            if (HIWORD(wp) == CBN_SELCHANGE && !St->sc_filling && sc_shot()) {
+                static const showcase::Pace paces[5] = {showcase::Pace::even, showcase::Pace::in, showcase::Pace::out,
+                                                        showcase::Pace::both, showcase::Pace::keyed};
+                int sel = (int)SendMessageW(item(IDC_SC_PACE), CB_GETCURSEL, 0, 0);
+                if (sel < 0 || sel > 4) return 0;
+                showcase::Shot &shot = *sc_shot();
+                showcase::Pace was = shot.pace, now = paces[sel];
+                if (now == was) return 0;
+                sc_stop();
+                if (was == showcase::Pace::keyed) shot.via = shot.keys;   // (its keys become the path, timed along it)
+                shot.pace = now;
+                if (now == showcase::Pace::keyed) shot.via.clear();   // (the keys as they're timed now, each its own time)
+                else showcase::retime(shot);
+                St->sc_key = std::min(St->sc_key, std::max(0, (int)showcase::path_keys(shot).size() - 1));
+                sc_changed();
+                sc_check(shot);
+            }
+            return 0;
         case IDC_SC_NAME:
             if (HIWORD(wp) == EN_CHANGE && !St->sc_filling && sc_shot()) {
                 wchar_t b[64] = {};
@@ -1658,10 +1709,15 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 double middle = shot->orbit.start + shot->orbit.sweep / 2;
                 showcase::Shot o = showcase::orbit_shot(shot->at, St->orbit_radius, St->orbit_height, middle - St->orbit_around / 2,
                                                         St->orbit_around, shot->seconds, shot->label);
+                if (shot->pace != showcase::Pace::keyed) {   // (its pace kept: the circle is the path)
+                    o.pace = shot->pace;
+                    o.via = o.keys;
+                    showcase::retime(o);
+                }
                 *shot = o;
                 St->sc_custom = true;
-                ListView_SetItemText(St->sc_list, St->sc_sel, 2, (LPWSTR)std::to_wstring(shot->keys.size()).c_str());
-                St->sc_key = (int)shot->keys.size() / 2;
+                ListView_SetItemText(St->sc_list, St->sc_sel, 2, (LPWSTR)std::to_wstring(showcase::path_keys(*shot).size()).c_str());
+                St->sc_key = (int)showcase::path_keys(*shot).size() / 2;
                 sc_key_show();
                 camera_to(showcase::at(*shot, shot->seconds / 2));
                 sc_status();
@@ -1699,7 +1755,10 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 showcase::Shot &shot = St->sc.shots[(size_t)St->sc_sel];
                 if (v < 0.5 || v > 600 || std::fabs(v - shot.seconds) < 1e-9) return 0;
                 // (the keys spread out or closer together with it: the same path, slower or faster)
-                if (shot.orbit.on) {
+                if (shot.pace != showcase::Pace::keyed) {   // (the same path, at the pace the seconds give)
+                    shot.seconds = v;
+                    showcase::retime(shot);
+                } else if (shot.orbit.on) {
                     shot = showcase::orbit_shot(shot.at, shot.orbit.radius, shot.orbit.height, shot.orbit.start, shot.orbit.sweep, v,
                                                 shot.label);
                     ListView_SetItemText(St->sc_list, St->sc_sel, 2, (LPWSTR)std::to_wstring(shot.keys.size()).c_str());
@@ -1731,6 +1790,7 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                     shot.look = false;
                 }
                 shot.orbit.on = false;   // (an orbit looks at its middle: a new point, or none, and it's keys of its own)
+                showcase::retime(shot);
                 sc_changed();
                 sc_check(shot);
             }

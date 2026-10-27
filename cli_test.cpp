@@ -6,6 +6,7 @@
 #include "perflog.hpp"
 #include "showcase.hpp"
 #include "levelshaders.hpp"
+#include <cmath>
 #include <algorithm>
 #include <cstdlib>
 #include <fstream>
@@ -63,6 +64,25 @@ static Game parse(const std::string &s) {
 }
 
 int main(int argc, char **argv) {
+    if (argc >= 3 && std::string(argv[1]) == "pace") {   // cli_test pace <showcase.txt>: each shot timed again, its speed as played
+        std::ifstream in(argv[2], std::ios::binary);
+        std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>()), err;
+        showcase::Showcase sc;
+        if (!showcase::read(text, sc, &err)) { std::cout << "can't read: " << err << "\n"; return 1; }
+        for (auto &s : sc.shots) {
+            showcase::retime(s);
+            std::cout << s.label << " (" << showcase::pace_name(s.pace) << ", " << s.keys.size() << " keys):";
+            showcase::V3 last = showcase::at(s, 0).eye;
+            for (double t = 0.25; t <= s.seconds + 1e-9; t += 0.25) {
+                showcase::V3 e = showcase::at(s, t).eye;
+                double d = std::hypot(std::hypot(e[0] - last[0], e[1] - last[1]), e[2] - last[2]);
+                printf(" %.1f", d / 0.25);
+                last = e;
+            }
+            std::cout << "\n";
+        }
+        return 0;
+    }
     if (argc >= 3 && std::string(argv[1]) == "showcase") {   // cli_test showcase <level.lsh> [out.txt]: the generated flythrough
         lshade::Analysis a;
         lshade::Preview p;

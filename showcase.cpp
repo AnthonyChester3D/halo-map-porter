@@ -444,10 +444,11 @@ V3 along(const std::vector<V3> &c, double s) {
     return c.empty() ? V3{} : c.back();
 }
 
-// A shot along corners at `speed` units a second (eased in and out), looking ahead along the way and a little down,
-// then, over its last stretch, at `goal` (where the route goes: a flag, a hill), stopping a few units short of the end
-// so it's in view. Its keys: at every corner, half a unit either side of it, and every couple of units between, so the
-// curve through them keeps to the straight legs and only rounds the corners a little.
+// A shot along corners at about `speed` units a second (at an even pace: Pace::even), looking ahead along the way and
+// a little down, then, over its last stretch, at `goal` (where the route goes: a flag, a hill), stopping a few units
+// short of the end so it's in view. Its path (Shot::via): at every corner, half a unit either side of it, and every 4
+// units between (for where it looks), so the curve keeps to the straight legs and only rounds the corners a little;
+// its keys are timed along that (retime).
 Shot route_shot(const World &w, std::vector<V3> c, double speed, double down, V3 goal, const std::string &label) {
     const double full = route_length(c), ahead = std::clamp(speed * 1.6, 5.0, 14.0);
     double stop = std::min(5.0, full * 0.2);
@@ -479,21 +480,11 @@ Shot route_shot(const World &w, std::vector<V3> c, double speed, double down, V3
     std::sort(at_s.begin(), at_s.end());
     at_s.erase(std::unique(at_s.begin(), at_s.end(), [](double x, double y) { return y - x < 0.05; }), at_s.end());
     if (at_s.back() < L - 0.05) at_s.push_back(L);
-    // (the time each is reached: ease's inverse, by halving)
-    auto time_of = [&](double s) {
-        double lo = 0, hi = 1, want = std::clamp(s / std::max(L, 1e-9), 0.0, 1.0);
-        for (int k = 0; k < 40; k++) {
-            double mid = (lo + hi) / 2;
-            (ease(mid) < want ? lo : hi) = mid;
-        }
-        return seconds * (lo + hi) / 2;
-    };
     Shot sh;
     sh.label = label.substr(0, 31);
     sh.seconds = seconds;
     for (double s : at_s) {
         Key k;
-        k.t = time_of(s);
         k.p = along(c, s);
         // (ahead along the way as far as it's in view: round a corner, at the way out of it, not at the wall)
         double look = ahead;
@@ -508,10 +499,10 @@ Shot route_shot(const World &w, std::vector<V3> c, double speed, double down, V3
         }
         k.yaw = yaw_to(k.p, f);
         k.pitch = std::clamp(deg(std::atan2(f[2] - k.p[2], std::max(1e-6, len2d(sub(f, k.p))))), -35.0, 8.0);
-        sh.keys.push_back(k);
+        sh.via.push_back(k);
     }
-    sh.keys.front().t = 0;
-    sh.keys.back().t = seconds;
+    sh.pace = Pace::even;
+    retime(sh);
     return sh;
 }
 
@@ -626,6 +617,18 @@ std::string write(const Showcase &s, const std::string &map, const std::string &
             snprintf(b, sizeof b, "# orbit %.2f %.2f %.1f %.1f\r\n", sh.orbit.radius, sh.orbit.height, sh.orbit.start, sh.orbit.sweep);
             out += b;
         }
+        if (sh.pace != Pace::keyed && !sh.via.empty()) {   // (the path the keys are timed along: retime)
+            out += std::string("# pace ") + pace_name(sh.pace) + "\r\n";
+            for (auto &k : sh.via) {
+                double y = std::fmod(k.yaw, 360.0);
+                if (y < 0) y += 360;
+                if (std::fabs(k.fov - kFov) > 0.05)
+                    snprintf(b, sizeof b, "# via %.2f %.2f %.2f %.1f %.1f %.1f\r\n", k.p[0], k.p[1], k.p[2], y, k.pitch, k.fov);
+                else
+                    snprintf(b, sizeof b, "# via %.2f %.2f %.2f %.1f %.1f\r\n", k.p[0], k.p[1], k.p[2], y, k.pitch);
+                out += b;
+            }
+        }
         for (auto &k : sh.keys) {
             double y = std::fmod(k.yaw, 360.0);
             if (y < 0) y += 360;
@@ -676,6 +679,16 @@ bool read(const std::string &text, Showcase &out, std::string *error) {
                 o.on = true;
                 out.shots.back().orbit = o;
             }
+            // (its pace, and the path its keys are timed along: retime)
+            std::string pn;
+            if (h == "#" && w == "pace" && !out.shots.empty() && cs >> pn) pace_from(pn, out.shots.back().pace);
+            Key k;
+            if (h == "#" && w == "via" && !out.shots.empty() && (cs >> k.p[0] >> k.p[1] >> k.p[2])) {
+                if (!(cs >> k.yaw)) k.yaw = 0;
+                if (!(cs >> k.pitch)) k.pitch = 0;
+                if (!(cs >> k.fov) || k.fov < 10 || k.fov > 150) k.fov = kFov;
+                out.shots.back().via.push_back(k);
+            }
         }
         size_t hash = line.find('#');
         if (hash != std::string::npos) line.resize(hash);
@@ -716,6 +729,13 @@ bool read(const std::string &text, Showcase &out, std::string *error) {
     for (auto &s : out.shots) {
         if (s.keys.empty()) return fail("shot \"" + s.label + "\" has no keys");
         if (!s.look) s.orbit.on = false;
+        if (s.via.empty()) s.pace = Pace::keyed;
+        if (s.pace == Pace::keyed) s.via.clear();
+        if (s.pace != Pace::keyed) {   // (when it gets to each via key: as retime worked it out)
+            Shot t = s;
+            retime(t);
+            for (size_t i = 0; i < s.via.size(); i++) s.via[i].t = t.via[i].t;
+        }
     }
     return true;
 }
@@ -771,6 +791,144 @@ View at(const Shot &s, double t) {
     v.yaw = std::fmod(v.yaw, 360.0);
     if (v.yaw < 0) v.yaw += 360;
     return v;
+}
+
+// ---- pace: a shot's keys timed along its path
+const char *pace_name(Pace p) {
+    switch (p) {
+    case Pace::even: return "even";
+    case Pace::in: return "in";
+    case Pace::out: return "out";
+    case Pace::both: return "both";
+    default: return "keyed";
+    }
+}
+
+bool pace_from(const std::string &name, Pace &p) {
+    for (Pace q : {Pace::keyed, Pace::even, Pace::in, Pace::out, Pace::both})
+        if (name == pace_name(q)) { p = q; return true; }
+    return false;
+}
+
+namespace {
+// How far apart two views are along a path: the distance the camera moves; where it only turns (or zooms) standing
+// still, a unit for each 20 degrees, so turning on the spot still takes its time
+double step_len(const Key &a, const Key &b, bool look) {
+    double d = len(sub(b.p, a.p));
+    if (look || d > 0.05) return std::max(d, 1e-3);
+    double turn = std::hypot(b.yaw - a.yaw, b.pitch - a.pitch) / 20, zoom = std::fabs(b.fov - a.fov) / 20;
+    return std::max({d, turn, zoom, 1e-3});
+}
+
+// The share of the way gone at `x` of the time, at an even speed between a speed-up over the first `a` of the time and
+// a slow-down over the last `b` (each from or to still, along half a cosine)
+double paced(double x, double a, double b) {
+    x = std::clamp(x, 0.0, 1.0);
+    double v = 1 / (1 - (a + b) / 2);
+    auto ramp = [](double t, double r) { return r > 0 ? (t - r / kPi * std::sin(kPi * t / r)) / 2 : 0.0; };
+    if (x < a) return v * ramp(x, a);
+    if (x <= 1 - b) return v * (a / 2 + (x - a));
+    return 1 - v * ramp(1 - x, b);
+}
+}   // namespace
+
+void retime(Shot &s) {
+    if (s.pace == Pace::keyed || s.via.empty()) return;
+    const size_t n = s.via.size();
+    const double T = std::max(0.5, s.seconds);
+    if (n == 1) {
+        s.via[0].t = 0;
+        s.keys = {s.via[0]};
+        return;
+    }
+    std::vector<Key> P = s.via;   // (yaw unwrapped: each within half a turn of the one before)
+    for (size_t i = 1; i < n; i++) {
+        while (P[i].yaw - P[i - 1].yaw > 180) P[i].yaw -= 360;
+        while (P[i].yaw - P[i - 1].yaw < -180) P[i].yaw += 360;
+    }
+    // The curve through them: Hermite between each two, Catmull-Rom tangents over the distances between them (as the
+    // playback rule does over times: knots this far apart give the even pace a smooth curve)
+    std::vector<double> kn(n, 0);
+    for (size_t i = 1; i < n; i++) kn[i] = kn[i - 1] + step_len(P[i - 1], P[i], s.look);
+    auto val = [&](size_t i, int c) -> double {
+        return c < 3 ? P[i].p[(size_t)c] : c == 3 ? P[i].yaw : c == 4 ? P[i].pitch : P[i].fov;
+    };
+    auto tangent = [&](size_t j, int c) {
+        if (j == 0) return (val(1, c) - val(0, c)) / (kn[1] - kn[0]);
+        if (j == n - 1) return (val(n - 1, c) - val(n - 2, c)) / (kn[n - 1] - kn[n - 2]);
+        return (val(j + 1, c) - val(j - 1, c)) / (kn[j + 1] - kn[j - 1]);
+    };
+    auto eval = [&](double sigma) {   // (sigma: key i at i)
+        sigma = std::clamp(sigma, 0.0, (double)(n - 1));
+        size_t i = std::min((size_t)sigma, n - 2);
+        double u = sigma - (double)i, d = kn[i + 1] - kn[i];
+        double h00 = 2 * u * u * u - 3 * u * u + 1, h10 = u * u * u - 2 * u * u + u, h01 = -2 * u * u * u + 3 * u * u,
+               h11 = u * u * u - u * u;
+        double r[6];
+        for (int c = 0; c < 6; c++) r[c] = h00 * val(i, c) + h10 * d * tangent(i, c) + h01 * val(i + 1, c) + h11 * d * tangent(i + 1, c);
+        Key k;
+        k.p = {r[0], r[1], r[2]};
+        k.yaw = r[3], k.pitch = r[4], k.fov = std::clamp(r[5], 10.0, 150.0);
+        return k;
+    };
+    // How far along it each point is
+    const int per = 40;
+    std::vector<double> sig, dist;
+    Key prev = eval(0);
+    double S = 0;
+    for (size_t i = 0; i + 1 < n; i++)
+        for (int k = i ? 1 : 0; k <= per; k++) {
+            double sg = (double)i + (double)k / per;
+            Key q = eval(sg);
+            if (!sig.empty()) S += step_len(prev, q, s.look);
+            sig.push_back(sg);
+            dist.push_back(S);
+            prev = q;
+        }
+    auto sigma_at = [&](double want) {
+        size_t j = (size_t)(std::lower_bound(dist.begin(), dist.end(), want) - dist.begin());
+        if (j == 0) return sig.front();
+        if (j >= dist.size()) return sig.back();
+        double f = (want - dist[j - 1]) / std::max(1e-12, dist[j] - dist[j - 1]);
+        return sig[j - 1] + (sig[j] - sig[j - 1]) * f;
+    };
+    // The slow start and end: up to 2 seconds each, at most 45% of the shot alone, 35% each with both
+    bool in = s.pace == Pace::in || s.pace == Pace::both, out = s.pace == Pace::out || s.pace == Pace::both;
+    double share = in && out ? 0.35 : 0.45;
+    double a = in ? std::min(2.0, share * T) / T : 0, b = out ? std::min(2.0, share * T) / T : 0;
+    // When it gets to each via key
+    for (size_t i = 0; i < n; i++) {
+        double want = S > 0 ? dist[i * per] / S : 0, lo = 0, hi = 1;
+        for (int k = 0; k < 50; k++) {
+            double mid = (lo + hi) / 2;
+            (paced(mid, a, b) < want ? lo : hi) = mid;
+        }
+        s.via[i].t = T * (lo + hi) / 2;
+    }
+    // Keys: a key every half second, or closer at speed (about a unit apart), and one at each via key (where it turns
+    // quickly, round a corner). All on the one curve at its pace, so the playback's curve through them keeps to it.
+    double top = S / T / (1 - (a + b) / 2);
+    double dt = std::clamp(1.0 / std::max(top, 1e-6), 0.2, 0.5);
+    int N = std::max(2, (int)std::ceil(T / dt - 1e-9));
+    std::vector<double> times;
+    for (int j = 0; j <= N; j++) times.push_back(T * j / N);
+    for (auto &v : s.via) times.push_back(v.t);
+    std::sort(times.begin(), times.end());
+    std::vector<double> kept;
+    for (double t : times)
+        if (kept.empty() || t - kept.back() >= 0.06 || t >= T - 1e-9) {
+            if (!kept.empty() && t >= T - 1e-9 && T - kept.back() < 0.06 && kept.size() > 1) kept.back() = T;
+            else kept.push_back(std::min(t, T));
+        }
+    kept.erase(std::unique(kept.begin(), kept.end()), kept.end());
+    s.keys.clear();
+    for (double t : kept) {
+        Key k = eval(sigma_at(paced(t / T, a, b) * S));
+        k.t = t;
+        k.yaw = std::fmod(k.yaw, 360.0);
+        if (k.yaw < 0) k.yaw += 360;
+        s.keys.push_back(k);
+    }
 }
 
 std::vector<V3> path(const Shot &s, double step) {

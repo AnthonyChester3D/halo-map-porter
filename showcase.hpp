@@ -16,6 +16,9 @@
 //                             camera tour's stops; then the horizontal field of view, optional (70 when left out)
 //   # orbit 5 2 30 100        (a comment, after a shot's look line) the Level window's orbit (Shot::orbit): radius,
 //                             height, start and sweep, so it can change it again; the keys are the shot
+//   # pace even               (a comment) the shot's pace (Shot::pace): even, in, out or both (slow in, slow out, both),
+//   # via x y z yaw pitch [fov]  then the path's own keys (Shot::via), where the camera goes; the key lines are made
+//                             from them (retime), so the Level window can change the path or the seconds and time it again
 // Shots play in the file's order, then the list starts again. Between a shot's keys the camera moves on a curve
 // through them in time (at(): Catmull-Rom tangents from the neighbouring keys, Hermite between two keys; yaw the
 // short way round), and with "look" it turns to keep its point in the middle. A shot ends at its seconds (its last
@@ -34,6 +37,10 @@ constexpr double kFov = 70;        // Halo's own horizontal field of view
 constexpr double kFade = 0.5;
 
 struct Key { double t = 0; V3 p{}; double yaw = 0, pitch = 0, fov = kFov; };
+// How a shot spends its seconds. Keyed: at its keys' own times. The others: along its path (Shot::via) at an even pace,
+// so the camera's speed doesn't change with how close its keys are, starting from still (in), coming to rest (out), or
+// both: its seconds set how fast. Its keys are then made by retime().
+enum class Pace { keyed, even, in, out, both };
 struct Shot {
     std::string label;
     double seconds = 0;
@@ -44,6 +51,8 @@ struct Shot {
     // height start sweep"): it can change it. Its own keys once they're changed one by one.
     struct Orbit { bool on = false; double radius = 0, height = 0, start = 0, sweep = 0; };
     Orbit orbit;
+    Pace pace = Pace::keyed;
+    std::vector<Key> via;   // (with a pace) where the camera goes and looks, in order; t: when it gets there (retime)
 };
 struct Showcase {
     std::vector<Shot> shots;
@@ -68,6 +77,17 @@ View at(const Shot &s, double t);
 // them go outside it), each checked to keep the camera inside the level, clear of walls and objects, and its subject
 // in view. `report`: what it made, for the log. Empty when the level has nothing to go on.
 Showcase generate(const lshade::Preview &p, std::string *report = nullptr);
+
+// A paced shot's keys made from its path and seconds (Shot::pace): a key every half second or less (closer where it's
+// quick), at even speed along a smooth curve through its via keys, with a slow start and/or end (up to 2 seconds
+// each) as its pace says. A keyed shot is left as it is.
+void retime(Shot &s);
+// The keys that say where a shot goes: its via keys with a pace, its keys without
+inline std::vector<Key> &path_keys(Shot &s) { return s.pace == Pace::keyed ? s.keys : s.via; }
+inline const std::vector<Key> &path_keys(const Shot &s) { return s.pace == Pace::keyed ? s.keys : s.via; }
+// The pace's name in the file ("even", "in", "out", "both"), and back (false: not one).
+const char *pace_name(Pace p);
+bool pace_from(const std::string &name, Pace &p);
 
 // The shot's camera path, sampled every `step` seconds (for drawing it).
 std::vector<V3> path(const Shot &s, double step = 0.25);

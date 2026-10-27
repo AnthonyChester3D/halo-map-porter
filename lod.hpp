@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <functional>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -17,20 +18,29 @@ namespace lod {
 // How a model's shader draws (by its tag path with extension): opaque, cut out where its texture's alpha is half or
 // less (alpha-tested, and the texture has see-through parts: leaves, grates), or blended (a transparent shader, an
 // alpha-blended decal); from both sides or one. `known` false: its tag couldn't be read.
+// Where a cut-out shader's texture is see-through: a grid over it (up to 64 cells a side), a cell set when any of
+// its pixels is; and how many times across the texture repeats on the model (its map scale).
+struct ClearMask {
+    int w = 0, h = 0;
+    std::vector<char> clear;
+    double u_scale = 1, v_scale = 1;
+};
 struct ShaderLook {
     enum Kind { kOpaque, kCutOut, kBlended };
     Kind kind = kOpaque;
     bool two_sided = false;
     bool known = false;
+    std::shared_ptr<const ClearMask> mask;   // (cut out: where; none: the whole part counts as cut out)
 };
 using LookUp = std::function<ShaderLook(const std::string &shader_tag)>;
 
 struct Settings {
     std::filesystem::path library;   // the LOD library folder (empty: make every time, keep nothing)
     int min_triangles = 1000;        // models with fewer (most detailed version) are left alone
-    // The model's shaders (none given: every part is simplified). Parts drawn cut out (leaf cards, grates) stay
-    // exactly as made in every version: a card is a few triangles whose outline is the texture's, and taking a corner
-    // off it takes off the leaves there (the tops of Deathtrap's trees went at a distance).
+    // The model's shaders (none given: every part is simplified). Trimming a model's most detailed version (seen up
+    // close) keeps the triangles drawn cut out (leaf cards, grates: where their texture is see-through,
+    // ShaderLook::mask) exactly as made: a card's outline is its texture's. Lower-detail versions simplify them like
+    // the rest (a tree's leaf clusters come down too; the LODs window shows each version and can change it).
     LookUp look;
 };
 
