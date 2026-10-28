@@ -5,10 +5,12 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#include <array>
 #include <filesystem>
 #include <functional>
 #include <set>
 #include <string>
+#include <vector>
 
 namespace shadersui {
 
@@ -37,6 +39,11 @@ struct Picks {
     // The map's own showcase flythrough (showcase.txt's text, showcase.hpp), made in the window; empty: the
     // conversion makes one from the level (Config::xbox_showcase_text).
     std::string showcase;
+    // Waypoints for Halo 1 Unlimited's bots placed here (each where an item spawn point that spawns nothing goes:
+    // Config::xbox_bot_waypoints), and whether conversions add their own (Config::xbox_bot_nodes: the window plans as
+    // a conversion would; not kept with the picks).
+    std::vector<std::array<double, 3>> bots;
+    bool bots_auto = true;
 };
 
 // The showcase's "Save to map folder": writes its shots now, without a conversion. `text`: showcase.txt's; `own`: the

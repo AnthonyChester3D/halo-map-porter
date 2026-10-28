@@ -19,6 +19,13 @@ using V3 = std::array<double, 3>;
 
 namespace {
 
+// An item spawn point with every game type "none": no game spawns anything there (the bots' hidden waypoints).
+bool never_spawns(const tagfile::Elem &e) {
+    for (const char *f : {"type 0", "type 1", "type 2", "type 3"})
+        if (e.integer(f) != 0) return false;
+    return true;
+}
+
 V3 sub(V3 a, V3 b) { return {a[0] - b[0], a[1] - b[1], a[2] - b[2]}; }
 V3 mul(V3 a, double s) { return {a[0] * s, a[1] * s, a[2] * s}; }
 double dot(V3 a, V3 b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
@@ -301,6 +308,7 @@ static void read_marks(const tagfile::Elem &sc, const Find &find, Preview &p) {
     static const char *const kPower[] = {"rocket", "sniper", "fuel", "flame", "overshield", "over shield", "camo", "invis"};
     tagfile::Block eq = sc.block("netgame equipment");
     for (size_t i = 0; i < eq.size(); i++) {
+        if (never_spawns(eq[i])) continue;
         std::string ref = eq[i].ref("item collection"), stem = fs::path(ref).stem().string(), low = stem;
         for (auto &c : low) c = (char)std::tolower((unsigned char)c);
         bool power = false;
@@ -743,7 +751,7 @@ void read_objects(const tagfile::Elem &sc, const tagfile::Elem &bsp, const Find 
     std::map<std::string, std::string> first_item;
     for (size_t i = 0; i < eq.size(); i++) {
         std::string ic = eq[i].ref("item collection");
-        if (ic.empty()) continue;
+        if (ic.empty() || never_spawns(eq[i])) continue;
         if (!first_item.count(ic)) {
             std::string &item = first_item[ic];
             fs::path f = find(ic);

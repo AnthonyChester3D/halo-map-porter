@@ -76,6 +76,7 @@ enum {
     ID_X_MAKELOD, ID_X_TRIM_LBL, ID_X_TRIM, ID_S_LOD_LBL, ID_S_LOD, ID_S_LOD_BROWSE, ID_S_LOD_HINT, ID_S_TOUR,
     // portals for levels made without them
     ID_X_PORTALS,
+    ID_X_BOTS,
     // the level shaders window
     ID_X_SHADERS,
     ID_X_LODS,
@@ -182,6 +183,7 @@ static void save_settings() {
     ini_set(L"x_allveh", checked(ID_X_ALLVEH) ? L"1" : L"0");
     ini_set(L"x_lodstock", checked(ID_X_LODSTOCK) ? L"1" : L"0");
     ini_set(L"x_makelod", checked(ID_X_MAKELOD) ? L"1" : L"0");
+    ini_set(L"x_bots", checked(ID_X_BOTS) ? L"1" : L"0");
     ini_set(L"x_trim", std::to_wstring(std::max(0, sel(ID_X_TRIM))));
     ini_set(L"x_anim", std::to_wstring(std::max(0, sel(ID_X_ANIM))));
     ini_set(L"x_portals", std::to_wstring(std::max(0, sel(ID_X_PORTALS))));
@@ -448,6 +450,7 @@ static void apply_xbox_options(Config &cfg) {
     cfg.xbox_keep_all_vehicles = folder_mode() && checked(ID_X_ALLVEH);
     cfg.xbox_lod_stock_models = checked(ID_X_LODSTOCK);
     cfg.xbox_make_lods = checked(ID_X_MAKELOD);
+    cfg.xbox_bot_nodes = checked(ID_X_BOTS);
     cfg.xbox_trim_models = std::clamp(sel(ID_X_TRIM), 0, 3);
     cfg.xbox_collision = std::min(cfg.xbox_trim_models, 2);   // (heavy models: their collision too)
     cfg.xbox_compress_animations = std::clamp(sel(ID_X_ANIM), 0, 2);
@@ -1314,6 +1317,15 @@ static shadersui::Picks load_shader_picks(const fs::path &input) {
     sf.replace_extension(L".showcase.txt");
     std::ifstream sc(sf, std::ios::binary);
     if (sc) picks.showcase.assign((std::istreambuf_iterator<char>(sc)), std::istreambuf_iterator<char>());
+    // (the bots' waypoints placed in the window: one a line, x y z)
+    fs::path bf = shader_picks_file(input);
+    bf.replace_extension(L".bots.txt");
+    std::ifstream bs(bf, std::ios::binary);
+    std::string bl;
+    while (std::getline(bs, bl)) {
+        std::array<double, 3> p{};
+        if (sscanf(bl.c_str(), "%lf %lf %lf", &p[0], &p[1], &p[2]) == 3) picks.bots.push_back(p);
+    }
     return picks;
 }
 static void save_shader_picks(const fs::path &input, const shadersui::Picks &picks) {
@@ -1326,6 +1338,20 @@ static void save_shader_picks(const fs::path &input, const shadersui::Picks &pic
         else {
             fs::create_directories(sf.parent_path(), ec);
             std::ofstream(sf, std::ios::binary | std::ios::trunc) << picks.showcase;
+        }
+    }
+    {
+        fs::path bf = p;
+        bf.replace_extension(L".bots.txt");
+        if (picks.bots.empty()) fs::remove(bf, ec);
+        else {
+            fs::create_directories(bf.parent_path(), ec);
+            std::ofstream f(bf, std::ios::binary | std::ios::trunc);
+            char b[96];
+            for (auto &q : picks.bots) {
+                snprintf(b, sizeof b, "%.4f %.4f %.4f\n", q[0], q[1], q[2]);
+                f << b;
+            }
         }
     }
     shadersui::Picks defaults;
@@ -1359,6 +1385,7 @@ static void apply_shader_picks(Config &cfg, const fs::path &input) {
     cfg.xbox_fog_start = picks.fog_start;
     cfg.xbox_scenery_pixels = picks.tiny_px;
     cfg.xbox_showcase_text = picks.showcase;
+    cfg.xbox_bot_waypoints = picks.bots;
     cfg.xbox_weather = picks.weather;
     cfg.xbox_rider_ai_off = picks.riders == 1;
     cfg.xbox_detailed_props_off = picks.props == 1;
@@ -1376,7 +1403,8 @@ static std::string shaders_key(const Config &cfg, const fs::path &in) {
     std::error_code ec;
     auto mt = fs::last_write_time(in, ec);
     return N(lower(in.wstring())) + "|" + std::to_string((long long)mt.time_since_epoch().count()) + "|" +
-           (cfg.xbox_add_portals ? "p" : "-") + (cfg.xbox_replan_portals ? "r" : "-");
+           (cfg.xbox_add_portals ? "p" : "-") + (cfg.xbox_replan_portals ? "r" : "-") +
+           "|2";   // (2: the bots' waypoints measured too, and spawn points that spawn nothing not drawn)
 }
 
 // The folder the Xbox map goes in (its showcase.txt goes beside its info.txt there): the Convert tab's output's, or
@@ -1472,6 +1500,7 @@ static void open_shaders() {
     apply_xbox_options(cfg);
     std::string key = shaders_key(cfg, in);
     shadersui::Picks picks = load_shader_picks(in);
+    picks.bots_auto = cfg.xbox_bot_nodes;
     bool ok = shadersui::edit(
         g_wnd, L"Level - " + in.filename().wstring(), key,
         [cfg, in, game](fs::path &file, std::string &error, const std::function<void(const std::string &)> &log) {
@@ -1503,7 +1532,8 @@ static void open_shaders() {
                    L"; sky " + (picks.sky ? L"as made" : L"in fewer layers") + L"; effects " +
                    (picks.effects == 1 ? L"as made" : picks.effects == 2 ? L"lighter" : L"no busier than Bungie's") +
                    (picks.riders ? L"; riders without AI" : L"") + (picks.props ? L"; detailed props without collision" : L"") +
-                   (picks.showcase.empty() ? L"; showcase flythrough made from the level" : L"; showcase flythrough your own") + L".");
+                   (picks.showcase.empty() ? L"; showcase flythrough made from the level" : L"; showcase flythrough your own") +
+                   (picks.bots.empty() ? L"" : L"; " + std::to_wstring(picks.bots.size()) + L" bot waypoint" + (picks.bots.size() == 1 ? L"" : L"s") + L" of yours") + L".");
     }
 }
 
@@ -2369,6 +2399,9 @@ static void create_controls() {
                 L"Also divide up the rooms of levels that have them, when that draws less"});
     button(2, L"Level...", 534, y - 4, 96, ID_X_SHADERS);
     button(2, L"LODs...", 638, y - 4, 96, ID_X_LODS);
+    y += 26;
+    check(2, L"Add waypoints for Halo 1 Unlimited's bots where they can't find their way (item spawn points that spawn nothing)",
+          26, y, 708, ID_X_BOTS);
 
     // Map packs page
     create_pack_page();
@@ -2461,6 +2494,7 @@ static void create_controls() {
     set_check(ID_X_ALLVEH, ini_get(L"x_allveh", L"1") == L"1");
     set_check(ID_X_LODSTOCK, ini_get(L"x_lodstock", L"0") == L"1");
     set_check(ID_X_MAKELOD, ini_get(L"x_makelod", L"1") == L"1");
+    set_check(ID_X_BOTS, ini_get(L"x_bots", L"1") == L"1");
     SendDlgItemMessageW(g_wnd, ID_X_TRIM, CB_SETCURSEL, std::clamp(_wtoi(ini_get(L"x_trim", L"1").c_str()), 0, 3), 0);
     SendDlgItemMessageW(g_wnd, ID_X_ANIM, CB_SETCURSEL, std::clamp(_wtoi(ini_get(L"x_anim", L"1").c_str()), 0, 2), 0);
     SendDlgItemMessageW(g_wnd, ID_X_PORTALS, CB_SETCURSEL, std::clamp(_wtoi(ini_get(L"x_portals", L"1").c_str()), 0, 2), 0);
@@ -2597,7 +2631,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case ID_X_ALLVEH:
             if (code == BN_CLICKED) { update_vehicle_texts(); save_settings(); }
             break;
-        case ID_X_LODSTOCK: case ID_X_MAKELOD:
+        case ID_X_LODSTOCK: case ID_X_MAKELOD: case ID_X_BOTS:
             if (code == BN_CLICKED) save_settings();
             break;
         case ID_X_PORTALS: case ID_X_TRIM: case ID_X_ANIM:

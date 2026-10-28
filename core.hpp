@@ -1,6 +1,7 @@
 // Halo Map Porter - conversion engine (portable: Windows + Linux for testing)
 #pragma once
 #include <cstdint>
+#include <array>
 #include <filesystem>
 #include <functional>
 #include <map>
@@ -82,6 +83,11 @@ struct Config {
     // Give a level made without portals (one cluster: everything in view is drawn, walls or not) clusters and portals
     // at its doorways and corridors (portals.hpp), when that cuts what the Xbox draws.
     bool xbox_add_portals = true;
+    // Add waypoints for Halo 1 Unlimited's multiplayer bots where its AI path search can't finish a hop and there's no
+    // way around (item spawn points that spawn nothing: botnodes.hpp).
+    bool xbox_bot_nodes = true;
+    // Waypoints for the bots placed in the Level window (each where an item spawn point that spawns nothing goes).
+    std::vector<std::array<double, 3>> xbox_bot_waypoints;
     // And divide further the clusters of levels made with portals of their own, when that draws 15% less (each keeps
     // its cluster's sky, fog, sound and weather); also a second time over a level the app just gave portals.
     bool xbox_replan_portals = false;

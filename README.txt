@@ -1767,22 +1767,75 @@ Content nobody can get (Xbox)
   so folders like weapons\sniper rifle can still show up).
 
 Bot route points (Xbox, Halo 1 Unlimited)
-  Halo 1 Unlimited's multiplayer bots find their way between route points
+  Halo 1 Unlimited's multiplayer bots find their way between waypoints
   made from the map's player spawns, item spawn points and netgame flags
-  (teleporters first, then spawns, item spots and the other flags). Points
-  within 1 unit of each other count once, and past 192 the rest are left
-  out with no warning, so bots never use them. Each Xbox build's log says
-  how many the map makes ("[bots] ... N of their 192 route points"), and
-  the report warns when a map goes past 192.
-  To help bots up stairs, ramps and walkways they get stuck under, add
-  hidden "AI nodes" in Sapien: item spawn points with all four gametypes
-  set to "none" (they never spawn anything), each still given an item
-  collection (any one). Put one at the bottom, landings and top of each
-  staircase or ramp, and every 5 to 10 units along walkways up to a raised
-  goal. Place each a little above its floor, never over a gap (the bots
-  drop each point straight down). Bots can't climb ladders, so nodes only
-  help where stairs or ramps lead. Don't bunch many in one place: they
-  draw wandering bots there.
+  (teleporters first, then spawns, item spots and the other flags). Each
+  is dropped onto the ground under it; points within 1 world unit (about
+  3 m) of one already taken are that one, and past 192 the rest are left
+  out with no warning, so bots never use them. Each waypoint links to its nearest ones, and a bot walks
+  each hop with Halo's own AI path search. That search only walks the
+  level's AI floor (the surfaces Tool marks walkable, joined edge to edge),
+  opens 1,024 surfaces at most, and goes no further than twice the hop
+  plus 10 units; a bot whose search doesn't get there walks to the closest
+  spot it found (it jumps a ledge up to a crouch-jump's height, or steps
+  off a drop it survives, from there). So on a level cut into many small
+  surfaces, or with stairs reached the long way round, a bot can end up
+  standing under its waypoint.
+
+  "Add waypoints for Halo 1 Unlimited's bots" (Xbox tab, on by default)
+  works this out on each Xbox build. It makes the waypoints and links as
+  the game does and runs every hop's search the way the game runs it. A
+  hop the search can't finish is fine when the hops that do work go round
+  it (the bots learn to drop a link that fails twice). Where they don't,
+  but the floor (with jumps and drops a bot can make) does join the two
+  ends, it follows that way and adds waypoints along it, each as far as a
+  search still finishes to, and only where the bots will link them. The
+  added waypoints are item spawn points with all four gametypes "none":
+  they never spawn anything (stock Halo ignores them too). It keeps them
+  only when they join more of the map's own waypoints, and stays well
+  under the 192.
+  The log's [bots] line says how many waypoints the map's points make
+  (counting those merged, those with no ground under them, and, by kind,
+  the ones past 192 the game leaves out: Precipice's 272 points make 230,
+  so its last 38, mostly race flags and one CTF flag, never become
+  waypoints), how many were added, how much of the map the bots' working links now join, and
+  how many links bots still can't walk with no way round: those need a
+  jump higher than a crouch-jump, a ladder, a lift, a man cannon, or
+  stairs the AI floor data doesn't join (nothing a waypoint fixes). A
+  picture of it from above goes beside the report (reports\<map> -
+  bots.bmp): the floor the AI walks by height (lighter is higher), the
+  map's waypoints in blue, the added ones in orange, the ways they were
+  added along in yellow, and in red the links still with no way round.
+  A map that already uses (nearly) all 192, like Blood Gulch with its
+  race and CTF flags, gets none.
+
+  Placing your own in the Level window (Xbox tab, Level...): "Bot
+  waypoints..." shows the bots' waypoints and links in the picture, worked
+  out as a conversion would with yours in: blue the map's own, green
+  yours, orange the ones a conversion adds; links green where the bots
+  walk them, amber where their search can't finish one way but they go
+  round, red where nothing goes round. Click the level to put a waypoint
+  there (a little above the floor: the bots drop it onto the floor below),
+  click one of yours (or pick it in the list) to Delete it, and "Next red
+  link" looks at each red link in turn, saying whether a walk joins its
+  ends (then waypoints along that walk can fix it) or not (a jump, ladder
+  or lift: nothing a waypoint fixes). Yours are kept for the map with its
+  other Level choices (OK keeps them) and go into every Xbox conversion
+  or build as item spawn points that spawn nothing, before the
+  automatic ones are worked out. One within 1 unit of a waypoint already
+  there makes one with it (the list says so). A measurement made before
+  this version has no waypoints to show: press "Measure again". The lines
+  need the picture drawn on the graphics card (OpenGL 2). The level
+  picture never draws an item on a spawn point that spawns nothing (the
+  waypoints' own, or any the map has), since no game puts one there.
+
+  You can add your own in Sapien too: item spawn points with all four
+  gametypes set to "none", each still given an item collection (any one).
+  Put one at the bottom, landings and top of each staircase or ramp, and
+  every 5 to 10 units along walkways up to a raised goal. Place each a
+  little above its floor, never over a gap (the bots drop each point
+  straight down). Don't bunch many in one place: they draw wandering bots
+  there. The app keeps yours and plans around them.
 
 Machines (Xbox)
   Machines (device_machine: doors, lifts, anything a map animates as a
@@ -2240,8 +2293,9 @@ The log lists every automatic change:
   [lod]   Lower-detail versions were made for models, or models got
           switch distances for theirs (see "Levels of detail" above).
   [portals] A level made without portals got them (see "Portals" above).
-  [bots]  Route points the map gives Halo 1 Unlimited's bots, and item
-          spawn points kept for them (see "Bot route points" above).
+  [bots]  Waypoints the map gives Halo 1 Unlimited's bots, the ones added
+          for them, and item spawn points kept for them (see "Bot route
+          points" above).
   [water] Clusters inside a water volume were made underwater (see "Water
           at more than one height" above).
   [reflections] Level reflections were dropped, as chosen in the Level

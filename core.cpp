@@ -10,6 +10,7 @@
 #include "levelshaders.hpp"
 #include "showcase.hpp"
 #include "portals.hpp"
+#include "botnodes.hpp"
 #include "preview.hpp"
 #include "sky.hpp"
 #include "tagedit.hpp"
@@ -335,6 +336,7 @@ struct Job {
     // doesn't fit the Xbox), and what those versions take in the Xbox map.
     std::vector<std::pair<fs::path, std::string>> lod_backups;
     std::vector<std::pair<fs::path, std::string>> portal_backups;   // levels the app gave portals, as they were
+    fs::path bots_picture;   // the bots' waypoints from above (bot_route_points), for beside the report
     size_t lod_xbox_bytes = 0;
     std::vector<LodView::Model> lod_changes;   // the models whose levels of detail changed (for the LODs window)
     std::map<std::string, std::string> trim_originals;   // trimmed models (tag) as the map made them, for that window
@@ -1732,6 +1734,13 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
         }
     }
     r.shaders = job.shaders_file;
+    if (!job.shaders_file.empty() && fs::exists(job.work / "bots.txt", ec)) {   // (for the Level window's bot waypoints)
+        fs::path t = job.shaders_file, b = job.shaders_file;
+        t += ".bots";
+        b += ".bots.scenario_structure_bsp";
+        fs::copy_file(job.work / "bots.txt", t, fs::copy_options::overwrite_existing, ec);
+        fs::copy_file(job.work / "bots.scenario_structure_bsp", b, fs::copy_options::overwrite_existing, ec);
+    }
     if (cfg.level_shaders_only) {   // (measured: nothing more to do)
         r.ok = !job.shaders_file.empty();
         if (!r.ok) r.error = "The map's level couldn't be measured.";
@@ -2215,6 +2224,8 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
     fs::path reports = cfg.cache_dir / "reports";
     fs::create_directories(reports, ec);
     r.report = reports / (stem + " - " + game_name(job.target) + ".txt");
+    if (!job.bots_picture.empty() && fs::exists(job.bots_picture, ec))
+        fs::copy_file(job.bots_picture, reports / (stem + " - bots.bmp"), fs::copy_options::overwrite_existing, ec);
     if (job.update) {   // (the conversion's report, with what the update changed after it)
         std::ofstream rep(r.report, std::ios::app);
         std::time_t now = std::time(nullptr);
@@ -11988,10 +11999,13 @@ void drop_dead_placements(Job &job, const fs::path &xsrc) {
              "(one in a vehicle slot stays when the map has Race vehicle spawns: Race spawns the slots' vehicles)");
 }
 
-// Halo 1 Unlimited's multiplayer bots find their way over route points made from the map's player spawns, item
-// spawn points (those that spawn nothing too: a map's hidden "AI nodes") and netgame flags, teleporters first, then
-// spawns, items, the other flags; points within 1 unit of one already taken are one; past 192 the rest are left out,
-// unsaid. The log says how many the map makes.
+// Halo 1 Unlimited's multiplayer bots find their way over waypoints made from the map's player spawns, item spawn
+// points (those that spawn nothing too: a map's hidden "AI nodes") and netgame flags, and walk each hop between two
+// with Halo's AI path search (botnodes.hpp). This runs their waypoints, links and searches as the game does, and where
+// a hop the search can't finish has no way around over the links that work, but the level's floors do join its ends,
+// adds waypoints along the way (item spawn points that spawn nothing), when that joins more of the map's waypoints.
+// The log says how many waypoints the map makes, what was added, and what bots still can't reach (a jump, a ladder, a
+// lift); a picture of it (from above) goes beside the report.
 void bot_route_points(Job &job, const fs::path &xsrc) {
     const std::string scen = job.scenario + ".scenario";
     fs::path dir = fs::exists(xsrc / from_u8(scen)) ? xsrc : job.owner(scen);
@@ -11999,45 +12013,156 @@ void bot_route_points(Job &job, const fs::path &xsrc) {
     if (dir.empty() || !t.load(dir / from_u8(scen))) return;
     tagfile::Elem r = t.root();
     if (r.integer("type") != 1) return;   // multiplayer
-    std::vector<portals::V3> taken;
-    int over = 0, merged = 0;
-    auto add = [&](const tagfile::Elem &e) {
-        portals::V3 p{e.num("position", 0), e.num("position", 1), e.num("position", 2)};
-        for (auto &q : taken) {
-            double dx = p[0] - q[0], dy = p[1] - q[1], dz = p[2] - q[2];
-            if (dx * dx + dy * dy + dz * dz < 1.0) { merged++; return; }
-        }
-        if (taken.size() >= 192) { over++; return; }
-        taken.push_back(p);
-    };
+    // The points, in the bots' order: each teleporter's way in and its way out, the spawns, the item spots, the other flags.
+    std::vector<botnodes::V3> points;
+    std::vector<std::string> kind;   // (each point's, for what's left out)
+    static const char *flag_kinds[] = {"CTF flag", "CTF vehicle spawn", "oddball spawn", "race flag", "race vehicle spawn",
+                                       "vegas bank", "teleporter", "teleporter", "hill flag"};
+    auto flag_kind = [](long long ty) { return ty >= 0 && ty < 9 ? std::string(flag_kinds[ty]) : std::string("flag"); };
+    auto pos = [](const tagfile::Elem &e) { return botnodes::V3{e.num("position", 0), e.num("position", 1), e.num("position", 2)}; };
     tagfile::Block flags = r.block("netgame flags"), spawns = r.block("player starting locations"),
                    items = r.block("netgame equipment");
     int tele = 0, other = 0, hidden = 0;
     for (size_t i = 0; i < flags.size(); i++) {
-        long long ty = flags[i].integer("type");
-        if (ty == 6 || ty == 7) { add(flags[i]); tele++; }
+        if (flags[i].integer("type") != 6) continue;   // teleporter_source
+        for (size_t j = 0; j < flags.size(); j++)
+            if (flags[j].integer("type") == 7 && flags[j].integer("team index") == flags[i].integer("team index")) {
+                points.push_back(pos(flags[i]));
+                points.push_back(pos(flags[j]));
+                kind.insert(kind.end(), 2, "teleporter");
+                tele += 2;
+                break;
+            }
     }
-    for (size_t i = 0; i < spawns.size(); i++) add(spawns[i]);
+    for (size_t i = 0; i < spawns.size(); i++) {
+        points.push_back(pos(spawns[i]));
+        kind.push_back("player spawn");
+    }
     for (size_t i = 0; i < items.size(); i++) {
         bool none = true;
         for (const char *f : {"type 0", "type 1", "type 2", "type 3"}) none = none && items[i].integer(f) == 0;
         if (none) hidden++;
-        add(items[i]);
+        points.push_back(pos(items[i]));
+        kind.push_back(none ? "item spawn point that spawns nothing" : "item spawn point");
     }
+    // (the Level window's: added after the map's item spawn points, as they're put in the scenario; the window plans
+    // with its own, so they're left out of what it's given)
+    const size_t insert_at = points.size();
+    const std::vector<botnodes::V3> mine(job.cfg.xbox_bot_waypoints.begin(), job.cfg.xbox_bot_waypoints.end());
     for (size_t i = 0; i < flags.size(); i++) {
         long long ty = flags[i].integer("type");
-        if (ty != 6 && ty != 7) { add(flags[i]); other++; }
+        if (ty != 6 && ty != 7) {
+            points.push_back(pos(flags[i]));
+            kind.push_back(flag_kind(ty));
+            other++;
+        }
     }
-    std::string l = "[bots] the map gives Halo 1 Unlimited's bots " + std::to_string(taken.size()) + " of their 192 route points (" +
-                    std::to_string(spawns.size()) + " player spawns, " + std::to_string(items.size()) + " item spawn points" +
-                    (hidden ? " (" + std::to_string(hidden) + " that spawn nothing)" : std::string()) + ", " + std::to_string(other) +
-                    " flags, " + std::to_string(tele) + " teleporter ends" +
-                    (merged ? "; " + std::to_string(merged) + " within 1 unit of another counted once" : std::string()) + ")";
-    if (over)
-        job.note(l + ": " + std::to_string(over) + " more are left out (the last of the item spawn points and flags), so bots "
-                     "never go to or through them. Fewer hidden item spawn points (or spawns) make room");
-    else
-        job.log("  " + l);
+    tagfile::Block bsps = r.block("structure bsps");
+    std::string bsp = bsps.size() > 0 ? bsps[0].ref("structure bsp") : std::string();
+    fs::path bdir = bsp.empty() ? fs::path() : fs::exists(xsrc / from_u8(bsp)) ? xsrc : job.owner(bsp);
+    std::string counts = std::to_string(spawns.size()) + " player spawns, " + std::to_string(items.size()) + " item spawn points" +
+                         (hidden ? " (" + std::to_string(hidden) + " that spawn nothing)" : std::string()) + ", " + std::to_string(other) +
+                         " flags, " + std::to_string(tele) + " teleporter ends";
+    // For the Level window: the map's points (without the window's own), and its level's collision.
+    if (!bdir.empty()) {
+        std::ofstream f(job.work / "bots.txt", std::ios::binary | std::ios::trunc);
+        f << "HMP bots 1\nteleporters\t" << tele << "\ninsert\t" << insert_at << "\n";
+        char b[160];
+        for (size_t i = 0; i < points.size(); i++) {
+            snprintf(b, sizeof b, "p\t%.4f\t%.4f\t%.4f\t", points[i][0], points[i][1], points[i][2]);
+            f << b << kind[i] << "\n";
+        }
+        std::error_code ec;
+        fs::copy_file(bdir / from_u8(bsp), job.work / "bots.scenario_structure_bsp", fs::copy_options::overwrite_existing, ec);
+    }
+    std::vector<botnodes::V3> with_mine = points;
+    with_mine.insert(with_mine.begin() + (std::ptrdiff_t)insert_at, mine.begin(), mine.end());
+    kind.insert(kind.begin() + (std::ptrdiff_t)insert_at, mine.size(), "waypoint of yours");
+    points = with_mine;
+    botnodes::Options bo;
+    if (!job.cfg.xbox_bot_nodes) bo.max_add = 0;
+    botnodes::Result br = bdir.empty() ? botnodes::Result() : botnodes::plan(bdir / from_u8(bsp), points, tele, bo);
+    if (!br.ok) {
+        job.log("  [bots] the map's " + std::to_string(points.size()) + " points for Halo 1 Unlimited's bots (" + counts + ")" +
+                (br.why.empty() ? std::string() : ": its level " + br.why));
+        return;
+    }
+    // The nodes: item spawn points with every game type "none", each like one the map has (its item collection).
+    int added = 0;
+    std::vector<botnodes::V3> nodes = mine;   // (the window's, then the ones added)
+    nodes.insert(nodes.end(), br.added.begin(), br.added.end());
+    if (!nodes.empty()) {
+        for (const fs::path &d : {job.fixes, xsrc}) {
+            if (d.empty() || !fs::exists(d / from_u8(scen))) continue;
+            tagfile::EditTag et;
+            if (!et.load(d / from_u8(scen))) continue;
+            std::vector<tagfile::TagNode> *ne = tagfile::block(et.root(), "netgame equipment");
+            if (!ne || ne->empty()) break;
+            size_t like = 0;   // (one that spawns something: its item collection is in the map anyway)
+            for (size_t i = 0; i < ne->size(); i++) {
+                bool none = true;
+                for (const char *f : {"type 0", "type 1", "type 2", "type 3"}) none = none && tagfile::get_num((*ne)[i], f) == 0;
+                if (!none) { like = i; break; }
+            }
+            const tagfile::TagNode model = (*ne)[like];
+            for (auto &p : nodes) {
+                tagfile::TagNode n = model;
+                for (const char *f : {"type 0", "type 1", "type 2", "type 3"}) tagfile::set_num(n, f, 0);
+                tagfile::set_num(n, "flags", 0);
+                tagfile::set_num(n, "team index", 0);
+                for (int k = 0; k < 3; k++) tagfile::set_num(n, "position", p[(size_t)k], k);
+                tagfile::set_num(n, "facing", 0);
+                ne->push_back(n);
+            }
+            if (et.save(d / from_u8(scen))) added = (int)br.added.size();
+            else added = 0;
+        }
+    }
+    fs::path pic = job.work / "bots.bmp";
+    std::error_code ec;
+    fs::remove(pic, ec);
+    if (botnodes::picture(bdir / from_u8(bsp), br, pic)) job.bots_picture = pic;
+    const int total = br.given + added;
+    if (!mine.empty()) counts += ", " + std::to_string(mine.size()) + " of yours (the Level window's)";
+    // Its points as the bots take them: on the ground, those within 1 unit of one already taken that one, 192 at most.
+    std::string l = "[bots] the map's " + std::to_string(points.size()) + " points (" + counts + ") make " + std::to_string(br.given) +
+                    " of Halo 1 Unlimited's 192 bot waypoints";
+    {
+        std::vector<std::string> why;
+        if (br.merged) why.push_back(std::to_string(br.merged) + " within 1 world unit of another (the game makes those one)");
+        if (br.no_ground) why.push_back(std::to_string(br.no_ground) + " with no ground under " + (br.no_ground == 1 ? "it" : "them") + " (no waypoint)");
+        if (!br.left_out.empty()) {
+            std::map<std::string, int> by;
+            for (int i : br.left_out)
+                if (i >= 0 && i < (int)kind.size()) by[kind[(size_t)i]]++;
+            std::string list;
+            for (auto &[k, c] : by) {
+                std::string name = k;
+                if (c != 1) name = k == "item spawn point that spawns nothing" ? "item spawn points that spawn nothing" : k + "s";
+                list += (list.empty() ? "" : ", ") + std::to_string(c) + " " + name;
+            }
+            why.push_back(std::to_string(br.left_out.size()) + " more left out past the 192 (" + list +
+                          "): the game drops the last ones with no warning, so bots never go to them");
+        }
+        for (size_t k = 0; k < why.size(); k++) l += (k ? (k + 1 == why.size() ? " and " : ", ") : ": ") + why[k];
+    }
+    if (added) {
+        auto pct = [&](long v) { return std::to_string((int)std::lround(100.0 * v / std::max(1, br.given * (br.given - 1)))); };
+        l += ". Added " + std::to_string(added) + " (item spawn points that spawn nothing), " + std::to_string(total) +
+             " now, where the bots' path search can't finish a hop and the hops that work don't go around: their waypoints "
+             "now join " + pct(br.reach_after) + "% of the ways between the map's own (" + pct(br.reach_before) + "% before)";
+    } else if (job.cfg.xbox_bot_nodes && br.stuck_before > 0 && br.unjoined < br.stuck_after) {
+        l += ". None added: they wouldn't join more of the map's waypoints" +
+             std::string(total >= bo.budget - bo.spare ? " (the map has no room for more)" : "");
+    }
+    if (br.stuck_after > 0) {
+        l += ". " + std::to_string(br.stuck_after) + " link" + (br.stuck_after == 1 ? "" : "s") + " bots can't walk with no way around" +
+             (br.unjoined ? " (" + std::to_string(br.unjoined) + " where no walk joins them: a jump higher than a crouch-jump, a "
+                            "ladder, a lift, stairs the AI's floor data doesn't join)" : std::string());
+    }
+    if (!job.bots_picture.empty()) l += ". A picture of them from above goes beside the report (\"- bots.bmp\")";
+    if (added || !br.left_out.empty() || br.no_ground) job.note(l);
+    else job.log("  " + l);
 }
 
 // Machines (device_machine) cost the Xbox more every tick than anything else a map places that doesn't move by
@@ -13647,7 +13772,7 @@ Result update_xbox_models(const Config &cfg, const fs::path &file, const Log &lo
 
 std::string xbox_prepare_key(const Config &c) {
     std::ostringstream k;
-    k << "HMP prepare 2\n";   // (2: automatic picks, the gravity rifle and spare needlers)
+    k << "HMP prepare 3\n";   // (3: bot waypoints; 2: automatic picks, the gravity rifle and spare needlers)
     auto path = [&](const char *n, const fs::path &p) { k << n << "=" << u8(p) << "\n"; };
     path("invader", c.invader_dir);
     path("ce", c.ce_dir);
@@ -13664,7 +13789,8 @@ std::string xbox_prepare_key(const Config &c) {
     k << "other=" << c.xbox_other_weapons << "\n";
     for (auto &[w, r] : c.xbox_replace) k << "pick=" << w << "=" << r << "\n";
     k << "anim=" << c.xbox_compress_animations << " coll=" << c.xbox_collision << " portals=" << c.xbox_add_portals
-      << c.xbox_replan_portals << "\n";
+      << c.xbox_replan_portals << " bots=" << c.xbox_bot_nodes << "\n";
+    for (auto &w : c.xbox_bot_waypoints) k << "waypoint=" << w[0] << " " << w[1] << " " << w[2] << "\n";
     k << "fog=" << c.xbox_fog << " " << c.xbox_fog_scale << " " << c.xbox_fog_distance << " " << c.xbox_fog_start << "\n";
     k << "fx=" << c.xbox_effects << " sky=" << c.xbox_sky << " weather=" << c.xbox_weather << " riders=" << c.xbox_rider_ai_off
       << " props=" << c.xbox_detailed_props_off << " lights=" << c.xbox_object_lights << "\n";

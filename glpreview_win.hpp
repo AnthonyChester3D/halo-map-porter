@@ -29,6 +29,13 @@ struct Frame {
     bool look = false;
     std::array<float, 3> look_at{};
     const std::vector<lshade::Box> *boxes = nullptr;
+    // Lines and points drawn over the level (the bots' waypoints and links): colours as 0xAARRGGBB. `through`: also
+    // faintly where something's in front of them.
+    struct Line { std::array<float, 3> a, b; uint32_t argb; float width; };
+    struct Mark { std::array<float, 3> p; uint32_t argb; float size; };
+    std::vector<Line> lines;
+    std::vector<Mark> marks;
+    bool through = false;
 };
 
 class Renderer {

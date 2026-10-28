@@ -607,6 +607,41 @@ void Renderer::draw(const Frame &f) {
             glDepthMask(GL_TRUE);
             glDisable(GL_BLEND);
         }
+        // Lines and points over the level (the bots' waypoints): faintly through what's in front, then as they are.
+        if (!f.lines.empty() || !f.marks.empty()) {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDepthMask(GL_FALSE);
+            auto color = [](uint32_t c, float fade) {
+                glColor4f(((c >> 16) & 255) / 255.0f, ((c >> 8) & 255) / 255.0f, (c & 255) / 255.0f, ((c >> 24) & 255) / 255.0f * fade);
+            };
+            for (int pass = f.through ? 0 : 1; pass < 2; pass++) {
+                if (pass == 0) glDisable(GL_DEPTH_TEST);
+                else { glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LEQUAL); }
+                float fade = pass == 0 ? 0.22f : 1.0f;
+                for (auto &l : f.lines) {
+                    glLineWidth(l.width);
+                    color(l.argb, fade);
+                    glBegin(GL_LINES);
+                    glVertex3f(l.a[0], l.a[1], l.a[2]);
+                    glVertex3f(l.b[0], l.b[1], l.b[2]);
+                    glEnd();
+                }
+                for (auto &m : f.marks) {
+                    glPointSize(m.size);
+                    color(m.argb, fade);
+                    glBegin(GL_POINTS);
+                    glVertex3f(m.p[0], m.p[1], m.p[2]);
+                    glEnd();
+                }
+            }
+            glEnable(GL_DEPTH_TEST);
+            glPointSize(1.0f);
+            glLineWidth(1.0f);
+            glDepthFunc(GL_LESS);
+            glDepthMask(GL_TRUE);
+            glDisable(GL_BLEND);
+        }
         // The portals: a glow where you see through one, and its outline (as lshade::draw's).
         if (f.portals && !f.what_it_loses) {
             glEnable(GL_BLEND);

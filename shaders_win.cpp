@@ -4,6 +4,7 @@
 #include <commctrl.h>
 #include <windowsx.h>
 
+#include "botnodes.hpp"
 #include "glpreview_win.hpp"
 #include "levelshaders.hpp"
 #include "showcase.hpp"
@@ -33,6 +34,8 @@ enum {
     IDC_SC_KEYS_LBL, IDC_SC_KPREV, IDC_SC_KEY, IDC_SC_KNEXT, IDC_SC_KGO, IDC_SC_KMOVE, IDC_SC_ORBIT_LBL, IDC_SC_ORAD_LBL,
     IDC_SC_ORAD, IDC_SC_OHGT_LBL, IDC_SC_OHGT, IDC_SC_OAR_LBL, IDC_SC_OAR, IDC_SC_ORBIT, IDC_SC_SAVE, IDC_SC_PACE, IDC_SC_HINT,
     IDC_FOG_START, IDC_FOG_TO, IDC_OBJECTS,
+    IDC_BOTS, IDC_BOTS_TEXT, IDC_BOTS_LIST, IDC_BOTS_DEL, IDC_BOTS_CLEAR, IDC_BOTS_NEXT, IDC_BOTS_THROUGH, IDC_BOTS_GOOD,
+    IDC_BOTS_HINT,
 };
 #define WM_LS_LOG (WM_APP + 60)
 #define WM_LS_DONE (WM_APP + 61)
@@ -85,6 +88,24 @@ struct State {
     bool playing = false;
     int play_shot = -1;   // (-1: all of them, round and round)
     LARGE_INTEGER play_start{};
+    fs::path file;   // the measurement shown
+    // The bots' waypoints ("Bot waypoints..." swaps the list for them; botnodes.hpp): the map's points as the
+    // measurement found them (in the bots' order; yours go in at `bot_insert`, after its item spawn points), its level's
+    // collision, and the bots' waypoints and links with yours, as a conversion makes them.
+    bool bots_mode = false, bots_loaded = false, bots_through = true, bots_good = true;
+    std::vector<botnodes::V3> bot_points;
+    std::vector<std::string> bot_kinds;
+    int bot_tele = 0;
+    size_t bot_insert = 0;
+    fs::path bot_bsp;
+    std::string bot_why;   // (none: why)
+    botnodes::Result bot_res;
+    std::vector<int> bot_mine_at;   // each of yours: its waypoint (in bot_res.waypoints), or -1
+    std::vector<char> bot_mine_merged;   // (that waypoint an earlier point's: within 1 unit of it)
+    int bot_sel = -1;               // (one of yours, picked)
+    size_t bot_next = 0;            // ("Next problem": the last one shown)
+    bool click = false;             // (a press in the picture that hasn't moved: a click)
+    POINT click_at{};
 };
 State *St = nullptr;
 
@@ -160,6 +181,13 @@ void keep_locked(const std::string &key, const fs::path &file) {
     fs::path lsh = disk_name(key), kf = lsh;
     kf.replace_extension(".key");
     if (!fs::copy_file(file, lsh, fs::copy_options::overwrite_existing, ec)) { g_cache[key] = file; return; }
+    for (const char *side : {".bots", ".bots.scenario_structure_bsp"}) {   // (the bots' waypoints' data beside it)
+        fs::path from = file, to = lsh;
+        from += side;
+        to += side;
+        if (fs::exists(from, ec)) fs::copy_file(from, to, fs::copy_options::overwrite_existing, ec);
+        else fs::remove(to, ec);
+    }
     std::ofstream(kf, std::ios::binary) << key;
     g_cache[key] = lsh;
 }
@@ -198,6 +226,9 @@ lshade::Fog fog_for(const lshade::Camera &c) {
     return f;
 }
 
+void bots_frame(glpreview::Frame &f);
+void set_bots_mode(bool on);
+
 // Draws the picture: on the graphics card when it can (fast enough to fly through), else here (`fast`: at half the
 // size, while the camera moves).
 void render(bool fast) {
@@ -228,6 +259,7 @@ void render(bool fast) {
                 f.look_at = {(float)shot.at[0], (float)shot.at[1], (float)shot.at[2]};
             }
         }
+        if (St->bots_mode) bots_frame(f);
         St->gl->draw(f);
         ValidateRect(St->view, nullptr);
         return;
@@ -465,6 +497,7 @@ std::wstring g_status_text;   // (the list's status line, back when leaving the 
 void fog_cut_status();
 void set_sc_mode(bool on) {
     if (on && !St->data) return;
+    if (on && St->bots_mode) set_bots_mode(false);
     if (on) sc_prepare();
     else sc_stop();
     St->sc_mode = on;
@@ -482,6 +515,322 @@ void set_sc_mode(bool on) {
         render(false);
     }
 }
+// ---- the bots' waypoints (botnodes.hpp): in place of the list, drawn in the picture, yours added by clicking it
+const uint32_t kMapMark = 0xFF4A90FF, kMineMark = 0xFF36F07A, kAutoMark = 0xFFFF8C1A, kPickedMark = 0xFFFFFFFF;
+const uint32_t kGoodLine = 0x9050D070, kRoundLine = 0xB0F0B030, kStuckLine = 0xFFFF3A3A;
+
+// A point's place in the picture (false: behind the camera), as lshade::draw projects.
+bool project(const botnodes::V3 &p, int w, int h, double &sx, double &sy) {
+    const double tx = std::tan(35.0 * 3.14159265358979 / 180), ty = tx * h / std::max(1, w);
+    const auto &c = St->cam;
+    double fwd[3] = {std::cos(c.yaw) * std::cos(c.pitch), std::sin(c.yaw) * std::cos(c.pitch), std::sin(c.pitch)};
+    double right[3] = {fwd[1], -fwd[0], 0};
+    double rl = std::sqrt(right[0] * right[0] + right[1] * right[1]);
+    if (rl < 1e-9) return false;
+    right[0] /= rl;
+    right[1] /= rl;
+    double up[3] = {right[1] * fwd[2] - right[2] * fwd[1], right[2] * fwd[0] - right[0] * fwd[2], right[0] * fwd[1] - right[1] * fwd[0]};
+    double d[3] = {p[0] - c.eye[0], p[1] - c.eye[1], p[2] - c.eye[2]};
+    double z = d[0] * fwd[0] + d[1] * fwd[1] + d[2] * fwd[2];
+    if (z < 0.05) return false;
+    sx = ((d[0] * right[0] + d[1] * right[1]) / z / tx * 0.5 + 0.5) * w;
+    sy = (0.5 - (d[0] * up[0] + d[1] * up[1] + d[2] * up[2]) / z / ty * 0.5) * h;
+    return true;
+}
+
+// The two ends of a link (one each way), and how it goes: 0 both ways walked, 1 a way the search can't finish but the
+// bots go round, 2 one with nothing round it.
+struct BotLink { int a, b, how; };
+std::vector<BotLink> bot_links() {
+    std::map<std::pair<int, int>, int> how;
+    for (auto &h : St->bot_res.hops) {
+        auto k = std::make_pair(std::min(h.a, h.b), std::max(h.a, h.b));
+        int v = h.ok ? 0 : h.around ? 1 : 2;
+        auto it = how.find(k);
+        if (it == how.end()) how[k] = v;
+        else it->second = std::max(it->second, v);
+    }
+    std::vector<BotLink> out;
+    for (auto &[k, v] : how) out.push_back({k.first, k.second, v});
+    return out;
+}
+
+void bots_frame(glpreview::Frame &f) {
+    if (!St->bots_loaded || !St->bot_res.ok) return;
+    const auto &r = St->bot_res;
+    f.through = St->bots_through;
+    auto up = [](const botnodes::V3 &p, double dz) { return std::array<float, 3>{(float)p[0], (float)p[1], (float)(p[2] + dz)}; };
+    for (auto &l : bot_links()) {
+        if (l.a >= (int)r.waypoints.size() || l.b >= (int)r.waypoints.size()) continue;
+        if (l.how == 0 && !St->bots_good) continue;
+        uint32_t c = l.how == 0 ? kGoodLine : l.how == 1 ? kRoundLine : kStuckLine;
+        f.lines.push_back({up(r.waypoints[(size_t)l.a], 0.3), up(r.waypoints[(size_t)l.b], 0.3), c, l.how == 2 ? 3.0f : 1.5f});
+    }
+    std::vector<char> mine(r.waypoints.size(), 0);
+    for (size_t k = 0; k < St->bot_mine_at.size(); k++) {
+        int i = St->bot_mine_at[k];
+        if (i >= 0 && (size_t)i < mine.size() && !St->bot_mine_merged[k]) mine[(size_t)i] = 1;
+    }
+    for (size_t i = 0; i < r.waypoints.size(); i++) {
+        uint32_t c = mine[i] ? kMineMark : (int)i < r.given ? kMapMark : kAutoMark;
+        f.marks.push_back({up(r.waypoints[i], 0.3), c, mine[i] ? 11.0f : 9.0f});
+    }
+    if (St->bot_sel >= 0 && (size_t)St->bot_sel < St->bot_mine_at.size()) {
+        int i = St->bot_mine_at[(size_t)St->bot_sel];
+        botnodes::V3 p = i >= 0 && (size_t)i < r.waypoints.size() ? r.waypoints[(size_t)i] : St->picks.bots[(size_t)St->bot_sel];
+        f.marks.push_back({up(p, 0.3), kPickedMark, 15.0f});
+    }
+}
+
+std::wstring bots_where(const botnodes::V3 &p) {
+    wchar_t b[96];
+    swprintf(b, 96, L"(%.1f, %.1f, %.1f)", p[0], p[1], p[2]);
+    return b;
+}
+
+void bots_text() {
+    if (!St->bots_loaded) {
+        SetWindowTextW(item(IDC_BOTS_TEXT), W(St->bot_why).c_str());
+        return;
+    }
+    const auto &r = St->bot_res;
+    if (!r.ok) {
+        SetWindowTextW(item(IDC_BOTS_TEXT), (L"The bots' waypoints couldn't be worked out: " + W(r.why) + L".").c_str());
+        return;
+    }
+    int mine = 0;
+    for (size_t k = 0; k < St->bot_mine_at.size(); k++) mine += St->bot_mine_at[k] >= 0 && !St->bot_mine_merged[k];
+    int good = 0, round = 0, stuck = 0;
+    for (auto &l : bot_links()) (l.how == 0 ? good : l.how == 1 ? round : stuck)++;
+    auto pct = [&](long v) { return std::to_wstring((int)std::lround(100.0 * v / std::max(1, r.given * (r.given - 1)))); };
+    const int total = (int)r.waypoints.size();
+    std::wstring t = L"Waypoints: " + std::to_wstring(total) + L" of the bots' 192: " + std::to_wstring(r.given - mine) +
+                     L" from the map's spawns, item spots and flags (blue), " + std::to_wstring(mine) + L" of yours (green)";
+    if (!r.added.empty()) t += L", " + std::to_wstring(r.added.size()) + L" a conversion adds (orange)";
+    t += L".";
+    if (r.merged) t += L" " + std::to_wstring(r.merged) + L" of the map's points are within 1 unit of another and make one with it.";
+    if (!r.left_out.empty()) {
+        std::vector<std::string> kinds = St->bot_kinds;   // (as the points were planned: yours in)
+        size_t at = std::min(St->bot_insert, kinds.size());
+        kinds.insert(kinds.begin() + (std::ptrdiff_t)at, St->picks.bots.size(), "waypoint of yours");
+        std::map<std::string, int> by;
+        for (int i : r.left_out) by[i >= 0 && (size_t)i < kinds.size() ? kinds[(size_t)i] : std::string("point")]++;
+        std::wstring list;
+        for (auto &[k, c] : by) {
+            std::string name = k;
+            if (c != 1)
+                name = k == "item spawn point that spawns nothing" ? "item spawn points that spawn nothing"
+                       : k == "waypoint of yours"                  ? "waypoints of yours"
+                                                                   : k + "s";
+            list += (list.empty() ? L"" : L", ") + std::to_wstring(c) + L" " + W(name);
+        }
+        t += L" Past the 192, the game leaves out " + std::to_wstring(r.left_out.size()) + L" (" + list + L"): bots never go to them.";
+    }
+    t += L"\r\n\r\nLinks: " + std::to_wstring(good) + L" the bots walk (green), " + std::to_wstring(round) +
+         L" their search can't finish one way but they go round (amber), " + std::to_wstring(stuck) + L" with nothing round (red)";
+    {
+        std::set<std::pair<int, int>> joined, red;   // (red links: whether a walk joins their ends)
+        for (auto &h : r.hops)
+            if (!h.ok && !h.around) {
+                auto k = std::make_pair(std::min(h.a, h.b), std::max(h.a, h.b));
+                red.insert(k);
+                if (h.joined) joined.insert(k);
+            }
+        size_t none = red.size() - joined.size();
+        if (none) t += L"; " + std::to_wstring(none) + L" of those no walk joins (a jump, ladder or lift: no waypoint helps)";
+    }
+    t += L". The working links join " + pct(r.reach_after) + L"% of the ways between the map's own waypoints";
+    if (!r.added.empty()) t += L" (" + pct(r.reach_before) + L"% without the orange ones)";
+    t += L".";
+    SetWindowTextW(item(IDC_BOTS_TEXT), t.c_str());
+}
+
+void bots_fill_list() {
+    HWND l = item(IDC_BOTS_LIST);
+    SendMessageW(l, LB_RESETCONTENT, 0, 0);
+    for (size_t i = 0; i < St->picks.bots.size(); i++) {
+        std::wstring s = std::to_wstring(i + 1) + L"   " + bots_where(St->picks.bots[i]);
+        if (i < St->bot_mine_at.size() && St->bot_mine_at[i] < 0) s += L"   (no waypoint: no ground under it, or past 192)";
+        else if (i < St->bot_mine_merged.size() && St->bot_mine_merged[i]) s += L"   (within 1 unit of another: one waypoint with it)";
+        SendMessageW(l, LB_ADDSTRING, 0, (LPARAM)s.c_str());
+    }
+    if (St->bot_sel >= 0) SendMessageW(l, LB_SETCURSEL, (WPARAM)St->bot_sel, 0);
+    EnableWindow(item(IDC_BOTS_DEL), St->bot_sel >= 0);
+    EnableWindow(item(IDC_BOTS_CLEAR), !St->picks.bots.empty());
+}
+
+// The bots' waypoints and links with yours, as a conversion makes them.
+void bots_plan() {
+    if (!St->bots_loaded) return;
+    std::vector<botnodes::V3> pts = St->bot_points;
+    size_t at = std::min(St->bot_insert, pts.size());
+    pts.insert(pts.begin() + (std::ptrdiff_t)at, St->picks.bots.begin(), St->picks.bots.end());
+    botnodes::Options o;
+    if (!St->picks.bots_auto) o.max_add = 0;
+    HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
+    St->bot_res = botnodes::plan(St->bot_bsp, pts, St->bot_tele, o);
+    SetCursor(old);
+    // (each of yours: the waypoint it makes, or the one it's within 1 unit of; and whether that one is the map's)
+    St->bot_mine_at.assign(St->picks.bots.size(), -1);
+    St->bot_mine_merged.assign(St->picks.bots.size(), 0);
+    const auto &r = St->bot_res;
+    std::vector<int> first(r.waypoints.size(), -1);   // (each waypoint: the first point that made it)
+    for (size_t i = 0; i < r.point_waypoint.size(); i++) {
+        int k = r.point_waypoint[i];
+        if (k >= 0 && (size_t)k < first.size() && first[(size_t)k] < 0) first[(size_t)k] = (int)i;
+    }
+    for (size_t k = 0; k < St->picks.bots.size(); k++) {
+        size_t i = at + k;
+        if (i >= r.point_waypoint.size()) continue;
+        int wp = r.point_waypoint[i];
+        St->bot_mine_at[k] = wp;
+        if (wp >= 0 && first[(size_t)wp] != (int)i) St->bot_mine_merged[k] = 1;
+    }
+    bots_text();
+    bots_fill_list();
+    render(false);
+}
+
+void bots_loaded_now() {
+    St->bots_loaded = false;
+    St->bot_points.clear();
+    St->bot_kinds.clear();
+    fs::path t = St->file, b = St->file;
+    t += ".bots";
+    b += ".bots.scenario_structure_bsp";
+    std::ifstream f(t, std::ios::binary);
+    std::string l;
+    bool head = false;
+    while (std::getline(f, l)) {
+        if (!l.empty() && l.back() == '\r') l.pop_back();
+        if (l == "HMP bots 1") { head = true; continue; }
+        size_t tab = l.find('\t');
+        if (!head || tab == std::string::npos) continue;
+        std::string k = l.substr(0, tab), v = l.substr(tab + 1);
+        if (k == "teleporters") St->bot_tele = atoi(v.c_str());
+        else if (k == "insert") St->bot_insert = (size_t)std::max(0, atoi(v.c_str()));
+        else if (k == "p") {
+            botnodes::V3 p{};
+            char *e = nullptr;
+            const char *c = v.c_str();
+            for (int i = 0; i < 3; i++) { p[(size_t)i] = strtod(c, &e); c = *e ? e + 1 : e; }
+            St->bot_points.push_back(p);
+            St->bot_kinds.push_back(c);
+        }
+    }
+    std::error_code ec;
+    if (!head || !fs::exists(b, ec)) {
+        St->bot_why = "This measurement has no bot waypoints: the map isn't a multiplayer map, or it was measured before the "
+                      "app could show them. Press \"Measure again\".";
+        St->bot_res = botnodes::Result();
+        bots_text();
+        bots_fill_list();
+        render(false);
+        return;
+    }
+    St->bot_bsp = b;
+    St->bots_loaded = true;
+    bots_plan();
+}
+
+void set_bots_mode(bool on) {
+    if (on && !St->data) return;
+    if (on && St->sc_mode) set_sc_mode(false);
+    St->bots_mode = on;
+    ShowWindow(St->list, on ? SW_HIDE : SW_SHOW);
+    for (int id = IDC_BOTS_TEXT; id <= IDC_BOTS_HINT; id++) ShowWindow(item(id), on ? SW_SHOW : SW_HIDE);
+    SetWindowTextW(item(IDC_BOTS), on ? L"Back to the reflections" : L"Bot waypoints...");
+    if (on) {
+        SetWindowTextW(item(IDC_STATUS), L"Bot waypoints: click the level to put one there; click one of yours (green) to pick it.");
+        if (!St->bots_loaded) bots_loaded_now();
+        else bots_plan();
+    } else {
+        SetWindowTextW(item(IDC_STATUS), g_status_text.c_str());
+        fog_cut_status();
+        render(false);
+    }
+}
+
+// A click in the picture: one of yours within 12 pixels of it picked, else a new one on the surface there.
+void bots_click(int x, int y) {
+    RECT rc;
+    GetClientRect(St->view, &rc);
+    int best = -1;
+    double best_d = 12.0 * St->dpi / 96;
+    for (size_t k = 0; k < St->picks.bots.size(); k++) {
+        int i = k < St->bot_mine_at.size() ? St->bot_mine_at[k] : -1;
+        botnodes::V3 p = i >= 0 && (size_t)i < St->bot_res.waypoints.size() ? St->bot_res.waypoints[(size_t)i] : St->picks.bots[k];
+        p[2] += 0.3;
+        double sx, sy;
+        if (!project(p, rc.right, rc.bottom, sx, sy)) continue;
+        double d = std::hypot(sx - x, sy - y);
+        if (d < best_d) { best_d = d; best = (int)k; }
+    }
+    if (best >= 0) {
+        St->bot_sel = best;
+        bots_fill_list();
+        SetWindowTextW(item(IDC_STATUS), (L"Picked your waypoint " + std::to_wstring(best + 1) + L" " +
+                                          bots_where(St->picks.bots[(size_t)best]) + L": Delete removes it.").c_str());
+        render(false);
+        return;
+    }
+    std::array<double, 3> at{};
+    int t = lshade::pick(St->data->p, St->cam, rc.right, rc.bottom, x, y, &at, nullptr);
+    if (t < 0) {
+        SetWindowTextW(item(IDC_STATUS), L"Nothing of the level there to put a waypoint on.");
+        return;
+    }
+    St->picks.bots.push_back({at[0], at[1], at[2] + 0.25});   // (a little above the floor: the bots drop it down)
+    St->bot_sel = (int)St->picks.bots.size() - 1;
+    bots_plan();
+    int i = St->bot_mine_at.back();
+    std::wstring s = L"Added waypoint " + std::to_wstring(St->picks.bots.size()) + L" " + bots_where(St->picks.bots.back());
+    if (i < 0) s += L": no waypoint comes of it (no ground under it, or the map is past 192).";
+    else if (St->bot_mine_merged.back()) s += L": it's within 1 unit of a waypoint already there, so the bots make them one.";
+    else if ((size_t)i < St->bot_res.waypoints.size() && std::fabs(St->bot_res.waypoints[(size_t)i][2] - at[2]) > 0.6)
+        s += L": the bots drop it onto the floor below.";
+    else s += L".";
+    SetWindowTextW(item(IDC_STATUS), s.c_str());
+}
+
+void bots_delete() {
+    if (St->bot_sel < 0 || (size_t)St->bot_sel >= St->picks.bots.size()) return;
+    St->picks.bots.erase(St->picks.bots.begin() + St->bot_sel);
+    St->bot_sel = -1;
+    bots_plan();
+    SetWindowTextW(item(IDC_STATUS), L"Removed it.");
+}
+
+// "Next problem": the picture looks at the next red link, from above and behind it.
+void bots_next() {
+    std::vector<BotLink> stuck;
+    for (auto &l : bot_links())
+        if (l.how == 2) stuck.push_back(l);
+    if (stuck.empty()) {
+        SetWindowTextW(item(IDC_STATUS), L"No red links: every waypoint the bots can't walk to directly, they go round to.");
+        return;
+    }
+    St->bot_next = (St->bot_next + 1) % stuck.size();
+    const auto &l = stuck[St->bot_next];
+    const auto &r = St->bot_res;
+    const auto &a = r.waypoints[(size_t)l.a], &b = r.waypoints[(size_t)l.b];
+    double mid[3] = {(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2};
+    double span = std::max(4.0, std::hypot(a[0] - b[0], a[1] - b[1]) * 0.9 + 3);
+    double yaw = St->cam.yaw;
+    St->cam.eye = {mid[0] - std::cos(yaw) * span, mid[1] - std::sin(yaw) * span, mid[2] + span * 0.6};
+    St->cam.pitch = -std::atan2(span * 0.6, span);
+    render(false);
+    std::wstring s = L"Red link " + std::to_wstring(St->bot_next + 1) + L" of " + std::to_wstring(stuck.size()) + L": " +
+                     bots_where(a) + L" to " + bots_where(b) + L". ";
+    bool joined = false;
+    for (auto &h : r.hops)
+        if ((h.a == l.a && h.b == l.b) || (h.a == l.b && h.b == l.a))
+            if (!h.ok && !h.around) joined = joined || h.joined;
+    s += joined ? L"The floor joins them: waypoints along the way the bots walk (a few units apart) can let them through."
+                : L"No walk joins them (a jump, a ladder, a lift, or stairs the AI's floor doesn't join): no waypoint helps.";
+    SetWindowTextW(item(IDC_STATUS), s.c_str());
+}
+
 // The point in the middle of the picture (what a shot looks at), if there's a surface there.
 bool middle_point(std::array<double, 3> &at) {
     RECT rc;
@@ -822,10 +1171,14 @@ void start_measure() {
     }).detach();
 }
 
+void bots_loaded_now();
 bool load_file(const fs::path &f) {
     auto d = std::make_shared<Data>();
     if (!lshade::load(d->a, d->p, f)) return false;
     St->data = d;
+    St->file = f;
+    St->bots_loaded = false;
+    if (St->bots_mode) bots_loaded_now();
     if (St->gl) St->gl->set_scene(&d->p);
     // (picks made against an older measurement keep only the shaders still there)
     std::set<std::string> tags;
@@ -1027,15 +1380,27 @@ LRESULT CALLBACK view_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         SetFocus(h);
         St->dragging = true;
         St->drag_from = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        St->click = msg == WM_LBUTTONDOWN;
+        St->click_at = St->drag_from;
         start_ticking();
         return 0;
     case WM_LBUTTONDBLCLK:
+        if (St && St->data && St->bots_mode) {   // (a second click: as the first)
+            St->click = true;
+            St->click_at = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            SetCapture(h);
+            St->dragging = true;
+            St->drag_from = St->click_at;
+            return 0;
+        }
         if (St && St->data) pick_at(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
         return 0;
     case WM_MOUSEMOVE:
         if (St && St->dragging) {
             // Turns the camera itself, so the keys move it the way you look now.
             POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            if (St->click && std::abs(pt.x - St->click_at.x) + std::abs(pt.y - St->click_at.y) <= 3) return 0;   // (still a click)
+            St->click = false;
             St->cam.yaw -= (pt.x - St->drag_from.x) * 0.005;
             St->cam.pitch = std::clamp(St->cam.pitch - (pt.y - St->drag_from.y) * 0.005, -1.5, 1.5);
             St->drag_from = pt;
@@ -1049,6 +1414,11 @@ LRESULT CALLBACK view_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             St->dragging = false;
             if (msg != WM_CAPTURECHANGED) ReleaseCapture();
             St->dirty = true;
+            if (msg == WM_LBUTTONUP && St->click && St->bots_mode && St->data) {
+                St->click = false;
+                bots_click(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+            }
+            St->click = false;
         }
         return 0;
     case WM_MOUSEWHEEL:
@@ -1068,6 +1438,9 @@ LRESULT CALLBACK view_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         switch (wp) {
         case 'W': case 'A': case 'S': case 'D': case 'Q': case 'E': case VK_UP: case VK_DOWN: case VK_LEFT: case VK_RIGHT:
             if (St && St->data) start_ticking();
+            return 0;
+        case VK_DELETE: case VK_BACK:
+            if (St && St->bots_mode) bots_delete();
             return 0;
         }
         break;
@@ -1166,6 +1539,28 @@ void create_controls() {
         L"map folder's showcase.txt, and Save to map folder writes it now, without converting.",
         0, 12, 552, 548, 160, IDC_SC_HINT);
     for (int id = IDC_SC_LIST; id <= IDC_SC_HINT; id++) ShowWindow(item(id), SW_HIDE);
+    // The bots' waypoints: in place of the list too (hidden until "Bot waypoints...").
+    add(L"STATIC", L"", 0, 12, 68, 548, 150, IDC_BOTS_TEXT);
+    add(L"BUTTON", L"Show them through walls (faintly)", BS_AUTOCHECKBOX | WS_TABSTOP, 12, 224, 262, 22, IDC_BOTS_THROUGH);
+    add(L"BUTTON", L"Show the links that work (green)", BS_AUTOCHECKBOX | WS_TABSTOP, 280, 224, 280, 22, IDC_BOTS_GOOD);
+    CheckDlgButton(St->wnd, IDC_BOTS_THROUGH, St->bots_through ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(St->wnd, IDC_BOTS_GOOD, St->bots_good ? BST_CHECKED : BST_UNCHECKED);
+    add(L"BUTTON", L"Next red link", BS_PUSHBUTTON | WS_TABSTOP, 12, 252, 130, 26, IDC_BOTS_NEXT);
+    add(L"BUTTON", L"Delete", BS_PUSHBUTTON | WS_TABSTOP, 148, 252, 100, 26, IDC_BOTS_DEL);
+    add(L"BUTTON", L"Clear mine", BS_PUSHBUTTON | WS_TABSTOP, 254, 252, 110, 26, IDC_BOTS_CLEAR);
+    add(L"LISTBOX", L"", LBS_NOTIFY | WS_VSCROLL | WS_BORDER | WS_TABSTOP | LBS_NOINTEGRALHEIGHT, 12, 286, 548, 180, IDC_BOTS_LIST);
+    add(L"STATIC",
+        L"Halo 1 Unlimited's bots go between these waypoints, walking each link with Halo's AI path search. Click the level to "
+        L"put one of yours there (green); click one of yours, or pick it in the list, to Delete it. Yours go into each Xbox "
+        L"conversion as item spawn points that never spawn anything. Blue: the map's own (its spawns, item spots and flags; "
+        L"one within 1 unit of another makes one with it). Orange: the ones a conversion adds where the search can't "
+        L"finish a link and the others don't go round (Xbox tab: \"Add waypoints for Halo 1 Unlimited's bots\"). Lines: "
+        L"green, a link the bots walk; amber, one their search can't finish one way, but they learn to go round it; red, one "
+        L"with nothing round it. Put yours a few units apart along the way the bots should walk: at the foot, landings and "
+        L"top of stairs and ramps, and along walkways up to a raised spot. The search only walks floor the level's AI data "
+        L"joins, so a red link across a jump, ladder or lift stays red.",
+        0, 12, 474, 548, 240, IDC_BOTS_HINT);
+    for (int id = IDC_BOTS_TEXT; id <= IDC_BOTS_HINT; id++) ShowWindow(item(id), SW_HIDE);
     St->view = CreateWindowExW(WS_EX_CLIENTEDGE, L"HMPLevelView", L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_TABSTOP,
                                S(572), S(68), S(596), S(447), St->wnd,
                                (HMENU)(INT_PTR)IDC_VIEW, GetModuleHandleW(nullptr), nullptr);
@@ -1213,8 +1608,9 @@ void create_controls() {
     add(L"STATIC", L"Lights:", SS_NOTIFY, 884, 690, 42, 20, IDC_LIGHTS_LBL);
     add(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 928, 686, 240, 300, IDC_LIGHTS);
     add(L"BUTTON", L"Measure again", BS_PUSHBUTTON | WS_TABSTOP, 12, 726, 120, 26, IDC_REMEASURE);
-    add(L"STATIC", L"Shows: how much of what you see is its reflection. Covers: how much of the screen it is. Passes: triangles drawn again per view.",
-        0, 140, 730, 740, 20, IDC_ABOUT);
+    add(L"BUTTON", L"Bot waypoints...", BS_PUSHBUTTON | WS_TABSTOP, 138, 726, 150, 26, IDC_BOTS);
+    add(L"STATIC", L"Shows: how much of the view is its reflection. Covers: how much of the screen. Passes: triangles drawn again.",
+        0, 298, 730, 660, 20, IDC_ABOUT);
     add(L"BUTTON", L"OK", BS_DEFPUSHBUTTON | WS_TABSTOP, 966, 726, 96, 26, IDC_OKB);
     add(L"BUTTON", L"Cancel", BS_PUSHBUTTON | WS_TABSTOP, 1072, 726, 96, 26, IDC_CANCELB);
     CheckRadioButton(St->wnd, IDC_MODE0, IDC_MODE2, IDC_MODE0 + St->picks.mode);
@@ -1546,6 +1942,45 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         case IDC_SHOWCASE:
             set_sc_mode(!St->sc_mode);
+            return 0;
+        case IDC_BOTS:
+            set_bots_mode(!St->bots_mode);
+            return 0;
+        case IDC_BOTS_THROUGH:
+            St->bots_through = IsDlgButtonChecked(h, IDC_BOTS_THROUGH) == BST_CHECKED;
+            render(false);
+            return 0;
+        case IDC_BOTS_GOOD:
+            St->bots_good = IsDlgButtonChecked(h, IDC_BOTS_GOOD) == BST_CHECKED;
+            render(false);
+            return 0;
+        case IDC_BOTS_NEXT:
+            bots_next();
+            return 0;
+        case IDC_BOTS_DEL:
+            bots_delete();
+            return 0;
+        case IDC_BOTS_CLEAR:
+            if (!St->picks.bots.empty() &&
+                MessageBoxW(h, L"Remove all of your waypoints for this map?", L"Bot waypoints", MB_YESNO | MB_ICONQUESTION) == IDYES) {
+                St->picks.bots.clear();
+                St->bot_sel = -1;
+                bots_plan();
+            }
+            return 0;
+        case IDC_BOTS_LIST:
+            if (HIWORD(wp) == LBN_SELCHANGE) {
+                int k = (int)SendMessageW(item(IDC_BOTS_LIST), LB_GETCURSEL, 0, 0);
+                St->bot_sel = k >= 0 && (size_t)k < St->picks.bots.size() ? k : -1;
+                EnableWindow(item(IDC_BOTS_DEL), St->bot_sel >= 0);
+                if (St->bot_sel >= 0) {   // (the picture looks at it)
+                    const auto &p = St->picks.bots[(size_t)St->bot_sel];
+                    double yaw = St->cam.yaw;
+                    St->cam.eye = {p[0] - std::cos(yaw) * 5, p[1] - std::sin(yaw) * 5, p[2] + 3};
+                    St->cam.pitch = -std::atan2(3.0, 5.0);
+                }
+                render(false);
+            }
             return 0;
         case IDC_SC_PLAY: case IDC_SC_PLAYSHOT:
             sc_play(id == IDC_SC_PLAY ? -1 : St->sc_sel);
