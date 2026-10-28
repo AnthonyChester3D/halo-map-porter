@@ -1735,9 +1735,8 @@ Content nobody can get (Xbox)
     not offered in the Weapons & vehicles window or given a slot either:
     a vehicle with none of its gametype flags set (Precipice's Scorpion:
     Halo PC and MCC never spawn it, but the Xbox ignores those flags and
-    would spawn it in every game), an item spawn point whose gametypes are
-    all "none", and an unnamed vehicle, weapon or equipment marked "not
-    placed: automatically". Named ones stay, because a script can make
+    would spawn it in every game), and an unnamed vehicle, weapon or
+    equipment marked "not placed: automatically". Named ones stay, because a script can make
     them. A map with no gametype flags on any vehicle (tags from an Xbox
     map) keeps its vehicles, since it never had flags to go by. A vehicle
     or weapon with nothing else placing it then drops out of the map. A
@@ -1745,6 +1744,11 @@ Content nobody can get (Xbox)
     spawns the slot vehicles itself (a default Race game's second vehicle
     is the Scorpion, so Precipice keeps its tank for Race);
   - palette entries the scenario never places (weapons, equipment, vehicles);
+  An item spawn point whose gametypes are all "none" spawns nothing, but it
+  stays: Halo 1 Unlimited's bots use each one as a route point (see "Bot
+  route points" below). If it names an item collection no other spot
+  uses, it's switched to one they do, so that collection drops out of
+  the map. The log's [bots] line says so.
   - the single-player character and the weapons it carries (the stock
     assault rifle and pistol). Matches spawn players as the multiplayer
     character, so that one takes its place;
@@ -1761,6 +1765,24 @@ Content nobody can get (Xbox)
   the Oddball and CTF flag, and the parts the map's own weapons are built
   from (a mod's custom weapons often reuse stock effects, sounds and models,
   so folders like weapons\sniper rifle can still show up).
+
+Bot route points (Xbox, Halo 1 Unlimited)
+  Halo 1 Unlimited's multiplayer bots find their way between route points
+  made from the map's player spawns, item spawn points and netgame flags
+  (teleporters first, then spawns, item spots and the other flags). Points
+  within 1 unit of each other count once, and past 192 the rest are left
+  out with no warning, so bots never use them. Each Xbox build's log says
+  how many the map makes ("[bots] ... N of their 192 route points"), and
+  the report warns when a map goes past 192.
+  To help bots up stairs, ramps and walkways they get stuck under, add
+  hidden "AI nodes" in Sapien: item spawn points with all four gametypes
+  set to "none" (they never spawn anything), each still given an item
+  collection (any one). Put one at the bottom, landings and top of each
+  staircase or ramp, and every 5 to 10 units along walkways up to a raised
+  goal. Place each a little above its floor, never over a gap (the bots
+  drop each point straight down). Bots can't climb ladders, so nodes only
+  help where stairs or ramps lead. Don't bunch many in one place: they
+  draw wandering bots there.
 
 Machines (Xbox)
   Machines (device_machine: doors, lifts, anything a map animates as a
@@ -2218,6 +2240,8 @@ The log lists every automatic change:
   [lod]   Lower-detail versions were made for models, or models got
           switch distances for theirs (see "Levels of detail" above).
   [portals] A level made without portals got them (see "Portals" above).
+  [bots]  Route points the map gives Halo 1 Unlimited's bots, and item
+          spawn points kept for them (see "Bot route points" above).
   [water] Clusters inside a water volume were made underwater (see "Water
           at more than one height" above).
   [reflections] Level reflections were dropped, as chosen in the Level

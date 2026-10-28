@@ -1098,6 +1098,7 @@ bool prepare_for_xbox(Job &job, std::string &err);
 size_t shrink_textures_to_fit(Job &job, size_t needed, int &count, bool hard = true);
 void restrict_to_xbox_mp(Job &job, const fs::path &xsrc);
 void drop_dead_placements(Job &job, const fs::path &xsrc);
+void bot_route_points(Job &job, const fs::path &xsrc);
 void trim_machines(Job &job, const fs::path &xsrc);
 bool drop_kept_vehicles(Job &job);
 void use_stock_versions(Job &job, const fs::path &xsrc);
@@ -10929,6 +10930,7 @@ bool prepare_for_xbox(Job &job, std::string &err) {
     use_stock_versions(job, xsrc);
     drop_dead_placements(job, xsrc);
     restrict_to_xbox_mp(job, xsrc);
+    if (!job.analysis) bot_route_points(job, xsrc);
     apply_xbox_slots(job, xsrc);
     merge_map_globals(job, xsrc);
     ensure_player_animations(job, xsrc);
@@ -11848,13 +11850,13 @@ static void remove_scenario_vehicle(Job &job, const fs::path &xsrc, const std::s
 //    (Warthog reads them only for Custom Edition maps: game_engine_ce_vehicle_placement_allowed), so on the Xbox it
 //    would spawn in every game (Precipice's Scorpion). Only when the map's other vehicle placements have flags: a map
 //    with none set anywhere never had them (tags from an Xbox map), and spawns them all;
-//  - an item spawn point (netgame equipment) whose four game types are all "none": no game type matches it
-//    (match_game_type);
 //  - a placed vehicle, weapon or equipment marked "not placed: automatically" that has no name: nothing makes it
 //    (a script makes an object the map doesn't place by its name).
 // Named placements stay (a script can make them: Precipice's beam_attach_hog), and so does everything else. A palette
 // entry left with nothing placed from it goes too (not the vehicles' when the map has AI, whose starting locations
-// use them), and with the item spawn points' item collections, whatever only they used drops out of the build.
+// use them). An item spawn point (netgame equipment) whose four game types are all "none" spawns nothing (no game type
+// matches it: match_game_type) but stays, for Halo 1 Unlimited's bots: every one is a route point to them. It takes
+// an item collection a spot that spawns uses, so whatever only it named drops out of the build.
 void drop_dead_placements(Job &job, const fs::path &xsrc) {
     const Config &cfg = job.cfg;
     const std::string scen = job.scenario + ".scenario";
@@ -11862,7 +11864,7 @@ void drop_dead_placements(Job &job, const fs::path &xsrc) {
     static const Kind kinds[] = {{"vehicles", "vehicle_palette"}, {"weapons", "weapon_palette"}, {"equipment", "equipment_palette"}};
     static const char *spawn_bits[] = {"slayer_default", "ctf_default", "king_default", "oddball_default",
                                        "slayer_allowed", "ctf_allowed", "king_allowed", "oddball_allowed"};
-    std::vector<std::string> said;
+    std::vector<std::string> said, said_ics;
     int said_items = 0;
     // The scenario's copies: the fixes' (which the build uses) and the prepared one (which the Xbox steps read).
     for (const fs::path &dir : {job.fixes, xsrc}) {
@@ -11928,18 +11930,33 @@ void drop_dead_placements(Job &job, const fs::path &xsrc) {
             }
             for (auto it = empty.rbegin(); it != empty.rend(); ++it) drop_palette.insert(drop_palette.end(), {"-E", pal + "[" + std::to_string(*it) + "]"});
         }
-        std::vector<int> dead_items;
+        // Item spawn points with every game type "none" stay: they spawn nothing, but Halo 1 Unlimited's bots take
+        // every one as a route point (a map's hidden "AI nodes" up stairs and walkways). Each takes an item collection a
+        // spot that spawns uses, so what only they named drops out of the build.
         const int ne = count("netgame_equipment");
+        std::string live;
+        std::set<std::string> lives;
+        for (int i = 0; i < ne; i++) {
+            const std::string e = "netgame_equipment[" + std::to_string(i) + "]";
+            bool none = true;
+            for (int t = 0; t < 4 && none; t++) none = vals[e + ".type_" + std::to_string(t) + ".none"] == "*";
+            if (none || vals[e + ".item_collection"].empty()) continue;
+            if (live.empty()) live = vals[e + ".item_collection"];
+            lives.insert(vals[e + ".item_collection"]);
+        }
         std::map<std::string, int> items_gone;
+        int nodes = 0;
         for (int i = 0; i < ne; i++) {
             const std::string e = "netgame_equipment[" + std::to_string(i) + "]";
             bool none = true;
             for (int t = 0; t < 4 && none; t++) none = vals[e + ".type_" + std::to_string(t) + ".none"] == "*";
             if (!none) continue;
-            dead_items.push_back(i);
-            items_gone[fs::path(from_u8(norm_rel(vals[e + ".item_collection"]))).stem().u8string()]++;
+            nodes++;
+            const std::string ic = vals[e + ".item_collection"];
+            if (live.empty() || lives.count(ic)) continue;
+            edits.insert(edits.end(), {"-S", e + ".item_collection", live});
+            if (!ic.empty()) items_gone[fs::path(from_u8(norm_rel(ic))).stem().u8string()]++;
         }
-        for (auto it = dead_items.rbegin(); it != dead_items.rend(); ++it) edits.insert(edits.end(), {"-E", "netgame_equipment[" + std::to_string(*it) + "]"});
         if (edits.empty()) continue;
         std::string out;
         std::vector<std::string> cmd{u8(tool(cfg, "invader-edit")), "-t", u8(dir), scen};
@@ -11950,19 +11967,77 @@ void drop_dead_placements(Job &job, const fs::path &xsrc) {
             job.log("  couldn't take out the placements no game can use: " + out);
             continue;
         }
-        if (!said.empty() || said_items) continue;   // (the same map in both copies: said once)
+        if (!said.empty() || !said_ics.empty()) continue;   // (the same map in both copies: said once)
         for (auto &[tag, c] : gone) said.push_back(fs::path(from_u8(tag)).stem().u8string() + " (" + std::to_string(c) + " placed)");
-        for (auto &[ic, c] : items_gone)
-            said.push_back(ic + " (" + std::to_string(c) + " spawn point" + (c == 1 ? "" : "s") + ")");
-        said_items = (int)dead_items.size();
+        said_items = nodes;
+        for (auto &[ic, c] : items_gone) said_ics.push_back(ic + " (" + std::to_string(c) + " spot" + (c == 1 ? "" : "s") + ")");
+    }
+    if (!said_ics.empty()) {
+        std::string list = said_ics[0];
+        for (size_t i = 1; i < said_ics.size(); i++) list += ", " + said_ics[i];
+        job.note("[bots] kept the " + std::to_string(said_items) + " item spawn point" + (said_items == 1 ? "" : "s") +
+                 " with every game type \"none\" (they never spawn anything; Halo 1 Unlimited's bots use each as a route "
+                 "point), given an item collection the map's other spots use, so what only they named isn't built: " + list);
     }
     if (said.empty()) return;
     std::string list = said[0];
     for (size_t i = 1; i < said.size(); i++) list += ", " + said[i];
     job.note("[trim] took out placements no game type can ever spawn (vehicles with none of their gametype flags set, "
-             "which the Xbox ignores and would spawn in every game; item spawn points with every gametype \"none\"; "
-             "unnamed objects marked not placed): " + list + ". A vehicle or weapon nothing else uses drops out of the map "
+             "which the Xbox ignores and would spawn in every game; unnamed objects marked not placed): " + list +
+             ". A vehicle or weapon nothing else uses drops out of the map "
              "(one in a vehicle slot stays when the map has Race vehicle spawns: Race spawns the slots' vehicles)");
+}
+
+// Halo 1 Unlimited's multiplayer bots find their way over route points made from the map's player spawns, item
+// spawn points (those that spawn nothing too: a map's hidden "AI nodes") and netgame flags, teleporters first, then
+// spawns, items, the other flags; points within 1 unit of one already taken are one; past 192 the rest are left out,
+// unsaid. The log says how many the map makes.
+void bot_route_points(Job &job, const fs::path &xsrc) {
+    const std::string scen = job.scenario + ".scenario";
+    fs::path dir = fs::exists(xsrc / from_u8(scen)) ? xsrc : job.owner(scen);
+    tagfile::Tag t;
+    if (dir.empty() || !t.load(dir / from_u8(scen))) return;
+    tagfile::Elem r = t.root();
+    if (r.integer("type") != 1) return;   // multiplayer
+    std::vector<portals::V3> taken;
+    int over = 0, merged = 0;
+    auto add = [&](const tagfile::Elem &e) {
+        portals::V3 p{e.num("position", 0), e.num("position", 1), e.num("position", 2)};
+        for (auto &q : taken) {
+            double dx = p[0] - q[0], dy = p[1] - q[1], dz = p[2] - q[2];
+            if (dx * dx + dy * dy + dz * dz < 1.0) { merged++; return; }
+        }
+        if (taken.size() >= 192) { over++; return; }
+        taken.push_back(p);
+    };
+    tagfile::Block flags = r.block("netgame flags"), spawns = r.block("player starting locations"),
+                   items = r.block("netgame equipment");
+    int tele = 0, other = 0, hidden = 0;
+    for (size_t i = 0; i < flags.size(); i++) {
+        long long ty = flags[i].integer("type");
+        if (ty == 6 || ty == 7) { add(flags[i]); tele++; }
+    }
+    for (size_t i = 0; i < spawns.size(); i++) add(spawns[i]);
+    for (size_t i = 0; i < items.size(); i++) {
+        bool none = true;
+        for (const char *f : {"type 0", "type 1", "type 2", "type 3"}) none = none && items[i].integer(f) == 0;
+        if (none) hidden++;
+        add(items[i]);
+    }
+    for (size_t i = 0; i < flags.size(); i++) {
+        long long ty = flags[i].integer("type");
+        if (ty != 6 && ty != 7) { add(flags[i]); other++; }
+    }
+    std::string l = "[bots] the map gives Halo 1 Unlimited's bots " + std::to_string(taken.size()) + " of their 192 route points (" +
+                    std::to_string(spawns.size()) + " player spawns, " + std::to_string(items.size()) + " item spawn points" +
+                    (hidden ? " (" + std::to_string(hidden) + " that spawn nothing)" : std::string()) + ", " + std::to_string(other) +
+                    " flags, " + std::to_string(tele) + " teleporter ends" +
+                    (merged ? "; " + std::to_string(merged) + " within 1 unit of another counted once" : std::string()) + ")";
+    if (over)
+        job.note(l + ": " + std::to_string(over) + " more are left out (the last of the item spawn points and flags), so bots "
+                     "never go to or through them. Fewer hidden item spawn points (or spawns) make room");
+    else
+        job.log("  " + l);
 }
 
 // Machines (device_machine) cost the Xbox more every tick than anything else a map places that doesn't move by

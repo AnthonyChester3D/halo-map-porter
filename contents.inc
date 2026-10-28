@@ -413,10 +413,18 @@ static bool analyze_built_map(Job &job, const fs::path &map, const std::set<std:
         static const std::regex plc(R"(^(weapons|vehicles)\[\d+\]\.type$)");
         std::map<std::string, std::string> palette;   // "weapon 3" -> tag
         std::map<std::string, int> uses;              // "weapon 3" -> placements
-        for (auto &[k, v] : list_values(job.cfg, sdir, scen)) {
+        auto kv = list_values(job.cfg, sdir, scen);
+        std::map<std::string, std::string> vals(kv.begin(), kv.end());
+        for (auto &[k, v] : kv) {
             std::smatch m;
             if (v.empty()) continue;
-            if (std::regex_match(k, ne)) spawns_of_collection[v]++;
+            if (std::regex_match(k, ne)) {
+                // (not the spots that spawn nothing: bot route points)
+                std::string e = k.substr(0, k.size() - strlen(".item_collection"));
+                bool none = true;
+                for (int t = 0; t < 4 && none; t++) none = vals[e + ".type_" + std::to_string(t) + ".none"] == "*";
+                if (!none) spawns_of_collection[v]++;
+            }
             else if (std::regex_match(k, se)) starting.insert(v);
             else if (std::regex_match(k, m, pal)) palette[m[1].str() + " " + m[2].str()] = v;
             else if (std::regex_match(k, m, plc) && isdigit((unsigned char)v[0]))
@@ -663,10 +671,18 @@ static void remove_item_collection_uses(Job &job, const fs::path &xsrc, const st
     static const std::regex se(R"(^starting_equipment\[\d+\]\.item_collection_\d$)");
     std::vector<int> drop;
     std::vector<std::string> cmd{u8(tool(cfg, "invader-edit")), "-t", u8(d), scen};
-    for (auto &[k, v] : list_values(cfg, d, scen)) {
+    auto kv = list_values(cfg, d, scen);
+    std::map<std::string, std::string> vals(kv.begin(), kv.end());
+    for (auto &[k, v] : kv) {
         if (v != collection) continue;
         std::smatch m;
-        if (std::regex_match(k, m, ne)) drop.push_back(std::stoi(m[1]));
+        if (std::regex_match(k, m, ne)) {
+            // (one that spawns nothing stays: a bot route point; the collection is still there to name)
+            bool none = true;
+            for (int t = 0; t < 4 && none; t++)
+                none = vals["netgame_equipment[" + m[1].str() + "].type_" + std::to_string(t) + ".none"] == "*";
+            if (!none) drop.push_back(std::stoi(m[1]));
+        }
         else if (std::regex_match(k, se)) cmd.insert(cmd.end(), {"-S", k, ""});
     }
     std::sort(drop.rbegin(), drop.rend());
