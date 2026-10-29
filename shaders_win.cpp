@@ -1181,13 +1181,13 @@ bool load_file(const fs::path &f) {
     St->data = d;
     St->file = f;
     St->bots_loaded = false;
-    if (St->bots_mode) bots_loaded_now();
-    if (St->gl) St->gl->set_scene(&d->p);
+    if (St->gl) St->gl->set_scene(&d->p);   // (before anything draws: the old level is gone)
     // (picks made against an older measurement keep only the shaders still there)
     std::set<std::string> tags;
     for (auto &s : d->a.shaders) tags.insert(s.tag);
     for (auto it = St->picks.drops.begin(); it != St->picks.drops.end();) it = tags.count(*it) ? std::next(it) : St->picks.drops.erase(it);
     fill_list();
+    if (St->bots_mode) bots_loaded_now();
     return true;
 }
 
