@@ -1407,7 +1407,7 @@ static std::string shaders_key(const Config &cfg, const fs::path &in) {
     auto mt = fs::last_write_time(in, ec);
     return N(lower(in.wstring())) + "|" + std::to_string((long long)mt.time_since_epoch().count()) + "|" +
            (cfg.xbox_add_portals ? "p" : "-") + (cfg.xbox_replan_portals ? "r" : "-") +
-           "|2";   // (2: the bots' waypoints measured too, and spawn points that spawn nothing not drawn)
+           "|3";   // (2: the bots' waypoints measured too, and spawn points that spawn nothing not drawn; 3: the sky)
 }
 
 // The folder the Xbox map goes in (its showcase.txt goes beside its info.txt there): the Convert tab's output's, or

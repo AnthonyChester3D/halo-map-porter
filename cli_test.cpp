@@ -237,6 +237,16 @@ int main(int argc, char **argv) {
         std::filesystem::path file;
         if (!analyze_level_shaders(cfg, argv[2], in, file, err, log)) { std::cout << "FAILED: " << err << "\n"; return 1; }
         std::cout << "level shaders file: " << file.u8string() << "\n";
+        lshade::Analysis la;
+        lshade::Preview lp;
+        if (lshade::load(la, lp, file) && lp.sky_model >= 0) {
+            const auto &m = lp.models[(size_t)lp.sky_model];
+            std::cout << "sky: " << m.tag << ", " << m.parts.size() << " parts:";
+            for (auto &pt : m.parts) std::cout << " [" << pt.count << " tris, texture " << pt.texture << ", flags " << pt.flags << "]";
+            float lo[3] = {1e9f, 1e9f, 1e9f}, hi[3] = {-1e9f, -1e9f, -1e9f};
+            for (auto &v : m.vertices) for (int k = 0; k < 3; k++) { lo[k] = std::min(lo[k], v.p[k]); hi[k] = std::max(hi[k], v.p[k]); }
+            std::cout << "\n  from " << lo[0] << " " << lo[1] << " " << lo[2] << " to " << hi[0] << " " << hi[1] << " " << hi[2] << "\n";
+        }
         return 0;
     }
     // XDUMP=<file>: a measurement's tags, their sizes and what they use, and its items (for the window test)

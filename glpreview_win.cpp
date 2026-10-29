@@ -447,6 +447,62 @@ void Renderer::draw(const Frame &f) {
             gl.glUniform1f(d->u(has), id ? 1.0f : 0.0f);
             return id;
         };
+        // The map's sky, behind everything: its model round the camera (turned with it, never nearer or farther), its
+        // parts in order, each over the ones before as its shader blends, unlit and unfogged.
+        if (f.sky && d->object_vbo && p->sky_model >= 0 && (size_t)p->sky_model < d->model_parts.size()) {
+            glMatrixMode(GL_PROJECTION);
+            glPushMatrix();
+            glLoadIdentity();
+            glFrustum(-tx * n, tx * n, -ty * n, ty * n, n, 1e7);   // (skies are big: Bungie's mp_dusk is 56,000 units across)
+            glMatrixMode(GL_MODELVIEW);
+            glPushMatrix();
+            double sm[16];
+            std::copy(m, m + 16, sm);
+            sm[12] = sm[13] = sm[14] = 0;
+            glLoadMatrixd(sm);
+            glDisable(GL_DEPTH_TEST);
+            glDepthMask(GL_FALSE);
+            glDisable(GL_CULL_FACE);
+            use_buffer(d->object_vbo);
+            gl.glUniform1f(d->u("u_object"), 1.0f);
+            gl.glUniform1f(d->u("u_has_cut"), 0.0f);
+            gl.glUniform1f(d->u("u_has_cube"), 0.0f);
+            gl.glUniform1f(d->u("u_fog_density"), 0.0f);
+            gl.glUniform3f(d->u("u_ambient"), 1, 1, 1);
+            gl.glUniform3f(d->u("u_color0"), 0, 0, 0);
+            gl.glUniform3f(d->u("u_color1"), 0, 0, 0);
+            for (auto &q : d->model_parts[(size_t)p->sky_model]) {
+                if (q.texture < 0) continue;   // (a layer with no texture read: left out, not drawn grey over the rest)
+                bool see = (q.flags & lshade::ModelPart::kSeeThrough) != 0;
+                gl.glUniform1f(d->u("u_see_through"), see ? 1.0f : 0.0f);
+                gl.glUniform1f(d->u("u_object_cut"), (q.flags & lshade::ModelPart::kCutout) ? 1.0f : 0.0f);
+                int blend = (q.flags & lshade::ModelPart::kAdd) ? 1 : (q.flags & lshade::ModelPart::kMultiply) ? 2
+                            : (q.flags & lshade::ModelPart::kDoubleMultiply) ? 3 : 0;
+                gl.glUniform1f(d->u("u_blend"), (float)blend);
+                if (!see) glDisable(GL_BLEND);
+                else {
+                    glEnable(GL_BLEND);
+                    if (blend == 1) glBlendFunc(GL_ONE, GL_ONE);
+                    else if (blend == 2) glBlendFunc(GL_DST_COLOR, GL_ZERO);
+                    else if (blend == 3) glBlendFunc(GL_DST_COLOR, GL_SRC_COLOR);
+                    else glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                }
+                bind2d(0, q.texture, "u_has_base");
+                glDrawArrays(GL_TRIANGLES, q.first, q.count);
+            }
+            gl.glUniform1f(d->u("u_object"), 0.0f);
+            gl.glUniform1f(d->u("u_see_through"), 0.0f);
+            gl.glUniform1f(d->u("u_fog_density"), fog_on ? f.fog.density : 0.0f);
+            glDisable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glEnable(GL_DEPTH_TEST);
+            glDepthMask(GL_TRUE);
+            glPopMatrix();
+            glMatrixMode(GL_PROJECTION);
+            glPopMatrix();
+            glMatrixMode(GL_MODELVIEW);
+            use_buffer(d->vbo);
+        }
         for (int pass = 0; pass < 2; pass++) {   // opaque, then see-through (blended, not hiding what's behind)
             if (pass == 1) {
                 if (f.what_it_loses) break;

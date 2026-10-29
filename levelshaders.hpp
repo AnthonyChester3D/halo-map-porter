@@ -184,6 +184,8 @@ struct Preview {
     std::vector<Box> boxes;
     std::vector<Model> models;
     std::vector<Object> objects;
+    int32_t sky_model = -1;                   // the scenario's first sky's model (in `models`; -1: none), drawn round the
+                                              // camera behind everything, as the engine draws the sky
     // Which room a point is in: the level's BSP tree (child: a node, ~leaf for a leaf (-2 and less), -1 solid).
     struct Node { float n[3] = {0, 0, 0}; float d = 0; int32_t front = -1, back = -1; };
     std::vector<Node> tree;

@@ -22,6 +22,7 @@ struct Frame {
     bool fog_on = false;                 // the level fogged (and cut off past opaque fog), as the engine does
     lshade::Fog fog;
     bool objects = false;                // the objects in the level (lshade::Preview::objects) drawn
+    bool sky = false;                    // the map's sky (lshade::Preview::sky_model) drawn behind the level
     // The showcase's shot being edited: its camera path (a line), its keys (points), what it looks at, and the boxes
     // around the map's placed objects (the camera keeps clear of them), outlined.
     std::vector<std::array<float, 3>> path, keys;

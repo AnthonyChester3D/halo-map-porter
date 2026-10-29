@@ -1067,6 +1067,19 @@ bool analyze(const fs::path &bsp_file, const fs::path &scenario, const Find &fin
             snprintf(p.content.light_names, sizeof p.content.light_names, "%s", ln.c_str());
             read_marks(sc.root(), find, p);
             read_objects(sc.root(), r, find, tex, incident, p);
+            // (the sky: its model, as an object's)
+            tagfile::Block skies = sc.root().block("skies");
+            std::string sky = skies.size() ? skies[0].ref("sky") : std::string();
+            fs::path skf = sky.empty() ? fs::path() : find(sky);
+            tagfile::Tag skt;
+            if (!skf.empty() && skt.load(skf)) {
+                std::string m = skt.root().ref("model");
+                Model model;
+                if (!m.empty() && read_model(m, find, tex, model) && !model.parts.empty()) {
+                    p.sky_model = (int32_t)p.models.size();
+                    p.models.push_back(std::move(model));
+                }
+            }
         }
         for (size_t c = 0; c < clusters.size(); c++) {
             long long sky = clusters[c].integer("sky");
@@ -1730,6 +1743,7 @@ bool save(const Analysis &a, const Preview &p, const fs::path &file) {
         for (auto &t : m.shaders) o.str(t);
     }
     o.vec(p.objects);
+    o.raw(p.sky_model);
     return (bool)o.f;
 }
 
@@ -1798,6 +1812,8 @@ bool load(Analysis &a, Preview &p, const fs::path &file) {
         for (auto &t : m.shaders) in.str(t);
     }
     in.vec(p.objects);
+    in.raw(p.sky_model);
+    if (p.sky_model >= (int32_t)p.models.size()) return false;
     // (every reference in range: the pictures index with them)
     for (auto &m : p.models) {
         for (uint32_t v : m.tris) if (v >= m.vertices.size()) return false;

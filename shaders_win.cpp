@@ -33,9 +33,9 @@ enum {
     IDC_SC_SECS, IDC_SC_LOOK, IDC_SC_DELETE, IDC_SC_UP, IDC_SC_DOWN, IDC_SC_REMAKE, IDC_SC_NAME_LBL, IDC_SC_NAME,
     IDC_SC_KEYS_LBL, IDC_SC_KPREV, IDC_SC_KEY, IDC_SC_KNEXT, IDC_SC_KGO, IDC_SC_KMOVE, IDC_SC_ORBIT_LBL, IDC_SC_ORAD_LBL,
     IDC_SC_ORAD, IDC_SC_OHGT_LBL, IDC_SC_OHGT, IDC_SC_OAR_LBL, IDC_SC_OAR, IDC_SC_ORBIT, IDC_SC_SAVE, IDC_SC_PACE, IDC_SC_HINT,
-    IDC_FOG_START, IDC_FOG_TO, IDC_OBJECTS,
+    IDC_FOG_START, IDC_FOG_TO, IDC_OBJECTS, IDC_SHOWSKY,
     IDC_BOTS, IDC_BOTS_TEXT, IDC_BOTS_LIST, IDC_BOTS_DEL, IDC_BOTS_CLEAR, IDC_BOTS_NEXT, IDC_BOTS_THROUGH, IDC_BOTS_GOOD,
-    IDC_BOTS_HINT,
+    IDC_BOTS_HIDE, IDC_BOTS_HINT,
 };
 #define WM_LS_LOG (WM_APP + 60)
 #define WM_LS_DONE (WM_APP + 61)
@@ -62,6 +62,7 @@ struct State {
     int show = 1;                  // 0 as made, 1 as converted, 2 what changes
     bool highlight = true, portals = false;
     bool objects = true;   // (the objects in the level drawn; remembered while the app runs: g_objects)
+    bool sky = true;       // (the map's sky drawn behind the level: g_sky)
     HWND tips = nullptr;
     // the camera: the view's spot, turned by dragging and flown with the keys
     lshade::Camera cam;
@@ -92,7 +93,8 @@ struct State {
     // The bots' waypoints ("Bot waypoints..." swaps the list for them; botnodes.hpp): the map's points as the
     // measurement found them (in the bots' order; yours go in at `bot_insert`, after its item spawn points), its level's
     // collision, and the bots' waypoints and links with yours, as a conversion makes them.
-    bool bots_mode = false, bots_loaded = false, bots_through = true, bots_good = true;
+    bool bots_mode = false, bots_loaded = false, bots_through = true, bots_good = true,
+         bots_hide = false;   // planned without the suggested (orange) ones, to place your own (the conversion still adds them)
     std::vector<botnodes::V3> bot_points;
     std::vector<std::string> bot_kinds;
     int bot_tele = 0;
@@ -123,6 +125,7 @@ void post(UINT msg, WPARAM wp, Note *n) {
 }
 fs::path g_disk;
 bool g_objects = true;   // (State::objects, for the next window)
+bool g_sky = true;       // (State::sky)
 
 int S(int v) { return MulDiv(v, St->dpi, 96); }
 std::wstring W(const std::string &s) {
@@ -246,6 +249,7 @@ void render(bool fast) {
         f.highlight = St->highlight ? St->selected : -1;
         f.portals = St->portals;
         f.objects = St->objects;
+        f.sky = St->sky;
         f.fog_on = true;
         f.fog = fog_for(c);
         if (St->sc_mode) {   // (the showcase: the objects' boxes, and the selected shot's path, keys and look point)
@@ -608,8 +612,9 @@ void bots_text() {
                      L" from the map's spawns, item spots and flags (blue), " + std::to_wstring(mine) + L" of yours (green)";
     if (!r.added.empty())
         t += L", " + std::to_wstring(r.added.size()) + L" a conversion adds (orange: " + std::to_wstring(r.on_ramps) + L" along ramps, " +
-             std::to_wstring(r.in_narrow) + L" through doorways, tunnels and bridges, " +
-             std::to_wstring((int)r.added.size() - r.on_ramps - r.in_narrow) + L" where the search needs them)";
+             std::to_wstring(r.in_narrow) + L" through doorways, tunnels, bridges and along ledges, " + std::to_wstring(r.on_open) +
+             L" on open floor far from every waypoint, " +
+             std::to_wstring((int)r.added.size() - r.on_ramps - r.in_narrow - r.on_open) + L" where the search needs them)";
     t += L".";
     if (r.merged) t += L" " + std::to_wstring(r.merged) + L" of the map's points are within 1 unit of another and make one with it.";
     if (!r.left_out.empty()) {
@@ -669,8 +674,14 @@ void bots_plan() {
     size_t at = std::min(St->bot_insert, pts.size());
     pts.insert(pts.begin() + (std::ptrdiff_t)at, St->picks.bots.begin(), St->picks.bots.end());
     botnodes::Options o;
-    if (!St->picks.bots_auto) { o.max_add = 0; o.features = false; }
+    if (!St->picks.bots_auto || St->bots_hide) { o.max_add = 0; o.features = false; }
     HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
+    {   // (bots walk on from every point but the item spawn points)
+        std::vector<std::string> kinds = St->bot_kinds;
+        kinds.insert(kinds.begin() + (std::ptrdiff_t)std::min(St->bot_insert, kinds.size()), St->picks.bots.size(), "waypoint of yours");
+        if (kinds.size() == pts.size())
+            for (auto &k : kinds) o.walk_from.push_back(k.rfind("item spawn point", 0) != 0);
+    }
     St->bot_res = botnodes::plan(St->bot_bsp, pts, St->bot_tele, o);
     SetCursor(old);
     // (each of yours: the waypoint it makes, or the one it's within 1 unit of; and whether that one is the map's)
@@ -783,13 +794,35 @@ void bots_click(int x, int y) {
         SetWindowTextW(item(IDC_STATUS), L"Nothing of the level there to put a waypoint on.");
         return;
     }
+    // (within 1 unit of a waypoint there: the bots would make them one, so it isn't added)
+    auto too_close = [&](const botnodes::V3 &q, int &near_) {
+        const auto &r = St->bot_res;
+        for (int k = 0; k < r.given && (size_t)k < r.waypoints.size(); k++) {
+            const auto &w = r.waypoints[(size_t)k];
+            if (std::hypot(std::hypot(w[0] - q[0], w[1] - q[1]), w[2] - q[2]) < 1.0) { near_ = k; return true; }
+        }
+        return false;
+    };
+    auto refuse = [&](int k) {
+        SetWindowTextW(item(IDC_STATUS), (L"Not added: that's within 1 unit of waypoint " + std::to_wstring(k + 1) + L" " +
+                                          bots_where(St->bot_res.waypoints[(size_t)k]) +
+                                          L", and the bots would make the two one.").c_str());
+    };
+    int near_ = -1;
+    if (St->bot_res.ok && too_close({at[0], at[1], at[2]}, near_)) { refuse(near_); return; }
     St->picks.bots.push_back({at[0], at[1], at[2] + 0.25});   // (a little above the floor: the bots drop it down)
     St->bot_sel = (int)St->picks.bots.size() - 1;
     bots_plan();
     int i = St->bot_mine_at.back();
+    if (i >= 0 && St->bot_mine_merged.back()) {   // (its ground merged with one after all: taken back)
+        St->picks.bots.pop_back();
+        St->bot_sel = -1;
+        bots_plan();
+        refuse(i);
+        return;
+    }
     std::wstring s = L"Added waypoint " + std::to_wstring(St->picks.bots.size()) + L" " + bots_where(St->picks.bots.back());
     if (i < 0) s += L": no waypoint comes of it (no ground under it, or the map is past 512).";
-    else if (St->bot_mine_merged.back()) s += L": it's within 1 unit of a waypoint already there, so the bots make them one.";
     else if ((size_t)i < St->bot_res.waypoints.size() && std::fabs(St->bot_res.waypoints[(size_t)i][2] - at[2]) > 0.6)
         s += L": the bots drop it onto the floor below.";
     else s += L".";
@@ -1553,6 +1586,7 @@ void create_controls() {
     add(L"BUTTON", L"Next red link", BS_PUSHBUTTON | WS_TABSTOP, 12, 252, 130, 26, IDC_BOTS_NEXT);
     add(L"BUTTON", L"Delete", BS_PUSHBUTTON | WS_TABSTOP, 148, 252, 100, 26, IDC_BOTS_DEL);
     add(L"BUTTON", L"Clear mine", BS_PUSHBUTTON | WS_TABSTOP, 254, 252, 110, 26, IDC_BOTS_CLEAR);
+    add(L"BUTTON", L"Hide suggested (orange)", BS_AUTOCHECKBOX | WS_TABSTOP, 372, 254, 188, 22, IDC_BOTS_HIDE);
     add(L"LISTBOX", L"", LBS_NOTIFY | WS_VSCROLL | WS_BORDER | WS_TABSTOP | LBS_NOINTEGRALHEIGHT, 12, 286, 548, 180, IDC_BOTS_LIST);
     add(L"STATIC",
         L"Halo 1 Unlimited's bots go between these waypoints, walking each link with Halo's AI path search. Click the level to "
@@ -1574,9 +1608,10 @@ void create_controls() {
     add(L"BUTTON", L"As made", BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, 658, 524, 72, 22, IDC_BEFORE);
     add(L"BUTTON", L"As converted", BS_AUTORADIOBUTTON, 732, 524, 96, 22, IDC_AFTER);
     add(L"BUTTON", L"What it loses", BS_AUTORADIOBUTTON, 830, 524, 100, 22, IDC_CHANGES);
-    add(L"BUTTON", L"Tint selected", BS_AUTOCHECKBOX | WS_GROUP | WS_TABSTOP, 936, 524, 94, 22, IDC_HILITE);
-    add(L"BUTTON", L"Portals", BS_AUTOCHECKBOX | WS_TABSTOP, 1034, 524, 64, 22, IDC_PORTALS);
-    add(L"BUTTON", L"Objects", BS_AUTOCHECKBOX | WS_TABSTOP, 1100, 524, 68, 22, IDC_OBJECTS);
+    add(L"BUTTON", L"Tint", BS_AUTOCHECKBOX | WS_GROUP | WS_TABSTOP, 936, 524, 52, 22, IDC_HILITE);
+    add(L"BUTTON", L"Portals", BS_AUTOCHECKBOX | WS_TABSTOP, 992, 524, 64, 22, IDC_PORTALS);
+    add(L"BUTTON", L"Objects", BS_AUTOCHECKBOX | WS_TABSTOP, 1058, 524, 68, 22, IDC_OBJECTS);
+    add(L"BUTTON", L"Sky", BS_AUTOCHECKBOX | WS_TABSTOP, 1130, 524, 44, 22, IDC_SHOWSKY);
     add(L"STATIC", L"", SS_NOTIFY, 572, 554, 596, 36, IDC_COST);
     add(L"STATIC", L"Fog:", SS_NOTIFY, 572, 600, 34, 20, IDC_FOG_LBL);
     add(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 608, 596, 166, 300, IDC_FOG);
@@ -1623,6 +1658,8 @@ void create_controls() {
     CheckDlgButton(St->wnd, IDC_HILITE, BST_CHECKED);
     St->objects = g_objects;
     CheckDlgButton(St->wnd, IDC_OBJECTS, St->objects ? BST_CHECKED : BST_UNCHECKED);
+    St->sky = g_sky;
+    CheckDlgButton(St->wnd, IDC_SHOWSKY, St->sky ? BST_CHECKED : BST_UNCHECKED);
     {
         int k = 0;   // (the nearest of the choices)
         for (int i = 1; i < kTinyCount; i++)
@@ -1657,6 +1694,7 @@ void create_controls() {
     tip(IDC_AFTER, L"The level with the reflections your choice above keeps.");
     tip(IDC_CHANGES, L"The converted picture dimmed, with the reflections that go lit up: what the conversion takes away.");
     tip(IDC_HILITE, L"Tints the shader selected in the list pink, so you can find its surfaces.");
+    tip(IDC_SHOWSKY, L"Draws the map's sky behind the level, as the game does (its layers blended, still; with the graphics card's picture only), to frame the showcase's shots against it.");
     tip(IDC_PORTALS, L"Outlines each portal in yellow (the openings the engine looks through from one room to the next), "
                      L"glowing orange where you can see through it, and tints each room (cluster) a colour of its own. The engine draws the room you're in, then only the rooms "
                      L"it can see through portals, so walls between rooms hide what's behind them.");
@@ -1938,6 +1976,10 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             St->objects = g_objects = IsDlgButtonChecked(h, IDC_OBJECTS) == BST_CHECKED;
             render(false);
             return 0;
+        case IDC_SHOWSKY:
+            St->sky = g_sky = IsDlgButtonChecked(h, IDC_SHOWSKY) == BST_CHECKED;
+            render(false);
+            return 0;
         case IDC_HILITE:
             St->highlight = IsDlgButtonChecked(h, IDC_HILITE) == BST_CHECKED;
             render(false);
@@ -1954,6 +1996,10 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case IDC_BOTS_THROUGH:
             St->bots_through = IsDlgButtonChecked(h, IDC_BOTS_THROUGH) == BST_CHECKED;
             render(false);
+            return 0;
+        case IDC_BOTS_HIDE:
+            St->bots_hide = IsDlgButtonChecked(h, IDC_BOTS_HIDE) == BST_CHECKED;
+            bots_plan();
             return 0;
         case IDC_BOTS_GOOD:
             St->bots_good = IsDlgButtonChecked(h, IDC_BOTS_GOOD) == BST_CHECKED;

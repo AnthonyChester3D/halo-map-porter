@@ -35,8 +35,12 @@ struct Options {
     double jump = 0.8;         // a ledge this high a search's end can be straight from (the cyborg's crouch-jump, 9 in 10)
     double drop = 2.7;         // and a drop this far down (the globals' harmless fall: 3 units, 9 in 10 of it)
     int rounds = 3;            // plans again with the nodes' own links
-    bool features = true;      // waypoints along the level's ramps and narrow ways (doorways, tunnels, bridges)
+    bool features = true;      // waypoints along the level's ramps and narrow ways (doorways, tunnels, bridges), and on
+                               // open floor far from every waypoint
     int max_features = 200;    // those at most
+    std::vector<char> walk_from;   // per point given: bots walk on from it (empty: every point). Not an item spawn point:
+                                   // one on a platform only a ladder reaches (Snow Space's sniper rifles) would have the
+                                   // floor up there taken as floor bots walk
 };
 
 struct Hop {                   // a link, walked one way
@@ -61,8 +65,9 @@ struct Result {
                                        // merged), or -1
     std::vector<V3> waypoints; // the map's, then the nodes added (on the ground)
     std::vector<V3> added;     // the nodes as placed in the scenario (a little above the ground)
-    std::vector<int> added_kind;   // each one's: 0 where the search can't finish a hop, 1 a ramp, 2 a narrow way
-    int on_ramps = 0, in_narrow = 0;
+    std::vector<int> added_kind;   // each one's: 0 where the search can't finish a hop, 1 a ramp, 2 a narrow way, 3 open
+                                   // floor far from every waypoint
+    int on_ramps = 0, in_narrow = 0, on_open = 0;
     std::vector<Hop> hops;     // the links (both ways) with the nodes added
     int failing_before = 0, failing_after = 0;   // hops the search can't finish, before and after the nodes
     int stuck_before = 0, stuck_after = 0;       // of those, ones the links that work don't go around either

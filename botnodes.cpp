@@ -464,7 +464,8 @@ void build_grid(const Level &L, const V3 &lo, const V3 &hi, Grid &g) {
 // narrow ways (doorways, tunnels, bridges: a waypoint in the middle and either side of a doorway, and along a long one
 // every few units), on the floor players can walk to from their spawns. `kind`: 1 ramp, 2 narrow way.
 struct Feature { V3 p; int kind; };
-std::vector<Feature> find_features(const Level &L, const std::vector<V3> &spawns) {
+// `spawns`: every waypoint; `walk`: the ones bots walk on from (the floor they get to is walked from these).
+std::vector<Feature> find_features(const Level &L, const std::vector<V3> &spawns, const std::vector<V3> &walk_from) {
     std::vector<Feature> out;
     if (spawns.empty()) return out;
     V3 lo{1e30, 1e30, 1e30}, hi{-1e30, -1e30, -1e30};
@@ -478,7 +479,7 @@ std::vector<Feature> find_features(const Level &L, const std::vector<V3> &spawns
     // The floor players get to: walked from each waypoint's floor.
     std::vector<char> reach(n, 0);
     std::vector<int> q;
-    for (auto &p : spawns) {
+    for (auto &p : walk_from) {
         int ci = (int)std::floor((p[0] - g.x0) / g.h), cj = (int)std::floor((p[1] - g.y0) / g.h);
         if (ci < 0 || cj < 0 || ci >= g.nx || cj >= g.ny) continue;
         int c = cj * g.nx + ci, best = -1;
@@ -667,6 +668,17 @@ std::vector<Feature> find_features(const Level &L, const std::vector<V3> &spawns
             along_way(way, 1, 4.0, true);
         }
     }
+    // The grid cell next to a floor's, in direction d: no floor there as high as it (less half a unit), or none at
+    // all: a drop (a floor there that high, it's a wall or a step in the way).
+    auto drop_beyond = [&](int f, int d) {
+        const V3 &a = g.at[(size_t)f];
+        int ci = (int)std::floor((a[0] - g.x0) / g.h) + kDir[d][0], cj = (int)std::floor((a[1] - g.y0) / g.h) + kDir[d][1];
+        if (ci < 0 || cj < 0 || ci >= g.nx || cj >= g.ny) return true;
+        int c = cj * g.nx + ci;
+        for (int k = g.first[(size_t)c]; k < g.first[(size_t)c + 1]; k++)
+            if (g.at[(size_t)k][2] >= a[2] - 0.5) return false;
+        return true;
+    };
     // Narrow ways: from end to end (its two ends furthest apart), and a little past each into the open.
     {
         std::vector<std::vector<int>> comps;
@@ -705,9 +717,76 @@ std::vector<Feature> find_features(const Level &L, const std::vector<V3> &spawns
                 }
                 c = t;
             }
+            // (a ledge: a walkway with a drop at its side for much of it, where a bot that strays from the line falls;
+            // a doorway, tunnel or corridor between walls: its ends and middle are enough)
+            size_t drops = 0;
+            for (int c : way) {
+                const V3 &ax = axis[(size_t)c];
+                int dacross = -1;
+                for (int d = 0; d < 4; d++)
+                    if (std::fabs(kDir[d][0] * ax[0] + kDir[d][1] * ax[1]) < 0.3) { dacross = d; break; }
+                if (dacross < 0) continue;
+                bool drop = false;
+                for (int side = 0; side < 2 && !drop; side++) {
+                    int d = dacross + 4 * side, t = c;
+                    for (int k = 0; k < kMax && g.nb[(size_t)t][(size_t)d] >= 0; k++) t = g.nb[(size_t)t][(size_t)d];
+                    drop = drop_beyond(t, d);
+                }
+                drops += drop;
+            }
+            const bool ledge = drops * 2 >= way.size();
             way.insert(way.begin(), beyond(way.front(), way[std::min<size_t>(3, way.size() - 1)], 1.5));
             way.push_back(beyond(way.back(), way[way.size() >= 5 ? way.size() - 5 : 0], 1.5));
-            along_way(way, 2, 5.0, false);
+            along_way(way, 2, ledge ? 2.0 : 6.0, !ledge);
+        }
+    }
+    // Open floor: wherever it's more than kOpen units' walk from every waypoint (the map's, yours, the ones above), one
+    // more there, the farthest first, until none is that far. (A bot picks a waypoint to go to: floor far from all of
+    // them is floor bots never cross.)
+    {
+        const double kOpen = 3.5;   // (your Snow Space nodes on the open ice: 3 to 4 units from the nearest waypoint)
+        const float kFar = 1e30f;
+        std::vector<float> far_(n, kFar);
+        auto floor_at = [&](const V3 &p) {
+            int ci = (int)std::floor((p[0] - g.x0) / g.h), cj = (int)std::floor((p[1] - g.y0) / g.h);
+            if (ci < 0 || cj < 0 || ci >= g.nx || cj >= g.ny) return -1;
+            int c = cj * g.nx + ci, best = -1;
+            for (int f = g.first[(size_t)c]; f < g.first[(size_t)c + 1]; f++)
+                if (g.at[(size_t)f][2] <= p[2] + 0.5 && (best < 0 || g.at[(size_t)f][2] > g.at[(size_t)best][2])) best = f;
+            return best;
+        };
+        using QE = std::pair<float, int>;
+        auto spread = [&](int from) {   // (walking distances from a new waypoint, where they're shorter than before)
+            if (from < 0 || far_[(size_t)from] == 0) return;
+            std::priority_queue<QE, std::vector<QE>, std::greater<QE>> pq;
+            far_[(size_t)from] = 0;
+            pq.push({0, from});
+            while (!pq.empty()) {
+                auto [d, c] = pq.top();
+                pq.pop();
+                if (d > far_[(size_t)c] || d > 40) continue;
+                for (int m : g.nb[(size_t)c]) {
+                    if (m < 0) continue;
+                    float nd = d + (float)dist(g.at[(size_t)c], g.at[(size_t)m]);
+                    if (nd < far_[(size_t)m]) { far_[(size_t)m] = nd; pq.push({nd, m}); }
+                }
+            }
+        };
+        for (auto &p : spawns) spread(floor_at(p));
+        for (size_t k = 0; k < out.size(); k++) spread(floor_at(out[k].p));
+        // (only floor as high as the map's own points go, give or take 1.5 units: below them is the bottom of a pit or a
+        // drop players die in, not a place to send bots)
+        double zlo = 1e30, zhi = -1e30;
+        for (auto &p : spawns) { zlo = std::min(zlo, p[2]); zhi = std::max(zhi, p[2]); }
+        for (int added = 0; added < 400; added++) {
+            int best = -1;
+            for (size_t f = 0; f < n; f++)
+                if (reach[f] && far_[f] > kOpen && g.at[f][2] >= zlo - 1.5 && g.at[f][2] <= zhi + 1.5 &&
+                    (best < 0 || far_[f] > far_[(size_t)best]))
+                    best = (int)f;
+            if (best < 0) break;
+            out.push_back({g.at[(size_t)best], 3});
+            spread(best);
         }
     }
     return out;
@@ -825,8 +904,13 @@ Result plan(const fs::path &bsp, const std::vector<V3> &points, int teleporters,
     if (o.features) {
         std::vector<V3> from;
         for (int i = 0; i < res.given; i++) from.push_back(w[(size_t)i].at);
+        std::vector<V3> walk;
+        if (o.walk_from.size() == points.size()) {
+            for (size_t i = 0; i < points.size() && i < res.point_waypoint.size(); i++)
+                if (o.walk_from[i] && res.point_waypoint[i] >= 0) walk.push_back(w[(size_t)res.point_waypoint[i]].at);
+        } else walk = from;
         const int cap = std::max(0, o.budget - o.spare - (int)w.size());
-        for (auto &f : find_features(L, from)) {
+        for (auto &f : find_features(L, from, walk)) {
             if ((int)res.added.size() >= std::min(cap, o.max_features)) break;
             V3 gp;
             uint32_t sf = ground(L, {f.p[0], f.p[1], f.p[2] + 0.25}, gp);
@@ -838,7 +922,7 @@ Result plan(const fs::path &bsp, const std::vector<V3> &points, int teleporters,
             tele_to.push_back(-1);
             res.added.push_back({gp[0], gp[1], gp[2] + 0.25});
             res.added_kind.push_back(f.kind);
-            (f.kind == 1 ? res.on_ramps : res.in_narrow)++;
+            (f.kind == 1 ? res.on_ramps : f.kind == 2 ? res.in_narrow : res.on_open)++;
         }
         if (!res.added.empty()) {
             links = make_links(w, tele_to);

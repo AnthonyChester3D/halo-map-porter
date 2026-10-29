@@ -16,6 +16,7 @@
 #include "tagedit.hpp"
 #include "tagfile.hpp"
 
+#include <functional>
 #include <algorithm>
 #include <atomic>
 #include <climits>
@@ -8265,6 +8266,59 @@ struct ScriptConverter {
         auto d = defaults.find(type);
         return d == defaults.end() ? "none" : d->second;
     }
+    // A parameter turned into a global starts as a value one of its calls passes, when its type's plain value would
+    // be "none": the Xbox checks a name global's value when the map loads ("none: this is not a valid cutscene_flag
+    // name" stopped Hydroponics loading). A call passing its own script's parameter passes what that one starts as.
+    std::map<std::string, std::string> param_init;   // global -> its first value
+    bool param_init_made = false;
+    std::string init_value(const Param &p) {
+        std::string d = default_value(p.type);
+        if (d != "none") return d;
+        if (!param_init_made) {
+            param_init_made = true;
+            std::map<std::string, std::string> alias;   // global -> the global whose value it starts as
+            std::function<void(const hsc::Node &, const std::map<std::string, std::string> &)> walk =
+                [&](const hsc::Node &n, const std::map<std::string, std::string> &mine) {
+                    if (!n.list) return;
+                    if (!n.kids.empty() && !n.kids[0].list) {
+                        auto ps = param_scripts.find(hsc::lower(n.kids[0].atom));
+                        if (ps != param_scripts.end())
+                            for (size_t k = 1; k < n.kids.size() && k - 1 < ps->second.size(); k++) {
+                                auto &a = n.kids[k];
+                                const std::string &g = ps->second[k - 1].global;
+                                if (a.list || a.str || param_init.count(g) || alias.count(g)) continue;
+                                auto m = mine.find(hsc::lower(a.atom));
+                                if (m != mine.end()) alias[g] = m->second;
+                                else if (hsc::lower(a.atom) != "none") param_init[g] = a.atom;
+                            }
+                    }
+                    for (auto &k : n.kids) walk(k, mine);
+                };
+            for (auto &t : texts) {
+                std::vector<hsc::Node> top;
+                size_t i = 0;
+                if (!hsc::parse(t, i, top, false)) continue;
+                for (auto &n : top) {
+                    std::map<std::string, std::string> mine;
+                    if (n.list && n.kids.size() >= 3 && !n.kids[0].list && hsc::lower(n.kids[0].atom) == "script")
+                        for (auto &k : n.kids)
+                            if (k.list && !k.kids.empty() && !k.kids[0].list) {
+                                auto ps = param_scripts.find(hsc::lower(k.kids[0].atom));
+                                if (ps != param_scripts.end()) {
+                                    for (auto &q : ps->second) mine[hsc::lower(q.name)] = q.global;
+                                    break;
+                                }
+                            }
+                    walk(n, mine);
+                }
+            }
+            for (int round = 0; round < 8; round++)
+                for (auto &[g, from] : alias)
+                    if (!param_init.count(g) && param_init.count(from)) param_init[g] = param_init[from];
+        }
+        auto it = param_init.find(p.global);
+        return it == param_init.end() ? d : it->second;
+    }
     bool calls_param_script(const hsc::Node &n) const {
         if (!n.list) return false;
         if (!n.kids.empty() && !n.kids[0].list && param_scripts.count(hsc::lower(n.kids[0].atom))) return true;
@@ -8357,7 +8411,7 @@ struct ScriptConverter {
                 do dst = ("t" + std::to_string(++param_globals) + "_" + head + "_" + p.name).substr(0, 31);
                 while (user.count(dst));
                 user.insert(dst);
-                extra_globals += "(global " + p.type + " " + dst + " " + default_value(p.type) + ")\n";
+                extra_globals += "(global " + p.type + " " + dst + " " + init_value(p) + ")\n";
                 temps.push_back(dst);
             }
             r += " (set " + dst + " " + emit(s, n.kids[k]) + ")";
@@ -8804,7 +8858,7 @@ struct ScriptConverter {
                         std::string decls;
                         for (auto &p : ps->second) {
                             m[p.name] = p.global;
-                            decls += "(global " + p.type + " " + p.global + " " + default_value(p.type) + ")\n";
+                            decls += "(global " + p.type + " " + p.global + " " + init_value(p) + ")\n";
                         }
                         std::string r = decls + s.substr(n.b, n.kids[at].b - n.b) + n.kids[at].kids[0].atom;
                         size_t pos = n.kids[at].e;
@@ -12133,6 +12187,7 @@ void bot_route_points(Job &job, const fs::path &xsrc) {
     points = with_mine;
     botnodes::Options bo;
     if (!job.cfg.xbox_bot_nodes) { bo.max_add = 0; bo.features = false; }
+    for (auto &k : kind) bo.walk_from.push_back(k.rfind("item spawn point", 0) != 0);
     botnodes::Result br = bdir.empty() ? botnodes::Result() : botnodes::plan(bdir / from_u8(bsp), points, tele, bo);
     if (!br.ok) {
         job.log("  [bots] the map's " + std::to_string(points.size()) + " points for Halo 1 Unlimited's bots (" + counts + ")" +
@@ -12200,10 +12255,11 @@ void bot_route_points(Job &job, const fs::path &xsrc) {
     }
     if (added) {
         auto pct = [&](long v) { return std::to_string((int)std::lround(100.0 * v / std::max(1, br.given * (br.given - 1)))); };
-        const int searched = added - br.on_ramps - br.in_narrow;
+        const int searched = added - br.on_ramps - br.in_narrow - br.on_open;
         l += ". Added " + std::to_string(added) + " (item spawn points that spawn nothing), " + std::to_string(total) + " now: " +
              std::to_string(br.on_ramps) + " along ramps (foot, middle, turns, top), " + std::to_string(br.in_narrow) +
-             " through doorways, tunnels and bridges, " + std::to_string(searched) +
+             " through doorways, tunnels, bridges and along ledges, " + std::to_string(br.on_open) +
+             " on open floor more than 3.5 units' walk from every waypoint, " + std::to_string(searched) +
              " where the bots' path search can't finish a hop and the hops that work don't go around. Their waypoints "
              "now join " + pct(br.reach_after) + "% of the ways between the map's own (" + pct(br.reach_before) + "% before)";
     } else if (job.cfg.xbox_bot_nodes && br.stuck_before > 0 && br.unjoined < br.stuck_after) {
@@ -14412,8 +14468,11 @@ bool analyze_map_traits(const Config &cfg, const fs::path &map, MapTraits &t, st
         if (!listed(kStockWeapons, std::size(kStockWeapons), w)) t.custom_weapons.push_back(short_name(w));
         else if (short_name(w) != "ball" && short_name(w) != "flag") stock_guns++;
     }
+    // (a "vehicle" with no seats is a script's helper, invisible and never driven: Hydroponics' scriptroomthing)
     for (auto &v : vehicles)
-        if (!listed(kStockVehicles, std::size(kStockVehicles), v)) t.custom_vehicles.push_back(short_name(v));
+        if (!listed(kStockVehicles, std::size(kStockVehicles), v) &&
+            !(fs::exists(dir / (v + ".vehicle")) && lines(v + ".vehicle", "seats[*].label").empty()))
+            t.custom_vehicles.push_back(short_name(v));
     if (fs::exists(dir / g)) {
         auto u = lines(g, "multiplayer_information[0].unit");
         std::string r = u.empty() ? std::string() : ref_path(u[0], ".biped");
