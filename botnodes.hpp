@@ -2,7 +2,7 @@
 //
 // The bots (Halo 1 Unlimited's bots.c) go between waypoints made from a map's player spawns, item spawn points and
 // netgame flags: each dropped onto the ground under it (3 units at most), teleporters first, then spawns, item spots,
-// the other flags; one within 1 unit of another is that one; 192 at most, the rest left out. Each links both ways to
+// the other flags; one within 1 unit of another is that one; 512 at most, the rest left out. Each links both ways to
 // its nearest (a floor up or down counting double), up to 8 within 40 units and at least 2. A hop between two is
 // walked with Halo's AI path search (path.c): a best-first search over the level's walkable collision surfaces, from
 // one to the next across their shared edges, that opens 1,024 surfaces at most, goes no further than twice the hop
@@ -26,7 +26,7 @@ namespace botnodes {
 using V3 = std::array<double, 3>;
 
 struct Options {
-    int budget = 192;          // the bots' waypoints
+    int budget = 512;          // the bots' waypoints
     int spare = 8;             // left free of that (for the map's later changes)
     int max_add = 48;          // nodes added at most
     int node_limit = 1024;     // the game's search's surfaces at most (PATH_NODE_LIST_SIZE)
@@ -35,6 +35,8 @@ struct Options {
     double jump = 0.8;         // a ledge this high a search's end can be straight from (the cyborg's crouch-jump, 9 in 10)
     double drop = 2.7;         // and a drop this far down (the globals' harmless fall: 3 units, 9 in 10 of it)
     int rounds = 3;            // plans again with the nodes' own links
+    bool features = true;      // waypoints along the level's ramps and narrow ways (doorways, tunnels, bridges)
+    int max_features = 200;    // those at most
 };
 
 struct Hop {                   // a link, walked one way
@@ -59,6 +61,8 @@ struct Result {
                                        // merged), or -1
     std::vector<V3> waypoints; // the map's, then the nodes added (on the ground)
     std::vector<V3> added;     // the nodes as placed in the scenario (a little above the ground)
+    std::vector<int> added_kind;   // each one's: 0 where the search can't finish a hop, 1 a ramp, 2 a narrow way
+    int on_ramps = 0, in_narrow = 0;
     std::vector<Hop> hops;     // the links (both ways) with the nodes added
     int failing_before = 0, failing_after = 0;   // hops the search can't finish, before and after the nodes
     int stuck_before = 0, stuck_after = 0;       // of those, ones the links that work don't go around either

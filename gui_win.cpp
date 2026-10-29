@@ -546,6 +546,8 @@ static mapcard::Card conv_card() { return mapcard::load_card(conv_card_dir(), N(
 static bool write_card(const fs::path &card_dir, const std::wstring &map_name, const fs::path &map_path,
                        std::wstring &note) {
     mapcard::Card c = mapcard::load_card(card_dir, N(map_name));
+    const int was = c.version;
+    mapcard::next_version(c, map_path);   // (a changed map: the next release; written by the card below)
     mapcard::Image img;
     bool pic = mapcard::card_image(card_dir, c, img);
     std::string err;
@@ -554,7 +556,8 @@ static bool write_card(const fs::path &card_dir, const std::wstring &map_name, c
         MessageBoxW(g_wnd, W(err).c_str(), L"Halo Map Porter", MB_ICONWARNING);
         return false;
     }
-    note = L"Map card: \"" + W(c.name) + L"\" -> " + folder.wstring() + L"\\ (info.txt" + (pic ? L", preview.bin)" : L"; no picture yet)");
+    note = L"Map card: \"" + W(c.name) + L"\" -> " + folder.wstring() + L"\\ (info.txt" + (pic ? L", preview.bin)" : L"; no picture yet)") +
+           L", version " + std::to_wstring(c.version) + (c.version != was ? L" (the map changed since the last one)" : L" (the map is the same)");
     c.output = u8(map_path);   // so opening that map later finds this card
     mapcard::save_card(card_dir, c);
     std::error_code ec;

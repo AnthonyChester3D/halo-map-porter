@@ -102,7 +102,7 @@ static std::wstring to_edit(const std::string &s) {
 enum {
     IDC_FOLDER = 2001, IDC_NAME, IDC_DESC, IDC_CROP, IDC_PREVIEW, IDC_ZOOM, IDC_CHOOSE, IDC_FIT, IDC_FILL, IDC_REMOVE,
     IDC_TV43, IDC_TV169, IDC_BOUNDS, IDC_ST_FOLDER, IDC_CNT_FOLDER, IDC_ST_NAME, IDC_CNT_NAME, IDC_ST_DESC,
-    IDC_CNT_DESC, IDC_PICINFO, IDC_OUTFILES, IDC_WHERE, IDC_LBL, IDC_PLAYERS, IDC_GAMETYPES, IDC_GENRES, IDC_GENRE_ADD,
+    IDC_CNT_DESC, IDC_PICINFO, IDC_OUTFILES, IDC_WHERE, IDC_LBL, IDC_PLAYERS, IDC_GAMETYPES, IDC_GENRES, IDC_GENRE_ADD, IDC_VERSION,
     IDC_ST_BROWSER,
 };
 constexpr int kGenreMenu = 3000;   // + index into kDefaultGenres
@@ -683,14 +683,18 @@ static void create_controls() {
     HWND gt = add(L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL, L + 206, B + 24, 260, 24, IDC_GAMETYPES, WS_EX_CLIENTEDGE);
     SendMessageW(gt, EM_LIMITTEXT, 100, 0);
     add(L"STATIC", L"Genres", 0, L + 480, B + 27, 50, 20, IDC_LBL);
-    HWND gn = add(L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL, L + 532, B + 24, 326, 24, IDC_GENRES, WS_EX_CLIENTEDGE);
+    HWND gn = add(L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL, L + 532, B + 24, 234, 24, IDC_GENRES, WS_EX_CLIENTEDGE);
     SendMessageW(gn, EM_LIMITTEXT, 120, 0);
+    add(L"STATIC", L"Version", 0, L + 774, B + 27, 48, 20, IDC_LBL);
+    HWND vn = add(L"EDIT", L"", WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL, L + 822, B + 24, 36, 24, IDC_VERSION, WS_EX_CLIENTEDGE);
+    SendMessageW(vn, EM_LIMITTEXT, 4, 0);
     add(L"BUTTON", L"Add genre...", WS_TABSTOP | BS_PUSHBUTTON, L + 864, B + 22, 96, 28, IDC_GENRE_ADD);
     add(L"STATIC", L"", 0, L, B + 56, 830, 36, IDC_ST_BROWSER);
     add(L"BUTTON", L"Done", WS_TABSTOP | BS_DEFPUSHBUTTON, L + 860, B + 58, 100, 30, IDOK);
     SetWindowTextW(pl, W(E->card.players).c_str());
     SetWindowTextW(gt, W(E->card.gametypes).c_str());
     SetWindowTextW(gn, W(E->card.genres).c_str());
+    if (E->card.version > 0) SetWindowTextW(vn, std::to_wstring(E->card.version).c_str());
 
     SetWindowTextW(folder, W(E->card.folder).c_str());
     SetWindowTextW(name, W(E->card.name).c_str());
@@ -724,6 +728,13 @@ static LRESULT CALLBACK editor_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 if (id == IDC_FOLDER) E->card.folder = v;
                 else if (id == IDC_NAME) E->card.name = v;
                 else E->card.desc = v;
+                update_texts();
+            }
+            return 0;
+        case IDC_VERSION:
+            if (code == EN_CHANGE && GetFocus() == (HWND)lp) {   // (yours: the next export writes it as it is)
+                E->card.version = std::max(0, atoi(from_edit((HWND)lp).c_str()));
+                E->card.version_set = E->card.version > 0;
                 update_texts();
             }
             return 0;

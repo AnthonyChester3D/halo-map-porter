@@ -484,6 +484,13 @@ game, the app rewrites the map's scripts for that game:
     once someone is. Halo's scripts have no loops (no for or while; a
     continuous script is the loop, run once a tick), so this is the cheap
     way: the most a player in the volume waits is a sixth of a second.
+  - Xbox: a continuous script that tests many objects against trigger
+    volumes every tick (teleporters for each vehicle at each entrance:
+    Coldsnap's 494 tests a tick, about 5 ms of 33) tests each volume's
+    objects only while a player is in that volume: one test a volume a
+    tick (Coldsnap's scripts: about 3 ms a tick, from 9). Only on maps
+    whose scripts use no AI, where a vehicle only goes anywhere with a
+    player in it; an empty one rolling in isn't teleported.
   - Xbox: lookups. With no arrays, scripts keep 16 players' things in 16
     globals and pick one with an if for each:
     (if (= index 0) (set r ref_player0)) (if (= index 1) ...) ... Every
@@ -1771,7 +1778,7 @@ Bot route points (Xbox, Halo 1 Unlimited)
   made from the map's player spawns, item spawn points and netgame flags
   (teleporters first, then spawns, item spots and the other flags). Each
   is dropped onto the ground under it; points within 1 world unit (about
-  3 m) of one already taken are that one, and past 192 the rest are left
+  3 m) of one already taken are that one, and past 512 the rest are left
   out with no warning, so bots never use them. Each waypoint links to its nearest ones, and a bot walks
   each hop with Halo's own AI path search. That search only walks the
   level's AI floor (the surfaces Tool marks walkable, joined edge to edge),
@@ -1783,7 +1790,15 @@ Bot route points (Xbox, Halo 1 Unlimited)
   standing under its waypoint.
 
   "Add waypoints for Halo 1 Unlimited's bots" (Xbox tab, on by default)
-  works this out on each Xbox build. It makes the waypoints and links as
+  works this out on each Xbox build. First it gives the bots a plain way
+  along the level's ramps and narrow ways, on the floor players can walk
+  to from their spawns: on each ramp (one slope, edged by walls or drops,
+  climbing a third of a unit or more) a waypoint at its foot, its
+  middle, each turn, its top and every 4 units between (an L-shaped
+  ramp's legs each get theirs); through each doorway, tunnel or bridge
+  (4 units across or less, longer than wide) one at each end, a little
+  outside, and every 5 units through it. One within 1.6 units of a
+  waypoint already there isn't added. Then it makes the waypoints and links as
   the game does and runs every hop's search the way the game runs it. A
   hop the search can't finish is fine when the hops that do work go round
   it (the bots learn to drop a link that fails twice). Where they don't,
@@ -1793,12 +1808,10 @@ Bot route points (Xbox, Halo 1 Unlimited)
   added waypoints are item spawn points with all four gametypes "none":
   they never spawn anything (stock Halo ignores them too). It keeps them
   only when they join more of the map's own waypoints, and stays well
-  under the 192.
+  under the 512.
   The log's [bots] line says how many waypoints the map's points make
   (counting those merged, those with no ground under them, and, by kind,
-  the ones past 192 the game leaves out: Precipice's 272 points make 230,
-  so its last 38, mostly race flags and one CTF flag, never become
-  waypoints), how many were added, how much of the map the bots' working links now join, and
+  the ones past 512 the game leaves out), how many were added, how much of the map the bots' working links now join, and
   how many links bots still can't walk with no way round: those need a
   jump higher than a crouch-jump, a ladder, a lift, a man cannon, or
   stairs the AI floor data doesn't join (nothing a waypoint fixes). A
@@ -1806,8 +1819,8 @@ Bot route points (Xbox, Halo 1 Unlimited)
   bots.bmp): the floor the AI walks by height (lighter is higher), the
   map's waypoints in blue, the added ones in orange, the ways they were
   added along in yellow, and in red the links still with no way round.
-  A map that already uses (nearly) all 192, like Blood Gulch with its
-  race and CTF flags, gets none.
+  (Halo 1 Unlimited's bots used to take 192 waypoints at most; they take
+  512 now, so even Precipice's 272 points, 230 after merging, all fit.)
 
   Placing your own in the Level window (Xbox tab, Level...): "Bot
   waypoints..." shows the bots' waypoints and links in the picture, worked
@@ -1820,7 +1833,7 @@ Bot route points (Xbox, Halo 1 Unlimited)
   link" looks at each red link in turn, saying whether a walk joins its
   ends (then waypoints along that walk can fix it) or not (a jump, ladder
   or lift: nothing a waypoint fixes). Yours are kept for the map with its
-  other Level choices (OK keeps them) and go into every Xbox conversion
+  other Level choices (closing the window keeps them) and go into every Xbox conversion
   or build as item spawn points that spawn nothing, before the
   automatic ones are worked out. One within 1 unit of a waypoint already
   there makes one with it (the list says so). A measurement made before
@@ -2117,8 +2130,16 @@ sort). The card has a field for each, at the bottom of "Map card...":
     the Xbox starts with: Competitive, Casual, Memes, Artistic, Custom
     vehicles, Custom weapons and Total conversions. Each Xbox can rename or
     reorder them in maps\genres.txt.
-They go at the end of info.txt as "Players:", "Gametypes:" and "Genres:"
-lines, which the Xbox doesn't show in the description. Older XBEs show
+  - Version: the map's release, for Halo 1 Unlimited's map sharing: when
+    two players have different copies, the newer one is kept (a host
+    with an older copy never replaces yours; its copy is used for that
+    game only). A map without one counts as version 0. Each export of a
+    map that changed since the last one raises it by one (the first is
+    1); writing it again with only a new picture or description keeps
+    it. Type a number to set it yourself: the next export writes that,
+    and counts on from it.
+They go at the end of info.txt as "Players:", "Gametypes:", "Genres:" and
+"Version:" lines, which the Xbox doesn't show in the description. Older XBEs show
 them as part of the description.
 After each build or conversion the app reads the finished map and fills
 in what you haven't set yourself:

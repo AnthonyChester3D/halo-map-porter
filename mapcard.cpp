@@ -321,6 +321,9 @@ Card load_card(const fs::path &dir, const std::string &default_name) {
         else if (k == "gametypes") c.gametypes = v;
         else if (k == "genres") c.genres = v;
         else if (k == "edited") c.edited = v;
+        else if (k == "version") c.version = std::max(0, atoi(v.c_str()));
+        else if (k == "version_hash") c.version_hash = v;
+        else if (k == "version_set") c.version_set = v == "1";
     }
     if (!c.image.empty() && !fs::exists(dir / fs::u8path(c.image))) c.image.clear();
     return c;
@@ -338,6 +341,9 @@ bool save_card(const fs::path &dir, const Card &c) {
     if (!c.gametypes.empty()) f << "gametypes=" << esc(c.gametypes) << "\n";
     if (!c.genres.empty()) f << "genres=" << esc(c.genres) << "\n";
     if (!c.edited.empty()) f << "edited=" << esc(c.edited) << "\n";
+    if (c.version > 0) f << "version=" << c.version << "\n";
+    if (!c.version_hash.empty()) f << "version_hash=" << c.version_hash << "\n";
+    if (c.version_set) f << "version_set=1\n";
     return (bool)f;
 }
 
@@ -430,10 +436,10 @@ static bool valid_utf8(const std::string &s) {
 }
 // "Genres: x" -> 0 / 1 / 2 (players, gametypes, genres) with the value; -1 for any other line
 static int info_line(const std::u32string &l, std::string &value) {
-    static const char *const keys[3] = {"players:", "gametypes:", "genres:"};
+    static const char *const keys[4] = {"players:", "gametypes:", "genres:", "version:"};
     size_t i = 0;
     while (i < l.size() && l[i] == U' ') i++;
-    for (int k = 0; k < 3; k++) {
+    for (int k = 0; k < 4; k++) {
         size_t n = 0;
         while (keys[k][n] && i + n < l.size() && l[i + n] < 128 && tolower((int)l[i + n]) == keys[k][n]) n++;
         if (keys[k][n]) continue;
@@ -473,6 +479,7 @@ bool read_info(const fs::path &txt, std::string &name, std::string &desc, InfoLi
         if (k == 0) got.players = v;
         else if (k == 1) got.gametypes = v;
         else if (k == 2) got.genres = v;
+        else if (k == 3) got.version = std::max(0, atoi(v.c_str()));
         else if (!d.empty() || !l.empty()) d += (d.empty() ? U"" : U"\n") + l;   // the XBE skips blank lines before it
         l.clear();
     };
@@ -556,6 +563,10 @@ bool import_card(const fs::path &dir, const fs::path &map_file, bool in_maps_dir
             if (!il.players.empty()) { c.players = il.players; mark_edited(c, "players"); }   // someone chose these
             if (!il.gametypes.empty()) { c.gametypes = il.gametypes; mark_edited(c, "gametypes"); }
             if (!il.genres.empty()) { c.genres = il.genres; mark_edited(c, "genres"); }
+            if (il.version > 0) {   // (its release as it is: the same map exported again keeps the number)
+                c.version = il.version;
+                c.version_hash = map_fingerprint(map_file);
+            }
         }
     }
     if (!pb.empty()) {
@@ -842,7 +853,34 @@ std::string info_lines(const Card &c) {
     add("Players: ", c.players);
     add("Gametypes: ", c.gametypes);
     add("Genres: ", c.genres);
+    if (c.version > 0) add("Version: ", std::to_string(c.version));
     return o;
+}
+
+std::string map_fingerprint(const fs::path &map_file) {
+    std::ifstream f(map_file, std::ios::binary);
+    if (!f) return "";
+    uint64_t h = 1469598103934665603ull, n = 0;
+    char buf[1 << 16];
+    while (f) {
+        f.read(buf, sizeof buf);
+        std::streamsize got = f.gcount();
+        for (std::streamsize i = 0; i < got; i++) { h ^= (unsigned char)buf[i]; h *= 1099511628211ull; }
+        n += (uint64_t)got;
+    }
+    char hex[48];
+    snprintf(hex, sizeof hex, "%016llx-%llu", (unsigned long long)h, (unsigned long long)n);
+    return hex;
+}
+bool next_version(Card &c, const fs::path &map_file) {
+    std::string fp = map_fingerprint(map_file);
+    if (fp.empty()) return false;
+    const int before = c.version;
+    if (c.version_set) c.version = std::max(1, c.version);          // (yours, as you set it)
+    else if (fp != c.version_hash) c.version = std::max(0, c.version) + 1;   // (a changed map: the next release)
+    c.version_set = false;
+    c.version_hash = fp;
+    return c.version != before;
 }
 bool write_info_txt(const Card &c, const fs::path &folder, std::string &err) {
     std::error_code ec;

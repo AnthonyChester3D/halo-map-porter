@@ -604,9 +604,12 @@ void bots_text() {
     for (auto &l : bot_links()) (l.how == 0 ? good : l.how == 1 ? round : stuck)++;
     auto pct = [&](long v) { return std::to_wstring((int)std::lround(100.0 * v / std::max(1, r.given * (r.given - 1)))); };
     const int total = (int)r.waypoints.size();
-    std::wstring t = L"Waypoints: " + std::to_wstring(total) + L" of the bots' 192: " + std::to_wstring(r.given - mine) +
+    std::wstring t = L"Waypoints: " + std::to_wstring(total) + L" of the bots' 512: " + std::to_wstring(r.given - mine) +
                      L" from the map's spawns, item spots and flags (blue), " + std::to_wstring(mine) + L" of yours (green)";
-    if (!r.added.empty()) t += L", " + std::to_wstring(r.added.size()) + L" a conversion adds (orange)";
+    if (!r.added.empty())
+        t += L", " + std::to_wstring(r.added.size()) + L" a conversion adds (orange: " + std::to_wstring(r.on_ramps) + L" along ramps, " +
+             std::to_wstring(r.in_narrow) + L" through doorways, tunnels and bridges, " +
+             std::to_wstring((int)r.added.size() - r.on_ramps - r.in_narrow) + L" where the search needs them)";
     t += L".";
     if (r.merged) t += L" " + std::to_wstring(r.merged) + L" of the map's points are within 1 unit of another and make one with it.";
     if (!r.left_out.empty()) {
@@ -624,7 +627,7 @@ void bots_text() {
                                                                    : k + "s";
             list += (list.empty() ? L"" : L", ") + std::to_wstring(c) + L" " + W(name);
         }
-        t += L" Past the 192, the game leaves out " + std::to_wstring(r.left_out.size()) + L" (" + list + L"): bots never go to them.";
+        t += L" Past the 512, the game leaves out " + std::to_wstring(r.left_out.size()) + L" (" + list + L"): bots never go to them.";
     }
     t += L"\r\n\r\nLinks: " + std::to_wstring(good) + L" the bots walk (green), " + std::to_wstring(round) +
          L" their search can't finish one way but they go round (amber), " + std::to_wstring(stuck) + L" with nothing round (red)";
@@ -650,7 +653,7 @@ void bots_fill_list() {
     SendMessageW(l, LB_RESETCONTENT, 0, 0);
     for (size_t i = 0; i < St->picks.bots.size(); i++) {
         std::wstring s = std::to_wstring(i + 1) + L"   " + bots_where(St->picks.bots[i]);
-        if (i < St->bot_mine_at.size() && St->bot_mine_at[i] < 0) s += L"   (no waypoint: no ground under it, or past 192)";
+        if (i < St->bot_mine_at.size() && St->bot_mine_at[i] < 0) s += L"   (no waypoint: no ground under it, or past 512)";
         else if (i < St->bot_mine_merged.size() && St->bot_mine_merged[i]) s += L"   (within 1 unit of another: one waypoint with it)";
         SendMessageW(l, LB_ADDSTRING, 0, (LPARAM)s.c_str());
     }
@@ -666,7 +669,7 @@ void bots_plan() {
     size_t at = std::min(St->bot_insert, pts.size());
     pts.insert(pts.begin() + (std::ptrdiff_t)at, St->picks.bots.begin(), St->picks.bots.end());
     botnodes::Options o;
-    if (!St->picks.bots_auto) o.max_add = 0;
+    if (!St->picks.bots_auto) { o.max_add = 0; o.features = false; }
     HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
     St->bot_res = botnodes::plan(St->bot_bsp, pts, St->bot_tele, o);
     SetCursor(old);
@@ -785,7 +788,7 @@ void bots_click(int x, int y) {
     bots_plan();
     int i = St->bot_mine_at.back();
     std::wstring s = L"Added waypoint " + std::to_wstring(St->picks.bots.size()) + L" " + bots_where(St->picks.bots.back());
-    if (i < 0) s += L": no waypoint comes of it (no ground under it, or the map is past 192).";
+    if (i < 0) s += L": no waypoint comes of it (no ground under it, or the map is past 512).";
     else if (St->bot_mine_merged.back()) s += L": it's within 1 unit of a waypoint already there, so the bots make them one.";
     else if ((size_t)i < St->bot_res.waypoints.size() && std::fabs(St->bot_res.waypoints[(size_t)i][2] - at[2]) > 0.6)
         s += L": the bots drop it onto the floor below.";
@@ -1441,6 +1444,8 @@ LRESULT CALLBACK view_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         case VK_DELETE: case VK_BACK:
             if (St && St->bots_mode) bots_delete();
+            else if (St && St->sc_mode && !St->playing && sc_shot())   // (the picked key, as "Remove it")
+                SendMessageW(St->wnd, WM_COMMAND, MAKEWPARAM(IDC_SC_UNDO, BN_CLICKED), (LPARAM)item(IDC_SC_UNDO));
             return 0;
         }
         break;
@@ -1553,8 +1558,8 @@ void create_controls() {
         L"Halo 1 Unlimited's bots go between these waypoints, walking each link with Halo's AI path search. Click the level to "
         L"put one of yours there (green); click one of yours, or pick it in the list, to Delete it. Yours go into each Xbox "
         L"conversion as item spawn points that never spawn anything. Blue: the map's own (its spawns, item spots and flags; "
-        L"one within 1 unit of another makes one with it). Orange: the ones a conversion adds where the search can't "
-        L"finish a link and the others don't go round (Xbox tab: \"Add waypoints for Halo 1 Unlimited's bots\"). Lines: "
+        L"one within 1 unit of another makes one with it). Orange: the ones a conversion adds: along ramps, through "
+        L"doorways, tunnels and bridges, and where the search can't finish a link and the others don't go round (Xbox tab: \"Add waypoints for Halo 1 Unlimited's bots\"). Lines: "
         L"green, a link the bots walk; amber, one their search can't finish one way, but they learn to go round it; red, one "
         L"with nothing round it. Put yours a few units apart along the way the bots should walk: at the foot, landings and "
         L"top of stairs and ramps, and along walkways up to a raised spot. The search only walks floor the level's AI data "
@@ -1612,7 +1617,7 @@ void create_controls() {
     add(L"STATIC", L"Shows: how much of the view is its reflection. Covers: how much of the screen. Passes: triangles drawn again.",
         0, 298, 730, 660, 20, IDC_ABOUT);
     add(L"BUTTON", L"OK", BS_DEFPUSHBUTTON | WS_TABSTOP, 966, 726, 96, 26, IDC_OKB);
-    add(L"BUTTON", L"Cancel", BS_PUSHBUTTON | WS_TABSTOP, 1072, 726, 96, 26, IDC_CANCELB);
+    add(L"BUTTON", L"Discard...", BS_PUSHBUTTON | WS_TABSTOP, 1072, 726, 96, 26, IDC_CANCELB);
     CheckRadioButton(St->wnd, IDC_MODE0, IDC_MODE2, IDC_MODE0 + St->picks.mode);
     CheckRadioButton(St->wnd, IDC_BEFORE, IDC_CHANGES, IDC_AFTER);
     CheckDlgButton(St->wnd, IDC_HILITE, BST_CHECKED);
@@ -1669,7 +1674,7 @@ void create_controls() {
                      L"(up to 2 seconds of speeding up), for a held start; Slow out: it comes to rest at the end; or both. "
                      L"Times as keyed: each key's own time, as the file had them (a key every so often: even time between "
                      L"keys, not even speed).");
-    tip(IDC_SC_UNDO, L"Removes the picked key. Without the first, the shot starts at the next one; without the last, it ends at "
+    tip(IDC_SC_UNDO, L"Removes the picked key (or press Delete or Backspace in the picture). Without the first, the shot starts at the next one; without the last, it ends at "
                      L"the one before.");
     tip(IDC_SC_SAVE, L"Writes these shots into the map folder's showcase.txt now (beside the converted map and its info.txt, "
                      L"where Halo 1 Unlimited reads them), without converting the map again. They're kept for the next "
@@ -2253,7 +2258,12 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             SetWindowTextW(item(IDC_STATUS), W(said).c_str());
             return 0;
         }
-        case IDC_OKB:
+        case IDC_CANCELB:   // (only on asking: closing otherwise keeps what you did)
+            if (MessageBoxW(h, L"Throw away the changes made in this window since it opened?", L"Level",
+                            MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES)
+                St->done = true;
+            return 0;
+        case IDC_OKB: case IDCANCEL:   // (Esc, like the close box, keeps them)
             if (St->sc_ready)   // (shots changed here are the map's own; untouched, the conversion makes them)
                 St->picks.showcase = St->sc_custom ? showcase::write(St->sc, St->data ? St->data->a.map_name : std::string(),
                                                                        "made in its Level window")
@@ -2261,14 +2271,11 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             St->ok = true;
             St->done = true;
             return 0;
-        case IDC_CANCELB: case IDCANCEL:
-            St->done = true;
-            return 0;
         }
         break;
     }
     case WM_CLOSE:
-        St->done = true;
+        SendMessageW(h, WM_COMMAND, MAKEWPARAM(IDC_OKB, BN_CLICKED), 0);
         return 0;
     case WM_CTLCOLORSTATIC:
         SetBkMode((HDC)wp, TRANSPARENT);

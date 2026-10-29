@@ -34,9 +34,20 @@ struct Card {
     std::string gametypes;            // "CTF, King, Oddball, Race, Slayer"
     std::string genres;               // "Competitive, Custom vehicles"
     std::string edited;               // the ones you set yourself ("players gametypes genres"): a build leaves those alone
+    // The map's release ("Version: N" in info.txt; 0: none written): Halo 1 Unlimited's map sharing keeps the newer of
+    // two copies. Each export of a map that differs from the last one exported (version_hash) raises it by one; one
+    // set by hand (version_set) is used as it is for the next export.
+    int version = 0;
+    std::string version_hash;
+    bool version_set = false;
 };
+// The map file's fingerprint, for telling a changed map from one written again with only a new card.
+std::string map_fingerprint(const fs::path &map_file);
+// Before a card's files are written next to `map_file`: its version raised when the map changed (see Card::version).
+// True when it changed.
+bool next_version(Card &c, const fs::path &map_file);
 // The three map browser lines of an info.txt (empty = not there).
-struct InfoLines { std::string players, gametypes, genres; };
+struct InfoLines { std::string players, gametypes, genres; int version = 0; };
 bool is_edited(const Card &c, const char *field);
 void mark_edited(Card &c, const char *field);
 // "4 - 16 players" / "4-16" / "8" -> lo, hi (1..16); false when there's no player count at the start of s

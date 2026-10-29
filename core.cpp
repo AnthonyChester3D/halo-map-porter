@@ -8278,8 +8278,10 @@ struct ScriptConverter {
             if (!(n.engines & bit)) missing[hsc::lower(n.name)] = &n;
     }
 
+    bool uses_ai = false;   // (any script calls an ai_ function: units the AI drives)
     void collect_user_names(const std::string &s) {
         texts.push_back(s);
+        if (hsc::lower(s).find("(ai_") != std::string::npos) uses_ai = true;
         std::vector<hsc::Node> top;
         size_t i = 0;
         if (!hsc::parse(s, i, top, false)) return;
@@ -8718,6 +8720,56 @@ struct ScriptConverter {
                 f.first++;
                 f.second = "tests each player against " + list + " only once one of them is in it (checked every 5 ticks, "
                            "a sixth of a second), not every player every tick";
+                return r + s.substr(pos, n.e - pos);
+            }
+        }
+        // (script continuous <name> (if (volume_test_object <volume> <object>) ...) ...), many of them (a teleporter
+        // for each vehicle at each entrance: Coldsnap's 494 a tick) -> each run of tests of one volume only once a player
+        // is in it. Only on a map with no AI, whose vehicles go anywhere only with a player in them.
+        if (poll_volumes && !uses_ai && head == "script" && n.kids.size() >= 15 && !n.kids[1].list &&
+            hsc::lower(n.kids[1].atom) == "continuous" && !n.kids[2].list) {
+            bool ok = true;
+            std::vector<std::string> vol;   // (each statement's volume)
+            for (size_t k = 3; k < n.kids.size() && ok; k++) {
+                const hsc::Node &c = n.kids[k];
+                ok = c.list && c.kids.size() == 3 && !c.kids[0].list && hsc::lower(c.kids[0].atom) == "if";
+                if (!ok) break;
+                const hsc::Node &t = c.kids[1];
+                ok = t.list && t.kids.size() == 3 && !t.kids[0].list && hsc::lower(t.kids[0].atom) == "volume_test_object" &&
+                     !t.kids[1].list && !t.kids[1].str && !t.kids[2].list && !t.kids[2].str;
+                if (ok) vol.push_back(hsc::lower(t.kids[1].atom));
+            }
+            size_t runs = 0, gated = 0;
+            for (size_t k = 0; ok && k < vol.size();) {
+                size_t e = k;
+                while (e < vol.size() && vol[e] == vol[k]) e++;
+                runs++;
+                if (e - k >= 2) gated += e - k;
+                k = e;
+            }
+            if (ok && gated >= 12 && runs * 2 <= vol.size()) {
+                std::string ind = indent_of(s, n.kids[3].b);
+                std::string r = s.substr(n.b, n.kids[3].b - n.b);
+                for (size_t k = 0; k < vol.size();) {
+                    size_t e = k;
+                    while (e < vol.size() && vol[e] == vol[k]) e++;
+                    const hsc::Node &first = n.kids[3 + k];
+                    if (k) r += "\n" + ind;
+                    if (e - k >= 2) {
+                        r += "(if (volume_test_objects " + first.kids[1].kids[1].atom + " (players))\n" + ind + "    (begin";
+                        for (size_t j = k; j < e; j++) r += "\n" + ind + "        " + emit(s, n.kids[3 + j]);
+                        r += "\n" + ind + "    )\n" + ind + ")";
+                    } else {
+                        r += emit(s, first);
+                    }
+                    k = e;
+                }
+                size_t pos = n.kids.back().e;
+                auto &f = fixes[n.kids[2].atom];
+                f.first++;
+                f.second = "tests its " + std::to_string(gated) + " objects against each volume only while a player is in it (" +
+                           std::to_string(runs) + " volume tests a tick, not " + std::to_string(vol.size()) +
+                           "); the map has no AI, so a vehicle goes in only with a player";
                 return r + s.substr(pos, n.e - pos);
             }
         }
@@ -12080,7 +12132,7 @@ void bot_route_points(Job &job, const fs::path &xsrc) {
     kind.insert(kind.begin() + (std::ptrdiff_t)insert_at, mine.size(), "waypoint of yours");
     points = with_mine;
     botnodes::Options bo;
-    if (!job.cfg.xbox_bot_nodes) bo.max_add = 0;
+    if (!job.cfg.xbox_bot_nodes) { bo.max_add = 0; bo.features = false; }
     botnodes::Result br = bdir.empty() ? botnodes::Result() : botnodes::plan(bdir / from_u8(bsp), points, tele, bo);
     if (!br.ok) {
         job.log("  [bots] the map's " + std::to_string(points.size()) + " points for Halo 1 Unlimited's bots (" + counts + ")" +
@@ -12124,9 +12176,9 @@ void bot_route_points(Job &job, const fs::path &xsrc) {
     if (botnodes::picture(bdir / from_u8(bsp), br, pic)) job.bots_picture = pic;
     const int total = br.given + added;
     if (!mine.empty()) counts += ", " + std::to_string(mine.size()) + " of yours (the Level window's)";
-    // Its points as the bots take them: on the ground, those within 1 unit of one already taken that one, 192 at most.
+    // Its points as the bots take them: on the ground, those within 1 unit of one already taken that one, 512 at most.
     std::string l = "[bots] the map's " + std::to_string(points.size()) + " points (" + counts + ") make " + std::to_string(br.given) +
-                    " of Halo 1 Unlimited's 192 bot waypoints";
+                    " of Halo 1 Unlimited's 512 bot waypoints";
     {
         std::vector<std::string> why;
         if (br.merged) why.push_back(std::to_string(br.merged) + " within 1 world unit of another (the game makes those one)");
@@ -12141,15 +12193,18 @@ void bot_route_points(Job &job, const fs::path &xsrc) {
                 if (c != 1) name = k == "item spawn point that spawns nothing" ? "item spawn points that spawn nothing" : k + "s";
                 list += (list.empty() ? "" : ", ") + std::to_string(c) + " " + name;
             }
-            why.push_back(std::to_string(br.left_out.size()) + " more left out past the 192 (" + list +
+            why.push_back(std::to_string(br.left_out.size()) + " more left out past the 512 (" + list +
                           "): the game drops the last ones with no warning, so bots never go to them");
         }
         for (size_t k = 0; k < why.size(); k++) l += (k ? (k + 1 == why.size() ? " and " : ", ") : ": ") + why[k];
     }
     if (added) {
         auto pct = [&](long v) { return std::to_string((int)std::lround(100.0 * v / std::max(1, br.given * (br.given - 1)))); };
-        l += ". Added " + std::to_string(added) + " (item spawn points that spawn nothing), " + std::to_string(total) +
-             " now, where the bots' path search can't finish a hop and the hops that work don't go around: their waypoints "
+        const int searched = added - br.on_ramps - br.in_narrow;
+        l += ". Added " + std::to_string(added) + " (item spawn points that spawn nothing), " + std::to_string(total) + " now: " +
+             std::to_string(br.on_ramps) + " along ramps (foot, middle, turns, top), " + std::to_string(br.in_narrow) +
+             " through doorways, tunnels and bridges, " + std::to_string(searched) +
+             " where the bots' path search can't finish a hop and the hops that work don't go around. Their waypoints "
              "now join " + pct(br.reach_after) + "% of the ways between the map's own (" + pct(br.reach_before) + "% before)";
     } else if (job.cfg.xbox_bot_nodes && br.stuck_before > 0 && br.unjoined < br.stuck_after) {
         l += ". None added: they wouldn't join more of the map's waypoints" +

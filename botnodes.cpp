@@ -7,6 +7,8 @@
 #include <cstring>
 #include <fstream>
 #include <queue>
+#include <map>
+#include <set>
 #include <unordered_map>
 
 #include "collision.hpp"
@@ -370,6 +372,347 @@ std::vector<std::vector<int>> make_links(const std::vector<Way> &w, const std::v
     return links;
 }
 
+// ---- the level's ramps and narrow ways (doorways, tunnels, bridges), for waypoints bots follow along them
+// The walkable floor on a grid (each cell's floors where a biped stands, with room above), joined where a biped walks
+// from one to the next (a step up or a slope, nothing in the way at the knee).
+struct Grid {
+    double h = 0.5;
+    double x0 = 0, y0 = 0;
+    int nx = 0, ny = 0;
+    std::vector<int> first;          // cell -> its first floor (size cells+1)
+    std::vector<V3> at;
+    std::vector<float> nz;           // each floor's normal's up part (1 flat)
+    std::vector<std::array<float, 2>> nxy;   // and its sideways part (which way the slope faces)
+    std::vector<std::array<int, 8>> nb;   // its neighbour in each of 8 directions (-1: none)
+};
+const int kDir[8][2] = {{1, 0}, {1, 1}, {0, 1}, {-1, 1}, {-1, 0}, {-1, -1}, {0, -1}, {1, -1}};
+
+void build_grid(const Level &L, const V3 &lo, const V3 &hi, Grid &g) {
+    double area = std::max(1.0, (hi[0] - lo[0]) * (hi[1] - lo[1]));
+    g.h = std::max(0.5, std::sqrt(area / 600000.0));
+    g.x0 = lo[0];
+    g.y0 = lo[1];
+    g.nx = std::max(1, (int)std::ceil((hi[0] - lo[0]) / g.h));
+    g.ny = std::max(1, (int)std::ceil((hi[1] - lo[1]) / g.h));
+    struct Spot { float z, nz, nx, ny; };
+    std::vector<std::vector<Spot>> cells((size_t)g.nx * g.ny);
+    for (uint32_t s = 0; s < L.ring.size(); s++) {
+        if (!L.walkable(s) || L.ring[s].size() < 3 || L.normal[s][2] < 0.3) continue;
+        const auto &q = L.ring[s];
+        const V3 &n = L.normal[s];
+        double d = n[0] * q[0][0] + n[1] * q[0][1] + n[2] * q[0][2];
+        double a0 = 1e30, b0 = 1e30, a1 = -1e30, b1 = -1e30;
+        for (auto &p : q) { a0 = std::min(a0, p[0]); a1 = std::max(a1, p[0]); b0 = std::min(b0, p[1]); b1 = std::max(b1, p[1]); }
+        int i0 = std::max(0, (int)std::ceil((a0 - g.x0) / g.h - 0.5)), i1 = std::min(g.nx - 1, (int)std::floor((a1 - g.x0) / g.h - 0.5));
+        int j0 = std::max(0, (int)std::ceil((b0 - g.y0) / g.h - 0.5)), j1 = std::min(g.ny - 1, (int)std::floor((b1 - g.y0) / g.h - 0.5));
+        for (int j = j0; j <= j1; j++)
+            for (int i = i0; i <= i1; i++) {
+                double x = g.x0 + (i + 0.5) * g.h, y = g.y0 + (j + 0.5) * g.h;
+                bool in = true;
+                for (size_t k = 0; k < q.size() && in; k++) {
+                    auto &a = q[k], &c = q[(k + 1) % q.size()];
+                    in = (c[0] - a[0]) * (y - a[1]) - (c[1] - a[1]) * (x - a[0]) >= -1e-9;
+                }
+                if (in) cells[(size_t)j * g.nx + i].push_back({(float)((d - n[0] * x - n[1] * y) / n[2]), (float)n[2], (float)n[0], (float)n[1]});
+            }
+    }
+    g.first.assign(cells.size() + 1, 0);
+    for (size_t c = 0; c < cells.size(); c++) {
+        g.first[c] = (int)g.at.size();
+        auto &v = cells[c];
+        std::sort(v.begin(), v.end(), [](const Spot &a, const Spot &b) { return a.z < b.z; });
+        double x = g.x0 + (double)(c % g.nx + 0.5) * g.h, y = g.y0 + (double)(c / g.nx + 0.5) * g.h;
+        for (size_t k = 0; k < v.size(); k++) {
+            if (k + 1 < v.size() && v[k + 1].z - v[k].z < 0.15) continue;
+            double p[3] = {x, y, v[k].z + 0.05}, up[3] = {0, 0, 0.6};
+            if (coll::test_vector(L.b, p, up, 1, true).surface != kNone) continue;
+            g.at.push_back({x, y, v[k].z});
+            g.nz.push_back(v[k].nz);
+            g.nxy.push_back({v[k].nx, v[k].ny});
+        }
+    }
+    g.first[cells.size()] = (int)g.at.size();
+    g.nb.assign(g.at.size(), {-1, -1, -1, -1, -1, -1, -1, -1});
+    for (int y = 0; y < g.ny; y++)
+        for (int x = 0; x < g.nx; x++) {
+            int c = y * g.nx + x;
+            for (int f = g.first[(size_t)c]; f < g.first[(size_t)c + 1]; f++)
+                for (int d = 0; d < 4; d++) {   // (each pair once: the other way round set with it)
+                    int x2 = x + kDir[d][0], y2 = y + kDir[d][1];
+                    if (x2 < 0 || y2 < 0 || x2 >= g.nx || y2 >= g.ny) continue;
+                    int c2 = y2 * g.nx + x2;
+                    double run = g.h * ((kDir[d][0] && kDir[d][1]) ? 1.4142 : 1.0);
+                    int best = -1;
+                    double bdz = 1e30;
+                    for (int k = g.first[(size_t)c2]; k < g.first[(size_t)c2 + 1]; k++) {
+                        double dz = std::fabs(g.at[(size_t)k][2] - g.at[(size_t)f][2]);
+                        double tan_a = std::sqrt(std::max(0.0, 1.0 - g.nz[(size_t)f] * g.nz[(size_t)f])) / std::max(0.3f, g.nz[(size_t)f]);
+                        double tan_b = std::sqrt(std::max(0.0, 1.0 - g.nz[(size_t)k] * g.nz[(size_t)k])) / std::max(0.3f, g.nz[(size_t)k]);
+                        if (dz <= 0.3 + run * std::max(tan_a, tan_b) * 1.1 && dz < bdz) { bdz = dz; best = k; }
+                    }
+                    if (best < 0) continue;
+                    const V3 &a = g.at[(size_t)f], &b = g.at[(size_t)best];
+                    double p[3] = {a[0], a[1], a[2] + 0.35}, v[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+                    if (coll::test_vector(L.b, p, v, 1, true).surface != kNone) continue;
+                    g.nb[(size_t)f][(size_t)d] = best;
+                    g.nb[(size_t)best][(size_t)d + 4] = f;
+                }
+        }
+}
+
+// Waypoints along the level's ramps (at the foot, the middle, each turn, the top, and every 4 units between) and through its
+// narrow ways (doorways, tunnels, bridges: a waypoint in the middle and either side of a doorway, and along a long one
+// every few units), on the floor players can walk to from their spawns. `kind`: 1 ramp, 2 narrow way.
+struct Feature { V3 p; int kind; };
+std::vector<Feature> find_features(const Level &L, const std::vector<V3> &spawns) {
+    std::vector<Feature> out;
+    if (spawns.empty()) return out;
+    V3 lo{1e30, 1e30, 1e30}, hi{-1e30, -1e30, -1e30};
+    for (auto &p : spawns)
+        for (int k = 0; k < 3; k++) { lo[k] = std::min(lo[k], p[k]); hi[k] = std::max(hi[k], p[k]); }
+    for (int k = 0; k < 2; k++) { lo[k] -= 12; hi[k] += 12; }
+    Grid g;
+    build_grid(L, lo, hi, g);
+    const size_t n = g.at.size();
+    if (n == 0) return out;
+    // The floor players get to: walked from each waypoint's floor.
+    std::vector<char> reach(n, 0);
+    std::vector<int> q;
+    for (auto &p : spawns) {
+        int ci = (int)std::floor((p[0] - g.x0) / g.h), cj = (int)std::floor((p[1] - g.y0) / g.h);
+        if (ci < 0 || cj < 0 || ci >= g.nx || cj >= g.ny) continue;
+        int c = cj * g.nx + ci, best = -1;
+        for (int f = g.first[(size_t)c]; f < g.first[(size_t)c + 1]; f++)
+            if (g.at[(size_t)f][2] <= p[2] + 0.5 && (best < 0 || g.at[(size_t)f][2] > g.at[(size_t)best][2])) best = f;
+        if (best >= 0 && !reach[(size_t)best]) { reach[(size_t)best] = 1; q.push_back(best); }
+    }
+    for (size_t k = 0; k < q.size(); k++)
+        for (int m : g.nb[(size_t)q[k]])
+            if (m >= 0 && !reach[(size_t)m]) { reach[(size_t)m] = 1; q.push_back(m); }
+    // Each floor's width across the narrowest way (both ways along a line of the grid, to a wall or an edge), and how
+    // far it goes the other way (along the passage).
+    const int kMax = (int)std::ceil(12.0 / g.h);
+    auto run = [&](int f, int d) {
+        int steps = 0;
+        for (int c = f; steps < kMax; steps++) {
+            int m = g.nb[(size_t)c][(size_t)d];
+            if (m < 0) break;
+            c = m;
+        }
+        return steps * g.h * ((d & 1) ? 1.4142 : 1.0);
+    };
+    const double kNarrow = 4.0;   // world units across at most (a doorway, a corridor, a bridge)
+    std::vector<char> narrow(n, 0);
+    std::vector<V3> axis(n, V3{0, 0, 0});
+    for (size_t f = 0; f < n; f++) {
+        if (!reach[f]) continue;
+        double wmin = 1e30, along = 0;
+        int dmin = 0;
+        for (int d = 0; d < 4; d++) {
+            double w = run((int)f, d) + run((int)f, d + 4) + g.h;
+            if (w < wmin) { wmin = w; dmin = d; }
+        }
+        int perp = (dmin + 2) % 4;
+        along = run((int)f, perp) + run((int)f, perp + 4) + g.h;
+        if (wmin <= kNarrow && along >= std::max(2.0 * wmin, 3.0)) {
+            narrow[f] = 1;
+            double l = std::hypot((double)kDir[perp][0], (double)kDir[perp][1]);
+            axis[f] = {kDir[perp][0] / l, kDir[perp][1] / l, 0};
+        }
+    }
+    auto slope = [&](size_t f) { return g.nz[f] < 0.993f; };   // (steeper than about 7 degrees)
+    // A part of the floor (narrow ways, or ramps): its pieces, and through each the way from end to end.
+    auto pieces = [&](const std::vector<char> &in, std::vector<std::vector<int>> &comps, bool one_slope = false) {
+        std::vector<int> id(n, -1);
+        for (size_t f = 0; f < n; f++) {
+            if (!in[f] || id[f] >= 0) continue;
+            comps.push_back({});
+            std::vector<int> st{(int)f};
+            id[f] = (int)comps.size() - 1;
+            while (!st.empty()) {
+                int c = st.back();
+                st.pop_back();
+                comps.back().push_back(c);
+                for (int m : g.nb[(size_t)c]) {
+                    if (m < 0 || !in[(size_t)m] || id[(size_t)m] >= 0) continue;
+                    if (one_slope) {   // (a ramp is one slope: its neighbour on another isn't part of it)
+                        const auto &a = g.nxy[(size_t)c], &b = g.nxy[(size_t)m];
+                        if (a[0] * b[0] + a[1] * b[1] + g.nz[(size_t)c] * g.nz[(size_t)m] < 0.998) continue;
+                    }
+                    id[(size_t)m] = id[f];
+                    st.push_back(m);
+                }
+            }
+        }
+    };
+    auto walk = [&](const std::vector<int> &comp, int from, std::vector<double> &dist_out, std::vector<int> &par) {
+        std::map<int, size_t> idx;
+        for (size_t k = 0; k < comp.size(); k++) idx[comp[k]] = k;
+        dist_out.assign(comp.size(), 1e30);
+        par.assign(comp.size(), -1);
+        using H = std::pair<double, int>;
+        std::priority_queue<H, std::vector<H>, std::greater<H>> pq;
+        dist_out[idx[from]] = 0;
+        pq.push({0, from});
+        while (!pq.empty()) {
+            auto [d, c] = pq.top();
+            pq.pop();
+            if (d > dist_out[idx[c]]) continue;
+            for (int m : g.nb[(size_t)c]) {
+                auto it = m >= 0 ? idx.find(m) : idx.end();
+                if (it == idx.end()) continue;
+                double nd = d + dist(g.at[(size_t)c], g.at[(size_t)m]);
+                if (nd < dist_out[it->second]) { dist_out[it->second] = nd; par[it->second] = c; pq.push({nd, m}); }
+            }
+        }
+        return idx;
+    };
+    // Along a way (cells, end to end): a waypoint at each end, at each turn, and every `spacing` between.
+    auto along_way = [&](const std::vector<int> &way, int kind, double spacing, bool middle) {
+        if (way.empty()) return;
+        std::vector<double> sl(way.size(), 0);
+        for (size_t k = 1; k < way.size(); k++) sl[k] = sl[k - 1] + dist(g.at[(size_t)way[k - 1]], g.at[(size_t)way[k]]);
+        auto at_len = [&](double x) {
+            size_t k = (size_t)(std::lower_bound(sl.begin(), sl.end(), x) - sl.begin());
+            return g.at[(size_t)way[std::min(k, way.size() - 1)]];
+        };
+        const double total = sl.back();
+        std::vector<double> marks{0, total};
+        if (middle && total > 1.5) marks.push_back(total / 2);
+        for (double x = 1.5; x + 1.5 < total; x += 0.5) {   // (turns: the way's heading changes by 40 degrees or more)
+            V3 a = at_len(x - 1.5), b = at_len(x), c = at_len(x + 1.5);
+            double ux = b[0] - a[0], uy = b[1] - a[1], vx = c[0] - b[0], vy = c[1] - b[1];
+            double lu = std::hypot(ux, uy), lv = std::hypot(vx, vy);
+            if (lu < 0.5 || lv < 0.5) continue;
+            if ((ux * vx + uy * vy) / (lu * lv) < 0.766) { marks.push_back(x); x += 2; }
+        }
+        std::sort(marks.begin(), marks.end());
+        std::vector<double> all = marks;
+        for (size_t k = 0; k + 1 < marks.size(); k++) {
+            double gap = marks[k + 1] - marks[k];
+            int extra = (int)std::ceil(gap / spacing) - 1;
+            for (int i = 1; i <= extra; i++) all.push_back(marks[k] + gap * i / (extra + 1));
+        }
+        for (double x : all) out.push_back({at_len(x), kind});
+    };
+    // Past a way's end, out of it: `len` further on, the way it was going.
+    auto beyond = [&](int from, int toward_dir_cell, double len) {
+        V3 a = g.at[(size_t)toward_dir_cell], b = g.at[(size_t)from];
+        double dx = b[0] - a[0], dy = b[1] - a[1], l = std::hypot(dx, dy);
+        int c = from;
+        if (l < 1e-6) return c;
+        for (double went = 0; went < len;) {
+            int best = -1;
+            double bd = -1e30;
+            for (int d = 0; d < 8; d++) {
+                int m = g.nb[(size_t)c][(size_t)d];
+                if (m < 0) continue;
+                double s = (kDir[d][0] * dx + kDir[d][1] * dy) / (l * std::hypot((double)kDir[d][0], (double)kDir[d][1]));
+                if (s > 0.7 && s > bd) { bd = s; best = m; }
+            }
+            if (best < 0) break;
+            went += dist(g.at[(size_t)c], g.at[(size_t)best]);
+            c = best;
+        }
+        return c;
+    };
+    // Ramps: the sloped floor that climbs a unit or more; from its lowest to its highest along it.
+    {
+        std::vector<char> in(n, 0);
+        for (size_t f = 0; f < n; f++) in[f] = reach[f] && slope(f);
+        std::vector<std::vector<int>> comps;
+        pieces(in, comps, true);
+        for (auto &comp : comps) {
+            int lo_c = comp[0], hi_c = comp[0];
+            for (int c : comp) {
+                if (g.at[(size_t)c][2] < g.at[(size_t)lo_c][2]) lo_c = c;
+                if (g.at[(size_t)c][2] > g.at[(size_t)hi_c][2]) hi_c = c;
+            }
+            // (one that climbs a third of a unit or more: a short leg of an L-shaped ramp too; and a ramp, not rolling
+            // ground: most of it one slope, facing one way)
+            if (g.at[(size_t)hi_c][2] - g.at[(size_t)lo_c][2] < 0.35 || comp.size() * g.h * g.h < 1.0) continue;
+            {
+                std::map<std::array<int, 3>, int> slopes;   // (each slope, rounded)
+                for (int c : comp) {
+                    const auto &v = g.nxy[(size_t)c];
+                    slopes[{(int)std::lround(v[0] * 25), (int)std::lround(v[1] * 25), (int)std::lround(g.nz[(size_t)c] * 50)}]++;
+                }
+                int most = 0;
+                for (auto &[k, c] : slopes) most = std::max(most, c);
+                if (most < 0.6 * comp.size()) continue;
+                // (and edged: much of its side a wall or a drop, as a ramp's sides are; a slope of open ground meets
+                // more ground all round)
+                std::set<int> inside(comp.begin(), comp.end());
+                int hard = 0, soft = 0;
+                for (int c : comp)
+                    for (int d = 0; d < 8; d += 2) {
+                        int m = g.nb[(size_t)c][(size_t)d];
+                        if (m < 0) hard++;
+                        else if (!inside.count(m)) soft++;
+                    }
+                if (hard < 0.35 * (hard + soft)) continue;
+            }
+            std::vector<double> dd;
+            std::vector<int> par;
+            auto idx = walk(comp, lo_c, dd, par);
+            if (dd[idx[hi_c]] >= 1e29) continue;
+            std::vector<int> way;
+            for (int c = hi_c; c >= 0; c = par[idx[c]]) way.push_back(c);
+            std::reverse(way.begin(), way.end());
+            // (from the floor before its foot to the floor past its top)
+            if (way.size() >= 2) {
+                way.insert(way.begin(), beyond(way.front(), way[std::min<size_t>(3, way.size() - 1)], 1.0));
+                way.push_back(beyond(way.back(), way[way.size() >= 5 ? way.size() - 5 : 0], 1.0));
+            }
+            along_way(way, 1, 4.0, true);
+        }
+    }
+    // Narrow ways: from end to end (its two ends furthest apart), and a little past each into the open.
+    {
+        std::vector<std::vector<int>> comps;
+        pieces(narrow, comps);
+        for (auto &comp : comps) {
+            if (comp.size() * g.h * g.h < 1.0) continue;
+            std::vector<double> dd;
+            std::vector<int> par;
+            auto idx = walk(comp, comp[0], dd, par);
+            int a = comp[0];
+            for (int c : comp)
+                if (dd[idx[c]] < 1e29 && dd[idx[c]] > dd[idx[a]]) a = c;
+            idx = walk(comp, a, dd, par);
+            int b = a;
+            for (int c : comp)
+                if (dd[idx[c]] < 1e29 && dd[idx[c]] > dd[idx[b]]) b = c;
+            std::vector<int> way;
+            for (int c = b; c >= 0; c = par[idx[c]]) way.push_back(c);
+            std::reverse(way.begin(), way.end());
+            if (way.size() < 2) continue;
+            // (its middle line: each step moved across to the middle of the narrow floor there)
+            for (auto &c : way) {
+                const V3 &ax = axis[(size_t)c];
+                int dacross = -1;
+                for (int d = 0; d < 4; d++)
+                    if (std::fabs(kDir[d][0] * ax[0] + kDir[d][1] * ax[1]) < 0.3) { dacross = d; break; }
+                if (dacross < 0) continue;
+                int left = 0, right = 0;
+                for (int t = c; left < kMax && g.nb[(size_t)t][(size_t)dacross] >= 0; left++) t = g.nb[(size_t)t][(size_t)dacross];
+                for (int t = c; right < kMax && g.nb[(size_t)t][(size_t)dacross + 4] >= 0; right++) t = g.nb[(size_t)t][(size_t)dacross + 4];
+                int shift = (left - right) / 2, t = c;
+                for (int k = 0; k < std::abs(shift); k++) {
+                    int m = g.nb[(size_t)t][(size_t)(shift > 0 ? dacross : dacross + 4)];
+                    if (m < 0) break;
+                    t = m;
+                }
+                c = t;
+            }
+            way.insert(way.begin(), beyond(way.front(), way[std::min<size_t>(3, way.size() - 1)], 1.5));
+            way.push_back(beyond(way.back(), way[way.size() >= 5 ? way.size() - 5 : 0], 1.5));
+            along_way(way, 2, 5.0, false);
+        }
+    }
+    return out;
+}
+
 }   // namespace
 
 Result plan(const fs::path &bsp, const std::vector<V3> &points, int teleporters, const Options &o) {
@@ -382,7 +725,7 @@ Result plan(const fs::path &bsp, const std::vector<V3> &points, int teleporters,
     res.surfaces = (int)L.b.surfaces.size();
     for (size_t s = 0; s < L.b.surfaces.size(); s++) res.walkable += L.walkable((uint32_t)s);
 
-    // The waypoints (bots_route_add): on the ground, one for points within 1 unit, 192 at most.
+    // The waypoints (bots_route_add): on the ground, one for points within 1 unit, 512 at most.
     std::vector<Way> w;
     std::vector<int> tele_to;
     std::vector<V3> past;   // (on the ground, past the budget: how many more there'd be)
@@ -456,7 +799,7 @@ Result plan(const fs::path &bsp, const std::vector<V3> &points, int teleporters,
     res.failing_before = evaluate(links, hops);
     for (auto &h : hops)
         if (!h.ok && !around(hops, h.a, h.b)) res.stuck_before++;
-    const int room = std::min(o.max_add, std::max(0, o.budget - o.spare - res.given));
+    int room = std::min(o.max_add, std::max(0, o.budget - o.spare - res.given));
 
     // How well the links that work join the map's own waypoints: of every one, how many of the others it reaches.
     auto reach = [&](const std::vector<Hop> &hs) {
@@ -478,8 +821,34 @@ Result plan(const fs::path &bsp, const std::vector<V3> &points, int teleporters,
         return total;
     };
     res.reach_before = reach(hops);
-    long reached = res.reach_before;
-    for (int round = 0; round < o.rounds && (int)res.added.size() < room; round++) {
+    // The level's ramps and narrow ways: waypoints along each, so the way along them is plain to the bots.
+    if (o.features) {
+        std::vector<V3> from;
+        for (int i = 0; i < res.given; i++) from.push_back(w[(size_t)i].at);
+        const int cap = std::max(0, o.budget - o.spare - (int)w.size());
+        for (auto &f : find_features(L, from)) {
+            if ((int)res.added.size() >= std::min(cap, o.max_features)) break;
+            V3 gp;
+            uint32_t sf = ground(L, {f.p[0], f.p[1], f.p[2] + 0.25}, gp);
+            if (sf == kNone) continue;
+            bool near = false;
+            for (auto &x : w) near = near || dist(x.at, gp) < 1.6;
+            if (near) continue;
+            w.push_back({gp, sf});
+            tele_to.push_back(-1);
+            res.added.push_back({gp[0], gp[1], gp[2] + 0.25});
+            res.added_kind.push_back(f.kind);
+            (f.kind == 1 ? res.on_ramps : res.in_narrow)++;
+        }
+        if (!res.added.empty()) {
+            links = make_links(w, tele_to);
+            evaluate(links, hops);
+        }
+    }
+    room = std::min(o.max_add, std::max(0, o.budget - o.spare - (int)w.size()));
+    long reached = reach(hops);
+    const size_t feat_n = res.added.size();   // (the ones the search's hops get: room more)
+    for (int round = 0; round < o.rounds && (int)(res.added.size() - feat_n) < room; round++) {
         // (a round whose nodes don't join more of the map's waypoints, 10 more pairs for each, is taken back)
         const auto w0 = w;
         const auto tele0 = tele_to;
@@ -494,7 +863,7 @@ Result plan(const fs::path &bsp, const std::vector<V3> &points, int teleporters,
         std::stable_sort(todo.begin(), todo.end(), [](const Hop *x, const Hop *y) { return x->opened > y->opened; });
         bool added_any = false;
         for (Hop *h : todo) {
-            if ((int)res.added.size() >= room) break;
+            if ((int)(res.added.size() - feat_n) >= room) break;
             const Way A = w[(size_t)h->a], B = w[(size_t)h->b];
             if (hop_ok(L, A, B, o, o.node_limit)) continue;   // (a node added for another hop finished it)
             std::vector<Step> path = way(L, A.at, A.surface, B.at, B.surface, o.radius);
@@ -568,10 +937,11 @@ Result plan(const fs::path &bsp, const std::vector<V3> &points, int teleporters,
                 if (existing >= 0) {
                     cur = w[(size_t)existing];
                 } else {
-                    if ((int)res.added.size() >= room) { stuck = true; break; }
+                    if ((int)(res.added.size() - feat_n) >= room) { stuck = true; break; }
                     w.push_back(next);
                     tele_to.push_back(-1);
                     res.added.push_back({next.at[0], next.at[1], next.at[2] + 0.25});
+                    res.added_kind.push_back(0);
                     added_any = true;
                     cur = next;
                 }
@@ -588,6 +958,7 @@ Result plan(const fs::path &bsp, const std::vector<V3> &points, int teleporters,
             w = w0;
             tele_to = tele0;
             res.added = added0;
+            res.added_kind.resize(added0.size());
             res.walks = walks0;
             hops = hops0;
             break;
