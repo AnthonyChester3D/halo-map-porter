@@ -1,4 +1,5 @@
 // Halo Map Porter - the Xbox tab's "Weapons & vehicles" window (Windows). See contents_win.hpp.
+#include "statuslamp_win.hpp"
 #include "contents_win.hpp"
 
 #include <commctrl.h>
@@ -21,7 +22,7 @@ namespace {
 
 enum {
     IDC_SUMMARY = 300, IDC_STATUS, IDC_LIST, IDC_REPL_LBL, IDC_REPL, IDC_KEEPALL, IDC_TOTAL, IDC_FILE, IDC_REMEASURE,
-    IDC_OKB, IDC_CANCELB, IDC_VIEW, IDC_ABOUT,
+    IDC_OKB, IDC_CANCELB, IDC_VIEW, IDC_ABOUT, IDC_LAMP,
 };
 #define WM_CU_LOG (WM_APP + 40)
 #define WM_CU_DONE (WM_APP + 41)
@@ -29,7 +30,7 @@ enum {
 const COLORREF kOk = RGB(16, 124, 16), kBad = RGB(196, 43, 28), kGrey = RGB(96, 96, 96);
 
 struct State {
-    HWND wnd = nullptr, list = nullptr, view = nullptr;
+    HWND wnd = nullptr, list = nullptr, view = nullptr, lamp = nullptr;
     int dpi = 96;
     HFONT font = nullptr, bold = nullptr;
     bool done = false, ok = false;
@@ -384,6 +385,7 @@ void set_busy(bool busy) {
     EnableWindow(item(IDC_REMEASURE), !busy);
     EnableWindow(item(IDC_KEEPALL), !busy);
     EnableWindow(St->list, !busy);
+    if (busy) statuslamp::set(St->lamp, statuslamp::kWorking);
     if (busy) {
         EnableWindow(item(IDC_REPL), FALSE);
         SetWindowTextW(item(IDC_SUMMARY), L"Measuring the map: the app prepares it for the Xbox and builds a test copy, then "
@@ -445,11 +447,12 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 std::lock_guard<std::mutex> g(g_lock);
                 cached = cached_locked(St->key);
             }
-            if (cached) { St->an = cached; set_busy(false); fill_list(); }
+            if (cached) { St->an = cached; set_busy(false); statuslamp::set(St->lamp, statuslamp::kDone); fill_list(); }
             else start_measure();
             return 0;
         }
         set_busy(false);
+        statuslamp::set(St->lamp, r->second->error.empty() ? statuslamp::kDone : statuslamp::kFailed);
         if (!r->second->error.empty()) {
             SetWindowTextW(item(IDC_SUMMARY), (L"Couldn't measure the map:\r\n" + W(r->second->error)).c_str());
             SetWindowTextW(item(IDC_STATUS), L"");
@@ -528,7 +531,8 @@ HWND add(const wchar_t *cls, const wchar_t *text, DWORD style, int x, int y, int
 
 void create_controls() {
     add(L"STATIC", L"", 0, 16, 12, 1136, 66, IDC_SUMMARY);
-    add(L"STATIC", L"", SS_ENDELLIPSIS, 16, 80, 1136, 20, IDC_STATUS);
+    St->lamp = statuslamp::create(St->wnd, S(16), S(82), S(56), S(16), IDC_LAMP);
+    add(L"STATIC", L"", SS_ENDELLIPSIS, 80, 80, 1072, 20, IDC_STATUS);
     // The selected one's model and what it is.
     St->view = modelview::create(St->wnd, S(856), S(102), S(296), S(256), IDC_VIEW);
     SendMessageW(St->view, WM_SETFONT, (WPARAM)St->font, TRUE);

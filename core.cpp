@@ -872,6 +872,32 @@ struct Job {
                 return true;
             }
         }
+        // A crosshair overlay marked "not a sprite" on a sprite sheet (MCC draws its sprite): the mark taken off.
+        static const std::regex not_sprite(R"(Overlay #(\d+) of crosshair #(\d+) is marked as not a sprite, but)");
+        if (std::regex_search(msg, m, not_sprite)) {
+            std::string key = "crosshairs[" + m[2].str() + "].crosshair_overlays[" + m[1].str() + "].flags.not_a_sprite";
+            if (edit(tag, key, "0")) {
+                note("[fix]  " + tag + ": crosshair #" + m[2].str() + "'s overlay #" + m[1].str() +
+                     " was marked 'not a sprite' on a sprite sheet; mark taken off (as MCC draws it)");
+                return true;
+            }
+        }
+        // A bitmap with textures but no sequence (MCC draws its first texture): one sequence of all of them.
+        if (msg.find("Bitmap has no sequences") != std::string::npos) {
+            fs::path own = owner(tag);
+            std::string out;
+            if (!own.empty() && (own == fixes || to_fixes(tag, own)) &&
+                run_process({u8(tool(cfg, "invader-edit")), "-t", u8(fixes), tag, "-C", "bitmap_data"}, out) == 0) {
+                int n = std::atoi(out.c_str());
+                if (n > 0 && run_process({u8(tool(cfg, "invader-edit")), "-t", u8(fixes), tag, "-n", "-I", "bitmap_group_sequence", "1", "end",
+                                          "-S", "bitmap_group_sequence[0].first_bitmap_index", "0",
+                                          "-S", "bitmap_group_sequence[0].bitmap_count", std::to_string(n)}, out) == 0) {
+                    note("[fix]  " + tag + ": had " + std::to_string(n) + " texture" + (n == 1 ? "" : "s") +
+                         " but no sequence; given one sequence of them (as MCC draws it)");
+                    return true;
+                }
+            }
+        }
         // A bitmap marked as a sprite sheet with no sprites in it (MCC draws it as a plain texture): now a 2D texture.
         if (msg.find("is marked as sprites, but no sprites are") != std::string::npos && edit(tag, "type", "2d_textures")) {
             note("[fix]  " + tag + ": marked as a sprite sheet but has no sprites; now a 2D texture (as MCC draws it)");

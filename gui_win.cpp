@@ -20,6 +20,7 @@
 #include <thread>
 #include <vector>
 
+#include "statuslamp_win.hpp"
 #include "core.hpp"
 #include "contents_win.hpp"
 #include "lodview_win.hpp"
@@ -37,6 +38,7 @@ using namespace porter;
 enum {
     ID_TAB = 100,
     ID_LOG,
+    ID_LAMP,
     ID_STATUS,
     ID_OPEN_FOLDER,
     ID_OPEN_REPORT,
@@ -625,8 +627,10 @@ static void update_invader_status() {
     set_text(ID_S_INV_STATUS, invader_ok(c) ? L"Invader found - you're all set" : L"Invader not found - click Download or Browse");
 }
 
+static HWND g_lamp = nullptr;   // (working, done or failed, at a glance: statuslamp_win.hpp)
 static void set_busy(bool b) {
     g_busy = b;
+    if (b) statuslamp::set(g_lamp, statuslamp::kWorking);
     if (b) {
         g_last_log = GetTickCount64();
         SetTimer(g_wnd, kHeartbeat, 1000, nullptr);
@@ -2459,7 +2463,8 @@ static void create_controls() {
         0, 190, y, 536, 34, ID_S_PERF_HINT);
 
     // Shared area
-    g_log = add(-1, L"EDIT", L"", WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 10, 494, 740, 250, ID_LOG,
+    g_lamp = statuslamp::create(g_wnd, S(10), S(494), S(740), S(8), ID_LAMP);
+    g_log = add(-1, L"EDIT", L"", WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 10, 504, 740, 240, ID_LOG,
                 WS_EX_CLIENTEDGE);
     SendMessageW(g_log, WM_SETFONT, (WPARAM)g_mono, TRUE);
     SendMessageW(g_log, EM_SETLIMITTEXT, 0, 0);
@@ -2793,6 +2798,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         append_log(L"");
         append_log(d->msg);
         set_busy(false);
+        statuslamp::set(g_lamp, d->ok ? statuslamp::kDone : statuslamp::kFailed);
         if (d->ok && !d->output.empty()) {
             g_last_output = d->output;
             g_last_report = d->report;

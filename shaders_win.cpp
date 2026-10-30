@@ -1,4 +1,5 @@
 // Halo Map Porter - the Xbox tab's "Level shaders" window (Windows). See shaders_win.hpp.
+#include "statuslamp_win.hpp"
 #include "shaders_win.hpp"
 
 #include <commctrl.h>
@@ -35,7 +36,7 @@ enum {
     IDC_SC_ORAD, IDC_SC_OHGT_LBL, IDC_SC_OHGT, IDC_SC_OAR_LBL, IDC_SC_OAR, IDC_SC_ORBIT, IDC_SC_SAVE, IDC_SC_PACE, IDC_SC_HINT,
     IDC_FOG_START, IDC_FOG_TO, IDC_OBJECTS, IDC_SHOWSKY,
     IDC_BOTS, IDC_BOTS_TEXT, IDC_BOTS_LIST, IDC_BOTS_DEL, IDC_BOTS_CLEAR, IDC_BOTS_NEXT, IDC_BOTS_THROUGH, IDC_BOTS_GOOD,
-    IDC_BOTS_HIDE, IDC_BOTS_HINT,
+    IDC_BOTS_HIDE, IDC_BOTS_HINT, IDC_LAMP,
 };
 #define WM_LS_LOG (WM_APP + 60)
 #define WM_LS_DONE (WM_APP + 61)
@@ -46,7 +47,7 @@ struct Data {
 };
 
 struct State {
-    HWND wnd = nullptr, list = nullptr, view = nullptr;
+    HWND wnd = nullptr, list = nullptr, view = nullptr, lamp = nullptr;
     int dpi = 96;
     HFONT font = nullptr, bold = nullptr;
     bool done = false, ok = false, filling = false;
@@ -1186,6 +1187,7 @@ void start_measure() {
         g_measuring_key = St->key;
     }
     SetWindowTextW(item(IDC_STATUS), L"Measuring the map's level (it's prepared as for a conversion, without building it)...");
+    statuslamp::set(St->lamp, statuslamp::kWorking);
     EnableWindow(item(IDC_REMEASURE), FALSE);
     Measure fn = St->measure;
     std::string key = St->key;
@@ -1501,7 +1503,8 @@ void create_controls() {
     add(L"BUTTON", L"Drop the suggested ones (cost most, show least; flatter in places)", BS_AUTORADIOBUTTON, 352, 12, 400, 22,
         IDC_MODE0);
     add(L"BUTTON", L"Drop the ones I tick", BS_AUTORADIOBUTTON, 756, 12, 160, 22, IDC_MODE1);
-    add(L"STATIC", L"", 0, 12, 42, 1156, 20, IDC_STATUS);
+    St->lamp = statuslamp::create(St->wnd, S(12), S(44), S(56), S(16), IDC_LAMP);
+    add(L"STATIC", L"", 0, 76, 42, 1092, 20, IDC_STATUS);
     St->list = add(WC_LISTVIEWW, L"", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP, 12, 68, 548, 646, IDC_LIST);
     ListView_SetExtendedListViewStyle(St->list, LVS_EX_FULLROWSELECT | LVS_EX_CHECKBOXES | LVS_EX_DOUBLEBUFFER);
     struct Col { const wchar_t *name; int w; } cols[] = {{L"Shader (ticked: reflection goes)", 184}, {L"Extra passes", 84},
@@ -1828,8 +1831,10 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (!St->data) SetWindowTextW(item(IDC_STATUS), L"The other map is measured: press \"Measure again\" for this one.");
             return 0;
         }
-        if (!wp || !load_file(n->file))
+        if (!wp || !load_file(n->file)) {
             SetWindowTextW(item(IDC_STATUS), (L"The level couldn't be measured: " + W(n->text.empty() ? "its file couldn't be read." : n->text)).c_str());
+            statuslamp::set(St->lamp, statuslamp::kFailed);
+        } else statuslamp::set(St->lamp, statuslamp::kDone);
         return 0;
     }
     case WM_NOTIFY: {
