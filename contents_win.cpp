@@ -31,6 +31,7 @@ const COLORREF kOk = RGB(16, 124, 16), kBad = RGB(196, 43, 28), kGrey = RGB(96, 
 
 struct State {
     HWND wnd = nullptr, list = nullptr, view = nullptr, lamp = nullptr;
+    ULONGLONG started = 0;   // (the measurement's start: how long it took, when it's done)
     int dpi = 96;
     HFONT font = nullptr, bold = nullptr;
     bool done = false, ok = false;
@@ -405,6 +406,7 @@ void start_measure() {
         g_measuring_key = St->key;
     }
     set_busy(true);
+    St->started = GetTickCount64();
     Analyze fn = St->analyze;
     std::string key = St->key;
     std::thread([fn, key] {
@@ -459,6 +461,12 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         St->an = r->second;
+        if (St->started) {
+            wchar_t b[80];
+            swprintf(b, 80, L"Measured in %.1f s.", (GetTickCount64() - St->started) / 1000.0);
+            SetWindowTextW(item(IDC_STATUS), b);
+            St->started = 0;
+        }
         // Picks for weapons the map no longer has are dropped.
         for (auto it = St->picks.begin(); it != St->picks.end();)
             it = find_item(it->first) ? std::next(it) : St->picks.erase(it);

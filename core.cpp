@@ -17,6 +17,7 @@
 #include "tagfile.hpp"
 
 #include <functional>
+#include <future>
 #include <algorithm>
 #include <atomic>
 #include <climits>
@@ -1138,6 +1139,7 @@ std::string tag_path_noext(const fs::path &rel) {
 
 bool prepare_for_xbox(Job &job, std::string &err);
 size_t shrink_textures_to_fit(Job &job, size_t needed, int &count, bool hard = true);
+size_t shrink_sounds_to_fit(Job &job, size_t needed, bool mono, std::vector<std::string> &names);
 void restrict_to_xbox_mp(Job &job, const fs::path &xsrc);
 void drop_dead_placements(Job &job, const fs::path &xsrc);
 void bot_route_points(Job &job, const fs::path &xsrc);
@@ -1945,7 +1947,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
 
     job.log(std::string(job.analysis ? "Measuring the map for " : "Building for ") + game_name(job.target) + "...");
     std::string out;
-    int shrink_rounds = 0;
+    int shrink_rounds = 0, sound_rounds = 0;
     bool shrink_hopeless = false;
     int texture_rounds = 0;
     bool texture_hopeless = false;
@@ -2060,6 +2062,27 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
             cmd = make_cmd();
             continue;
         }
+        // Over the limit: long stereo sounds at 44.1 kHz go to 22.05 kHz first (half each, and music is most of a
+        // big map), then, if that isn't enough, stereo 22 kHz ones go mono; before any texture is halved.
+        if (std::regex_search(out, tb, too_big) && job.target == Game::Xbox && cfg.xbox_shrink && sound_rounds < 2) {
+            double over = std::atof(tb[1].str().c_str()) - std::atof(tb[2].str().c_str());
+            size_t need = (size_t)(over * 1048576.0) + 256 * 1024;
+            std::vector<std::string> names;
+            bool mono = sound_rounds == 1;
+            size_t saved = shrink_sounds_to_fit(job, need, mono, names);
+            sound_rounds++;
+            if (saved > 0) {
+                job.cut = true;
+                std::string list;
+                for (size_t i = 0; i < names.size() && i < 6; i++) list += (i ? ", " : "") + fs::path(from_u8(names[i])).stem().u8string();
+                if (names.size() > 6) list += " and " + std::to_string(names.size() - 6) + " more";
+                job.note("[shrink] " + tb[1].str().substr(0, 5) + " MB is over the limit; " +
+                         (mono ? "made " + std::to_string(names.size()) + " long stereo sounds mono (22.05 kHz)"
+                               : "re-encoded " + std::to_string(names.size()) + " long sounds at 22.05 kHz instead of 44.1 kHz") +
+                         ", half the size each (saved about " + std::to_string(saved / 1048576.0).substr(0, 4) + " MB): " + list);
+                continue;
+            }
+        }
         if (std::regex_search(out, tb, too_big) && job.target == Game::Xbox && cfg.xbox_shrink && shrink_rounds < 6 &&
             !shrink_hopeless) {
             double over = std::atof(tb[1].str().c_str()) - std::atof(tb[2].str().c_str());
@@ -2086,7 +2109,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
                 r.error += "Xbox maps can't share textures or sounds with other maps, and stock multiplayer content "
                            "alone uses about 42 MB of that.";
             if (job.target == Game::Xbox && !cfg.xbox_shrink)
-                r.error += " Try ticking \"Shrink textures to fit\".";
+                r.error += " Try ticking \"Shrink textures to fit\" (it shrinks long sounds too).";
             else if (job.target == Game::Xbox)
                 r.error += " Even with the size options it doesn't fit, so the map's own content needs trimming.";
             r.error += size_breakdown(job);
@@ -2725,7 +2748,9 @@ bool sound_has_long_piece(const fs::path &p) {
 }
 
 // Re-encode a sound tag (in `tags`) as Xbox ADPCM. Uses the user's WAVs when available.
-static bool reencode_sound_now(Job &job, const fs::path &tags, const std::string &rel, std::string &why) {
+// `rate`/`mono`: a sample rate and mono instead of the sound's own (making a map fit: shrink_sounds_to_fit).
+static bool reencode_sound_now(Job &job, const fs::path &tags, const std::string &rel, std::string &why, int force_rate = 0,
+                               bool force_mono = false) {
     const Config &cfg = job.cfg;
     std::string noext = rel.substr(0, rel.size() - 6);
     std::string out;
@@ -2734,6 +2759,8 @@ static bool reencode_sound_now(Job &job, const fs::path &tags, const std::string
     // The Xbox has no channel for mono 44.1 kHz sounds: those become 22.05 kHz.
     std::vector<std::string> rate;
     if (t.channels == 1 && t.rate == 44100) rate = {"-r", "22050"};
+    if (force_rate) rate = {"-r", std::to_string(force_rate)};
+    if (force_mono) rate.insert(rate.end(), {"-C", "mono"});
     // -s: split into 227.5 KiB pieces; the original Halo engine crashes on longer unsplit sounds. invader-sound
     // refuses to split dialogue, so dialogue stays whole (a line longer than that gets a note from the caller).
     std::vector<std::string> split;
@@ -11270,6 +11297,37 @@ bool prepare_for_xbox(Job &job, std::string &err) {
 // target): the ones that save most first, but what's seen up close (vehicles, characters, weapons, first-person
 // weapons and arms: model_textures) only after everything else, and never HUD or menu art (fitted to the screen).
 // Not `hard` (the texture target, which a map may go over): the close-up ones only if that gets it there.
+// Over the size limit: the map's own long stereo sounds (music, ambience) re-encoded at 22.05 kHz, the biggest first,
+// until `needed` bytes are saved (`mono` true: its stereo 22 kHz ones made mono instead). Each halves. Short ones
+// (under 1 MB: effects, dialogue) stay as they are. The ones changed go in `names`.
+size_t shrink_sounds_to_fit(Job &job, size_t needed, bool mono, std::vector<std::string> &names) {
+    std::vector<std::string> deps = content_dependencies(job);
+    struct Cand { size_t bytes; std::string tag; };
+    std::vector<Cand> cands;
+    for (auto &dep : deps) {
+        if (!has_suffix(dep, ".sound")) continue;
+        if (fs::exists(job.fixes / from_u8(dep))) continue;
+        if (!job.overlay.empty() && fs::exists(job.overlay / from_u8(dep))) continue;   // stock: leave alone
+        fs::path p = job.source / from_u8(dep);
+        SndTag t;
+        if (!fs::exists(p) || !read_sound_tag(p, t) || t.channels != 2 || t.rate != (mono ? 22050 : 44100)) continue;
+        size_t bytes = 0;
+        for (auto &rg : t.ranges)
+            for (auto &pm : rg.perms) bytes += pm.data.size();
+        if (bytes >= 1048576) cands.push_back({bytes, dep});
+    }
+    std::sort(cands.begin(), cands.end(), [](const Cand &a, const Cand &b) { return a.bytes != b.bytes ? a.bytes > b.bytes : a.tag < b.tag; });
+    size_t saved = 0;
+    for (auto &c : cands) {
+        if (saved >= needed) break;
+        std::string why;
+        if (!reencode_sound_now(job, job.source, c.tag, why, 22050, mono)) continue;
+        saved += c.bytes / 2;
+        names.push_back(c.tag);
+    }
+    return saved;
+}
+
 size_t shrink_textures_to_fit(Job &job, size_t needed, int &count, bool hard) {
     // Only textures the map actually uses.
     std::vector<std::string> deps = content_dependencies(job);
@@ -13609,20 +13667,25 @@ static Result convert_map_impl(const Config &cfg, const fs::path &input, Game in
     if (!extracted.empty()) {
         log("Reusing the tags extracted from " + input.filename().u8string() + " before (the map hasn't changed)");
     } else {
-        // Protected maps have their tag names scrambled, so there's nothing usable to extract.
-        std::string path;
-        run_process({u8(tool(cfg, "invader-info")), "-T", "scenario_path", u8(input)}, path);
-        if (path.find("<protected>") != std::string::npos) {
-            r.error = "This map is protected: its author scrambled its tag names so it can't be taken apart, and the "
-                      "app needs those to rebuild it for another game. Use an unprotected copy of the map (for example "
-                      "the MCC release, or ask the author).";
-            return r;
-        }
+        // Protected maps have their tag names scrambled, so there's nothing usable to extract. (Asked at the same time
+        // as the extraction runs: reading the map for it takes seconds of its own.)
+        std::string info_tool = u8(tool(cfg, "invader-info")), info_in = u8(input);
+        auto info = std::async(std::launch::async, [info_tool, info_in] {
+            std::string path;
+            run_process({info_tool, "-T", "scenario_path", info_in}, path);
+            return path;
+        });
         log("Extracting tags from " + input.filename().u8string() + "...");
         std::vector<std::string> cmd{u8(tool(cfg, "invader-extract"))};
         if (!res_dir.empty()) cmd.insert(cmd.end(), {"-m", u8(res_dir)});
         cmd.push_back(u8(input));
         extracted = extract_kept(job, key, cmd, out);
+        if (info.get().find("<protected>") != std::string::npos) {
+            r.error = "This map is protected: its author scrambled its tag names so it can't be taken apart, and the "
+                      "app needs those to rebuild it for another game. Use an unprotected copy of the map (for example "
+                      "the MCC release, or ask the author).";
+            return r;
+        }
         if (extracted.empty()) {
             r.error = "Couldn't extract tags from the map:\n" + out.substr(out.size() > 2000 ? out.size() - 2000 : 0);
             if (in_game == Game::CE && res_dir.empty())

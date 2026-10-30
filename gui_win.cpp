@@ -319,6 +319,23 @@ static void append_log(const std::wstring &text) {
     SendMessageW(g_log, EM_REPLACESEL, FALSE, (LPARAM)t.c_str());
     g_last_log = GetTickCount64();
 }
+// Step timings: each step's header line ("Preparing tags for Xbox...", no indent) starts a step; when the next starts,
+// or the job ends, a line says how long it took, so a slow machine shows where its time goes.
+static ULONGLONG g_step_start = 0, g_job_start = 0;
+static void close_step() {
+    if (!g_step_start) return;
+    wchar_t b[64];
+    swprintf(b, 64, L"  (took %.1f s)", (GetTickCount64() - g_step_start) / 1000.0);
+    append_log(b);
+    g_step_start = 0;
+}
+static void step_log(const std::wstring &s) {
+    if (g_busy && !s.empty() && s[0] != L' ' && s.size() > 3 && s.compare(s.size() - 3, 3, L"...") == 0) {
+        close_step();
+        g_step_start = GetTickCount64();
+    }
+    append_log(s);
+}
 static void heartbeat() {
     ULONGLONG quiet = (GetTickCount64() - g_last_log) / 1000;
     if (quiet < 15) return;
@@ -630,7 +647,7 @@ static void update_invader_status() {
 static HWND g_lamp = nullptr;   // (working, done or failed, at a glance: statuslamp_win.hpp)
 static void set_busy(bool b) {
     g_busy = b;
-    if (b) statuslamp::set(g_lamp, statuslamp::kWorking);
+    if (b) { statuslamp::set(g_lamp, statuslamp::kWorking); g_job_start = GetTickCount64(); g_step_start = 0; }
     if (b) {
         g_last_log = GetTickCount64();
         SetTimer(g_wnd, kHeartbeat, 1000, nullptr);
@@ -2789,12 +2806,19 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_APP_LOG: {
         auto *s = (std::wstring *)lp;
         if (wp == 1) { set_text(ID_S_INV, *s); save_settings(); update_invader_status(); }
-        else append_log(*s);
+        else step_log(*s);
         delete s;
         return 0;
     }
     case WM_APP_DONE: {
         auto *d = (Done *)lp;
+        close_step();
+        if (g_job_start) {
+            wchar_t b[64];
+            swprintf(b, 64, L"(%.1f s in all)", (GetTickCount64() - g_job_start) / 1000.0);
+            append_log(b);
+            g_job_start = 0;
+        }
         append_log(L"");
         append_log(d->msg);
         set_busy(false);

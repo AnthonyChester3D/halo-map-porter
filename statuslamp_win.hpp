@@ -1,6 +1,7 @@
 // Halo Map Porter - a bar of colour that says whether the app is working, done or failed, so you can tell at a glance
 // when it's your turn without reading the log: amber with a light sweeping along it while working, green when done,
-// red when it failed, grey before anything has run. Windows only; header-only (the class registers itself).
+// red when it failed, grey before anything has run. Done or failed also flashes the taskbar button when another app
+// is in front. Windows only; header-only (the class registers itself).
 #pragma once
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -71,8 +72,18 @@ inline HWND create(HWND parent, int x, int y, int w, int h, int id) {
                            GetModuleHandleW(nullptr), nullptr);
 }
 
+// Done or failed: the app's taskbar button flashes until you come back to it (when you're in another app).
 inline void set(HWND lamp, State s) {
-    if (lamp) SendMessageW(lamp, kSetState, (WPARAM)s, 0);
+    if (!lamp) return;
+    SendMessageW(lamp, kSetState, (WPARAM)s, 0);
+    if (s == kDone || s == kFailed) {
+        HWND top = GetAncestor(lamp, GA_ROOTOWNER);   // (the window with the taskbar button: the main one)
+        HWND fg = GetForegroundWindow();
+        if (top && (!fg || GetAncestor(fg, GA_ROOTOWNER) != top)) {
+            FLASHWINFO fi{sizeof fi, top, FLASHW_ALL | FLASHW_TIMERNOFG, 0, 0};
+            FlashWindowEx(&fi);
+        }
+    }
 }
 
 }   // namespace statuslamp
