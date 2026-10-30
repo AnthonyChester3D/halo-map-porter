@@ -275,6 +275,14 @@ static bool parse_failure(const std::string &log_text, Failure &f) {
             size_t a = f.msg.find_first_not_of(' ');
             if (a != std::string::npos) f.msg = f.msg.substr(a);
             size_t j = i + 1;
+            // (a long message goes on over the next lines: "...but no sprites are" / "present")
+            while (j < lines.size() && !lines[j].empty() && lines[j].rfind("...in ", 0) != 0 && lines[j].rfind("Failed to compile", 0) != 0 &&
+                   lines[j].rfind("WARNING", 0) != 0 && lines[j].rfind("ERROR", 0) != 0 && lines[j].rfind("FATAL", 0) != 0 && j < i + 4) {
+                std::string c = lines[j];
+                while (!c.empty() && (c.back() == '\r' || c.back() == ' ')) c.pop_back();
+                f.msg += " " + c;
+                j++;
+            }
             while (j < lines.size() && lines[j].rfind("...in ", 0) == 0) {
                 if (f.tag.empty()) f.tag = lines[j].substr(6);
                 j++;
@@ -863,6 +871,11 @@ struct Job {
                 note("[fix]  " + tag + ": particle type #" + m[1].str() + " drawn 'simple' (its bitmap lacks the second sequence 'rotational' needs)");
                 return true;
             }
+        }
+        // A bitmap marked as a sprite sheet with no sprites in it (MCC draws it as a plain texture): now a 2D texture.
+        if (msg.find("is marked as sprites, but no sprites are") != std::string::npos && edit(tag, "type", "2d_textures")) {
+            note("[fix]  " + tag + ": marked as a sprite sheet but has no sprites; now a 2D texture (as MCC draws it)");
+            return true;
         }
         static const std::regex bad_index(R"((\w+)::(\w+) references an invalid index of \S+ \((\d+) >= (\d+)\))");
         if (std::regex_search(msg, m, bad_index)) {

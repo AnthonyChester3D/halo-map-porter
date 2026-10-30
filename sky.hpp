@@ -17,6 +17,8 @@
 //  - Trimming: the parts of a layer where its texture is clear (nothing drawn: the corners of a planet's square) are
 //    cut away, on a finer grid of the same triangles.
 #pragma once
+#include <array>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <string>
@@ -47,5 +49,24 @@ struct Lightened {
     std::vector<std::string> written;   // tags written (new ones too)
 };
 Lightened lighten(const std::string &sky, const Find &find, const Edit &edit);
+
+// The sky's model as drawn, for a picture of it: each part's corners and triangles, and for a part with a chicago
+// or generic shader its maps combined as the combiners do into one texture (`size` square) over the part's texture coordinates
+// (uv: 0 to 1 across it), with how it blends over what's behind: 0 by its alpha, 1 added, 2 multiplied, 3 multiplied
+// twice. A part not baked (another kind of shader, or no texture read) has baked false.
+struct Baked {
+    struct Part {
+        std::vector<std::array<float, 3>> p;
+        std::string shader;           // its shader tag (with extension)
+        std::vector<std::array<float, 2>> uv;   // (not baked: the model's, its base map scale applied)
+        std::vector<uint32_t> tris;   // a list
+        bool baked = false, two_sided = false;
+        int w = 0, h = 0, blend = 0;
+        std::vector<uint8_t> rgba;    // top row first
+    };
+    bool ok = false;
+    std::vector<Part> parts;          // in the order they're drawn
+};
+Baked bake(const std::string &sky, const Find &find, int size = 256);
 
 }   // namespace sky

@@ -143,9 +143,17 @@ struct MapI {
     bool moving = false;             // its texture slides, turns, or follows an object function
     const Image *img = nullptr;
 };
+// A shader_transparent_generic's stage: its combiners' inputs and outputs (as the tag has them).
+struct GStage {
+    int flags = 0;                   // 1 color mux, 2 alpha mux
+    float c0[4] = {0, 0, 0, 0}, c1[4] = {0, 0, 0, 0};   // constant colours 0 and 1 (r, g, b, a)
+    int in[4] = {0, 0, 0, 0}, map[4] = {0, 0, 0, 0}, ab = 0, abf = 0, cd = 0, cdf = 0, sum = 0, out_map = 0;
+    int ina[4] = {0, 0, 0, 0}, mapa[4] = {0, 0, 0, 0}, aba = 0, cda = 0, suma = 0, out_mapa = 0;
+};
 struct ShaderI {
     std::string tag;                 // with extension
-    bool readable = false, chicago = false;
+    bool readable = false, chicago = false, generic = false;
+    std::vector<GStage> stages;      // (generic)
     int blend = 0, flags = 0, first_type = 0, fade = 0, layers = 0, passes = 1;
     bool lens_flare = false;
     std::vector<MapI> maps;
@@ -187,7 +195,7 @@ struct Context {
         if (!f.empty() && t.load(f)) {
             s.readable = true;
             tagfile::Elem r = t.root();
-            if (ext == ".shader_transparent_chicago") {
+            if (ext == ".shader_transparent_chicago" || ext == ".shader_transparent_chicago_extended") {
                 s.chicago = true;
                 s.blend = (int)r.integer("framebuffer blend function");
                 s.flags = (int)r.integer("shader transparent chicago flags");
@@ -195,11 +203,54 @@ struct Context {
                 s.fade = (int)r.integer("framebuffer fade mode");
                 s.layers = (int)r.block("extra layers").size();
                 s.lens_flare = !r.ref("lens flare").empty();
-                tagfile::Block maps = r.block("maps");
+                tagfile::Block maps = r.block(ext == ".shader_transparent_chicago" ? "maps" : "maps 4 stage");
+                if (!maps.size() && ext != ".shader_transparent_chicago") maps = r.block("maps 2 stage");
                 for (size_t i = 0; i < maps.size() && i < 4; i++) s.maps.push_back(read_map(maps[i]));
+            } else if (ext == ".shader_transparent_generic") {
+                s.generic = true;
+                s.blend = (int)r.integer("framebuffer blend function");
+                s.flags = (int)r.integer("shader transparent generic flags");
+                s.first_type = (int)r.integer("first map type");
+                s.layers = (int)r.block("extra layers").size();
+                tagfile::Block maps = r.block("maps");
+                for (size_t i = 0; i < maps.size() && i < 4; i++) {
+                    MapI m = read_map(maps[i]);
+                    int f = (int)maps[i].integer("flags");   // (1 unfiltered, 2 u clamped, 4 v clamped)
+                    m.flags = (f & 1) | ((f & 2) ? 4 : 0) | ((f & 4) ? 8 : 0);
+                    s.maps.push_back(m);
+                }
+                tagfile::Block st = r.block("stages");
+                for (size_t i = 0; i < st.size() && i < 7; i++) {
+                    const tagfile::Elem &e = st[i];
+                    GStage g;
+                    g.flags = (int)e.integer("flags");
+                    for (int k = 0; k < 4; k++) {   // (ARGB: alpha first)
+                        int c = k == 3 ? 0 : k + 1;
+                        g.c0[k] = (float)((e.num("color0 animation lower bound", c) + e.num("color0 animation upper bound", c)) / 2);
+                        g.c1[k] = (float)e.num("color1", c);
+                    }
+                    const char *L[4] = {"a", "b", "c", "d"};
+                    for (int k = 0; k < 4; k++) {
+                        std::string x = std::string("input ") + L[k];
+                        g.in[k] = (int)e.integer(x.c_str());
+                        g.map[k] = (int)e.integer((x + " mapping").c_str());
+                        g.ina[k] = (int)e.integer((x + " alpha").c_str());
+                        g.mapa[k] = (int)e.integer((x + " mapping alpha").c_str());
+                    }
+                    g.ab = (int)e.integer("output ab");
+                    g.abf = (int)e.integer("output ab function");
+                    g.cd = (int)e.integer("output bc");   // (Invader's name for the cd output)
+                    g.cdf = (int)e.integer("output cd function");
+                    g.sum = (int)e.integer("output ab cd mux sum");
+                    g.out_map = (int)e.integer("output mapping color");
+                    g.aba = (int)e.integer("output ab alpha");
+                    g.cda = (int)e.integer("output cd alpha");
+                    g.suma = (int)e.integer("output ab cd mux sum alpha");
+                    g.out_mapa = (int)e.integer("output mapping alpha");
+                    s.stages.push_back(g);
+                }
             } else {
                 s.blend = -1;
-                if (ext == ".shader_transparent_generic") s.layers = (int)r.block("extra layers").size();
             }
             s.passes = 1 + s.layers;
         }
@@ -312,6 +363,88 @@ V4 chicago_eval(const std::vector<MapI> &maps, const V4 *T) {
     }
     for (int c = 0; c < 4; c++) R0.v[c] = std::min(1.f, std::max(0.f, R0.v[c]));   // the final combiner
     return R0;
+}
+
+// A shader_transparent_generic's colour (shader_transparent_generic: register combiners). Registers: 0 discard,
+// 1 scratch 0 (the result), 2 scratch 1, 3 and 4 vertex colours 0 and 1 (white: a sky is unlit), 5 to 8 maps 0 to 3.
+// No stages: map 0 as it is.
+V4 generic_eval(const ShaderI &s, const V4 *T) {
+    V4 R[9];
+    for (int c = 0; c < 4; c++) { R[3].v[c] = R[4].v[c] = 1; }
+    for (size_t k = 0; k < s.maps.size() && k < 4; k++) R[5 + k] = T[k];
+    if (s.stages.empty()) return s.maps.empty() ? R[3] : R[5];
+    R[1].v[3] = R[5].v[3];   // (scratch alpha 0 starts as map 0's alpha)
+    auto clamp1 = [](float x) { return std::min(1.f, std::max(-1.f, x)); };
+    for (const GStage &g : s.stages) {
+        // colour inputs: 0 zero, 1 one, 2 half, 3 -1, 4 -half, 5-8 map colour, 9-10 vertex colour, 11-12 scratch colour,
+        // 13-14 constant colour, 15-18 map alpha, 19-20 vertex alpha, 21-22 scratch alpha, 23-24 constant alpha
+        auto reg_c = [&](int i, int c) -> float {
+            const float consts[5] = {0, 1, 0.5f, -1, -0.5f};
+            if (i < 5) return consts[i];
+            bool alpha = i >= 15;
+            int j = alpha ? i - 10 : i;   // (to the colour inputs' numbering)
+            int ch = alpha ? 3 : c;
+            if (j <= 8) return R[j].v[ch];
+            if (j <= 10) return R[j - 6].v[ch];
+            if (j <= 12) return R[j - 10].v[ch];
+            return (j == 13 ? g.c0 : g.c1)[ch];
+        };
+        // alpha inputs: 0-4 constants, 5-8 map alpha, 9-10 vertex alpha, 11-12 scratch alpha, 13-14 constant alpha,
+        // 15-24 the same, blue
+        auto reg_a = [&](int i) -> float {
+            const float consts[5] = {0, 1, 0.5f, -1, -0.5f};
+            if (i < 5) return consts[i];
+            bool blue = i >= 15;
+            int j = blue ? i - 10 : i, ch = blue ? 2 : 3;
+            if (j <= 8) return R[j].v[ch];
+            if (j <= 10) return R[j - 6].v[ch];
+            if (j <= 12) return R[j - 10].v[ch];
+            return (j == 13 ? g.c0 : g.c1)[ch];
+        };
+        auto out_map = [](float x, int m) {   // identity, x 1/2, x 2, x 4, bias -1/2, expand (bias -1/2, x 2)
+            switch (m) {
+            case 1: return x * 0.5f;
+            case 2: return x * 2;
+            case 3: return x * 4;
+            case 4: return x - 0.5f;
+            case 5: return (x - 0.5f) * 2;
+            default: return x;
+            }
+        };
+        float A[3][4], B[3][4], C[3][4], D[3][4];
+        for (int c = 0; c < 3; c++) {
+            A[c][0] = mapping(reg_c(g.in[0], c), g.map[0]); B[c][0] = mapping(reg_c(g.in[1], c), g.map[1]);
+            C[c][0] = mapping(reg_c(g.in[2], c), g.map[2]); D[c][0] = mapping(reg_c(g.in[3], c), g.map[3]);
+        }
+        float ab[3], cd[3], sum[3];
+        float dab = A[0][0] * B[0][0] + A[1][0] * B[1][0] + A[2][0] * B[2][0], dcd = C[0][0] * D[0][0] + C[1][0] * D[1][0] + C[2][0] * D[2][0];
+        bool mux = (g.flags & 1) && R[1].v[3] >= 0.5f;
+        for (int c = 0; c < 3; c++) {
+            ab[c] = out_map(g.abf ? dab : A[c][0] * B[c][0], g.out_map);
+            cd[c] = out_map(g.cdf ? dcd : C[c][0] * D[c][0], g.out_map);
+            float a = g.abf ? dab : A[c][0] * B[c][0], b = g.cdf ? dcd : C[c][0] * D[c][0];
+            sum[c] = out_map((g.flags & 1) ? (mux ? b : a) : a + b, g.out_map);
+        }
+        float aa = mapping(reg_a(g.ina[0]), g.mapa[0]) * mapping(reg_a(g.ina[1]), g.mapa[1]);
+        float ac = mapping(reg_a(g.ina[2]), g.mapa[2]) * mapping(reg_a(g.ina[3]), g.mapa[3]);
+        bool muxa = (g.flags & 2) && R[1].v[3] >= 0.5f;
+        float sa = (g.flags & 2) ? (muxa ? ac : aa) : aa + ac;
+        // (written after all are read: registers 1-8)
+        V4 N[9];
+        for (int k = 0; k < 9; k++) N[k] = R[k];
+        for (int c = 0; c < 3; c++) {
+            if (g.ab > 0) N[g.ab].v[c] = clamp1(ab[c]);
+            if (g.cd > 0) N[g.cd].v[c] = clamp1(cd[c]);
+            if (g.sum > 0) N[g.sum].v[c] = clamp1(sum[c]);
+        }
+        if (g.aba > 0) N[g.aba].v[3] = clamp1(out_map(aa, g.out_mapa));
+        if (g.cda > 0) N[g.cda].v[3] = clamp1(out_map(ac, g.out_mapa));
+        if (g.suma > 0) N[g.suma].v[3] = clamp1(out_map(sa, g.out_mapa));
+        for (int k = 0; k < 9; k++) R[k] = N[k];
+    }
+    V4 o = R[1];
+    for (int c = 0; c < 4; c++) o.v[c] = std::min(1.f, std::max(0.f, o.v[c]));
+    return o;
 }
 
 // The same with each value a range: the output's range over all inputs in theirs.
@@ -1566,6 +1699,68 @@ Lightened lighten(const std::string &sky_tag, const Find &find, const Edit &edit
     out.written.push_back(model);
     out.changed = true;
     out.after = measure(sky_tag, find);
+    return out;
+}
+
+
+Baked bake(const std::string &sky_tag, const Find &find, int size) {
+    Baked out;
+    tagfile::Tag st;
+    fs::path sf = find(sky_tag);
+    if (sf.empty() || !st.load(sf)) return out;
+    std::string model = st.root().ref("model");
+    fs::path mf = model.empty() ? fs::path() : find(model);
+    Model m;
+    if (mf.empty() || !read_model(mf, m)) return out;
+    Context cx(find);
+    for (auto &p : m.parts) {
+        Baked::Part b;
+        for (auto &v : p.v) b.p.push_back({(float)v.p[0], (float)v.p[1], (float)v.p[2]});
+        b.tris = p.tris;
+        const ShaderI *s = p.shader >= 0 && p.shader < (int)m.shader_refs.size() ? &cx.shader(m.shader_refs[(size_t)p.shader]) : nullptr;
+        b.two_sided = s && s->two_sided();
+        bool any = false;
+        if (s && (s->chicago || s->generic))
+            for (auto &mp : s->maps) any = any || mp.img;
+        if (s) b.shader = s->tag;
+        if (!any || p.v.empty()) {   // (not a chicago shader with a texture read: left for the caller to draw its way)
+            for (auto &v : p.v) b.uv.push_back({(float)(v.uv[0] * m.bu), (float)(v.uv[1] * m.bv)});
+            out.parts.push_back(std::move(b));
+            continue;
+        }
+        // Its maps combined as the chicago combiners do, over the part's base texture coordinates (a texel each).
+        double u0 = 1e300, v0 = 1e300, u1 = -1e300, v1 = -1e300;
+        for (auto &v : p.v) {
+            u0 = std::min(u0, v.uv[0] * m.bu); u1 = std::max(u1, v.uv[0] * m.bu);
+            v0 = std::min(v0, v.uv[1] * m.bv); v1 = std::max(v1, v.uv[1] * m.bv);
+        }
+        if (u1 - u0 < 1e-6) u1 = u0 + 1e-6;
+        if (v1 - v0 < 1e-6) v1 = v0 + 1e-6;
+        for (auto &v : p.v) b.uv.push_back({(float)((v.uv[0] * m.bu - u0) / (u1 - u0)), (float)((v.uv[1] * m.bv - v0) / (v1 - v0))});
+        b.w = b.h = size;
+        b.rgba.resize((size_t)size * size * 4);
+        const V4 white = [] { V4 o; for (float &x : o.v) x = 1; return o; }();
+        std::vector<V4> T(s->maps.size());
+        // Its framebuffer blend function: 0 alpha blend, 1 multiply, 2 double multiply, 3 add, 7 alpha-multiply add
+        // (added, weighted by its alpha: baked in); the rest drawn as alpha blended.
+        const int blend = s->blend;
+        b.blend = blend == 1 ? 2 : blend == 2 ? 3 : (blend == 3 || blend == 7) ? 1 : 0;
+        for (int y = 0; y < size; y++)
+            for (int x = 0; x < size; x++) {
+                double u = u0 + (x + 0.5) / size * (u1 - u0), v = v0 + (y + 0.5) / size * (v1 - v0);
+                for (size_t k = 0; k < s->maps.size(); k++) {
+                    const MapI &mp = s->maps[k];
+                    T[k] = mp.img ? sample(*mp.img, u * mp.us + mp.uo, v * mp.vs + mp.vo, (mp.flags & 4) != 0, (mp.flags & 8) != 0) : white;
+                }
+                V4 c = s->generic ? generic_eval(*s, T.data()) : chicago_eval(s->maps, T.data());
+                if (blend == 7) for (int k = 0; k < 3; k++) c.v[k] *= c.v[3];
+                uint8_t *o = &b.rgba[((size_t)y * size + x) * 4];
+                for (int k = 0; k < 4; k++) o[k] = (uint8_t)std::lround(std::min(1.f, std::max(0.f, c.v[k])) * 255);
+            }
+        b.baked = true;
+        out.parts.push_back(std::move(b));
+    }
+    out.ok = true;
     return out;
 }
 

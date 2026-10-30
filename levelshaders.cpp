@@ -1,5 +1,6 @@
 // Halo Map Porter - the level's shaders on the Xbox (see levelshaders.hpp)
 #include "levelshaders.hpp"
+#include "sky.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -1071,11 +1072,50 @@ bool analyze(const fs::path &bsp_file, const fs::path &scenario, const Find &fin
             tagfile::Block skies = sc.root().block("skies");
             std::string sky = skies.size() ? skies[0].ref("sky") : std::string();
             fs::path skf = sky.empty() ? fs::path() : find(sky);
-            tagfile::Tag skt;
-            if (!skf.empty() && skt.load(skf)) {
-                std::string m = skt.root().ref("model");
+            // (each layer's maps combined as its chicago or generic shader combines them, baked into one texture;
+            // a shader_model, shader_environment or water layer drawn with its base map; any other left out)
+            sky::Baked baked = skf.empty() ? sky::Baked() : sky::bake(sky, [&](const std::string &t) { return find(t); }, 256);
+            if (baked.ok) {
                 Model model;
-                if (!m.empty() && read_model(m, find, tex, model) && !model.parts.empty()) {
+                model.tag = sky;
+                for (auto &bp : baked.parts) {
+                    ModelPart part;
+                    double su = 1, sv = 1;
+                    if (bp.baked) {
+                        Texture t;
+                        t.w = bp.w;
+                        t.h = bp.h;
+                        t.rgba = bp.rgba;
+                        part.texture = (int32_t)p.textures.size();
+                        p.textures.push_back(std::move(t));
+                        part.flags = ModelPart::kSeeThrough | ModelPart::kTwoSided |
+                                     (bp.blend == 1 ? ModelPart::kAdd : bp.blend == 2 ? ModelPart::kMultiply
+                                      : bp.blend == 3 ? ModelPart::kDoubleMultiply : 0);
+                    } else {
+                        std::string ext = fs::path(bp.shader).extension().u8string();
+                        if (ext != ".shader_model" && ext != ".shader_environment" && ext != ".shader_transparent_water") continue;
+                        tagfile::Tag sh;
+                        fs::path shf = find(bp.shader);
+                        if (shf.empty() || !sh.load(shf)) continue;
+                        part.texture = tex.get(bitmap_ref(sh.root(), "base map"), 0, 256);
+                        if (part.texture < 0) continue;
+                        if (ext == ".shader_model") { su = or_one(sh.root().num("map u scale")); sv = or_one(sh.root().num("map v scale")); }
+                        part.flags = ModelPart::kTwoSided | (ext == ".shader_transparent_water" ? ModelPart::kSeeThrough : 0);
+                    }
+                    uint32_t base = (uint32_t)model.vertices.size();
+                    for (size_t k = 0; k < bp.p.size(); k++) {
+                        ModelVertex x{};
+                        for (int c = 0; c < 3; c++) x.p[c] = bp.p[k][c];
+                        x.uv[0] = (float)(bp.uv[k][0] * su);
+                        x.uv[1] = (float)(bp.uv[k][1] * sv);
+                        model.vertices.push_back(x);
+                    }
+                    part.first = (int32_t)(model.tris.size() / 3);
+                    for (uint32_t i : bp.tris) model.tris.push_back(base + i);
+                    part.count = (int32_t)(model.tris.size() / 3) - part.first;
+                    if (part.count > 0) model.parts.push_back(part);
+                }
+                if (!model.parts.empty()) {
                     p.sky_model = (int32_t)p.models.size();
                     p.models.push_back(std::move(model));
                 }
