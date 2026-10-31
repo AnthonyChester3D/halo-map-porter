@@ -44,6 +44,16 @@ struct Picks {
     // a conversion would; not kept with the picks).
     std::vector<std::array<double, 3>> bots;
     bool bots_auto = true;
+    // Ladders for Halo 1 Unlimited's bots (botnodes::Ladder: foot, top end, the way in, a way down too), written to the
+    // map's bot file, never into the map. `ladders_set`: changed in the window (kept); else found in the level anew.
+    struct Ladder {
+        std::array<double, 3> foot{}, top{};
+        double dx = 0, dy = 0;
+        bool down = true;
+    };
+    std::vector<Ladder> ladders;
+    bool ladders_set = false;
+    std::string map_name;   // (the bot file's name: the map's file name without .map, lower case; not kept)
 };
 
 // The showcase's "Save to map folder": writes its shots now, without a conversion. `text`: showcase.txt's; `own`: the

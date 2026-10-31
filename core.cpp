@@ -12344,7 +12344,8 @@ void bot_route_points(Job &job, const fs::path &xsrc) {
     fs::path pic = job.work / "bots.bmp";
     std::error_code ec;
     fs::remove(pic, ec);
-    if (botnodes::picture(bdir / from_u8(bsp), br, pic)) job.bots_picture = pic;
+    std::vector<botnodes::Ladder> ladders = botnodes::find_ladders(bdir / from_u8(bsp));   // (green: for the bot file)
+    if (botnodes::picture(bdir / from_u8(bsp), br, pic, &ladders)) job.bots_picture = pic;
     const int total = br.given + added;
     if (!mine.empty()) counts += ", " + std::to_string(mine.size()) + " of yours (the Level window's)";
     // Its points as the bots take them: on the ground, those within 1 unit of one already taken that one, 512 at most.

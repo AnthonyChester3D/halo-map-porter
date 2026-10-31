@@ -82,8 +82,39 @@ struct Result {
 // Nothing is added past the budget.
 Result plan(const std::filesystem::path &bsp, const std::vector<V3> &points, int teleporters, const Options &options = Options());
 
+// A ladder for Halo 1 Unlimited's bots (v1.64 and later: "ladder fx fy fz tx ty tz dx dy" in the map's bot file): the
+// foot node, on the floor in front of it; the top end, a node on the upper floor; (dx, dy) the way a climber walks
+// into it (the opposite of the way its front faces). The bot walks along it into the ladder, steered back onto the
+// line through the foot, and once its feet are 0.15 above the top end's height it jumps and walks to the top end.
+// `down`: a climb-down link top -> foot too ("link ... c": the bot walks straight off the top, a drop it survives).
+// Positions on the ground, as the game drops a node.
+struct Ladder {
+    V3 foot{}, top{};
+    double dx = 0, dy = 0;
+    bool down = true;
+};
+
+// The level's ladders: its climbable collision surfaces (bipeds climb them at any slope while facing them), joined
+// where they share a corner. Each one's foot: the floor about 0.75 out from its front at its bottom; its top end: the
+// upper floor about 0.75 behind its top edge, else in front of it about 1.6 out (a ladder up the back of an alcove,
+// like Prisoner's four), else beside its top. Ones with no floor at the foot or the top are left out.
+std::vector<Ladder> find_ladders(const std::filesystem::path &bsp);
+
+// Hops the game's search can't finish and no walk joins, with their two ends stacked (less than 2 units apart
+// across, a unit or more apart in height): where a ladder, a lift or a jump the bots don't know may be. Pairs of
+// waypoints (a below b), each pair once.
+std::vector<std::pair<int, int>> stacked_hops(const Result &r);
+
+// The bot file Halo 1 Unlimited reads for the map (maps\bots\<map>.txt for a stock map, bots.txt in a folder map's
+// folder; 64 KB at most): node lines for the waypoints `added` and `mine` (on the ground), each ladder's two nodes,
+// then its "ladder" line and, coming down, its "link top foot c" line. Numbers with 2 decimals, the same in each.
+// At most 16 ladders (the game's limit). `note` gets what was left out, if anything.
+std::string bot_file(const std::string &map, const std::vector<V3> &added, const std::vector<V3> &mine,
+                     const std::vector<Ladder> &ladders, std::string *note = nullptr);
+
 // A picture of it from above (a .bmp): the walkable floors by height, the waypoints (blue), the nodes added
-// (orange), the ways they were added along (yellow) and the hops still failing (red).
-bool picture(const std::filesystem::path &bsp, const Result &r, const std::filesystem::path &bmp);
+// (orange), the ways they were added along (yellow), the hops still failing (red) and the ladders (green: foot to top).
+bool picture(const std::filesystem::path &bsp, const Result &r, const std::filesystem::path &bmp,
+             const std::vector<Ladder> *ladders = nullptr);
 
 }   // namespace botnodes

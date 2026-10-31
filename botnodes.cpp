@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <queue>
@@ -1065,7 +1066,140 @@ Result plan(const fs::path &bsp, const std::vector<V3> &points, int teleporters,
     return res;
 }
 
-bool picture(const fs::path &bsp, const Result &r, const fs::path &file) {
+std::vector<Ladder> find_ladders(const fs::path &bsp) {
+    std::vector<Ladder> out;
+    tagfile::Tag t;
+    if (!t.load(bsp)) return out;
+    tagfile::Block cbs = t.root().block("collision bsp");
+    coll::Bsp b;
+    if (cbs.size() == 0 || !coll::read_bsp(cbs[0], b)) return out;
+    std::vector<coll::Poly> polys = coll::polygons(b);
+    std::vector<size_t> cl;
+    for (size_t i = 0; i < polys.size(); i++)
+        if ((polys[i].flags & coll::kClimbable) && polys[i].pts.size() >= 3) cl.push_back(i);
+    // (one ladder: climbable surfaces sharing a corner; its front and back are two of them)
+    std::vector<int> group(cl.size(), -1);
+    int groups = 0;
+    auto touch = [&](size_t a, size_t c) {
+        for (auto &p : polys[cl[a]].pts)
+            for (auto &q : polys[cl[c]].pts)
+                if (std::fabs(p[0] - q[0]) + std::fabs(p[1] - q[1]) + std::fabs(p[2] - q[2]) < 0.05) return true;
+        return false;
+    };
+    for (size_t i = 0; i < cl.size(); i++) {
+        if (group[i] >= 0) continue;
+        std::vector<size_t> st{i};
+        group[i] = groups;
+        while (!st.empty()) {
+            size_t a = st.back();
+            st.pop_back();
+            for (size_t j = 0; j < cl.size(); j++)
+                if (group[j] < 0 && touch(a, j)) { group[j] = groups; st.push_back(j); }
+        }
+        groups++;
+    }
+    // The ground under a point: from `up` above it, down to `down` below it (front faces).
+    auto floor_at = [&](double x, double y, double z, double up, double down, double &gz) {
+        double o[3] = {x, y, z + up}, v[3] = {0, 0, -(up + down)};
+        coll::Hit h = coll::test_vector(b, o, v, 1, false);
+        if (h.surface == kNone) return false;
+        gz = o[2] + v[2] * h.t;
+        return true;
+    };
+    for (int k = 0; k < groups; k++) {
+        double lo[3] = {1e30, 1e30, 1e30}, hi[3] = {-1e30, -1e30, -1e30}, n[2] = {0, 0};
+        for (size_t i = 0; i < cl.size(); i++) {
+            if (group[i] != k) continue;
+            const auto &q = polys[cl[i]].pts;
+            for (auto &p : q)
+                for (int a = 0; a < 3; a++) { lo[a] = std::min(lo[a], p[a]); hi[a] = std::max(hi[a], p[a]); }
+            for (size_t m = 0; m < q.size(); m++) {   // (its normal's sideways part, area-weighted)
+                auto &a = q[m], &z = q[(m + 1) % q.size()];
+                n[0] += (a[1] - z[1]) * (a[2] + z[2]);
+                n[1] += (a[2] - z[2]) * (a[0] + z[0]);
+            }
+        }
+        if (hi[2] - lo[2] < 1.0) continue;   // (not something to climb)
+        double l = std::hypot(n[0], n[1]);
+        if (l > 1e-6 && l > 0.05 * std::hypot(hi[0] - lo[0], hi[1] - lo[1]) * (hi[2] - lo[2])) { n[0] /= l; n[1] /= l; }
+        else if (hi[0] - lo[0] < hi[1] - lo[1]) { n[0] = 1; n[1] = 0; }   // (front and back cancel: across its thin side)
+        else { n[0] = 0; n[1] = 1; }
+        const double cx = (lo[0] + hi[0]) / 2, cy = (lo[1] + hi[1]) / 2;
+        // Its front: the side with floor at its foot.
+        for (int side : {1, -1}) {
+            double fx = n[0] * side, fy = n[1] * side, gz;
+            Ladder L;
+            if (!floor_at(cx + fx * 0.75, cy + fy * 0.75, lo[2], 0.6, 0.8, gz)) continue;
+            L.foot = {cx + fx * 0.75, cy + fy * 0.75, gz};
+            // Its top end: behind the top edge, else out in front, else beside it; on a floor at least a unit above
+            // the foot and no higher than the ladder's top.
+            bool found = false;
+            auto try_at = [&](double x, double y) {
+                double tz;
+                if (found || !floor_at(x, y, hi[2], 0.3, 1.8, tz) || tz < gz + 1.0 || tz > hi[2] + 0.3) return;
+                L.top = {x, y, tz};
+                found = true;
+            };
+            for (double d = 0.75; d <= 1.25 && !found; d += 0.25) try_at(cx - fx * d, cy - fy * d);
+            for (double d : {1.6, 1.4, 1.8, 2.0, 2.4}) try_at(cx + fx * d, cy + fy * d);
+            for (double d = 0.75; d <= 1.5 && !found; d += 0.25)
+                for (int s2 : {1, -1}) try_at(cx - fy * d * s2, cy + fx * d * s2);
+            if (!found) continue;
+            L.dx = fx == 0 ? 0.0 : -fx;   // (no "-0")
+            L.dy = fy == 0 ? 0.0 : -fy;
+            out.push_back(L);
+            break;
+        }
+    }
+    return out;
+}
+
+std::vector<std::pair<int, int>> stacked_hops(const Result &r) {
+    std::vector<std::pair<int, int>> out;
+    std::set<std::pair<int, int>> seen;
+    for (auto &h : r.hops) {
+        if (h.ok || h.joined || h.a < 0 || h.b < 0 || h.a >= (int)r.waypoints.size() || h.b >= (int)r.waypoints.size()) continue;
+        const V3 &a = r.waypoints[(size_t)h.a], &c = r.waypoints[(size_t)h.b];
+        if (dist2d(a, c) >= 2.0 || std::fabs(a[2] - c[2]) < 1.0) continue;
+        std::pair<int, int> p = a[2] < c[2] ? std::make_pair(h.a, h.b) : std::make_pair(h.b, h.a);
+        if (seen.insert(p).second) out.push_back(p);
+    }
+    return out;
+}
+
+std::string bot_file(const std::string &map, const std::vector<V3> &added, const std::vector<V3> &mine,
+                     const std::vector<Ladder> &ladders, std::string *note) {
+    auto f2 = [](double v) {
+        char b[32];
+        snprintf(b, sizeof b, "%.2f", std::fabs(v) < 0.005 ? 0.0 : v);
+        return std::string(b);
+    };
+    auto p3 = [&](const V3 &p) { return f2(p[0]) + " " + f2(p[1]) + " " + f2(p[2]); };
+    const size_t n = std::min<size_t>(ladders.size(), 16);
+    std::string s = "# Halo 1 Unlimited bot waypoints for " + map + ", made by Halo Map Porter.\n"
+                    "# The game reads it from maps\\bots\\" + map + ".txt (a stock map) or bots.txt in a folder map's folder.\n"
+                    "# " + std::to_string(added.size()) + " waypoints the porter adds, " + std::to_string(mine.size()) +
+                    " placed by hand, " + std::to_string(n) + " ladder" + (n == 1 ? "" : "s") + ".\n";
+    if (!added.empty()) s += "\n# Waypoints the porter adds (ramps, narrow ways, open floor, where the search needs them)\n";
+    for (auto &p : added) s += "node " + p3(p) + "\n";
+    if (!mine.empty()) s += "\n# Waypoints placed by hand in the Level window\n";
+    for (auto &p : mine) s += "node " + p3(p) + "\n";
+    if (n) s += "\n# Ladders: foot and top nodes, then the climb (and the way down)\n";
+    for (size_t i = 0; i < n; i++) s += "node " + p3(ladders[i].foot) + "\nnode " + p3(ladders[i].top) + "\n";
+    for (size_t i = 0; i < n; i++) {
+        const Ladder &L = ladders[i];
+        s += "ladder " + p3(L.foot) + " " + p3(L.top) + " " + f2(L.dx) + " " + f2(L.dy) + "\n";
+        if (L.down) s += "link " + p3(L.top) + " " + p3(L.foot) + " c\n";
+    }
+    if (note) {
+        note->clear();
+        if (ladders.size() > 16) *note = std::to_string(ladders.size() - 16) + " ladders past the game's 16 left out";
+        if (s.size() > 65536) *note += std::string(note->empty() ? "" : "; ") + "the file is over the game's 64 KB";
+    }
+    return s;
+}
+
+bool picture(const fs::path &bsp, const Result &r, const fs::path &file, const std::vector<Ladder> *ladders) {
     tagfile::Tag t;
     Level L;
     std::string why;
@@ -1142,6 +1276,12 @@ bool picture(const fs::path &bsp, const Result &r, const fs::path &file) {
             line(r.waypoints[(size_t)h.a], r.waypoints[(size_t)h.b], {220, 50, 50});
     for (int i = 0; i < r.given && i < (int)r.waypoints.size(); i++) plot(r.waypoints[(size_t)i][0], r.waypoints[(size_t)i][1], {60, 140, 255}, 3);
     for (auto &p : r.added) plot(p[0], p[1], {255, 140, 0}, 4);
+    if (ladders)
+        for (auto &L : *ladders) {
+            line(L.foot, L.top, {60, 220, 90});
+            plot(L.foot[0], L.foot[1], {60, 220, 90}, 3);
+            plot(L.top[0], L.top[1], {150, 255, 160}, 3);
+        }
     // A .bmp, bottom-up rows (the map's +y up).
     int stride = (W * 3 + 3) & ~3;
     std::string b(54, '\0');

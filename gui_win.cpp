@@ -1310,6 +1310,12 @@ static fs::path shader_picks_file(const fs::path &input) {
     p.replace_extension(L".shaders.txt");
     return p;
 }
+// A map file's name without its extension, lower case (a stock map's bot file: maps\\bots\\<this>.txt).
+static std::string in_stem_lower(const fs::path &input) {
+    std::string m = u8(input.stem().wstring());
+    for (auto &c : m) c = (char)tolower((unsigned char)c);
+    return m;
+}
 static shadersui::Picks load_shader_picks(const fs::path &input) {
     shadersui::Picks picks;
     std::ifstream f(shader_picks_file(input));
@@ -1346,9 +1352,21 @@ static shadersui::Picks load_shader_picks(const fs::path &input) {
     bf.replace_extension(L".bots.txt");
     std::ifstream bs(bf, std::ios::binary);
     std::string bl;
+    // (and the ladders, once changed in the window: "ladders", then "ladder fx fy fz tx ty tz dx dy down" lines)
     while (std::getline(bs, bl)) {
         std::array<double, 3> p{};
-        if (sscanf(bl.c_str(), "%lf %lf %lf", &p[0], &p[1], &p[2]) == 3) picks.bots.push_back(p);
+        shadersui::Picks::Ladder L;
+        int down = 1;
+        if (bl.rfind("ladders", 0) == 0 && bl.rfind("ladder ", 0) != 0) picks.ladders_set = true;
+        else if (sscanf(bl.c_str(), "ladder %lf %lf %lf %lf %lf %lf %lf %lf %d", &L.foot[0], &L.foot[1], &L.foot[2], &L.top[0],
+                        &L.top[1], &L.top[2], &L.dx, &L.dy, &down) >= 8) {
+            L.down = down != 0;
+            picks.ladders.push_back(L);
+        } else if (sscanf(bl.c_str(), "%lf %lf %lf", &p[0], &p[1], &p[2]) == 3) picks.bots.push_back(p);
+    }
+    {   // (the bot file's name)
+        std::string m = in_stem_lower(input);
+        picks.map_name = m;
     }
     return picks;
 }
@@ -1367,14 +1385,22 @@ static void save_shader_picks(const fs::path &input, const shadersui::Picks &pic
     {
         fs::path bf = p;
         bf.replace_extension(L".bots.txt");
-        if (picks.bots.empty()) fs::remove(bf, ec);
+        if (picks.bots.empty() && !picks.ladders_set) fs::remove(bf, ec);
         else {
             fs::create_directories(bf.parent_path(), ec);
             std::ofstream f(bf, std::ios::binary | std::ios::trunc);
-            char b[96];
+            char b[256];
             for (auto &q : picks.bots) {
                 snprintf(b, sizeof b, "%.4f %.4f %.4f\n", q[0], q[1], q[2]);
                 f << b;
+            }
+            if (picks.ladders_set) {
+                f << "ladders\n";
+                for (auto &L : picks.ladders) {
+                    snprintf(b, sizeof b, "ladder %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %d\n", L.foot[0], L.foot[1], L.foot[2],
+                             L.top[0], L.top[1], L.top[2], L.dx, L.dy, L.down ? 1 : 0);
+                    f << b;
+                }
             }
         }
     }

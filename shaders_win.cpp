@@ -3,6 +3,7 @@
 #include "shaders_win.hpp"
 
 #include <commctrl.h>
+#include <commdlg.h>
 #include <windowsx.h>
 
 #include "botnodes.hpp"
@@ -36,7 +37,8 @@ enum {
     IDC_SC_ORAD, IDC_SC_OHGT_LBL, IDC_SC_OHGT, IDC_SC_OAR_LBL, IDC_SC_OAR, IDC_SC_ORBIT, IDC_SC_SAVE, IDC_SC_PACE, IDC_SC_HINT,
     IDC_FOG_START, IDC_FOG_TO, IDC_OBJECTS, IDC_SHOWSKY,
     IDC_BOTS, IDC_BOTS_TEXT, IDC_BOTS_LIST, IDC_BOTS_DEL, IDC_BOTS_CLEAR, IDC_BOTS_NEXT, IDC_BOTS_THROUGH, IDC_BOTS_GOOD,
-    IDC_BOTS_HIDE, IDC_BOTS_HINT, IDC_LAMP,
+    IDC_BOTS_HIDE, IDC_LAD_LBL, IDC_LAD_LIST, IDC_LAD_ADD, IDC_LAD_FOOT, IDC_LAD_TOP, IDC_LAD_TURN, IDC_LAD_DEL,
+    IDC_LAD_DOWN, IDC_LAD_EXPORT, IDC_LAD_STACKED, IDC_BOTS_HINT, IDC_LAMP,
 };
 #define WM_LS_LOG (WM_APP + 60)
 #define WM_LS_DONE (WM_APP + 61)
@@ -106,6 +108,13 @@ struct State {
     std::vector<int> bot_mine_at;   // each of yours: its waypoint (in bot_res.waypoints), or -1
     std::vector<char> bot_mine_merged;   // (that waypoint an earlier point's: within 1 unit of it)
     int bot_sel = -1;               // (one of yours, picked)
+    // Ladders (botnodes::Ladder): St->picks.ladders, found in the level until you change them. A click in the picture
+    // places a ladder's foot or top while lad_mode says so: 1 a new one's foot, 2 its top, 3 the picked one's foot,
+    // 4 its top.
+    int lad_sel = -1, lad_mode = 0;
+    bool show_stacked = false;
+    botnodes::V3 lad_foot{};
+    std::vector<std::pair<int, int>> bot_stacked;   // (red links with their ends stacked: botnodes::stacked_hops)
     size_t bot_next = 0;            // ("Next problem": the last one shown)
     bool click = false;             // (a press in the picture that hasn't moved: a click)
     POINT click_at{};
@@ -523,6 +532,7 @@ void set_sc_mode(bool on) {
 // ---- the bots' waypoints (botnodes.hpp): in place of the list, drawn in the picture, yours added by clicking it
 const uint32_t kMapMark = 0xFF4A90FF, kMineMark = 0xFF36F07A, kAutoMark = 0xFFFF8C1A, kPickedMark = 0xFFFFFFFF;
 const uint32_t kGoodLine = 0x9050D070, kRoundLine = 0xB0F0B030, kStuckLine = 0xFFFF3A3A;
+const uint32_t kLadderLine = 0xFF3CDC5A, kLadderPicked = 0xFFB4FFC0, kStackedLine = 0xFFE040E0;
 
 // A point's place in the picture (false: behind the camera), as lshade::draw projects.
 bool project(const botnodes::V3 &p, int w, int h, double &sx, double &sy) {
@@ -580,11 +590,33 @@ void bots_frame(glpreview::Frame &f) {
         uint32_t c = mine[i] ? kMineMark : (int)i < r.given ? kMapMark : kAutoMark;
         f.marks.push_back({up(r.waypoints[i], 0.3), c, mine[i] ? 11.0f : 9.0f});
     }
+    // Ladders (green): foot, straight up to the top's height, over to the top end; the picked one lighter. Red links
+    // with their ends stacked (a ladder, lift or jump the bots don't know): magenta.
+    for (size_t k = 0; k < St->picks.ladders.size(); k++) {
+        const auto &L = St->picks.ladders[k];
+        uint32_t c = (int)k == St->lad_sel ? kLadderPicked : kLadderLine;
+        botnodes::V3 mid{L.foot[0], L.foot[1], L.top[2]};
+        f.lines.push_back({up(L.foot, 0.3), up(mid, 0.3), c, 3.0f});
+        f.lines.push_back({up(mid, 0.3), up(L.top, 0.3), c, 3.0f});
+        f.lines.push_back({up(L.foot, 0.3), up({L.foot[0] + L.dx * 0.6, L.foot[1] + L.dy * 0.6, L.foot[2]}, 0.3), c, 2.0f});
+        f.marks.push_back({up(L.foot, 0.3), c, 12.0f});
+        f.marks.push_back({up(L.top, 0.3), c, 12.0f});
+    }
+    if (St->show_stacked)
+    for (auto &[a, b] : St->bot_stacked)
+        if (a < (int)r.waypoints.size() && b < (int)r.waypoints.size())
+            f.lines.push_back({up(r.waypoints[(size_t)a], 0.3), up(r.waypoints[(size_t)b], 0.3), kStackedLine, 2.5f});
     if (St->bot_sel >= 0 && (size_t)St->bot_sel < St->bot_mine_at.size()) {
         int i = St->bot_mine_at[(size_t)St->bot_sel];
         botnodes::V3 p = i >= 0 && (size_t)i < r.waypoints.size() ? r.waypoints[(size_t)i] : St->picks.bots[(size_t)St->bot_sel];
         f.marks.push_back({up(p, 0.3), kPickedMark, 15.0f});
     }
+}
+
+botnodes::Ladder to_ladder(const Picks::Ladder &l) {
+    botnodes::Ladder b;
+    b.foot = l.foot; b.top = l.top; b.dx = l.dx; b.dy = l.dy; b.down = l.down;
+    return b;
 }
 
 std::wstring bots_where(const botnodes::V3 &p) {
@@ -651,6 +683,11 @@ void bots_text() {
     t += L". The working links join " + pct(r.reach_after) + L"% of the ways between the map's own waypoints";
     if (!r.added.empty()) t += L" (" + pct(r.reach_before) + L"% without the orange ones)";
     t += L".";
+    t += L"\r\n\r\nLadders: " + std::to_wstring(St->picks.ladders.size()) + (St->picks.ladders_set ? L" (yours)" : L" found in the level") +
+         L" (green; 16 at most)";
+    if (!St->bot_stacked.empty())
+        t += L"; " + std::to_wstring(St->bot_stacked.size()) + L" red links with stacked ends (magenta, when shown)";
+    t += L".";
     SetWindowTextW(item(IDC_BOTS_TEXT), t.c_str());
 }
 
@@ -666,6 +703,19 @@ void bots_fill_list() {
     if (St->bot_sel >= 0) SendMessageW(l, LB_SETCURSEL, (WPARAM)St->bot_sel, 0);
     EnableWindow(item(IDC_BOTS_DEL), St->bot_sel >= 0);
     EnableWindow(item(IDC_BOTS_CLEAR), !St->picks.bots.empty());
+    HWND ll = item(IDC_LAD_LIST);
+    SendMessageW(ll, LB_RESETCONTENT, 0, 0);
+    for (size_t i = 0; i < St->picks.ladders.size(); i++) {
+        const auto &L = St->picks.ladders[i];
+        wchar_t b[200];
+        swprintf(b, 200, L"%zu   foot (%.2f, %.2f, %.2f)  top (%.2f, %.2f, %.2f)  in (%.2f, %.2f)%s", i + 1, L.foot[0], L.foot[1],
+                 L.foot[2], L.top[0], L.top[1], L.top[2], L.dx, L.dy, L.down ? L"" : L"  (no way down)");
+        SendMessageW(ll, LB_ADDSTRING, 0, (LPARAM)b);
+    }
+    if (St->lad_sel >= (int)St->picks.ladders.size()) St->lad_sel = -1;
+    if (St->lad_sel >= 0) SendMessageW(ll, LB_SETCURSEL, (WPARAM)St->lad_sel, 0);
+    for (int id : {IDC_LAD_FOOT, IDC_LAD_TOP, IDC_LAD_TURN, IDC_LAD_DEL, IDC_LAD_DOWN}) EnableWindow(item(id), St->lad_sel >= 0);
+    CheckDlgButton(St->wnd, IDC_LAD_DOWN, St->lad_sel >= 0 && St->picks.ladders[(size_t)St->lad_sel].down ? BST_CHECKED : BST_UNCHECKED);
 }
 
 // The bots' waypoints and links with yours, as a conversion makes them.
@@ -684,6 +734,7 @@ void bots_plan() {
             for (auto &k : kinds) o.walk_from.push_back(k.rfind("item spawn point", 0) != 0);
     }
     St->bot_res = botnodes::plan(St->bot_bsp, pts, St->bot_tele, o);
+    St->bot_stacked = botnodes::stacked_hops(St->bot_res);
     SetCursor(old);
     // (each of yours: the waypoint it makes, or the one it's within 1 unit of; and whether that one is the map's)
     St->bot_mine_at.assign(St->picks.bots.size(), -1);
@@ -745,6 +796,14 @@ void bots_loaded_now() {
     }
     St->bot_bsp = b;
     St->bots_loaded = true;
+    if (!St->picks.ladders_set) {   // (found in the level until you change them)
+        St->picks.ladders.clear();
+        for (auto &L : botnodes::find_ladders(b)) {
+            Picks::Ladder p;
+            p.foot = L.foot; p.top = L.top; p.dx = L.dx; p.dy = L.dy; p.down = L.down;
+            St->picks.ladders.push_back(p);
+        }
+    }
     bots_plan();
 }
 
@@ -766,8 +825,97 @@ void set_bots_mode(bool on) {
     }
 }
 
+// A ladder's foot or top placed where the picture was clicked (lad_mode). A new one's way in: a ladder found in the
+// level within 2 units of its foot gives it, else from the foot toward the top ("Turn" turns it).
+bool ladder_click(int x, int y) {
+    if (!St->lad_mode) return false;
+    RECT rc;
+    GetClientRect(St->view, &rc);
+    std::array<double, 3> at{};
+    if (lshade::pick(St->data->p, St->cam, rc.right, rc.bottom, x, y, &at, nullptr) < 0) {
+        SetWindowTextW(item(IDC_STATUS), L"Nothing of the level there: click a floor.");
+        return true;
+    }
+    botnodes::V3 p{at[0], at[1], at[2]};
+    int mode = St->lad_mode;
+    St->lad_mode = 0;
+    if (mode == 1) {
+        St->lad_foot = p;
+        St->lad_mode = 2;
+        SetWindowTextW(item(IDC_STATUS), (L"Ladder foot at " + bots_where(p) + L": now click the floor at its top.").c_str());
+        render(false);
+        return true;
+    }
+    if (mode == 2) {
+        Picks::Ladder L;
+        L.foot = St->lad_foot;
+        L.top = p;
+        double dx = p[0] - L.foot[0], dy = p[1] - L.foot[1], l = std::hypot(dx, dy);
+        L.dx = l > 1e-6 ? dx / l : 1;
+        L.dy = l > 1e-6 ? dy / l : 0;
+        if (St->bots_loaded)
+            for (auto &f : botnodes::find_ladders(St->bot_bsp))
+                if (std::hypot(f.foot[0] - L.foot[0], f.foot[1] - L.foot[1]) < 2 && std::fabs(f.foot[2] - L.foot[2]) < 1.5) { L.dx = f.dx; L.dy = f.dy; }
+        St->picks.ladders.push_back(L);
+        St->lad_sel = (int)St->picks.ladders.size() - 1;
+    } else if (St->lad_sel >= 0 && (size_t)St->lad_sel < St->picks.ladders.size()) {
+        (mode == 3 ? St->picks.ladders[(size_t)St->lad_sel].foot : St->picks.ladders[(size_t)St->lad_sel].top) = p;
+    }
+    St->picks.ladders_set = true;
+    bots_text();
+    bots_fill_list();
+    SetWindowTextW(item(IDC_STATUS), (mode == 2 ? L"Ladder added: green line. \"Turn\" if the way in (the short tick at its foot) "
+                                                  L"doesn't point into the ladder."
+                                                : mode == 3 ? L"Ladder foot moved." : L"Ladder top moved.")); 
+    render(false);
+    return true;
+}
+
+// The map's bot file for Halo 1 Unlimited (botnodes::bot_file): the waypoints a conversion adds and yours, on the
+// ground, and the ladders. Asks where (maps\bots\<map>.txt for a stock map; bots.txt in a folder map's folder).
+void export_bot_file() {
+    if (!St->bots_loaded || !St->bot_res.ok) return;
+    botnodes::Result r = St->bot_res;
+    if (St->bots_hide && St->picks.bots_auto) {   // (the orange ones as a conversion adds them, though hidden here)
+        bool was = St->bots_hide;
+        St->bots_hide = false;
+        bots_plan();
+        r = St->bot_res;
+        St->bots_hide = was;
+        bots_plan();
+    }
+    std::vector<botnodes::V3> added(r.waypoints.begin() + std::min<size_t>((size_t)r.given, r.waypoints.size()), r.waypoints.end()), mine;
+    for (size_t k = 0; k < St->bot_mine_at.size(); k++)
+        if (St->bot_mine_at[k] >= 0 && !St->bot_mine_merged[k] && (size_t)St->bot_mine_at[k] < r.waypoints.size())
+            mine.push_back(r.waypoints[(size_t)St->bot_mine_at[k]]);
+    std::vector<botnodes::Ladder> ladders;
+    for (auto &L : St->picks.ladders) ladders.push_back(to_ladder(L));
+    std::string map = St->picks.map_name.empty() ? "map" : St->picks.map_name, note;
+    std::string text = botnodes::bot_file(map, added, mine, ladders, &note);
+    wchar_t file[MAX_PATH] = {};
+    wcsncpy(file, (W(map) + L".txt").c_str(), MAX_PATH - 1);
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof ofn;
+    ofn.hwndOwner = St->wnd;
+    ofn.lpstrFilter = L"Bot file (*.txt)\0*.txt\0";
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrTitle = L"Save the bot file (maps\\bots\\<map>.txt for a stock map, bots.txt in a folder map's folder)";
+    ofn.lpstrDefExt = L"txt";
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+    if (!GetSaveFileNameW(&ofn)) return;
+    std::ofstream f(fs::path(file), std::ios::binary | std::ios::trunc);
+    f << text;
+    std::wstring s = f ? L"Wrote " + std::wstring(file) + L": " + std::to_wstring(added.size() + mine.size()) + L" waypoints and " +
+                             std::to_wstring(std::min<size_t>(ladders.size(), 16)) + L" ladders."
+                       : L"Couldn't write " + std::wstring(file) + L".";
+    if (!note.empty()) s += L" (" + W(note) + L")";
+    SetWindowTextW(item(IDC_STATUS), s.c_str());
+}
+
 // A click in the picture: one of yours within 12 pixels of it picked, else a new one on the surface there.
 void bots_click(int x, int y) {
+    if (ladder_click(x, y)) return;
     RECT rc;
     GetClientRect(St->view, &rc);
     int best = -1;
@@ -1590,7 +1738,17 @@ void create_controls() {
     add(L"BUTTON", L"Delete", BS_PUSHBUTTON | WS_TABSTOP, 148, 252, 100, 26, IDC_BOTS_DEL);
     add(L"BUTTON", L"Clear mine", BS_PUSHBUTTON | WS_TABSTOP, 254, 252, 110, 26, IDC_BOTS_CLEAR);
     add(L"BUTTON", L"Hide suggested (orange)", BS_AUTOCHECKBOX | WS_TABSTOP, 372, 254, 188, 22, IDC_BOTS_HIDE);
-    add(L"LISTBOX", L"", LBS_NOTIFY | WS_VSCROLL | WS_BORDER | WS_TABSTOP | LBS_NOINTEGRALHEIGHT, 12, 286, 548, 180, IDC_BOTS_LIST);
+    add(L"LISTBOX", L"", LBS_NOTIFY | WS_VSCROLL | WS_BORDER | WS_TABSTOP | LBS_NOINTEGRALHEIGHT, 12, 286, 548, 110, IDC_BOTS_LIST);
+    add(L"STATIC", L"Ladders:", 0, 12, 402, 64, 18, IDC_LAD_LBL);
+    add(L"BUTTON", L"Show red links with stacked ends (a ladder, lift or jump?)", BS_AUTOCHECKBOX | WS_TABSTOP, 80, 400, 480, 20, IDC_LAD_STACKED);
+    add(L"LISTBOX", L"", LBS_NOTIFY | WS_VSCROLL | WS_BORDER | WS_TABSTOP | LBS_NOINTEGRALHEIGHT | WS_HSCROLL, 12, 422, 548, 76, IDC_LAD_LIST);
+    add(L"BUTTON", L"Add ladder", BS_PUSHBUTTON | WS_TABSTOP, 12, 504, 92, 26, IDC_LAD_ADD);
+    add(L"BUTTON", L"Move foot", BS_PUSHBUTTON | WS_TABSTOP, 108, 504, 84, 26, IDC_LAD_FOOT);
+    add(L"BUTTON", L"Move top", BS_PUSHBUTTON | WS_TABSTOP, 196, 504, 80, 26, IDC_LAD_TOP);
+    add(L"BUTTON", L"Turn", BS_PUSHBUTTON | WS_TABSTOP, 280, 504, 56, 26, IDC_LAD_TURN);
+    add(L"BUTTON", L"Delete", BS_PUSHBUTTON | WS_TABSTOP, 340, 504, 64, 26, IDC_LAD_DEL);
+    add(L"BUTTON", L"Way down too", BS_AUTOCHECKBOX | WS_TABSTOP, 412, 506, 148, 22, IDC_LAD_DOWN);
+    add(L"BUTTON", L"Export bot file...", BS_PUSHBUTTON | WS_TABSTOP, 12, 536, 150, 26, IDC_LAD_EXPORT);
     add(L"STATIC",
         L"Halo 1 Unlimited's bots go between these waypoints, walking each link with Halo's AI path search. Click the level to "
         L"put one of yours there (green); click one of yours, or pick it in the list, to Delete it. Yours go into each Xbox "
@@ -1600,8 +1758,10 @@ void create_controls() {
         L"green, a link the bots walk; amber, one their search can't finish one way, but they learn to go round it; red, one "
         L"with nothing round it. Put yours a few units apart along the way the bots should walk: at the foot, landings and "
         L"top of stairs and ramps, and along walkways up to a raised spot. The search only walks floor the level's AI data "
-        L"joins, so a red link across a jump, ladder or lift stays red.",
-        0, 12, 474, 548, 240, IDC_BOTS_HINT);
+        L"joins, so a red link across a jump, ladder or lift stays red: a ladder (green) gets bots up one. \"Export bot file\" "
+        L"writes these for Halo 1 Unlimited without changing the map (maps\\bots\\<map>.txt for a stock map, bots.txt in a "
+        L"folder map's folder).",
+        0, 168, 536, 392, 178, IDC_BOTS_HINT);
     for (int id = IDC_BOTS_TEXT; id <= IDC_BOTS_HINT; id++) ShowWindow(item(id), SW_HIDE);
     St->view = CreateWindowExW(WS_EX_CLIENTEDGE, L"HMPLevelView", L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_TABSTOP,
                                S(572), S(68), S(596), S(447), St->wnd,
@@ -2023,6 +2183,66 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 St->bot_sel = -1;
                 bots_plan();
             }
+            return 0;
+        case IDC_LAD_LIST:
+            if (HIWORD(wp) == LBN_SELCHANGE) {
+                int k = (int)SendMessageW(item(IDC_LAD_LIST), LB_GETCURSEL, 0, 0);
+                St->lad_sel = k >= 0 && (size_t)k < St->picks.ladders.size() ? k : -1;
+                St->lad_mode = 0;
+                bots_fill_list();
+                if (St->lad_sel >= 0) {   // (the picture looks at its foot)
+                    const auto &p = St->picks.ladders[(size_t)St->lad_sel].foot;
+                    double yaw = St->cam.yaw;
+                    St->cam.eye = {p[0] - std::cos(yaw) * 5, p[1] - std::sin(yaw) * 5, p[2] + 3};
+                    St->cam.pitch = -std::atan2(3.0, 5.0);
+                }
+                render(false);
+            }
+            return 0;
+        case IDC_LAD_ADD:
+            St->lad_mode = 1;
+            SetWindowTextW(item(IDC_STATUS), L"New ladder: click the floor at its foot, in front of it.");
+            return 0;
+        case IDC_LAD_FOOT:
+        case IDC_LAD_TOP:
+            if (St->lad_sel < 0) return 0;
+            St->lad_mode = LOWORD(wp) == IDC_LAD_FOOT ? 3 : 4;
+            SetWindowTextW(item(IDC_STATUS), LOWORD(wp) == IDC_LAD_FOOT ? L"Click the floor where its foot goes." : L"Click the floor where its top end goes.");
+            return 0;
+        case IDC_LAD_TURN:
+            if (St->lad_sel >= 0) {   // (a quarter turn)
+                auto &L = St->picks.ladders[(size_t)St->lad_sel];
+                double dx = L.dx;
+                L.dx = -L.dy;
+                L.dy = dx;
+                St->picks.ladders_set = true;
+                bots_fill_list();
+                render(false);
+            }
+            return 0;
+        case IDC_LAD_DEL:
+            if (St->lad_sel >= 0) {
+                St->picks.ladders.erase(St->picks.ladders.begin() + St->lad_sel);
+                St->lad_sel = -1;
+                St->picks.ladders_set = true;
+                bots_text();
+                bots_fill_list();
+                render(false);
+            }
+            return 0;
+        case IDC_LAD_DOWN:
+            if (St->lad_sel >= 0) {
+                St->picks.ladders[(size_t)St->lad_sel].down = IsDlgButtonChecked(h, IDC_LAD_DOWN) == BST_CHECKED;
+                St->picks.ladders_set = true;
+                bots_fill_list();
+            }
+            return 0;
+        case IDC_LAD_STACKED:
+            St->show_stacked = IsDlgButtonChecked(h, IDC_LAD_STACKED) == BST_CHECKED;
+            render(false);
+            return 0;
+        case IDC_LAD_EXPORT:
+            export_bot_file();
             return 0;
         case IDC_BOTS_LIST:
             if (HIWORD(wp) == LBN_SELCHANGE) {
