@@ -69,6 +69,11 @@ struct Result {
 // `cutoffs` (tag order: super high, high, medium, low, super low; pixels). `tag`: its tag path, for the library's
 // index. `targets`: the model's triangles to aim for, medium and low, instead (0: as above; chosen in the LODs
 // window), allowed to move the shape further to get there.
+// A model's own lower-detail versions taken out (each permutation draws its most detailed geometry at every level;
+// geometries nothing draws any more dropped), so add_lods makes new ones: the LODs window's "Make them" for a model the
+// map made with poor ones. Permutations the engine picks itself ("~blur") are left as made. False: nothing changed.
+bool drop_own_lods(const std::filesystem::path &model);
+
 Result add_lods(const std::filesystem::path &model, const double cutoffs[5], const Settings &settings,
                 const std::string &tag = {}, const int targets[2] = nullptr);
 

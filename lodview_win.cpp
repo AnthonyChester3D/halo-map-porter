@@ -173,7 +173,7 @@ void enable_choice() {
     const LodView::Model *m = St->model >= 0 ? &St->v.models[St->model] : nullptr;
     bool any = m && !St->library.empty(), fp = m && m->kind == 'f', stock = m && is_stock(*m);
     int li = (int)SendMessageW(item(IDC_LODS), CB_GETCURSEL, 0, 0), ti = (int)SendMessageW(item(IDC_TOP), CB_GETCURSEL, 0, 0);
-    bool lods = any && !fp, make = lods && li == 1 && !m->had_lods, top = any && !stock;
+    bool lods = any && !fp, make = lods && li == 1, top = any && !stock;
     for (int id : {IDC_LODS_LBL, IDC_LODS}) EnableWindow(item(id), lods);
     for (int id : {IDC_MED_LBL, IDC_MED, IDC_LOW_LBL, IDC_LOW, IDC_TRIS_LBL}) EnableWindow(item(id), make);
     for (int id : {IDC_TOP_LBL, IDC_TOP}) EnableWindow(item(id), top);
@@ -230,8 +230,8 @@ void save_choice() {
                      L" the map\" puts it in the map.";
     int top = triangles(m.level[0]);
     if (m.trimmed_from > 0) top = m.trimmed_from;
-    if (c.lods == 'm' && m.had_lods) t = L"Saved, but " + W(m.name) + L" has lower-detail versions of its own: the app keeps them.";
-    else if (c.lods == 'm' && c.medium > 0 && top > 0 && c.medium >= top)
+    if (c.lods == 'm' && m.had_lods) t += L" Its own lower-detail versions are replaced by ones the app makes.";
+    if (c.lods == 'm' && c.medium > 0 && top > 0 && c.medium >= top)
         t += L" Medium has to be fewer triangles than the most detailed version (" + thousands(top) + L") to be made.";
     else if (c.lods == 'm' && c.low > 0 && c.medium > 0 && c.low >= c.medium)
         t += L" Low has to be fewer triangles than medium to be made.";
@@ -566,15 +566,7 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case IDC_LODS:
         case IDC_TOP:
             if (code == CBN_SELCHANGE && !St->loading) {
-                // A model with lower-detail versions of its own keeps them (only "don't" changes anything: no switch
-                // distances).
-                if (id == IDC_LODS && SendMessageW(item(IDC_LODS), CB_GETCURSEL, 0, 0) == 1 && St->model >= 0 &&
-                    St->v.models[St->model].had_lods) {
-                    SendMessageW(item(IDC_LODS), CB_SETCURSEL, St->saved.lods == 'n' ? 2 : 0, 0);
-                    status(W(St->v.models[St->model].name) + L" has lower-detail versions of its own, which the app keeps; "
-                           L"\"Don't make them\" leaves it without switch distances.");
-                    return 0;
-                }
+                // (a model with lower-detail versions of its own: "Make them" replaces them with ones the app makes)
                 // "Trim it to": starting from 1.5x Bungie's for its kind and size (or half its triangles)
                 if (id == IDC_TOP && SendMessageW(item(IDC_TOP), CB_GETCURSEL, 0, 0) == 2 && number(IDC_TOPN) <= 0 &&
                     St->model >= 0) {

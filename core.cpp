@@ -7040,10 +7040,13 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
             const lod::Choice &ch = chosen[dep];
             perf::ModelStats ms = perf::model_stats(own / from_u8(dep));
             if (!ms.ok) continue;
+            // (its own lower-detail versions: kept, unless you chose "Make them" for it: then they're made again)
+            bool replace = false;
             if (ms.lods) {
                 for (auto &m : job.lod_changes)
                     if (m.tag == dep) m.had_lods = true;
-                continue;
+                if (ch.lods != 'm') continue;
+                replace = true;
             }
             if (stock) {
                 LodView::Model &m = record(dep, kinds[dep], "");
@@ -7086,7 +7089,10 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
                 targets[1] = ch.low;
             }
             keep_original(ed / from_u8(dep), before);
+            if (replace) lod::drop_own_lods(ed / from_u8(dep));
             lod::Result r = lod::add_lods(ed / from_u8(dep), px, s, dep, targets);
+            if (!r.changed && replace)   // (none made: its own put back)
+                std::ofstream(ed / from_u8(dep), std::ios::binary | std::ios::trunc) << before;
             if (!r.changed) {
                 left.push_back(name_of(dep) + " (" + r.why + ")");
                 note(dep, "no lower-detail versions: " + r.why);
@@ -7100,6 +7106,7 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
                 if (k) l += " > " + thousands(k);
             std::vector<std::string> about;
             if (ch.lods == 'm' && (ch.medium > 0 || ch.low > 0)) about.push_back("your choice");
+            if (replace) about.push_back("in place of its own");
             if (stock) about.push_back("Bungie's");
             if (on_map > 1) about.push_back(std::to_string(on_map) + " on the map");
             for (size_t k = 0; k < about.size(); k++) l += (k ? ", " : " (") + about[k] + (k + 1 == about.size() ? ")" : "");

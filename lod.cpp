@@ -955,6 +955,47 @@ Trim trim_top(const fs::path &model, const TrimSettings &ts, const Settings &set
     return r;
 }
 
+bool drop_own_lods(const fs::path &model) {
+    tagfile::EditTag t;
+    if (!t.load(model)) return false;
+    TagNode &root = t.root();
+    std::vector<TagNode> *geos = tagfile::block(root, "geometries"), *regions = tagfile::block(root, "regions");
+    if (!geos || !regions) return false;
+    bool changed = false;
+    for (auto &reg : *regions)
+        for (auto &perm : *tagfile::block(reg, "permutations")) {
+            std::string name = tagfile::get_str(perm, "name");
+            if (!name.empty() && name[0] == '~') continue;   // (the engine's pick: left as made)
+            int top = (int)tagfile::get_num(perm, "super high");
+            if (top < 0 || top >= (int)geos->size()) continue;
+            for (int lv = 1; lv < 5; lv++)
+                if ((int)tagfile::get_num(perm, kLevelNames[lv]) != top) { tagfile::set_num(perm, kLevelNames[lv], top); changed = true; }
+        }
+    if (!changed) return false;
+    std::vector<int> used(geos->size(), 0);
+    for (auto &reg : *regions)
+        for (auto &perm : *tagfile::block(reg, "permutations"))
+            for (auto lvn : kLevelNames) {
+                int g = (int)tagfile::get_num(perm, lvn);
+                if (g >= 0 && g < (int)geos->size()) used[g] = 1;
+            }
+    std::vector<int> remap(geos->size(), -1);
+    std::vector<TagNode> kept;
+    for (size_t g = 0; g < geos->size(); g++) {
+        if (!used[g]) continue;
+        remap[g] = (int)kept.size();
+        kept.push_back(std::move((*geos)[g]));
+    }
+    *geos = std::move(kept);
+    for (auto &reg : *regions)
+        for (auto &perm : *tagfile::block(reg, "permutations"))
+            for (auto lvn : kLevelNames) {
+                int g = (int)tagfile::get_num(perm, lvn);
+                if (g >= 0 && g < (int)remap.size()) tagfile::set_num(perm, lvn, remap[g]);
+            }
+    return t.save(model);
+}
+
 Result add_lods(const fs::path &model, const double cutoffs[5], const Settings &settings, const std::string &tag,
                 const int targets[2]) {
     Result r;
