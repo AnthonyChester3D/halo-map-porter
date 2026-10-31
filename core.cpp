@@ -2773,19 +2773,30 @@ static bool reencode_sound_now(Job &job, const fs::path &tags, const std::string
         cmd.push_back(noext);
         if (run_process(cmd, out) == 0) return true;
     }
-    fs::path data = job.work / "sound_data";
+    // (a data folder of its own: another sound's tag can sit inside a folder named like this one, "sounds.sound"
+    // beside "sounds/eng_start/...", and its data inside this one's made invader-sound refuse it; sounds are
+    // re-encoded at the same time, too)
+    char sub[24];
+    snprintf(sub, sizeof sub, "%016llx", (unsigned long long)std::hash<std::string>{}(rel));
+    fs::path data = job.work / "sound_data" / sub;
     fs::path dir = data / from_u8(noext);
     std::error_code ec;
-    fs::remove_all(dir, ec);
+    fs::remove_all(data, ec);
     std::set<std::string> range_names;
     for (size_t i = 0; i < t.ranges.size(); i++) {
         SndRange &r = t.ranges[i];
-        std::string rn = r.name;
-        if (rn.empty() || range_names.count(rn)) {
-            rn = "range" + std::to_string(i);
+        // (a name is a folder or a file name for invader-sound: one with a slash in it made a folder it refused)
+        auto plain = [](std::string n) {
+            for (auto &c : n)
+                if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|') c = '_';
+            while (!n.empty() && (n.back() == ' ' || n.back() == '.')) n.pop_back();
+            return n;
+        };
+        std::string rn = plain(r.name);
+        if (rn.empty() || range_names.count(rn)) rn = "range" + std::to_string(i);
+        if (rn != r.name)   // (the tag's range named as its folder, so invader-sound fills that range)
             run_process({u8(tool(cfg, "invader-edit")), "-t", u8(tags), rel, "-S",
                          "pitch_ranges[" + std::to_string(i) + "].name", rn}, out);
-        }
         range_names.insert(rn);
         fs::create_directories(dir / from_u8(rn), ec);
         std::set<std::string> names;
@@ -2794,7 +2805,8 @@ static bool reencode_sound_now(Job &job, const fs::path &tags, const std::string
             std::vector<int16_t> pcm;
             int ch, rate;
             if (!decode_chain(t, r, j, pcm, ch, rate)) { why = "unsupported sample format"; return false; }
-            std::string pn = r.perms[j].name.empty() ? "perm" + std::to_string(j) : r.perms[j].name;
+            std::string pn = plain(r.perms[j].name);
+            if (pn.empty()) pn = "perm" + std::to_string(j);
             while (names.count(pn)) pn += "_";
             names.insert(pn);
             write_wav(dir / from_u8(rn) / from_u8(pn + ".wav"), ch, rate, pcm);
