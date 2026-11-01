@@ -149,6 +149,7 @@ struct Config {
     // 0 = no limit. HUD/menu textures and stock tags are never scaled.
     int xbox_max_texture = 512;
     int xbox_max_lightmap = 0;
+    bool xbox_lightmap_dxt1 = false;   // lightmap pages (R5G6B5) as DXT1: a quarter (faint steps in dark, smooth light)
     double xbox_level_texture_mb = 6;  // level (BSP) texture budget in MB, like stock maps; 0 = none
     int xbox_max_object_texture = 256; // props, vehicles, effects (not the level or sky); 0 = same as xbox_max_texture
     // Weapons & vehicles window picks: weapon/vehicle tag -> replacement tag ("" = none).

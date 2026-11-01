@@ -476,13 +476,14 @@ static void apply_xbox_options(Config &cfg) {
     cfg.xbox_add_portals = sel(ID_X_PORTALS) >= 1;
     cfg.xbox_replan_portals = sel(ID_X_PORTALS) == 2;
     {
-        static const int tex[4] = {512, 512, 1024, 0}, obj[4] = {256, 0, 0, 0}, lm[3] = {0, 512, 256};
+        static const int tex[4] = {512, 512, 1024, 0}, obj[4] = {256, 0, 0, 0}, lm[5] = {0, 512, 256, 0, 512};
         int t = sel(ID_X_TEX), l = sel(ID_X_LM);
         if (t < 0 || t > 3) t = 0;
         cfg.xbox_max_texture = tex[t];
         cfg.xbox_max_object_texture = obj[t];
         cfg.xbox_level_texture_mb = t == 0 ? 6 : 0;
-        cfg.xbox_max_lightmap = lm[l >= 0 && l < 3 ? l : 0];
+        cfg.xbox_max_lightmap = lm[l >= 0 && l < 5 ? l : 0];
+        cfg.xbox_lightmap_dxt1 = l == 3 || l == 4;   // (compressed: DXT1, a quarter)
     }
     // Weapons: the map's own, all of them (the flamethrower and fuel rod gun work on the Xbox), each replaced only as
     // the weapons & vehicles window says (and its automatic picks: one nothing spawns goes).
@@ -2409,7 +2410,8 @@ static void create_controls() {
     label(2, L"Max texture size:", 26, y, 140, ID_X_TEX_LBL);
     list_combo(2, 170, y, 220, ID_X_TEX, {L"Stock-like budget (smoothest)", L"512 max (sharper)", L"1024", L"No limit"});
     label(2, L"Lightmaps:", 410, y, 70, ID_X_LM_LBL);
-    list_combo(2, 484, y, 250, ID_X_LM, {L"Keep their size", L"Max 512", L"Max 256 (like stock maps)"});
+    list_combo(2, 484, y, 250, ID_X_LM, {L"Keep their size", L"Max 512", L"Max 256 (like stock maps)",
+                                          L"Keep their size, compressed (DXT1)", L"Max 512, compressed (DXT1)"});
     y += 29;
     add(2, L"STATIC", L"Vehicle slots - the Xbox only spawns these three. The gametype's vehicle options pick them by slot:",
         0, 26, y, 708, 20, ID_X_VLBL);
@@ -2554,7 +2556,7 @@ static void create_controls() {
         set_text(ID_S_LOD, lib.empty() ? (appdata_dir(CSIDL_LOCAL_APPDATA) / L"lod_library").wstring() : lib);
     }
     for (auto [id, key, mx, def] : {std::tuple<int, const wchar_t *, int, const wchar_t *>{ID_X_TEX, L"x_tex2", 3, L"0"},
-                                    {ID_X_LM, L"x_lm", 2, L"2"}}) {
+                                    {ID_X_LM, L"x_lm", 4, L"2"}}) {
         int k = _wtoi(ini_get(key, def).c_str());
         SendDlgItemMessageW(g_wnd, id, CB_SETCURSEL, k < 0 || k > mx ? 0 : k, 0);
     }

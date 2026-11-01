@@ -2549,12 +2549,13 @@ int convert_bc7_kept(const Config &cfg, const fs::path &p) {
 // A texture compressed to DXT (compress_color_bitmap_tag) and a bump map packed into less memory
 // (compact_bump_bitmap_tag), kept the same way (the tag as it was then made, and what the step returned; a tag the
 // step left as it was is kept too, so it isn't tried again).
-int compress_color_bitmap_tag(const fs::path &p, bool write);
+int compress_color_bitmap_tag(const fs::path &p, bool write, bool lightmaps = false);
 int compact_bump_bitmap_tag(const fs::path &p, bool alpha_tested, int *fmt_out);
 static int compress_color_kept(const Config &cfg, const fs::path &p) {
-    std::string key = result_key("compress color 1", read_all(p)), note;
+    // (2: A8Y8 and Y8 textures, DXT3/DXT5 with solid white alpha too; and lightmaps when chosen)
+    std::string key = result_key(cfg.xbox_lightmap_dxt1 ? "compress color 2 lightmaps" : "compress color 2", read_all(p)), note;
     if (load_result(cfg, key, p, note)) return std::atoi(note.c_str());
-    int n = compress_color_bitmap_tag(p, true);
+    int n = compress_color_bitmap_tag(p, true, cfg.xbox_lightmap_dxt1);
     store_result(cfg, key, p, std::to_string(n));
     return n;
 }
@@ -4449,10 +4450,17 @@ bool merge_icon_sheets(const fs::path &xbox_sheet, const fs::path &map_sheet, ui
     return merge_icon_sheets_from(xbox_sheet, map_sheet, src, out, keep ? &k : nullptr);
 }
 
-// Re-encode a .bitmap tag's uncompressed 16/32-bit color textures (2D and sprite sheets) as DXT1, or DXT5
-// when they use transparency: a quarter of the texture memory or less (`write` false = just count). Bump, height and light maps are
-// left alone. Returns how many textures were compressed (-1 = unreadable).
-int compress_color_bitmap_tag(const fs::path &p, bool write) {
+// Re-encode a .bitmap tag's textures smaller, each as it looks the same (`write` false = just count):
+//  - uncompressed 16/32-bit colour ones (2D and sprite sheets) as DXT1, or DXT5 when they use transparency: a quarter
+//    of the texture memory or less;
+//  - A8Y8 ones (grey and alpha, 16-bit: a scope's zoom overlay) as DXT5: half;
+//  - Y8 ones (8-bit grey) as DXT1: half;
+//  - DXT3 and DXT5 ones whose alpha is solid white everywhere as DXT1, the colour blocks as they were: half, and
+//    nothing changes (DXT1's opaque alpha reads white too). (Solid black alpha isn't the same: a shader reading it as
+//    "no specular", "no colour change" would read white from DXT1.)
+// Bump, height and vector maps are left alone, and lightmaps unless `lightmaps` (R5G6B5 pages as DXT1: a quarter; smooth
+// dark gradients can show faint steps). Returns how many textures were compressed (-1 = unreadable).
+int compress_color_bitmap_tag(const fs::path &p, bool write, bool lightmaps) {
     std::string b;
     {
         std::ifstream f(p, std::ios::binary);
@@ -4461,50 +4469,125 @@ int compress_color_bitmap_tag(const fs::path &p, bool write) {
     const size_t S = 64;
     if (b.size() < S + 108 || b.compare(36, 4, "bitm") != 0) return -1;
     int ttype = be16(b, S), usage = be16(b, S + 4);
-    if ((ttype != 0 && ttype != 3) || usage == 2 || usage == 4 || usage == 5) return 0;
+    if ((ttype != 0 && ttype != 3) || usage == 2 || usage == 5 || (usage == 4 && !lightmaps)) return 0;
     uint32_t cp = be32(b, S + 28), pp = be32(b, S + 48), nseq = be32(b, S + 84), nbd = be32(b, S + 96);
     size_t pp_off = S + 108 + (size_t)cp, seq_off = pp_off + pp, o = seq_off + 64 * (size_t)nseq;
     if (o > b.size()) return -1;
     for (uint32_t i = 0; i < nseq; i++) o += 32 * (size_t)be32(b, seq_off + 64 * i + 52);
     size_t bd_off = o;
-    if (bd_off + 48 * (size_t)nbd != b.size()) return -1;
-    auto eligible = [&](size_t e) {
-        int fmt = be16(b, e + 12), flags = be16(b, e + 14);
-        return be16(b, e + 10) == 0 && (fmt == 6 || fmt == 8 || fmt == 9 || fmt == 10 || fmt == 11) && (flags & 1) &&
-               !(flags & 8);
-    };
-    int count = 0;
-    for (uint32_t i = 0; i < nbd; i++) count += eligible(bd_off + 48 * i);
-    if (!count || !write) return count;
+    if (bd_off + 48 * (size_t)nbd != b.size() || pp_off + pp > b.size()) return -1;
     std::string pix = b.substr(pp_off, pp), out_pix;
     std::vector<uint32_t> offs;
     for (uint32_t i = 0; i < nbd; i++) offs.push_back(be32(b, bd_off + 48 * i + 24));
-    int done = 0;
-    bool any_alpha = false;
-    for (uint32_t i = 0; i < nbd; i++) {
-        size_t e = bd_off + 48 * i;
+    auto data_of = [&](uint32_t i, std::string &data) {   // (an entry's pixels: to the next entry's, or the end)
         uint32_t off = offs[i], end = pp;
         for (auto x : offs)
             if (x > off && x < end) end = x;
-        if (off > pix.size() || end > pix.size()) return -1;
-        std::string data = pix.substr(off, end - off);
-        if (eligible(e)) {
+        if (off > pix.size() || end > pix.size()) return false;
+        data = pix.substr(off, end - off);
+        return true;
+    };
+    // An entry's blocks: whole 4x4 blocks of every mip level (DXT: 8 bytes a block for DXT1, 16 for DXT3/DXT5).
+    auto dxt_blocks = [&](size_t e) {
+        int w = be16(b, e + 4), h = be16(b, e + 6), mips = be16(b, e + 20);
+        size_t n = 0;
+        for (int k = 0; k <= mips; k++) n += (size_t)((std::max(1, w >> k) + 3) / 4) * ((std::max(1, h >> k) + 3) / 4);
+        return n;
+    };
+    auto solid_alpha = [&](uint32_t i, size_t e) {   // (DXT3/DXT5 whose alpha is 255 everywhere)
+        int fmt = be16(b, e + 12);
+        std::string data;
+        size_t n = dxt_blocks(e);
+        if (!data_of(i, data) || data.size() < n * 16) return false;
+        for (size_t k = 0; k < n; k++) {
+            const unsigned char *q = (const unsigned char *)data.data() + k * 16;
+            if (fmt == 15) {
+                for (int j = 0; j < 8; j++)
+                    if (q[j] != 255) return false;
+            } else {
+                // DXT5: the two endpoints, then 16 3-bit codes. 255 everywhere: both endpoints 255; or one of them 255
+                // and every code picks it (0: a0, 1: a1; with a0 <= a1, code 7 is 255 too).
+                int a0 = q[0], a1 = q[1];
+                uint64_t codes = 0;
+                for (int j = 0; j < 6; j++) codes |= (uint64_t)q[2 + j] << (8 * j);
+                for (int j = 0; j < 16; j++) {
+                    int c = (int)((codes >> (3 * j)) & 7);
+                    bool white = (c == 0 && a0 == 255) || (c == 1 && a1 == 255) || (c == 7 && a0 <= a1) ||
+                                 (a0 == 255 && a1 == 255);
+                    if (!white) return false;
+                }
+            }
+        }
+        return true;
+    };
+    auto eligible = [&](uint32_t i) {   // 1 re-encoded from its pixels, 2 DXT3/DXT5 to DXT1 as it is, 0 neither
+        size_t e = bd_off + 48 * i;
+        int fmt = be16(b, e + 12), flags = be16(b, e + 14);
+        if (be16(b, e + 10) != 0 || (flags & 8)) return 0;   // (2D, not swizzled)
+        if (usage == 4) return lightmaps && fmt == 6 && (flags & 1) ? 1 : 0;
+        if ((fmt == 1 || fmt == 3 || fmt == 6 || fmt == 8 || fmt == 9 || fmt == 10 || fmt == 11) && (flags & 1)) return 1;
+        if ((fmt == 15 || fmt == 16) && solid_alpha(i, e)) return 2;
+        return 0;
+    };
+    std::vector<int> kind(nbd, 0);
+    int count = 0;
+    for (uint32_t i = 0; i < nbd; i++) count += (kind[i] = eligible(i)) != 0;
+    if (!count || !write) return count;
+    int done = 0;
+    bool any_alpha = false, all_dxt1 = true;
+    for (uint32_t i = 0; i < nbd; i++) {
+        size_t e = bd_off + 48 * i;
+        std::string data;
+        if (!data_of(i, data)) return -1;
+        if (kind[i] == 2) {   // DXT3/DXT5 with solid white alpha: its colour blocks as DXT1's
+            size_t n = dxt_blocks(e);
+            std::string enc;
+            enc.reserve(n * 8);
+            for (size_t k = 0; k < n; k++) {
+                unsigned char c[8];
+                memcpy(c, data.data() + k * 16 + 8, 8);
+                // (DXT3/DXT5 colour blocks always have 4 colours; DXT1's do only with colour 0 above colour 1: swap them
+                // and the codes when it's below; equal, every texel is that colour)
+                unsigned c0 = c[0] | (c[1] << 8), c1 = c[2] | (c[3] << 8);
+                if (c0 < c1) {
+                    std::swap(c[0], c[2]);
+                    std::swap(c[1], c[3]);
+                    for (int j = 4; j < 8; j++) {
+                        unsigned v = c[j], r = 0;
+                        for (int t = 0; t < 4; t++) {
+                            unsigned code = (v >> (2 * t)) & 3;
+                            static const unsigned flip[4] = {1, 0, 3, 2};
+                            r |= flip[code] << (2 * t);
+                        }
+                        c[j] = (unsigned char)r;
+                    }
+                } else if (c0 == c1) {
+                    for (int j = 4; j < 8; j++) c[j] = 0;
+                }
+                enc.append((const char *)c, 8);
+            }
+            data = enc;
+            put_be16(b, e + 12, 14);
+            done++;
+        } else if (kind[i] == 1) {
             int w = be16(b, e + 4), h = be16(b, e + 6), fmt = be16(b, e + 12), mips = be16(b, e + 20);
-            int bpp = fmt >= 10 ? 4 : 2;
+            int bpp = fmt >= 10 ? 4 : fmt == 1 ? 1 : 2;
             size_t need = 0;
             for (int k = 0; k <= mips; k++) need += (size_t)std::max(1, w >> k) * std::max(1, h >> k) * bpp;
             // One pixel as R G B A (32-bit data is stored B G R A; 16-bit little endian).
             auto rgba = [&](const unsigned char *q, unsigned char *d) {
                 if (bpp == 4) { d[0] = q[2]; d[1] = q[1]; d[2] = q[0]; d[3] = fmt == 11 ? q[3] : 255; return; }
+                if (bpp == 1) { d[0] = d[1] = d[2] = q[0]; d[3] = 255; return; }   // Y8: grey
                 unsigned v = q[0] | (q[1] << 8);
-                if (fmt == 6) { d[0] = (v >> 11) * 255 / 31; d[1] = ((v >> 5) & 63) * 255 / 63; d[2] = (v & 31) * 255 / 31; d[3] = 255; }
+                if (fmt == 3) { d[0] = d[1] = d[2] = (unsigned char)(v & 255); d[3] = (unsigned char)(v >> 8); }   // A8Y8: grey, alpha
+                else if (fmt == 6) { d[0] = (v >> 11) * 255 / 31; d[1] = ((v >> 5) & 63) * 255 / 63; d[2] = (v & 31) * 255 / 31; d[3] = 255; }
                 else if (fmt == 8) { d[3] = (v >> 15) * 255; d[0] = ((v >> 10) & 31) * 255 / 31; d[1] = ((v >> 5) & 31) * 255 / 31; d[2] = (v & 31) * 255 / 31; }
                 else { d[3] = (v >> 12) * 17; d[0] = ((v >> 8) & 15) * 17; d[1] = ((v >> 4) & 15) * 17; d[2] = (v & 15) * 17; }
             };
             if (data.size() >= need) {
                 const unsigned char *px = (const unsigned char *)data.data();
                 bool alpha = false;
-                for (size_t q = 0; q < (size_t)w * h && !alpha && (fmt == 8 || fmt == 9 || fmt == 11); q++) {
+                for (size_t q = 0; q < (size_t)w * h && !alpha && (fmt == 3 || fmt == 8 || fmt == 9 || fmt == 11); q++) {
                     unsigned char c[4];
                     rgba(px + q * bpp, c);
                     alpha = c[3] != 255;
@@ -4534,12 +4617,19 @@ int compress_color_bitmap_tag(const fs::path &p, bool write) {
                 done++;
             }
         }
+        int f2 = be16(b, e + 12);
+        if (f2 != 14) all_dxt1 = false;
+        if (f2 == 15 || f2 == 16) any_alpha = true;
         put_be32(b, e + 24, (uint32_t)out_pix.size());
         put_be32(b, e + 28, (uint32_t)data.size());
         out_pix += data;
     }
     if (!done) return 0;
-    if (be16(b, S + 2) == 3 || be16(b, S + 2) == 4) put_be16(b, S + 2, any_alpha ? 2 : 0); // tag format: 16/32-bit -> DXT
+    // (the tag's own format: 16/32-bit or monochrome -> DXT; DXT3/DXT5 (explicit/interpolated alpha) -> color key when
+    // every texture is DXT1 now)
+    int tf = be16(b, S + 2);
+    if (tf >= 3 && tf <= 5) put_be16(b, S + 2, any_alpha ? 2 : 0);
+    else if ((tf == 1 || tf == 2) && all_dxt1) put_be16(b, S + 2, 0);
     std::string out = b.substr(0, pp_off) + out_pix + b.substr(pp_off + pp);
     put_be32(out, S + 48, (uint32_t)out_pix.size());
     put_be32(out, 40, ~crc32_of(out.data() + 64, out.size() - 64));
@@ -5198,7 +5288,7 @@ void cap_texture_sizes(Job &job, const std::vector<std::string> &deps) {
         }
     std::map<std::string, ModelTexture> model_cap;   // the map's objects' own textures (model_textures)
     if (cfg.xbox_max_object_texture > 0 && cfg.xbox_max_texture > 0) model_cap = model_textures(job, deps);
-    int textures = 0, objects = 0, lightmaps = 0, compressed = 0, model_textures = 0;
+    int textures = 0, objects = 0, lightmaps = 0, compressed = 0, compressed_lm = 0, model_textures = 0;
     for (auto &dep : deps) {
         if (!has_suffix(dep, ".bitmap")) continue;
         fs::path own = job.owner(dep);
@@ -5321,11 +5411,11 @@ void cap_texture_sizes(Job &job, const std::vector<std::string> &deps) {
                 if (f.gcount() < (std::streamsize)head.size()) continue;
             }
             int usage = be16(head, 64 + 4);
-            if (usage == 4) continue; // lightmaps have their own setting
-            if (compress_color_bitmap_tag(own / from_u8(dep), false) > 0) {
+            if (usage == 4 && !cfg.xbox_lightmap_dxt1) continue; // lightmaps have their own setting
+            if (compress_color_bitmap_tag(own / from_u8(dep), false, cfg.xbox_lightmap_dxt1) > 0) {
                 fs::path ed = editable_owner(job, dep, true);
                 int c = ed.empty() ? 0 : compress_color_kept(cfg, ed / from_u8(dep));
-                if (c > 0) compressed += c;
+                if (c > 0) (usage == 4 ? compressed_lm : compressed) += c;
                 own = job.owner(dep);
             }
             int side = 0;
@@ -5392,9 +5482,13 @@ void cap_texture_sizes(Job &job, const std::vector<std::string> &deps) {
         }
         level_after = total;
     }
+    if (compressed_lm)
+        job.note("[textures] compressed " + std::to_string(compressed_lm) + " lightmap page" + (compressed_lm == 1 ? "" : "s") +
+                 " to DXT1 (a quarter of the memory; your choice in the Xbox tab: look for faint steps in dark, smooth light)");
     if (compressed)
         job.note("[textures] compressed " + std::to_string(compressed) +
-                 " uncompressed textures to DXT (a quarter of the memory or less)");
+                 " textures to DXT (uncompressed colour ones a quarter of the memory or less; grey and grey-and-alpha ones, "
+                 "like scope overlays, and DXT3/DXT5 ones whose alpha is solid white, half)");
     if (bumps_p8 || bumps_dxt1)
         job.note("[textures] packed " + std::to_string(bumps_p8 + bumps_dxt1) + " of the map's bump maps into less memory "
                  "before halving any textures: " + std::to_string(bumps_p8) + " in the Xbox's own bump format (P8: a byte per "
@@ -14029,7 +14123,7 @@ std::string xbox_prepare_key(const Config &c) {
       << " props=" << c.xbox_detailed_props_off << " lights=" << c.xbox_object_lights << "\n";
     k << "refl=" << c.xbox_drop_reflections << c.xbox_reflection_picks_set << "\n";
     for (auto &t : c.xbox_reflection_picks) k << "drop=" << t << "\n";
-    k << "tex=" << c.xbox_max_texture << " lm=" << c.xbox_max_lightmap << " lvl=" << c.xbox_level_texture_mb
+    k << "tex=" << c.xbox_max_texture << " lm=" << c.xbox_max_lightmap << (c.xbox_lightmap_dxt1 ? " lmdxt1" : "") << " lvl=" << c.xbox_level_texture_mb
       << " obj=" << c.xbox_max_object_texture << "\n";
     // The models' options too: a build from prepared tags does their levels of detail and trims again, but not what
     // was worked out from them while preparing (collision fitted to a model's shape), and tiny scenery only ever

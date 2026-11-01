@@ -151,6 +151,7 @@ int main(int argc, char **argv) {
     if (getenv("XOTHER")) cfg.xbox_other_weapons = getenv("XOTHER");
     if (getenv("XMAXTEX")) cfg.xbox_max_texture = std::atoi(getenv("XMAXTEX"));
     if (getenv("XMAXLM")) cfg.xbox_max_lightmap = std::atoi(getenv("XMAXLM"));
+    cfg.xbox_lightmap_dxt1 = getenv("XLMDXT1") != nullptr;                       // lightmaps as DXT1
     for (int i = 0; i < 3; i++) {
         std::string k = "XV" + std::to_string(i);
         if (getenv(k.c_str())) cfg.xbox_vehicle_slots[i] = getenv(k.c_str());
