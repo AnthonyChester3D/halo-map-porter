@@ -6,6 +6,7 @@
 #include "perflog.hpp"
 #include "showcase.hpp"
 #include "levelshaders.hpp"
+#include "pairs.hpp"
 #include <cmath>
 #include <algorithm>
 #include <cstdlib>
@@ -65,6 +66,11 @@ static Game parse(const std::string &s) {
 }
 
 int main(int argc, char **argv) {
+    if (argc >= 4 && std::string(argv[1]) == "pair") {   // cli_test pair <CE tags folder> <Xbox tags folder> [lines per tag]
+        auto r = pairs::check(argv[2], argv[3]);
+        std::cout << pairs::report(r, argc > 4 ? (size_t)atoi(argv[4]) : 12);
+        return r.ok() ? 0 : 1;
+    }
     if (argc >= 3 && std::string(argv[1]) == "pace") {   // cli_test pace <showcase.txt>: each shot timed again, its speed as played
         std::ifstream in(argv[2], std::ios::binary);
         std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>()), err;

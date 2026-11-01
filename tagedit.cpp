@@ -1147,6 +1147,60 @@ bool resave(const std::string &in, const std::string &out) {
     }
 }
 
+namespace {
+// One line per value: "a.b[2].c" -> its text, the way invader-edit prints it (bits as name=0/1, data as size and crc).
+void flatten_node(Node &n, const std::string &pre, std::vector<std::pair<std::string, std::string>> &out) {
+    for (unsigned i = 0; i < nfields(n.sid); i++) {
+        const TdField &fd = field(n.sid, i);
+        if (fd.flags & F_UNREAD) continue;
+        if (!(fd.flags & F_LISTED) && fd.kind != K_DATA) continue;
+        std::string key = pre + fd.name;
+        Val v{&n, i};
+        try {
+            if (fd.kind == K_REFLEXIVE) {
+                auto &elems = n.x[i].elems;
+                out.push_back({key + ".size", std::to_string(elems.size())});
+                for (size_t m = 0; m < elems.size(); m++)
+                    flatten_node(elems[m], key + "[" + std::to_string(m) + "].", out);
+            } else if (fd.kind == K_DATA) {
+                const std::string &d = n.x[i].data;
+                char h[32];
+                snprintf(h, sizeof h, "%zu bytes crc %08x", d.size(), crc32(d.data(), d.size()));
+                out.push_back({key, h});
+            } else if (fd.kind == K_BITFIELD) {
+                const TdBits &b = kTdBitfields[fd.sub];
+                std::string t;
+                for (unsigned k = 0; k < b.count; k++)
+                    if ((fd.mask >> k & 1) && read_bit(v, (int)k)) t += std::string(t.empty() ? "" : " ") + kTdBitNames[b.first + k];
+                out.push_back({key, t});
+            } else if (fd.kind == K_DEP) {
+                out.push_back({key, "@" + (n.x[i].path.empty() ? std::string() : preferred(n.x[i].path) + "." + extension_of(n.x[i].fourcc))});
+            } else if (fd.kind == K_ENUM) {
+                out.push_back({key, enum_name(fd, enum_value(v))});
+            } else if (fd.kind == K_STRING) {
+                out.push_back({key, string_of(v)});
+            } else if (is_number(fd.vt)) {
+                out.push_back({key, number_text(v)});
+            }
+        } catch (Fail &) {
+            out.push_back({key, "?"});
+        }
+    }
+}
+}   // namespace
+
+bool flatten(const std::string &file, std::vector<std::pair<std::string, std::string>> &out, unsigned *fourcc) {
+    try {
+        Tag t;
+        load(fs::u8path(file), t);
+        if (fourcc) *fourcc = t.fourcc;
+        flatten_node(t.root, "", out);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 Stats stats() { return {g_handled.load(), g_fallback.load()}; }
 
 }   // namespace tagedit

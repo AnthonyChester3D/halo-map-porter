@@ -7,6 +7,7 @@
 // would refuse with an error) returns false, and the caller runs the tool itself.
 #pragma once
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace tagedit {
@@ -19,6 +20,11 @@ bool run_refactor(const std::vector<std::string> &args, std::string &output, int
 
 // For tests: read a tag and save it again as invader-edit would (false if it can't be read the same way).
 bool resave(const std::string &in, const std::string &out);
+
+// Every value of a tag, "block[3].field" -> its text as invader-edit prints it (bitfields as the names of the bits set,
+// data as its size and crc32, a reference as "@" and its path.group). False if the tag can't be read. `fourcc`, when
+// given, gets the tag's group.
+bool flatten(const std::string &file, std::vector<std::pair<std::string, std::string>> &out, unsigned *fourcc = nullptr);
 
 // For tests: how many calls were done in process, and how many fell back to the tool.
 struct Stats { long handled = 0, fallback = 0; };
