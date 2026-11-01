@@ -246,6 +246,9 @@ void show_level(int k) {
         int p = St->show == 1 ? m.coll_now : m.coll_made;
         EnableWindow(item(IDC_ASMADE), FALSE);
         modelview::show(St->view, p >= 0 ? &St->v.previews[p] : nullptr, L"No drawing of its collision.", true);
+        // (as converted and as made in the same place and size: switching shows only what changed)
+        int f = m.coll_made >= 0 ? m.coll_made : p;
+        modelview::set_frame(St->view, f >= 0 ? &St->v.previews[f] : nullptr);
         return;
     }
     if (St->model < 0 || k < 0 || k >= (int)St->levels.size()) {
@@ -261,6 +264,10 @@ void show_level(int k) {
     EnableWindow(item(IDC_ASMADE), can);
     if (can && SendMessageW(item(IDC_ASMADE), BM_GETCHECK, 0, 0) == BST_CHECKED) p = m.as_made;
     modelview::show(St->view, p >= 0 ? &St->v.previews[p] : nullptr, L"No drawing of this level.", true);
+    // Every level, and the most detailed as the map made it, in the same place and size (the map's own version's, or
+    // the most detailed level's): switching between them shows only what changed.
+    int f = m.as_made >= 0 ? m.as_made : m.level[St->levels[0]];
+    modelview::set_frame(St->view, f >= 0 ? &St->v.previews[f] : nullptr);
     for (int i = 0; i < 5; i++) SendMessageW(item(IDC_LEVEL0 + i), BM_SETCHECK, i == k ? BST_CHECKED : BST_UNCHECKED, 0);
 }
 
@@ -440,6 +447,7 @@ void start_update() {
 // The list again, from the window's file (or `file`), the same model shown.
 void reload(const fs::path &file) {
     std::string shown = St->model >= 0 ? St->v.models[St->model].tag : std::string();
+    render::View view = modelview::get_view(St->view);   // (the same model again: turned and zoomed as it was)
     LodView v;
     if (!load_lod_view(v, file.empty() ? St->file : file)) return;
     select_model(-1);   // (nothing drawn from the old one)
@@ -449,7 +457,10 @@ void reload(const fs::path &file) {
         if (St->v.models[i].tag == shown) keep = (int)i;
     St->model = keep;
     fill_list();
-    if (keep >= 0) select_model(keep);
+    if (keep >= 0) {
+        select_model(keep);
+        modelview::set_view(St->view, view);
+    }
 }
 
 void finish_update(Result *res) {

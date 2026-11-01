@@ -149,6 +149,10 @@ std::string strip_word(std::string v, const std::string &w) {
 // reported (allowed).
 std::string check_for(const std::string &g, const std::string &k, bool &note) {
     note = false;
+    // MCC's metagame scoring (what a kill of it scores): neither Custom Edition nor the Xbox reads it, and Invader
+    // versions fill it in differently.
+    std::string last = k.substr(k.rfind('.') == std::string::npos ? 0 : k.rfind('.') + 1);
+    if (last.rfind("metagame_", 0) == 0) return "";
     if (object_group(g)) {
         if (under(k, "predicted_resources") || under(k, "hud_text_message_index") || under(k, "widgets")) return "";
         return "gameplay-tags";

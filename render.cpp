@@ -30,17 +30,19 @@ void draw(const porter::ModelPreview &m, const View &v, int w, int h, std::vecto
     }
     size_t nv = m.pos.size() / 3;
     if (nv && !m.tris.empty()) {
-        // The model's middle and size.
+        // The model's middle and size (or the frame's: v.frame).
+        const porter::ModelPreview &fm = v.frame && v.frame->pos.size() >= 3 ? *v.frame : m;
+        const size_t fn = fm.pos.size() / 3;
         V3 lo{1e30f, 1e30f, 1e30f}, hi{-1e30f, -1e30f, -1e30f};
-        for (size_t i = 0; i < nv; i++) {
-            const float *p = &m.pos[i * 3];
+        for (size_t i = 0; i < fn; i++) {
+            const float *p = &fm.pos[i * 3];
             lo = {std::min(lo.x, p[0]), std::min(lo.y, p[1]), std::min(lo.z, p[2])};
             hi = {std::max(hi.x, p[0]), std::max(hi.y, p[1]), std::max(hi.z, p[2])};
         }
         V3 c{(lo.x + hi.x) / 2, (lo.y + hi.y) / 2, (lo.z + hi.z) / 2};
         float radius = 0;
-        for (size_t i = 0; i < nv; i++) {
-            V3 d = sub(V3{m.pos[i * 3], m.pos[i * 3 + 1], m.pos[i * 3 + 2]}, c);
+        for (size_t i = 0; i < fn; i++) {
+            V3 d = sub(V3{fm.pos[i * 3], fm.pos[i * 3 + 1], fm.pos[i * 3 + 2]}, c);
             radius = std::max(radius, dot(d, d));
         }
         radius = std::sqrt(radius);
@@ -52,8 +54,8 @@ void draw(const porter::ModelPreview &m, const View &v, int w, int h, std::vecto
         float ex = 1e-6f, ez = 1e-6f;
         for (int k = 0; k < 16; k++) {
             float a = k * 3.14159265f / 8, ca = std::cos(a), sa = std::sin(a);
-            for (size_t i = 0; i < nv; i++) {
-                float x = m.pos[i * 3] - c.x, y = m.pos[i * 3 + 1] - c.y, z = m.pos[i * 3 + 2] - c.z;
+            for (size_t i = 0; i < fn; i++) {
+                float x = fm.pos[i * 3] - c.x, y = fm.pos[i * 3 + 1] - c.y, z = fm.pos[i * 3 + 2] - c.z;
                 ex = std::max(ex, std::fabs(ca * x + sa * y));
                 ez = std::max(ez, std::fabs(sp * (sa * x - ca * y) + cp * z));
             }

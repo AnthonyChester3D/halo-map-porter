@@ -137,8 +137,10 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_LBUTTONDBLCLK:
         if (v) {
             bool wire = v->view.wire;
+            const porter::ModelPreview *frame = v->view.frame;
             v->view = render::View();
             v->view.wire = wire;
+            v->view.frame = frame;
             redraw(h, v);
         }
         return 0;
@@ -177,6 +179,27 @@ void show(HWND h, const porter::ModelPreview *m, const std::wstring &empty_text,
     }
     v->model = m;
     v->empty = empty_text;
+    redraw(h, v);
+}
+
+void set_frame(HWND h, const porter::ModelPreview *frame) {
+    View *v = of(h);
+    if (!v || v->view.frame == frame) return;
+    v->view.frame = frame;
+    redraw(h, v);
+}
+
+render::View get_view(HWND h) {
+    View *v = of(h);
+    return v ? v->view : render::View();
+}
+
+void set_view(HWND h, const render::View &rv) {
+    View *v = of(h);
+    if (!v) return;
+    const porter::ModelPreview *frame = v->view.frame;   // (the shown model's, not the one the view was saved with)
+    v->view = rv;
+    v->view.frame = frame;
     redraw(h, v);
 }
 

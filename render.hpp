@@ -13,6 +13,9 @@ struct View {
     float pitch = 0.32f;   // looked at from above (radians)
     float zoom = 1.0f;     // 1: the whole model fits
     bool wire = false;     // its triangles' edges drawn over it
+    // Placed and sized as this model would be (another version of the same model: each one drawn in the same place
+    // and size, so switching between them shows only what changed). Null: the model drawn.
+    const porter::ModelPreview *frame = nullptr;
 };
 
 // Draws `m` into `px`: w x h pixels, top row first, each 0x00RRGGBB (a Windows 32-bit DIB's layout).
