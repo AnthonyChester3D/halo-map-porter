@@ -1201,6 +1201,80 @@ bool flatten(const std::string &file, std::vector<std::pair<std::string, std::st
     }
 }
 
+namespace {
+// Copies field `path` ("a.b.c": a field, through blocks; each element of a block both have) from `from` to `to`.
+bool graft_node(const Node &from, Node &to, const std::string &path) {
+    size_t dot = path.find('.');
+    std::string name = path.substr(0, dot);
+    for (unsigned i = 0; i < nfields(to.sid); i++) {
+        const TdField &fd = field(to.sid, i);
+        if (name != fd.name) continue;
+        if (dot != std::string::npos) {
+            if (fd.kind != K_REFLEXIVE) return false;
+            auto &a = from.x[i].elems;
+            auto &b = to.x[i].elems;
+            bool ok = true;
+            for (size_t m = 0; m < a.size() && m < b.size(); m++) ok = graft_node(a[m], b[m], path.substr(dot + 1)) && ok;
+            return ok;
+        }
+        to.x[i] = from.x[i];
+        if (fd.size) {
+            if (fd.offset + fd.size > to.b.size() || fd.offset + fd.size > from.b.size()) return false;
+            to.b.replace(fd.offset, fd.size, from.b, fd.offset, fd.size);
+        }
+        return true;
+    }
+    return false;
+}
+}   // namespace
+
+bool graft(const std::string &from, const std::string &to, const std::vector<std::string> &fields, std::string *why) {
+    try {
+        Tag a, b;
+        load(fs::u8path(from), a);
+        load(fs::u8path(to), b);
+        if (a.fourcc != b.fourcc) {
+            if (why) *why = "not the same kind of tag";
+            return false;
+        }
+        for (auto &f : fields)
+            if (!graft_node(a.root, b.root, f)) {
+                if (why) *why = "no field " + f;
+                return false;
+            }
+        std::string bytes = file_bytes(b);
+        std::ofstream o(fs::u8path(to), std::ios::binary | std::ios::trunc);
+        if (!o.write(bytes.data(), (std::streamsize)bytes.size())) {
+            if (why) *why = "couldn't write it";
+            return false;
+        }
+        return true;
+    } catch (...) {
+        if (why) *why = "couldn't read it";
+        return false;
+    }
+}
+
+bool root_field(const std::string &file, const std::string &name, unsigned &offset, std::string &le) {
+    try {
+        Tag t;
+        load(fs::u8path(file), t);
+        for (unsigned i = 0; i < nfields(t.root.sid); i++) {
+            const TdField &fd = field(t.root.sid, i);
+            if (name != fd.name) continue;
+            if (!is_number(fd.vt) || fd.offset + fd.size > t.root.b.size()) return false;
+            offset = fd.offset;
+            le = t.root.b.substr(fd.offset, fd.size);
+            unsigned w = component_bytes(fd.vt);
+            if (!fd.endian)
+                for (size_t k = 0; k + w <= le.size(); k += w) std::reverse(le.begin() + (long)k, le.begin() + (long)(k + w));
+            return true;
+        }
+    } catch (...) {
+    }
+    return false;
+}
+
 Stats stats() { return {g_handled.load(), g_fallback.load()}; }
 
 }   // namespace tagedit

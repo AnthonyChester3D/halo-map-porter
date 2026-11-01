@@ -158,6 +158,12 @@ struct Config {
     // build's data folder's), for every game, converted for it as the map's own are. Empty, or a folder without .hsc
     // files: the map's own.
     fs::path user_scripts;
+    // Perfect Conversion (Custom Edition to Xbox): Halo 1 Unlimited can then put Custom Edition PCs and Xboxes in one
+    // game on this map. Gameplay stays exactly the Custom Edition map's (its own weapons, vehicles, objects, damage,
+    // collision, animations, placements and globals' gameplay, never the Xbox tagset's); only what's drawn and heard
+    // is made lighter. The bots' waypoints go to the map's bot file (bots.txt beside it), not the scenario. After the
+    // build the two maps are compared tag by tag (pairs.hpp); when they match, <map>.h1ulink is written beside it.
+    bool xbox_perfect = false;
 };
 
 // A model to show in the weapons & vehicles window: its most detailed version (each region's first permutation),
@@ -285,6 +291,8 @@ struct Result {
     std::string info;                  // invader-info output
     fs::path output;
     fs::path report;
+    fs::path link;                     // Perfect Conversion: the link file written (empty: the pair didn't match)
+    fs::path pair_check;               // Perfect Conversion: the comparison's report
 };
 
 // What a built map offers, for the Halo Universal XBE's map browser (build 20): the info.txt lines "Gametypes:" and

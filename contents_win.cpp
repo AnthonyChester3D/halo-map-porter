@@ -23,6 +23,7 @@ namespace {
 enum {
     IDC_SUMMARY = 300, IDC_STATUS, IDC_LIST, IDC_REPL_LBL, IDC_REPL, IDC_KEEPALL, IDC_TOTAL, IDC_FILE, IDC_REMEASURE,
     IDC_OKB, IDC_CANCELB, IDC_VIEW, IDC_ABOUT, IDC_LAMP,
+    IDC_SLOT_LBL, IDC_SLOT0, IDC_SLOT1, IDC_SLOT2, IDC_SLOT0_LBL, IDC_SLOT1_LBL, IDC_SLOT2_LBL,
 };
 #define WM_CU_LOG (WM_APP + 40)
 #define WM_CU_DONE (WM_APP + 41)
@@ -41,6 +42,8 @@ struct State {
     Analyze analyze;
     std::vector<int> row_item;             // list row -> item index
     std::vector<std::string> combo_tags;   // "Replace with" entries -> tag ("\x01" = keep)
+    std::string slots[3];                  // the vehicle slots: the map's vehicle each one spawns ("" the Xbox's own)
+    std::vector<std::string> slot_tags;    // the slot lists' entries -> tag
     COLORREF total_color = 0;
 };
 State *St = nullptr;
@@ -318,6 +321,27 @@ void add_group(int id, const wchar_t *text) {
     ListView_InsertGroup(St->list, -1, &g);
 }
 
+// The vehicle slots' lists: the Xbox's own, or one of the map's vehicles (one players can ride). A slot whose
+// vehicle the map no longer has goes back to the Xbox's own.
+void fill_slots() {
+    St->slot_tags = {""};
+    std::vector<std::wstring> names{L"The Xbox's own"};
+    if (St->an)
+        for (auto &it : St->an->items)
+            if (it.vehicle && it.in_map && it.piece_of.empty() && it.seats != 0) {
+                St->slot_tags.push_back(it.tag);
+                names.push_back(W(it.name));
+            }
+    for (int i = 0; i < 3; i++) {
+        HWND c = item(IDC_SLOT0 + i);
+        SendMessageW(c, CB_RESETCONTENT, 0, 0);
+        for (auto &n : names) SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)n.c_str());
+        size_t k = std::find(St->slot_tags.begin(), St->slot_tags.end(), St->slots[i]) - St->slot_tags.begin();
+        if (k >= St->slot_tags.size()) { k = 0; St->slots[i].clear(); }
+        SendMessageW(c, CB_SETCURSEL, k, 0);
+    }
+}
+
 void fill_list() {
     HWND l = St->list;
     SendMessageW(l, WM_SETREDRAW, FALSE, 0);
@@ -380,6 +404,7 @@ void fill_list() {
     update_combo();
     update_totals();
     update_preview();
+    fill_slots();
 }
 
 void set_busy(bool busy) {
@@ -496,6 +521,12 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case IDC_REPL:
             if (HIWORD(wp) == CBN_SELCHANGE) apply_combo();
             return 0;
+        case IDC_SLOT0: case IDC_SLOT1: case IDC_SLOT2:
+            if (HIWORD(wp) == CBN_SELCHANGE) {
+                int i = LOWORD(wp) - IDC_SLOT0, k = (int)SendMessageW((HWND)lp, CB_GETCURSEL, 0, 0);
+                if (k >= 0 && k < (int)St->slot_tags.size()) St->slots[i] = St->slot_tags[(size_t)k];
+            }
+            return 0;
         case IDC_KEEPALL:
             St->picks.clear();
             if (St->an) { int n = ListView_GetItemCount(St->list); for (int r = 0; r < n; r++) set_row_pick(r); update_combo(); update_totals(); }
@@ -567,9 +598,18 @@ void create_controls() {
     add(L"STATIC", L"", 0, 16, 534, 1136, 20, IDC_TOTAL);
     SendMessageW(item(IDC_TOTAL), WM_SETFONT, (WPARAM)St->bold, TRUE);
     add(L"STATIC", L"", 0, 16, 556, 1136, 20, IDC_FILE);
-    add(L"STATIC", L"Your picks are saved for this map and used every time you convert it for the Xbox.", 0, 16, 590, 520, 20, 0);
-    add(L"BUTTON", L"OK", WS_TABSTOP | BS_DEFPUSHBUTTON, 908, 584, 116, 30, IDC_OKB);
-    add(L"BUTTON", L"Cancel", WS_TABSTOP, 1036, 584, 116, 30, IDC_CANCELB);
+    // The vehicle slots: what the gametype's Warthogs / Ghosts / Scorpions options spawn.
+    add(L"STATIC", L"Gametype vehicle slots:", 0, 16, 589, 166, 20, IDC_SLOT_LBL);
+    const wchar_t *slot_names[3] = {L"Warthogs:", L"Ghosts:", L"Scorpions:"};
+    for (int i = 0; i < 3; i++) {
+        int x = 186 + i * 322;
+        add(L"STATIC", slot_names[i], 0, x, 589, 70, 20, IDC_SLOT0_LBL + i);
+        add(L"COMBOBOX", L"", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, x + 72, 586, 236, 300, IDC_SLOT0 + i);
+    }
+    add(L"STATIC", L"Your picks and slots are saved for this map and used every time you convert it for the Xbox "
+                   L"(Perfect Conversion keeps the map's own).", 0, 16, 624, 780, 20, 0);
+    add(L"BUTTON", L"OK", WS_TABSTOP | BS_DEFPUSHBUTTON, 908, 618, 116, 30, IDC_OKB);
+    add(L"BUTTON", L"Cancel", WS_TABSTOP, 1036, 618, 116, 30, IDC_CANCELB);
 }
 
 } // namespace
@@ -586,7 +626,7 @@ void remember(const std::string &key, std::shared_ptr<ContentAnalysis> a) {
 }
 
 bool edit_picks(HWND owner, const std::wstring &title, const std::string &key, Analyze analyze,
-                std::map<std::string, std::string> &picks) {
+                std::map<std::string, std::string> &picks, std::string slots[3]) {
     static bool registered = false;
     HINSTANCE inst = GetModuleHandleW(nullptr);
     if (!registered) {
@@ -614,8 +654,9 @@ bool edit_picks(HWND owner, const std::wstring &title, const std::string &key, A
     st.key = key;
     st.analyze = std::move(analyze);
     st.picks = picks;
+    for (int i = 0; i < 3; i++) st.slots[i] = slots[i];
 
-    RECT r{0, 0, S(1168), S(628)};
+    RECT r{0, 0, S(1168), S(662)};
     DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
     AdjustWindowRect(&r, style, FALSE);
     RECT orc;
@@ -630,6 +671,7 @@ bool edit_picks(HWND owner, const std::wstring &title, const std::string &key, A
     }
     st.wnd = CreateWindowExW(WS_EX_DLGMODALFRAME, L"HMPContents", title.c_str(), style, x, y, w, hgt, owner, nullptr, inst, nullptr);
     create_controls();
+    fill_slots();   // (the map's vehicles once it's measured)
     g_target = st.wnd;
     {
         std::shared_ptr<ContentAnalysis> cached;
@@ -660,7 +702,10 @@ bool edit_picks(HWND owner, const std::wstring &title, const std::string &key, A
     DeleteObject(st.font);
     DeleteObject(st.bold);
     St = nullptr;
-    if (st.ok) picks = st.picks;
+    if (st.ok) {
+        picks = st.picks;
+        for (int i = 0; i < 3; i++) slots[i] = st.slots[i];
+    }
     return st.ok;
 }
 

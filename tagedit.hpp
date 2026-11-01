@@ -26,6 +26,16 @@ bool resave(const std::string &in, const std::string &out);
 // given, gets the tag's group.
 bool flatten(const std::string &file, std::vector<std::pair<std::string, std::string>> &out, unsigned *fourcc = nullptr);
 
+// Copies these fields from tag `from` to tag `to` (the same kind) and saves `to` as invader-edit would. A field is a
+// name, or "block.field" through blocks (each element both tags have): "multiplayer_information.vehicles". A block
+// field copies the whole block. False (and `why`) if a tag can't be read or written, or a field isn't there.
+bool graft(const std::string &from, const std::string &to, const std::vector<std::string> &fields,
+           std::string *why = nullptr);
+
+// A number field of the tag's main struct ("autoaim_angle"): its offset in the struct and its bytes as a cache file
+// stores them (each number little-endian). False if there's no such number field.
+bool root_field(const std::string &file, const std::string &name, unsigned &offset, std::string &le);
+
 // For tests: how many calls were done in process, and how many fell back to the tool.
 struct Stats { long handled = 0, fallback = 0; };
 Stats stats();

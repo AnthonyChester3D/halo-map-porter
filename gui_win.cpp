@@ -92,6 +92,8 @@ enum {
     ID_UNPACK, ID_UNPACK_HINT,
     // the scripts window
     ID_X_SCRIPTS,
+    // Perfect Conversion (linked with the Custom Edition map)
+    ID_X_PERFECT, ID_X_PERFECT_HINT,
 };
 
 #define WM_APP_LOG (WM_APP + 1)
@@ -195,9 +197,7 @@ static void save_settings() {
     ini_set(L"x_shrink", checked(ID_X_SHRINK) ? L"1" : L"0");
     ini_set(L"write_tour", checked(ID_S_TOUR) ? L"1" : L"0");
     ini_set(L"x_target", std::to_wstring(std::max(0, sel(ID_X_TARGET))));
-    ini_set(L"x_v0", std::to_wstring(sel(ID_X_V0)));
-    ini_set(L"x_v1", std::to_wstring(sel(ID_X_V1)));
-    ini_set(L"x_v2", std::to_wstring(sel(ID_X_V2)));
+    ini_set(L"x_perfect", checked(ID_X_PERFECT) ? L"1" : L"0");
     ini_set(L"pk_size", std::to_wstring(std::max(0, sel(ID_PK_SIZE))));
     ini_set(L"pk_corner", std::to_wstring(std::max(0, sel(ID_PK_CORNER))));
 }
@@ -375,16 +375,6 @@ static void combo(int page, int x, int y, int w, int id) {
 }
 
 // Xbox tab choices (order = combo box order).
-static const struct { const wchar_t *label; const char *tag; } kVehicleChoices[] = {
-    {L"Xbox warthog", "vehicles/warthog/warthog.vehicle"},
-    {L"PC warthog", "vehicles/warthog/mp_warthog.vehicle"},
-    {L"Rocket warthog", "vehicles/rwarthog/rwarthog.vehicle"},
-    {L"Ghost", "vehicles/ghost/ghost_mp.vehicle"},
-    {L"Banshee", "vehicles/banshee/banshee_mp.vehicle"},
-    {L"Scorpion", "vehicles/scorpion/scorpion_mp.vehicle"},
-    {L"Covenant turret (untested)", "vehicles/c gun turret/c gun turret_mp.vehicle"},
-};
-static const int kVehicleDefaults[3] = {0, 3, 5};
 static const char *kPcWeaponTags[2] = {"weapons/flamethrower/flamethrower.weapon", "weapons/plasma_cannon/plasma_cannon.weapon"};
 
 static void list_combo(int page, int x, int y, int w, int id, const std::vector<const wchar_t *> &items) {
@@ -490,31 +480,35 @@ static void apply_xbox_options(Config &cfg) {
     cfg.xbox_other_weapons.clear();
     cfg.xbox_keep_weapons.assign(std::begin(kPcWeaponTags), std::end(kPcWeaponTags));
     cfg.xbox_weapon_replacements.clear();
-    const int vids[3] = {ID_X_V0, ID_X_V1, ID_X_V2};
-    for (int i = 0; i < 3; i++) {
-        int k = sel(vids[i]);
-        if (k >= 0 && k < (int)(sizeof(kVehicleChoices) / sizeof(kVehicleChoices[0]))) cfg.xbox_vehicle_slots[i] = kVehicleChoices[k].tag;
-    }
+    // The vehicle slots: the weapons & vehicles window's, for each map (apply_map_picks).
+    for (auto &v : cfg.xbox_vehicle_slots) v.clear();
+    cfg.xbox_perfect = checked(ID_X_PERFECT);
 }
 
 // The vehicle texts depend on whether every vehicle is kept (map folders = the Halo Universal XBE).
 static void update_vehicle_texts() {
     bool f = folder_mode(), all = f && checked(ID_X_ALLVEH);
     EnableWindow(GetDlgItem(g_wnd, ID_X_ALLVEH), f);
-    set_text(ID_X_VLBL, all ? L"Vehicle slots - what the gametype's Warthogs / Ghosts / Scorpions options spawn:"
-                            : L"Vehicle slots - the Xbox only spawns these three. The gametype's vehicle options pick them by slot:");
     set_text(ID_X_VHINT,
-             all ? L"Every vehicle the map places spawns when the gametype's Vehicles option is All. A vehicle of a "
-                   L"slot's type becomes the slotted one."
-             : f ? L"Placed vehicles without a slot become a slotted vehicle of the same kind (any warthog -> the slotted "
-                   L"warthog, Banshee <-> ghost), or are removed."
-                 : L"Placed vehicles without a slot become a slotted vehicle of the same kind, or are removed. Keeping "
-                   L"every vehicle needs the Halo Universal XBE (Map folders).");
+             all ? L"Every vehicle the map places spawns when the gametype's Vehicles option is All. Its vehicle slots "
+                   L"(Warthogs / Ghosts / Scorpions gametypes): the weapons & vehicles window."
+             : f ? L"Placed vehicles without a slot become a slotted one of the same kind, or are removed. The slots: the "
+                   L"weapons & vehicles window."
+                 : L"Placed vehicles without a slot become a slotted one of the same kind, or are removed. Keeping every "
+                   L"vehicle needs the Halo Universal XBE (Map folders).");
+}
+
+// Perfect Conversion leaves out what changes gameplay: those options don't apply while it's on.
+static void update_perfect() {
+    bool p = checked(ID_X_PERFECT);
+    for (int id : {ID_X_STOCK, ID_X_ALLVEH, ID_X_ANIM, ID_X_ANIM_LBL, ID_X_PORTALS, ID_X_PORTALS_LBL})
+        EnableWindow(GetDlgItem(g_wnd, id), !p && (id != ID_X_ALLVEH || folder_mode()));
 }
 
 // Map folder mode swaps the "Xbox name" pickers for "Map card..." buttons.
 static void apply_mode_visibility(int p) {
     update_vehicle_texts();
+    update_perfect();
     bool f = folder_mode();
     auto vis = [&](int id, int page, bool on) { ShowWindow(GetDlgItem(g_wnd, id), p == page && on ? SW_SHOW : SW_HIDE); };
     vis(ID_B_XBOX_NAME_LBL, 1, !f);
@@ -981,6 +975,21 @@ static void save_picks(const fs::path &input, const std::map<std::string, std::s
     for (auto &[from, to] : picks) f << from << '\t' << to << '\n';
 }
 
+// The weapons & vehicles window's vehicle slots, kept in the picks file as "#slot0".."#slot2" (the vehicle the
+// Warthogs, Ghosts and Scorpions gametypes spawn; none: the Xbox's own).
+static void split_slots(std::map<std::string, std::string> &picks, std::string slots[3]) {
+    for (int i = 0; i < 3; i++) {
+        auto it = picks.find("#slot" + std::to_string(i));
+        slots[i] = it == picks.end() ? std::string() : it->second;
+        if (it != picks.end()) picks.erase(it);
+    }
+}
+// The map's picks and slots, into the options for its conversion.
+static void apply_map_picks(Config &cfg, const fs::path &in) {
+    apply_map_picks(cfg, in);
+    split_slots(cfg.xbox_replace, cfg.xbox_vehicle_slots);
+}
+
 // The scripts window's edits, kept per input map (or scenario) as a folder of .hsc files: used for every game it's
 // converted (or built) for, when there are any (Config::user_scripts).
 static fs::path scripts_dir(const fs::path &input) {
@@ -1049,8 +1058,7 @@ static std::string contents_key(const Config &cfg, const fs::path &in, bool with
     std::string key = N(lower(in.wstring())) + "|" + std::to_string((long long)mt.time_since_epoch().count()) + "|" +
                       (cfg.xbox_use_stock_versions ? "s" : "-") + (cfg.xbox_keep_all_vehicles ? "a" : "-") +
                       (cfg.xbox_make_lods ? "l" : "-") + std::to_string(cfg.xbox_trim_models) + std::to_string(cfg.xbox_compress_animations) + "|" +
-                      cfg.xbox_other_weapons + "|" + cfg.xbox_vehicle_slots[0] + "|" + cfg.xbox_vehicle_slots[1] + "|" +
-                      cfg.xbox_vehicle_slots[2];
+                      cfg.xbox_other_weapons + (cfg.xbox_perfect ? "|perfect" : "");
     for (auto &w : cfg.xbox_keep_weapons) key += "|k" + w;
     for (auto &[w, r] : cfg.xbox_weapon_replacements) key += "|r" + w + "=" + r;
     fs::path lib = !cfg.lod_library.empty() ? cfg.lod_library : cfg.cache_dir / "lod_library";   // (models' choices)
@@ -1079,7 +1087,8 @@ static std::string prepared_key(const Config &cfg, const fs::path &in) {
     std::string key = N(lower(in.wstring())) + "|" + std::to_string((long long)mt.time_since_epoch().count()) + "|" +
                       (cfg.xbox_use_stock_versions ? "s" : "-") + (cfg.xbox_keep_all_vehicles ? "a" : "-") +
                       std::to_string(cfg.xbox_compress_animations) + "|" + cfg.xbox_other_weapons + "|" +
-                      cfg.xbox_vehicle_slots[0] + "|" + cfg.xbox_vehicle_slots[1] + "|" + cfg.xbox_vehicle_slots[2];
+                      cfg.xbox_vehicle_slots[0] + "|" + cfg.xbox_vehicle_slots[1] + "|" + cfg.xbox_vehicle_slots[2] +
+                      (cfg.xbox_perfect ? "|perfect" : "");
     for (auto &w : cfg.xbox_keep_weapons) key += "|k" + w;
     for (auto &[w, r] : cfg.xbox_weapon_replacements) key += "|r" + w + "=" + r;
     return hashed(key);
@@ -1226,7 +1235,7 @@ static void open_lods() {
             return;
         }
         Config rc = cfg;
-        rc.xbox_replace = load_picks(in);
+        apply_map_picks(rc, in);
         apply_shader_picks(rc, in);
         apply_user_scripts(rc, in);
         Keys k{pkey, models_key(rc), g_last_build_key, true};   // (the tags as they were prepared: Convert can still build from them)
@@ -1248,7 +1257,7 @@ static void open_lods() {
         if (build && (!check_card_folder(build_card()) || !write_card(build_card_dir(), build_map_name(), out, card_note))) return;
     }
     g_last_was_build = build;
-    cfg.xbox_replace = load_picks(in);
+    apply_map_picks(cfg, in);
     apply_shader_picks(cfg, in);
     apply_user_scripts(cfg, in);
     cfg.xbox_prepare_only = true;
@@ -1283,8 +1292,11 @@ static void open_contents() {
     save_settings();
     Config cfg = make_config();
     apply_xbox_options(cfg);
+    apply_map_picks(cfg, in);   // (the slots: the prepared tags' key has them)
     std::string key = contents_key(cfg, in);
     auto picks = load_picks(in);
+    std::string slots[3];
+    split_slots(picks, slots);
     // The last conversion of this map, with these options: measured from the tags it prepared (seconds), not by
     // preparing the map again.
     fs::path prepared = !g_last_update.empty() && g_last_update_key == prepared_key(cfg, in) ? fs::path(g_last_update) : fs::path();
@@ -1296,9 +1308,12 @@ static void open_contents() {
                 log("(" + a.error + " Preparing the map again to measure it.)");
             }
             return analyze_xbox_contents(cfg, in, game, a, log);
-        }, picks);
+        }, picks, slots);
     if (ok) {
-        save_picks(in, picks);
+        auto all = picks;
+        for (int i = 0; i < 3; i++)
+            if (!slots[i].empty()) all["#slot" + std::to_string(i)] = slots[i];
+        save_picks(in, all);
         append_log(picks.empty() ? L"Weapons & vehicles: no picks for " + in.filename().wstring() + L"."
                                  : L"Weapons & vehicles: " + std::to_wstring(picks.size()) + L" pick" + (picks.size() == 1 ? L"" : L"s") +
                                        L" saved for " + in.filename().wstring() + L"; they're used when you convert it for the Xbox.");
@@ -1618,7 +1633,7 @@ static void start_convert(bool again = false) {
     Config cfg = make_config();
     apply_xbox_options(cfg);
     if (to == Game::Xbox) {
-        cfg.xbox_replace = load_picks(in);
+        apply_map_picks(cfg, in);
         apply_shader_picks(cfg, in);
     }
     apply_user_scripts(cfg, in);   // (the scripts window's edits: for every game)
@@ -1675,7 +1690,7 @@ static void start_unpack() {
     set_xbox_for(0);
     Config cfg = make_config();
     apply_xbox_options(cfg);
-    cfg.xbox_replace = load_picks(in);
+    apply_map_picks(cfg, in);
     apply_shader_picks(cfg, in);
     apply_user_scripts(cfg, in);
     cfg.xbox_prepare_only = true;
@@ -1719,7 +1734,7 @@ static void start_build() {
     if (checked(ID_B_XBOX)) set_xbox_for(1);
     Config cfg = make_config();
     apply_xbox_options(cfg);
-    cfg.xbox_replace = load_picks(scen);   // used by the Xbox build only
+    apply_map_picks(cfg, scen);   // used by the Xbox build only
     apply_shader_picks(cfg, scen);
     apply_user_scripts(cfg, scen);
     bool share = checked(ID_B_SHARE);
@@ -2413,22 +2428,16 @@ static void create_controls() {
     list_combo(2, 484, y, 250, ID_X_LM, {L"Keep their size", L"Max 512", L"Max 256 (like stock maps)",
                                           L"Keep their size, compressed (DXT1)", L"Max 512, compressed (DXT1)"});
     y += 29;
-    add(2, L"STATIC", L"Vehicle slots - the Xbox only spawns these three. The gametype's vehicle options pick them by slot:",
-        0, 26, y, 708, 20, ID_X_VLBL);
-    y += 22;
-    {
-        std::vector<const wchar_t *> v;
-        for (auto &c : kVehicleChoices) v.push_back(c.label);
-        const wchar_t *names[3] = {L"\"Warthog\" slot:", L"\"Ghost\" slot:", L"\"Scorpion\" slot:"};
-        const int lids[3] = {ID_X_V0_LBL, ID_X_V1_LBL, ID_X_V2_LBL}, vids[3] = {ID_X_V0, ID_X_V1, ID_X_V2};
-        for (int i = 0; i < 3; i++) {
-            label(2, names[i], 46, y, 120, lids[i]);
-            list_combo(2, 170, y, 220, vids[i], v);
-            y += 27;
-        }
-    }
-    check(2, L"Keep every vehicle (Halo Universal XBE)", 410, y - 79, 324, ID_X_ALLVEH);
-    add(2, L"STATIC", L"", 0, 410, y - 55, 324, 54, ID_X_VHINT);
+    check(2, L"Perfect Conversion: linked with the Custom Edition map (Halo 1 Unlimited: PCs and Xboxes in one game)",
+          26, y, 708, ID_X_PERFECT);
+    y += 20;
+    add(2, L"STATIC", L"Gameplay stays exactly the Custom Edition map's; only what's drawn and heard gets lighter. Writes "
+                      L"<map>.h1ulink beside the map when the two match, and the bots' waypoints to bots.txt.",
+        0, 46, y, 688, 32, ID_X_PERFECT_HINT);
+    y += 34;
+    check(2, L"Keep every vehicle (Halo Universal XBE)", 26, y, 330, ID_X_ALLVEH);
+    add(2, L"STATIC", L"", 0, 370, y - 2, 364, 50, ID_X_VHINT);
+    y += 49;
     y += 2;
     add(2, L"STATIC", L"Weapons and vehicles: what each costs, and what to replace with what (the flamethrower and fuel rod gun "
                       L"work on the Xbox):", 0, 26, y - 2, 500, 34, ID_X_WLBL);
@@ -2590,13 +2599,7 @@ static void create_controls() {
         int k = _wtoi(ini_get(L"x_target", L"1").c_str());
         SendDlgItemMessageW(g_wnd, ID_X_TARGET, CB_SETCURSEL, k >= 0 && k < 3 ? k : 1, 0);
     }
-    {
-        const int vids[3] = {ID_X_V0, ID_X_V1, ID_X_V2};
-        for (int i = 0; i < 3; i++) {
-            int k = _wtoi(ini_get((L"x_v" + std::to_wstring(i)).c_str(), std::to_wstring(kVehicleDefaults[i]).c_str()).c_str());
-            SendDlgItemMessageW(g_wnd, vids[i], CB_SETCURSEL, k < 0 ? kVehicleDefaults[i] : k, 0);
-        }
-    }
+    set_check(ID_X_PERFECT, ini_get(L"x_perfect", L"0") == L"1");
     set_check(ID_B_XBOX, ini_get(L"b_xbox", L"0") == L"1");
     SendDlgItemMessageW(g_wnd, ID_FROM, CB_SETCURSEL, 0, 0);
     SendDlgItemMessageW(g_wnd, ID_TO, CB_SETCURSEL, (int)Game::Xbox, 0);
@@ -2682,7 +2685,10 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (code == CBN_SELCHANGE) on_conv_name_chosen();
             break;
         case ID_X_ALLVEH:
-            if (code == BN_CLICKED) { update_vehicle_texts(); save_settings(); }
+            if (code == BN_CLICKED) { update_vehicle_texts(); update_perfect(); save_settings(); }
+            break;
+        case ID_X_PERFECT:
+            if (code == BN_CLICKED) { update_perfect(); save_settings(); }
             break;
         case ID_X_LODSTOCK: case ID_X_MAKELOD: case ID_X_BOTS:
             if (code == BN_CLICKED) save_settings();
@@ -2793,7 +2799,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                     fs::path in;
                     Game game;
                     if (contents_input(in, game)) {
-                        c.xbox_replace = load_picks(in);
+                        apply_map_picks(c, in);
                         apply_shader_picks(c, in);
                         apply_user_scripts(c, in);
                     }

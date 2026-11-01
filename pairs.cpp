@@ -263,6 +263,12 @@ void compare(const std::string &tag, const std::string &g, Flat a, Flat b, Resul
         }
         auto clean = [](const std::string &v) { return !v.empty() && v[0] == '@' ? v.substr(1) : v; };
         Diff d{c, tag, k, clean(va), clean(vb)};
+        // A value that's none of the field's choices (an enum out of range, as some of Gearbox's stock tags have):
+        // Invader can't build it as it is (the first choice instead). Reported, not counted.
+        if (va == "?") {
+            d.ce = "(not one of its choices)";
+            note = true;
+        }
         if (note) {
             r.notes.push_back(d);
         } else {
@@ -277,6 +283,10 @@ void compare(const std::string &tag, const std::string &g, Flat a, Flat b, Resul
 Result check(const std::string &ce_dir, const std::string &xbox_dir) {
     Result r;
     auto A = scan(ce_dir, r.ce_tags), B = scan(xbox_dir, r.xbox_tags);
+    if (A.empty() || B.empty()) {   // (nothing to compare is no match)
+        r.diffs.push_back({"unreadable", A.empty() ? ce_dir : xbox_dir, "", "(no tags there)", ""});
+        return r;
+    }
     std::set<std::string> hit;
     for (auto &[key, fa] : A) {
         std::string g = key.substr(key.rfind('.') + 1);
@@ -305,6 +315,8 @@ Result check(const std::string &ce_dir, const std::string &xbox_dir) {
         if (d.check == "scripts") r.scripts_differ = true;
     return r;
 }
+
+bool gameplay_group(const std::string &ext) { return needed_group(group_key(ext)); }
 
 std::string report(const Result &r, size_t per_tag) {
     std::string s;

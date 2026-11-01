@@ -23,7 +23,17 @@ struct Result {
     int ce_tags = 0, xbox_tags = 0, matched = 0;
     bool scripts_differ = false;        // (only the scripts: an optimized Xbox side, "check scripts optimized")
     bool ok() const { return diffs.empty(); }
+    // Linkable: nothing differs but the scripts (an Xbox side whose scripts were converted: "check scripts optimized").
+    bool linkable() const {
+        for (auto &d : diffs)
+            if (d.check != "scripts") return false;
+        return true;
+    }
 };
+
+// A tag group (its file extension) whose tags the network names or gameplay rests on: Perfect Conversion takes them
+// from the Custom Edition map, never from the Xbox's tagset.
+bool gameplay_group(const std::string &ext);
 
 // `ce_dir` and `xbox_dir`: the folders the two maps were extracted to.
 Result check(const std::string &ce_dir, const std::string &xbox_dir);

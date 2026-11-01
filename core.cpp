@@ -15,6 +15,8 @@
 #include "sky.hpp"
 #include "tagedit.hpp"
 #include "tagfile.hpp"
+#include "pairs.hpp"
+#include "h1ulink.hpp"
 
 #include <functional>
 #include <future>
@@ -347,6 +349,9 @@ struct Job {
     std::vector<std::pair<fs::path, std::string>> lod_backups;
     std::vector<std::pair<fs::path, std::string>> portal_backups;   // levels the app gave portals, as they were
     fs::path bots_picture;   // the bots' waypoints from above (bot_route_points), for beside the report
+    std::string bot_file;    // Perfect Conversion: the bot file (botnodes::bot_file), for bots.txt beside the map
+    fs::path input_map;      // convert: the map converted
+    fs::path original;       // an Xbox conversion: the map's tags as extracted (Perfect Conversion compares with them)
     size_t lod_xbox_bytes = 0;
     std::vector<LodView::Model> lod_changes;   // the models whose levels of detail changed (for the LODs window)
     std::map<std::string, std::string> trim_originals;   // trimmed models (tag) as the map made them, for that window
@@ -1145,6 +1150,9 @@ void drop_dead_placements(Job &job, const fs::path &xsrc);
 void bot_route_points(Job &job, const fs::path &xsrc);
 void trim_machines(Job &job, const fs::path &xsrc);
 bool drop_kept_vehicles(Job &job);
+static void perfect_keep_gameplay(Job &job);
+static void perfect_link(Job &job, const fs::path &output, const std::string &stem, Result &r);
+static void undo_invader_stock_changes(Job &job, const fs::path &map);
 void use_stock_versions(Job &job, const fs::path &xsrc);
 int guess_vehicle_type(const std::string &tag);
 void apply_xbox_slots(Job &job, const fs::path &xsrc);
@@ -1596,6 +1604,13 @@ static void save_update(Job &job, const fs::path &output, const fs::path &lods, 
     line("overlay", u8(job.overlay));
     line("source", u8(job.source));
     line("user_tags", u8(job.user_tags));
+    if (!job.original.empty()) line("original", u8(job.original));     // (Perfect Conversion compares with them)
+    if (!job.input_map.empty()) line("input_map", u8(job.input_map));
+    if (!job.bot_file.empty()) {   // (its lines, tab-free: one per "bot_file" line)
+        std::istringstream bs(job.bot_file);
+        std::string bl;
+        while (std::getline(bs, bl)) line("bot_file", bl);
+    }
     line("scenario", job.scenario);
     line("output", u8(output));
     line("lods", u8(lods));
@@ -1640,6 +1655,9 @@ static bool load_update(Job &job, const fs::path &file, UpdateFile &u, std::stri
         else if (k == "overlay") job.overlay = from_u8(v);
         else if (k == "source") job.source = from_u8(v);
         else if (k == "user_tags") job.user_tags = from_u8(v);
+        else if (k == "original") job.original = from_u8(v);
+        else if (k == "input_map") job.input_map = from_u8(v);
+        else if (k == "bot_file") job.bot_file += v + "\n";
         else if (k == "scenario") u.scenario = v;
         else if (k == "output") u.output = from_u8(v);
         else if (k == "lods") u.lods = from_u8(v);
@@ -1762,6 +1780,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
         }
         if (!job.user_tags.empty() && !job.overlay.empty() && job.target != Game::MCC) keep_user_edits(job);
         if (job.target != Game::MCC) convert_bc7_textures(job);
+        if (job.target == Game::Xbox && cfg.xbox_perfect) perfect_keep_gameplay(job);
         if (job.target == Game::Xbox) xbox_content_passes(job);
         else if (job.from == Game::Xbox) reorder_multipurpose_maps(job, tag_dependencies(job, job.scenario + ".scenario", true));
         water_volumes(job);
@@ -2230,6 +2249,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
         r.warnings.push_back("WARNING: " + std::to_string(untyped) + " expression" + (untyped == 1 ? "" : "s") +
                              " in the map's scripts compiled without a type; the game can crash when one runs (if the "
                              "map crashes as a match starts, this is the likely reason)");
+    if (job.target == Game::Xbox && cfg.xbox_perfect && !job.analysis) undo_invader_stock_changes(job, tmp_out);
     if (job.target == Game::Xbox && !stamp_xbox_checksum(tmp_out))
         r.warnings.push_back("WARNING: couldn't write the map's header checksum (the Xbox may keep using an old cached copy)");
 
@@ -2282,6 +2302,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
                          job.showcase_note + ": " + u8(sf));
         }
     }
+    if (job.target == Game::Xbox && cfg.xbox_perfect && !job.analysis) perfect_link(job, output, stem, r);
     r.changes = job.changes;
 
     fs::path reports = cfg.cache_dir / "reports";
@@ -11223,20 +11244,29 @@ bool prepare_for_xbox(Job &job, std::string &err) {
     // The stock Xbox engine only spawns its own multiplayer vehicles (the first three in the globals list:
     // warthog, ghost, scorpion; the Halo Universal XBE spawns any) and replaces PC-only weapons, so use
     // the Xbox equivalents.
-    use_stock_versions(job, xsrc);
-    drop_dead_placements(job, xsrc);
-    restrict_to_xbox_mp(job, xsrc);
+    // Perfect Conversion: none of what changes gameplay (which objects there are, which versions, what's placed, the
+    // globals' gameplay): the map's own, as Custom Edition has it (perfect_keep_gameplay).
+    const bool perfect = cfg.xbox_perfect;
+    if (!perfect) {
+        use_stock_versions(job, xsrc);
+        drop_dead_placements(job, xsrc);
+        restrict_to_xbox_mp(job, xsrc);
+    }
     if (!job.analysis) bot_route_points(job, xsrc);
-    apply_xbox_slots(job, xsrc);
+    if (!perfect) apply_xbox_slots(job, xsrc);
     merge_map_globals(job, xsrc);
-    ensure_player_animations(job, xsrc);
-    fix_kept_weapons(job, xsrc);
+    if (!perfect) {
+        ensure_player_animations(job, xsrc);
+        fix_kept_weapons(job, xsrc);
+    }
     correct_xbox_tagset(job);
-    trim_unobtainable(job, xsrc);
-    trim_machines(job, xsrc);
-    apply_replacements(job, xsrc);
-    tidy_weapon_list(job);
-    fix_seat_labels(job, xsrc);
+    if (!perfect) {
+        trim_unobtainable(job, xsrc);
+        trim_machines(job, xsrc);
+        apply_replacements(job, xsrc);
+        tidy_weapon_list(job);
+        fix_seat_labels(job, xsrc);
+    }
     trim_pickup_extras(job, xsrc);
 
     // Models and extended shaders
@@ -12408,6 +12438,14 @@ void bot_route_points(Job &job, const fs::path &xsrc) {
     int added = 0;
     std::vector<botnodes::V3> nodes = mine;   // (the window's, then the ones added)
     nodes.insert(nodes.end(), br.added.begin(), br.added.end());
+    std::vector<botnodes::Ladder> ladders = botnodes::find_ladders(bdir / from_u8(bsp));   // (green: for the bot file)
+    if (job.cfg.xbox_perfect) {   // (the scenario's placements stay the map's: the waypoints go in the bot file)
+        std::string name = fs::path(from_u8(job.scenario)).filename().u8string(), why;
+        job.bot_file = botnodes::bot_file(name, br.added, mine, ladders, &why);
+        added = (int)br.added.size();
+        if (!why.empty()) job.log("  [bots] the bot file: " + why);
+        nodes.clear();
+    }
     if (!nodes.empty()) {
         for (const fs::path &d : {job.fixes, xsrc}) {
             if (d.empty() || !fs::exists(d / from_u8(scen))) continue;
@@ -12438,7 +12476,6 @@ void bot_route_points(Job &job, const fs::path &xsrc) {
     fs::path pic = job.work / "bots.bmp";
     std::error_code ec;
     fs::remove(pic, ec);
-    std::vector<botnodes::Ladder> ladders = botnodes::find_ladders(bdir / from_u8(bsp));   // (green: for the bot file)
     if (botnodes::picture(bdir / from_u8(bsp), br, pic, &ladders)) job.bots_picture = pic;
     const int total = br.given + added;
     if (!mine.empty()) counts += ", " + std::to_string(mine.size()) + " of yours (the Level window's)";
@@ -12467,7 +12504,9 @@ void bot_route_points(Job &job, const fs::path &xsrc) {
     if (added) {
         auto pct = [&](long v) { return std::to_string((int)std::lround(100.0 * v / std::max(1, br.given * (br.given - 1)))); };
         const int searched = added - br.on_ramps - br.in_narrow - br.on_open;
-        l += ". Added " + std::to_string(added) + " (item spawn points that spawn nothing), " + std::to_string(total) + " now: " +
+        l += ". Added " + std::to_string(added) +
+             (job.cfg.xbox_perfect ? std::string(" (in the bot file, bots.txt beside the map), ")
+                                   : std::string(" (item spawn points that spawn nothing), ")) + std::to_string(total) + " now: " +
              std::to_string(br.on_ramps) + " along ramps (foot, middle, turns, top), " + std::to_string(br.in_narrow) +
              " through doorways, tunnels, bridges and along ledges, " + std::to_string(br.on_open) +
              " on open floor more than 3.5 units' walk from every waypoint, " + std::to_string(searched) +
@@ -12730,7 +12769,15 @@ void restrict_to_xbox_mp(Job &job, const fs::path &xsrc) {
     for (int i = 0; i < 3; i++) {
         std::string want = slot_vehicle(cfg, i);
         job.xbox_slots[i] = want;
-        if (want == kXboxDefaultSlots[i] || have(want) || fs::exists(from / from_u8(want))) continue;
+        if (want == kXboxDefaultSlots[i]) continue;
+        // Only one of the map's own vehicles takes a slot: a slot never brings a vehicle the map doesn't have.
+        if (!placed.count(want)) {
+            job.xbox_slots[i] = kXboxDefaultSlots[i];
+            job.note(std::string("[slots] the map has no ") + fs::path(from_u8(want)).stem().u8string() + ", so the \"" +
+                     slot_names[i] + "\" slot keeps the Xbox's own");
+            continue;
+        }
+        if (have(want) || fs::exists(from / from_u8(want))) continue;
         // Not in any tags: with "use the Xbox's own versions", take the stock PC one from Custom Edition.
         if (cfg.xbox_use_stock_versions && mp_vehicle(want) && borrow_from_ce(job, xsrc, want)) {
             job.note("[slots] took the stock " + vehicle_label(want) + " for the \"" + slot_names[i] +
@@ -13733,6 +13780,249 @@ static fs::path extract_kept(Job &job, const std::string &key, std::vector<std::
 
 // ---------------------------------------------------------------- public API
 
+
+// ---------------------------------------------------------------- Perfect Conversion
+
+namespace {   // (the same one as the passes': run_build calls these)
+
+// What Perfect Conversion changes in the options: nothing that changes gameplay (which weapons and vehicles, the
+// Xbox's own versions, animations kept as made, collision as made, no portals added, scripts' AI kept, props'
+// collision kept). What's drawn and heard stays as the options have it.
+static Config perfect_config(Config c) {
+    c.xbox_use_stock_versions = false;
+    c.xbox_keep_all_vehicles = true;
+    c.xbox_replace.clear();
+    c.xbox_weapon_replacements.clear();
+    c.xbox_other_weapons.clear();
+    for (auto &v : c.xbox_vehicle_slots) v.clear();
+    c.xbox_compress_animations = 0;
+    c.xbox_collision = 0;
+    c.xbox_add_portals = false;
+    c.xbox_replan_portals = false;
+    c.xbox_rider_ai_off = false;
+    c.xbox_detailed_props_off = false;
+    c.xbox_prepare_only = false;
+    return c;
+}
+
+// The globals' gameplay, as Custom Edition has it, over the Xbox's globals (which keep the Xbox's menus, fonts, HUD
+// and rasterizer data).
+static const std::vector<std::string> kGlobalsGameplay = {
+    "player_information", "player_control", "falling_damage", "materials", "grenades", "difficulty", "cheat_powerups",
+    "weapon_list", "multiplayer_information.flag", "multiplayer_information.unit", "multiplayer_information.ball",
+    "multiplayer_information.vehicles"};
+
+// Perfect Conversion: the map's own versions of its gameplay tags win over the Xbox tagset's at the same path (the
+// Custom Edition map has the PC's versions of the stock weapons, vehicles and their damage, which aren't all the
+// Xbox's), the Xbox's shaders the map uses keep the map's material types (what shots and footsteps do on them), and
+// the globals keep the map's gameplay.
+static void perfect_keep_gameplay(Job &job) {
+    if (job.overlay.empty()) return;
+    std::error_code ec;
+    int kept = 0;
+    std::vector<std::string> materials;
+    for (auto it = fs::recursive_directory_iterator(job.source, ec); !ec && it != fs::recursive_directory_iterator();
+         it.increment(ec)) {
+        if (!it->is_regular_file()) continue;
+        std::string rel = fs::relative(it->path(), job.source).generic_u8string();
+        std::string ext = it->path().extension().u8string();
+        if (ext.size() < 2 || !fs::exists(job.overlay / from_u8(rel))) continue;
+        ext = ext.substr(1);
+        if (ext == "globals") continue;   // (below)
+        if (pairs::gameplay_group(ext)) {
+            if (job.keep_source.insert(rel).second) kept++;
+        } else if (ext.rfind("shader", 0) == 0) {
+            std::vector<std::pair<std::string, std::string>> a, b;
+            if (!tagedit::flatten(u8(it->path()), a) || !tagedit::flatten(u8(job.overlay / from_u8(rel)), b)) continue;
+            std::string ma, mb;
+            for (auto &kv : a) if (kv.first == "material_type") ma = kv.second;
+            for (auto &kv : b) if (kv.first == "material_type") mb = kv.second;
+            if (!ma.empty() && ma != mb && job.edit(rel, "material_type", ma)) materials.push_back(rel + " (" + mb + " -> " + ma + ")");
+        }
+    }
+    std::string what = std::to_string(kept) + " gameplay tags the Xbox tagset also has (its weapons, vehicles, "
+                       "objects, damage, collision, animations and models)";
+    if (!materials.empty()) {
+        what += "; the material types of " + std::to_string(materials.size()) + " of the Xbox's shaders: ";
+        for (size_t i = 0; i < materials.size() && i < 6; i++) what += (i ? ", " : "") + materials[i];
+        if (materials.size() > 6) what += " and " + std::to_string(materials.size() - 6) + " more";
+    }
+    const std::string g = "globals/globals.globals";
+    if (fs::exists(job.source / from_u8(g))) {
+        fs::path own = job.owner(g);
+        std::string why;
+        bool ok = !own.empty() && (own == job.fixes || job.to_fixes(g, own)) &&
+                  tagedit::graft(u8(job.source / from_u8(g)), u8(job.fixes / from_u8(g)), kGlobalsGameplay, &why);
+        if (ok) what += "; its globals' gameplay (player movement and control, falling damage, materials, grenades, "
+                        "difficulty, weapon list, multiplayer flag, ball, player and vehicles) over the Xbox's globals";
+        else job.log("  [perfect] couldn't bring the map's globals gameplay over the Xbox's" + (why.empty() ? "" : ": " + why));
+    }
+    job.note("[perfect] kept the map's own " + what);
+}
+
+// Invader, building a map named like one of Halo's own (timberland, bloodgulch...), gives a few stock tags the
+// target game's values: for the Xbox, the Ghost's and Banshee's bolts stun and the Rocket Warthog's gun has the
+// Xbox's autoaim, where Custom Edition's don't. Perfect Conversion keeps the Custom Edition map's: they're written
+// back into the built map's tag data (the map compressed again).
+static void undo_invader_stock_changes(Job &job, const fs::path &map) {
+    struct Fix { const char *path, *cls, *ext; std::vector<const char *> fields; };
+    static const Fix kFixes[] = {
+        {"vehicles\\ghost\\ghost bolt", "!tpj", "damage_effect", {"damage_stun", "damage_maximum_stun", "damage_stun_time"}},
+        {"vehicles\\banshee\\banshee bolt", "!tpj", "damage_effect", {"damage_stun", "damage_maximum_stun", "damage_stun_time"}},
+        {"vehicles\\rwarthog\\rwarthog_gun", "paew", "weapon", {"autoaim_angle", "deviation_angle"}}};
+    std::string raw;
+    {
+        std::ifstream f(map, std::ios::binary);
+        raw.assign((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    }
+    auto u32 = [](const std::string &b, size_t o) -> uint32_t {
+        if (o + 4 > b.size()) return 0;
+        const unsigned char *p = (const unsigned char *)b.data() + o;
+        return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24;
+    };
+    if (raw.size() < 0x800 || raw.compare(0, 4, "daeh") != 0 || u32(raw, 4) != 5) return;
+    const uint32_t file_size = u32(raw, 8), td_off = u32(raw, 0x10), td_size = u32(raw, 0x14), base = 0x803A6000u;
+    const bool compressed = raw.size() < file_size;
+    std::string body;
+    if (compressed) {
+        std::string rest;
+        if (!inflate::zlib((const uint8_t *)raw.data() + 0x800, raw.size() - 0x800, rest, file_size - 0x800)) return;
+        body = raw.substr(0, 0x800) + rest;
+    } else {
+        body = raw;
+    }
+    if (td_size < 16 || (size_t)td_off + td_size > body.size()) return;
+    auto at = [&](uint32_t addr) -> size_t { return addr >= base && addr < base + td_size ? td_off + (addr - base) : (size_t)-1; };
+    size_t index = at(u32(body, td_off));
+    uint32_t count = u32(body, td_off + 12);
+    if (index == (size_t)-1 || count > 65535) return;
+    std::vector<std::string> changed;
+    for (uint32_t i = 0; i < count; i++) {
+        size_t e = index + (size_t)i * 32;
+        if (e + 32 > body.size()) return;
+        size_t p = at(u32(body, e + 16)), d = at(u32(body, e + 20));
+        if (p == (size_t)-1 || d == (size_t)-1) continue;
+        std::string path = body.substr(p, body.find('\0', p) - p);
+        for (auto &fx : kFixes) {
+            if (path != fx.path || body.compare(e, 4, fx.cls) != 0) continue;
+            std::string rel = path;
+            std::replace(rel.begin(), rel.end(), '\\', '/');
+            fs::path ce = job.original / from_u8(rel + "." + fx.ext);
+            for (auto name : fx.fields) {
+                unsigned off;
+                std::string le;
+                if (!tagedit::root_field(u8(ce), name, off, le) || d + off + le.size() > body.size()) continue;
+                if (body.compare(d + off, le.size(), le) == 0) continue;
+                body.replace(d + off, le.size(), le);
+                changed.push_back(rel + " " + name);
+            }
+        }
+    }
+    if (changed.empty()) return;
+    std::string out;
+    if (compressed) {
+        std::string z = inflate::zlib_compress((const uint8_t *)body.data() + 0x800, body.size() - 0x800);
+        out = body.substr(0, 0x800) + z;
+        uint32_t pad = (uint32_t)((4096 - out.size() % 4096) % 4096);
+        out.append(pad, '\0');
+        for (int k = 0; k < 4; k++) out[0xC + k] = (char)(pad >> (8 * k) & 255);   // (Invader's "compressed padding")
+    } else {
+        out = body;
+    }
+    std::ofstream f(map, std::ios::binary | std::ios::trunc);
+    if (!(f << out)) return;
+    std::string list;
+    for (size_t k = 0; k < changed.size(); k++) list += (k ? ", " : "") + changed[k];
+    job.note("[perfect] Invader gives maps named like Halo's own the Xbox's values for a few stock tags; put back the "
+             "Custom Edition map's: " + list);
+}
+
+// Perfect Conversion, after the build: the bot file beside the map, then the built map extracted and compared with
+// the Custom Edition map tag by tag (pairs.hpp). When they match, <map>.h1ulink beside the map.
+static void perfect_link(Job &job, const fs::path &output, const std::string &stem, Result &r) {
+    const Config &cfg = job.cfg;
+    std::error_code ec;
+    if (!job.bot_file.empty()) {
+        fs::path bf = output.parent_path() / "bots.txt";
+        std::ofstream f(bf, std::ios::binary | std::ios::trunc);
+        if (f << job.bot_file) job.note("[bots] wrote the map's bot file for Halo 1 Unlimited (its waypoints and ladders): " + u8(bf));
+    }
+    fs::path link = output.parent_path() / from_u8(stem + ".h1ulink");
+    fs::remove(link, ec);   // (one written before is for other files)
+    if (job.original.empty() || job.input_map.empty() || !fs::exists(job.original / from_u8(job.scenario + ".scenario"), ec) ||
+        !fs::exists(job.input_map, ec)) {
+        r.warnings.push_back("WARNING: Perfect Conversion: the Custom Edition map (or its tags as extracted) isn't there to compare with, so no "
+                             "link file was written (convert the map again)");
+        return;
+    }
+    job.log("Comparing the Xbox map with the Custom Edition map, tag by tag (Perfect Conversion)...");
+    fs::path xdir = job.work / "perfect_check";
+    fs::remove_all(xdir, ec);
+    fs::create_directories(xdir, ec);
+    std::string out;
+    if (run_process({u8(tool(cfg, "invader-extract")), "-t", u8(xdir), u8(output)}, out) != 0) {
+        r.warnings.push_back("WARNING: Perfect Conversion: couldn't extract the Xbox map to compare it, so no link file was written");
+        return;
+    }
+    pairs::Result pr = pairs::check(u8(job.original), u8(xdir));
+    fs::path reports = cfg.cache_dir / "reports";
+    fs::create_directories(reports, ec);
+    r.pair_check = reports / from_u8(stem + " - pair check.txt");
+    {
+        std::ofstream f(r.pair_check, std::ios::binary | std::ios::trunc);
+        f << "Halo Map Porter: Perfect Conversion check\nCustom Edition: " << u8(job.input_map) << "\nXbox: " << u8(output)
+          << "\n\n" << pairs::report(pr);
+    }
+    if (!pr.linkable()) {
+        std::map<std::string, int> by;
+        for (auto &d : pr.diffs)
+            if (d.check != "scripts") by[d.check]++;
+        std::string list;
+        for (auto &[c, n] : by) list += (list.empty() ? "" : ", ") + c + " " + std::to_string(n);
+        r.warnings.push_back("WARNING: Perfect Conversion: the Xbox map's gameplay isn't the Custom Edition map's (" + list +
+                             "), so no link file was written. What differs: " + u8(r.pair_check));
+        return;
+    }
+    h1ulink::Link l;
+    l.tool = "Halo Map Porter 1.0 perfect-conversion";
+    l.ce_map = job.input_map;
+    l.xbox_map = output;
+    l.ce_name = "custom_maps\\" + job.input_map.stem().u8string();
+    l.xbox_name = output.parent_path().filename().u8string() + "\\" + output.filename().u8string();
+    tagfile::Tag st;
+    if (st.load(job.original / from_u8(job.scenario + ".scenario"))) {
+        tagfile::Elem sc = st.root();
+        for (auto [name, field] : {std::pair<const char *, const char *>{"scenery", "scenery"}, {"vehicle", "vehicles"},
+                                   {"weapon", "weapons"}, {"equipment", "equipment"}, {"biped", "bipeds"},
+                                   {"machine", "machines"}, {"control", "controls"}, {"light_fixture", "light fixtures"},
+                                   {"sound_scenery", "sound scenery"}})
+            l.placed.push_back({name, (int)sc.block(field).size()});
+    }
+    auto n = [&](const char *c) { auto it = pr.checked.find(c); return std::to_string(it == pr.checked.end() ? 0 : it->second); };
+    l.checks = {"gameplay-tags " + n("gameplay-tags") + " identical",
+                "collision " + n("collision") + " bsp identical",
+                "models " + n("models") + " skeletons, regions, permutations, markers identical",
+                "shaders " + n("shaders") + " material types identical",
+                "placements identical",
+                pr.scripts_differ ? "scripts optimized" : "scripts identical",
+                "globals gameplay identical (player control: CE values kept)"};
+    std::string why, text = h1ulink::link_text(l, why);
+    if (text.empty()) {
+        r.warnings.push_back("WARNING: Perfect Conversion: the maps match, but the link file couldn't be written: " + why);
+        return;
+    }
+    std::ofstream f(link, std::ios::binary | std::ios::trunc);
+    if (!(f << text)) {
+        r.warnings.push_back("WARNING: Perfect Conversion: the maps match, but " + u8(link) + " couldn't be written");
+        return;
+    }
+    r.link = link;
+    job.note("[perfect] the Xbox map's gameplay matches the Custom Edition map's (" + n("gameplay-tags") + " gameplay tags, " +
+             n("models") + " models, " + n("shaders") + " shaders, the level's collision, placements and globals" +
+             (pr.scripts_differ ? "; its scripts converted for the Xbox" : "") + "): wrote the link file " + u8(link));
+}
+}   // namespace
+
 static Result convert_map_impl(const Config &cfg, const fs::path &input, Game in_game, Game out_game,
                                const fs::path &output, bool share, const Log &log, ContentAnalysis *an,
                                ContentAnalysis *measure = nullptr) {
@@ -13811,6 +14101,8 @@ static Result convert_map_impl(const Config &cfg, const fs::path &input, Game in
     // a copy of their own.
     if (out_game == Game::Xbox) {
         job.source = extracted;
+        job.original = extracted;
+        job.input_map = input;
     } else {
         job.source = job.work / "source_tags";
         if (!copy_tree(extracted, job.source, true, ec)) { r.error = "Couldn't copy the map's tags: " + ec.message(); return r; }
@@ -14123,7 +14415,7 @@ std::string xbox_prepare_key(const Config &c) {
       << " props=" << c.xbox_detailed_props_off << " lights=" << c.xbox_object_lights << "\n";
     k << "refl=" << c.xbox_drop_reflections << c.xbox_reflection_picks_set << "\n";
     for (auto &t : c.xbox_reflection_picks) k << "drop=" << t << "\n";
-    k << "tex=" << c.xbox_max_texture << " lm=" << c.xbox_max_lightmap << (c.xbox_lightmap_dxt1 ? " lmdxt1" : "") << " lvl=" << c.xbox_level_texture_mb
+    k << "tex=" << c.xbox_max_texture << " lm=" << c.xbox_max_lightmap << (c.xbox_lightmap_dxt1 ? " lmdxt1" : "") << (c.xbox_perfect ? " perfect" : "") << " lvl=" << c.xbox_level_texture_mb
       << " obj=" << c.xbox_max_object_texture << "\n";
     // The models' options too: a build from prepared tags does their levels of detail and trims again, but not what
     // was worked out from them while preparing (collision fitted to a model's shape), and tiny scenery only ever
@@ -14235,10 +14527,27 @@ Result redo_model_lods(const Config &cfg, const fs::path &view_file, const std::
 
 Result convert_map(const Config &cfg, const fs::path &input, Game in_game, Game out_game,
                    const fs::path &output, bool share, const Log &log, ContentAnalysis *measure) {
+    if (cfg.xbox_perfect && out_game == Game::Xbox) {
+        if (in_game != Game::CE) {
+            Result r;
+            r.error = "Perfect Conversion links a Custom Edition map with its Xbox port (Halo 1 Unlimited's games of PCs "
+                      "and Xboxes run on Custom Edition maps). Convert a Custom Edition map, or turn Perfect Conversion off.";
+            return r;
+        }
+        Config pc = perfect_config(cfg);
+        return convert_map_impl(pc, input, in_game, out_game, output, share, log, nullptr, nullptr);
+    }
     return convert_map_impl(cfg, input, in_game, out_game, output, share, log, nullptr, measure);
 }
 Result build_from_tags(const Config &cfg, const fs::path &scenario_file, Game out_game,
                        const fs::path &output, bool share, const Log &log, ContentAnalysis *measure) {
+    if (cfg.xbox_perfect) {   // (it links a Custom Edition map with its port: the Build tab's tags have no such map)
+        Config c = cfg;
+        c.xbox_perfect = false;
+        log("Note: Perfect Conversion is for converting a Custom Edition map (the Convert tab); building from your tags "
+            "as usual.");
+        return build_from_tags_impl(c, scenario_file, out_game, output, share, log, nullptr, measure);
+    }
     return build_from_tags_impl(cfg, scenario_file, out_game, output, share, log, nullptr, measure);
 }
 std::map<std::string, std::string> automatic_picks(const std::map<std::string, bool> &weapons) { return automatic_picks_impl(weapons); }
@@ -14715,7 +15024,8 @@ bool analyze_map_traits(const Config &cfg, const fs::path &map, MapTraits &t, st
 }
 
 bool analyze_level_shaders(const Config &cfg_in, const fs::path &input, Game in_game, fs::path &file, std::string &error, const Log &log) {
-    Config cfg = cfg_in;
+    Config cfg = cfg_in.xbox_perfect && in_game == Game::CE ? perfect_config(cfg_in) : cfg_in;
+    if (in_game != Game::CE) cfg.xbox_perfect = false;
     cfg.level_shaders_only = true;
     file.clear();
     fs::path dummy = cfg.cache_dir / "shaders" / (input.stem().u8string() + ".map");
@@ -14760,7 +15070,8 @@ bool measure_prepared(const Config &cfg_in, const fs::path &update, ContentAnaly
 }
 
 bool analyze_xbox_contents(const Config &cfg_in, const fs::path &input, Game in_game, ContentAnalysis &out, const Log &log) {
-    Config cfg = cfg_in;
+    Config cfg = cfg_in.xbox_perfect && in_game == Game::CE ? perfect_config(cfg_in) : cfg_in;
+    if (in_game != Game::CE) cfg.xbox_perfect = false;
     cfg.xbox_replace.clear();   // measure the map as it is, without the picks
     out = ContentAnalysis();
     fs::path dummy = cfg.cache_dir / "analyze" / (input.stem().u8string() + ".map");
