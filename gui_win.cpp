@@ -672,7 +672,7 @@ static void update_conv_hint() {
     EnableWindow(GetDlgItem(g_wnd, ID_UNPACK), !g_busy && unpack_allowed());
     SetWindowTextW(GetDlgItem(g_wnd, ID_CONVERT), card_only() ? L"Save map card" : L"Convert");
     set_text(ID_XSHRINK, card_only() ? L"The map is used as it is, so the Xbox tab's conversion options don't apply to it."
-                                     : L"Xbox output uses the options on the Xbox tab (map list, vehicle slots, PC weapons, size).");
+                                     : L"Xbox output uses the options on the Xbox tab (map list, size, Perfect Conversion; slots: Weapons && vehicles).");
     if (card_only()) {
         fs::path in(get_text(ID_IN)), out(get_text(ID_OUT));
         std::error_code ec;
@@ -986,7 +986,7 @@ static void split_slots(std::map<std::string, std::string> &picks, std::string s
 }
 // The map's picks and slots, into the options for its conversion.
 static void apply_map_picks(Config &cfg, const fs::path &in) {
-    apply_map_picks(cfg, in);
+    cfg.xbox_replace = load_picks(in);
     split_slots(cfg.xbox_replace, cfg.xbox_vehicle_slots);
 }
 
@@ -2353,7 +2353,7 @@ static void create_controls() {
     y += 34;
     check(0, L"Use Custom Edition's shared bitmaps / sounds / loc maps (much smaller map)", 140, y, 590, ID_SHARE);
     y += 28;
-    add(0, L"STATIC", L"Xbox output uses the options on the Xbox tab (map list, vehicle slots, PC weapons, size).", 0, 140, y + 3, 590, 20, ID_XSHRINK);
+    add(0, L"STATIC", L"Xbox output uses the options on the Xbox tab (map list, size, Perfect Conversion; slots: Weapons && vehicles).", 0, 140, y + 3, 590, 20, ID_XSHRINK);
     y += 34;
     button(0, L"Unpack", 140, y, 140, ID_UNPACK);
     add(0, L"STATIC",
@@ -2389,7 +2389,7 @@ static void create_controls() {
     y += 36;
     check(1, L"Use Custom Edition's shared bitmaps / sounds / loc maps for the CE build (much smaller map)", 140, y, 590, ID_B_SHARE);
     y += 28;
-    add(1, L"STATIC", L"The Xbox build uses the options on the Xbox tab (map list, vehicle slots, PC weapons, size).", 0, 140, y + 3, 590, 20, ID_B_XSHRINK);
+    add(1, L"STATIC", L"The Xbox build uses the options on the Xbox tab (map list, size, Perfect Conversion; slots: Weapons && vehicles).", 0, 140, y + 3, 590, 20, ID_B_XSHRINK);
     y += 34;
     button(1, L"Build", 140, y, 140, ID_BUILD, true);
     add(1, L"STATIC", L"Re-run after every change. Your tags folder is never modified.",
