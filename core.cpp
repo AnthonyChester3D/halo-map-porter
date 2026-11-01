@@ -1153,6 +1153,7 @@ bool drop_kept_vehicles(Job &job);
 static void perfect_keep_gameplay(Job &job);
 static void perfect_link(Job &job, const fs::path &output, const std::string &stem, Result &r);
 static void undo_invader_stock_changes(Job &job, const fs::path &map);
+static void perfect_ghosts(Job &job);
 void use_stock_versions(Job &job, const fs::path &xsrc);
 int guess_vehicle_type(const std::string &tag);
 void apply_xbox_slots(Job &job, const fs::path &xsrc);
@@ -1780,7 +1781,10 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
         }
         if (!job.user_tags.empty() && !job.overlay.empty() && job.target != Game::MCC) keep_user_edits(job);
         if (job.target != Game::MCC) convert_bc7_textures(job);
-        if (job.target == Game::Xbox && cfg.xbox_perfect) perfect_keep_gameplay(job);
+        if (job.target == Game::Xbox && cfg.xbox_perfect) {
+            perfect_keep_gameplay(job);
+            perfect_ghosts(job);
+        }
         if (job.target == Game::Xbox) xbox_content_passes(job);
         else if (job.from == Game::Xbox) reorder_multipurpose_maps(job, tag_dependencies(job, job.scenario + ".scenario", true));
         water_volumes(job);
@@ -13801,7 +13805,6 @@ static Config perfect_config(Config c) {
     c.xbox_replan_portals = false;
     c.xbox_rider_ai_off = false;
     c.xbox_detailed_props_off = false;
-    c.xbox_prepare_only = false;
     return c;
 }
 
@@ -13858,6 +13861,201 @@ static void perfect_keep_gameplay(Job &job) {
         else job.log("  [perfect] couldn't bring the map's globals gameplay over the Xbox's" + (why.empty() ? "" : ": " + why));
     }
     job.note("[perfect] kept the map's own " + what);
+}
+
+// Perfect Conversion: the weapons, vehicles and equipment the Custom Edition map carries but nothing in a match
+// can hand out (in the globals' weapon list, cheat power-ups or multiplayer vehicles, or an unplaced palette entry,
+// and nothing else reaches them: Gephyrophobia's Rocket Warthog, Banshee and gravity rifle). They must stay (the
+// globals name them, and a linked game names tags by ID), but only what makes them play: their own values,
+// projectiles, damage, animations, collision, and their models' skeletons, regions, permutations and markers. What
+// only they use loses its looks and sounds: references to bitmaps, sounds, particles, HUDs, lights and the like go
+// (their shaders stay, untextured), effects keep only the parts that make objects or deal damage, and each model
+// part keeps a single triangle. Anything that also serves the rest of the map is left as it is.
+static void perfect_ghosts(Job &job) {
+    const std::string scen = job.scenario + ".scenario", glob = "globals/globals.globals";
+    using Flat = std::vector<std::pair<std::string, std::string>>;
+    std::map<std::string, Flat> flats;
+    auto flat = [&](const std::string &tag) -> const Flat & {
+        auto it = flats.find(tag);
+        if (it != flats.end()) return it->second;
+        Flat f;
+        fs::path own = job.owner(tag);
+        if (!own.empty()) tagedit::flatten(u8(own / from_u8(tag)), f);
+        return flats[tag] = std::move(f);
+    };
+    auto dep_of = [](const std::string &v) {   // "@path.ext" -> "path.ext" ('/' separators), "" for none
+        if (v.size() < 2 || v[0] != '@') return std::string();
+        std::string t = v.substr(1);
+        std::replace(t.begin(), t.end(), '\\', '/');
+        return t;
+    };
+    auto ext_of = [](const std::string &t) {
+        size_t d = t.rfind('.');
+        return d == std::string::npos ? std::string() : t.substr(d + 1);
+    };
+    auto generic = [](const std::string &k) {
+        std::string g;
+        bool in = false;
+        for (char c : k) {
+            if (c == '[') { in = true; g += "[]"; continue; }
+            if (c == ']') { in = false; continue; }
+            if (!in) g += c;
+        }
+        return g;
+    };
+    auto index_in = [](const std::string &k) {   // "weapon_palette[3].name" -> 3
+        size_t a = k.find('['), b = k.find(']');
+        return a == std::string::npos || b == std::string::npos ? -1 : std::atoi(k.c_str() + a + 1);
+    };
+    // What the scenario places, and whether Race spawns the globals' vehicles.
+    const Flat &sf = flat(scen), &gf = flat(glob);
+    if (sf.empty() || gf.empty()) return;
+    std::set<std::pair<std::string, int>> placed;   // (palette, index)
+    bool race = false;
+    for (auto &[k, v] : sf) {
+        std::string g = generic(k);
+        for (auto [block, pal] : {std::pair<const char *, const char *>{"weapons[].type", "weapon_palette"},
+                                  {"vehicles[].type", "vehicle_palette"}, {"equipment[].type", "equipment_palette"},
+                                  {"bipeds[].type", "biped_palette"}})
+            if (g == block && !v.empty() && isdigit((unsigned char)v[0])) placed.insert({pal, std::atoi(v.c_str())});
+        if (g == "netgame_flags[].type" && v == "race_vehicle") race = true;
+    }
+    std::string mp_unit;
+    for (auto &[k, v] : gf)
+        if (generic(k) == "multiplayer_information[].unit") mp_unit = dep_of(v);
+    // The references that don't hand anything out by themselves (their targets: candidates).
+    std::set<std::string> candidates;
+    auto held_back = [&](const std::string &tag, const std::string &k, const std::string &target) {
+        std::string g = generic(k), e = ext_of(target);
+        if (e != "weapon" && e != "vehicle" && e != "equipment" && e != "biped") return false;
+        bool skip = false;
+        if (tag == scen) {
+            for (auto pal : {"weapon_palette", "vehicle_palette", "equipment_palette", "biped_palette"})
+                if (g == std::string(pal) + "[].name" && !placed.count({pal, index_in(k)})) skip = true;
+        } else if (tag == glob) {
+            skip = g == "weapon_list[].weapon" || g == "cheat_powerups[].powerup" ||
+                   (g == "multiplayer_information[].vehicles[].vehicle" && !race) ||
+                   (g == "player_information[].unit" && target != mp_unit);
+        }
+        if (skip) candidates.insert(target);
+        return skip;
+    };
+    // Everything the match can reach.
+    std::set<std::string> live{scen, glob};
+    std::vector<std::string> todo{scen, glob};
+    while (!todo.empty()) {
+        std::string t = todo.back();
+        todo.pop_back();
+        for (auto &[k, v] : flat(t)) {
+            std::string d = dep_of(v);
+            if (d.empty() || live.count(d) || held_back(t, k, d)) continue;
+            live.insert(d);
+            todo.push_back(d);
+        }
+    }
+    std::vector<std::string> ghosts;
+    for (auto &c : candidates)
+        if (!live.count(c) && !job.owner(c).empty()) ghosts.push_back(c);
+    if (ghosts.empty()) return;
+    // What only they use.
+    std::set<std::string> only(ghosts.begin(), ghosts.end());
+    todo.assign(ghosts.begin(), ghosts.end());
+    while (!todo.empty()) {
+        std::string t = todo.back();
+        todo.pop_back();
+        for (auto &[k, v] : flat(t)) {
+            std::string d = dep_of(v);
+            if (d.empty() || live.count(d) || only.count(d) || job.owner(d).empty()) continue;
+            only.insert(d);
+            todo.push_back(d);
+        }
+    }
+    int edited = 0, models = 0, dropped = 0;
+    for (auto &t : only) {
+        std::string e = ext_of(t);
+        if (pairs::look_or_sound_group(e) && e.rfind("shader", 0) != 0) continue;   // (no longer referenced: left out)
+        std::vector<std::string> sets;
+        std::map<std::string, std::set<int>> deletes;   // block path -> element indices
+        for (auto &[k, v] : flat(t)) {
+            std::string d = dep_of(v), de = ext_of(d);
+            if (d.empty() || !pairs::look_or_sound_group(de) || de.rfind("shader", 0) == 0) continue;
+            std::string g = generic(k);
+            if (g == "attachments[].type" || g == "events[].parts[].type" || g == "events[].particles[].particle_type" ||
+                g == "widgets[].reference" || g == "predicted_resources[].tag") {
+                size_t end = k.rfind('['), close = k.find(']', end);
+                deletes[k.substr(0, end)].insert(std::atoi(k.c_str() + end + 1));
+                (void)close;
+            } else {
+                sets.insert(sets.end(), {"-S", k, ""});
+            }
+        }
+        bool model = e == "model";
+        if (sets.empty() && deletes.empty() && !model) continue;
+        fs::path own = job.owner(t);
+        if (own.empty() || (own != job.fixes && !job.to_fixes(t, own))) continue;
+        std::vector<std::string> cmd{u8(tool(job.cfg, "invader-edit")), "-t", u8(job.fixes), t};
+        // (the deepest blocks first, and each block's last elements first, so the numbers stay right)
+        std::vector<std::pair<std::string, std::set<int>>> dl(deletes.begin(), deletes.end());
+        std::sort(dl.begin(), dl.end(), [](auto &a, auto &b) { return a.first.size() > b.first.size(); });
+        for (auto &[block, idx] : dl)
+            for (auto it = idx.rbegin(); it != idx.rend(); ++it) {
+                cmd.insert(cmd.end(), {"-E", block + "[" + std::to_string(*it) + "]"});
+                dropped++;
+            }
+        // (a reference inside an element that goes is set first: harmless)
+        cmd.insert(cmd.begin() + 4, sets.begin(), sets.end());
+        std::string out;
+        if ((sets.size() || deletes.size()) && run_process(cmd, out) != 0) {
+            job.log("  [perfect] couldn't strip " + t + ": " + out.substr(0, 300));
+            continue;
+        }
+        if (model) {   // each part: a single triangle (its vertices' nodes, so the skeleton's the same)
+            tagfile::EditTag et;
+            if (et.load(job.fixes / from_u8(t))) {
+                bool any = false;
+                if (auto *geos = tagfile::block(et.root(), "geometries"))
+                    for (auto &geo : *geos)
+                        if (auto *parts = tagfile::block(geo, "parts"))
+                            for (auto &part : *parts) {
+                                auto *U = tagfile::block(part, "uncompressed vertices");
+                                auto *C = tagfile::block(part, "compressed vertices");
+                                auto *T = tagfile::block(part, "triangles");
+                                if (!U || !T || T->empty() || U->size() <= 3) continue;
+                                size_t n = U->size();
+                                int idx[3] = {-1, -1, -1};
+                                for (auto &tri : *T) {
+                                    int a = (int)tagfile::get_num(tri, "vertex0 index"), b = (int)tagfile::get_num(tri, "vertex1 index"),
+                                        c = (int)tagfile::get_num(tri, "vertex2 index");
+                                    if (a >= 0 && b >= 0 && c >= 0 && (size_t)a < n && (size_t)b < n && (size_t)c < n) {
+                                        idx[0] = a; idx[1] = b; idx[2] = c;
+                                        break;
+                                    }
+                                }
+                                if (idx[0] < 0) continue;
+                                std::vector<tagfile::TagNode> nu, nc;
+                                for (int j = 0; j < 3; j++) {
+                                    nu.push_back((*U)[(size_t)idx[j]]);
+                                    if (C && C->size() == n) nc.push_back((*C)[(size_t)idx[j]]);
+                                }
+                                tagfile::TagNode tri = T->front();
+                                for (int j = 0; j < 3; j++)
+                                    tagfile::set_num(tri, j == 0 ? "vertex0 index" : j == 1 ? "vertex1 index" : "vertex2 index", j);
+                                *U = std::move(nu);
+                                if (C && C->size() == n) *C = std::move(nc);
+                                *T = {tri};
+                                any = true;
+                            }
+                if (any && et.save(job.fixes / from_u8(t))) models++;
+            }
+        }
+        edited++;
+    }
+    std::string names;
+    for (size_t i = 0; i < ghosts.size(); i++)
+        names += (i ? ", " : "") + fs::path(from_u8(ghosts[i])).stem().u8string();
+    job.note("[perfect] kept what nothing in a match can hand out only as far as gameplay goes (" + names + "): " +
+             std::to_string(edited) + " tags only they use without their looks and sounds (" + std::to_string(models) +
+             " models a triangle per part, " + std::to_string(dropped) + " visual parts and attachments left out)");
 }
 
 // Invader, building a map named like one of Halo's own (timberland, bloodgulch...), gives a few stock tags the

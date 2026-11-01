@@ -317,6 +317,7 @@ Result check(const std::string &ce_dir, const std::string &xbox_dir) {
 }
 
 bool gameplay_group(const std::string &ext) { return needed_group(group_key(ext)); }
+bool look_or_sound_group(const std::string &ext) { return visual_group(ext); }
 
 std::string report(const Result &r, size_t per_tag) {
     std::string s;

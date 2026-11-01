@@ -34,6 +34,8 @@ struct Result {
 // A tag group (its file extension) whose tags the network names or gameplay rests on: Perfect Conversion takes them
 // from the Custom Edition map, never from the Xbox's tagset.
 bool gameplay_group(const std::string &ext);
+// A group that only looks or sounds (bitmaps, sounds, shaders, particles, HUDs...): references to it may change or go.
+bool look_or_sound_group(const std::string &ext);
 
 // `ce_dir` and `xbox_dir`: the folders the two maps were extracted to.
 Result check(const std::string &ce_dir, const std::string &xbox_dir);
