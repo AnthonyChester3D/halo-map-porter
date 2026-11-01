@@ -12,6 +12,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <mutex>
+#include <set>
 #include <fstream>
 #include <regex>
 #include <sstream>
@@ -28,6 +30,7 @@
 #include "maplist_win.hpp"
 #include "mappack.hpp"
 #include "perflog.hpp"
+#include "batch_win.hpp"
 #include "scripts_win.hpp"
 #include "shaders_win.hpp"
 #include "showcase.hpp"
@@ -94,6 +97,8 @@ enum {
     ID_X_SCRIPTS,
     // Perfect Conversion (linked with the Custom Edition map)
     ID_X_PERFECT, ID_X_PERFECT_HINT,
+    // the Convert tab's batch of conversions
+    ID_BATCH, ID_BATCH_HINT,
 };
 
 #define WM_APP_LOG (WM_APP + 1)
@@ -650,7 +655,7 @@ static void set_busy(bool b) {
         KillTimer(g_wnd, kHeartbeat);
         clear_heartbeat();
     }
-    for (int id : {ID_CONVERT, ID_BUILD, ID_S_INV_DL, ID_PK_CREATE}) EnableWindow(GetDlgItem(g_wnd, id), !b);
+    for (int id : {ID_CONVERT, ID_BUILD, ID_S_INV_DL, ID_PK_CREATE, ID_BATCH}) EnableWindow(GetDlgItem(g_wnd, id), !b);
     EnableWindow(GetDlgItem(g_wnd, ID_UNPACK), !b && unpack_allowed());
     if (b) {
         ShowWindow(GetDlgItem(g_wnd, ID_OPEN_FOLDER), SW_HIDE);
@@ -1603,6 +1608,8 @@ static void open_shaders() {
     }
 }
 
+static void remember_conversion(const fs::path &in, const fs::path &out);
+
 // `again`: the LODs window's "Convert again" (the same map and output, so no questions about replacing it).
 static void start_convert(bool again = false) {
     if (card_only()) { save_map_card(); return; }
@@ -1662,8 +1669,209 @@ static void start_convert(bool again = false) {
         if (!lkey.empty()) shadersui::remember(lkey, r.shaders);
         if (r.ok && !card_dir.empty())
             if (std::string t = card_traits(cfg, card_dir, card_name, out, out.parent_path()); !t.empty()) post_log(t);
+        if (r.ok && to == Game::Xbox) remember_conversion(in, out);
         finish(r, std::string("Converted to ") + game_name(to), keys);
     }).detach();
+}
+
+// ---- the batch window (batch_win.hpp): earlier conversions to the Xbox, converted again one after another
+
+// Every map converted for the Xbox, "input\toutput" lines (newest last), for the batch window.
+static fs::path history_file() { return appdata_dir(CSIDL_LOCAL_APPDATA) / L"conversions.txt"; }
+static std::mutex g_history_lock;
+static void remember_conversion(const fs::path &in, const fs::path &out) {
+    std::lock_guard<std::mutex> g(g_history_lock);
+    std::error_code ec;
+    fs::create_directories(history_file().parent_path(), ec);
+    std::ofstream f(history_file(), std::ios::binary | std::ios::app);
+    f << N(in.wstring()) << '\t' << N(out.wstring()) << '\n';
+}
+
+// The maps converted for the Xbox before: the app's record of them (from this version on), then the maps whose map
+// card (Halo Universal XBE map folders) or report names an Xbox output, found among the maps in your Custom Edition
+// and MCC maps folders and the folders you converted from.
+static std::vector<batchui::Item> find_earlier_conversions() {
+    std::vector<batchui::Item> found;
+    std::set<std::wstring> outs;
+    std::error_code ec;
+    auto add_item = [&](const fs::path &in, const fs::path &out) {
+        if (in.empty() || out.empty() || !fs::exists(in, ec) || !fs::exists(out.parent_path(), ec)) return;
+        if (lower(in.wstring()) == lower(out.wstring())) return;
+        if (!outs.insert(lower(out.wstring())).second) return;
+        found.push_back({in.wstring(), out.wstring(), true, L""});
+    };
+    std::set<std::wstring> dirs;   // where inputs are looked for
+    {
+        std::lock_guard<std::mutex> g(g_history_lock);
+        std::ifstream f(history_file(), std::ios::binary);
+        std::vector<std::pair<fs::path, fs::path>> h;
+        std::string l;
+        while (std::getline(f, l)) {
+            if (!l.empty() && l.back() == '\r') l.pop_back();
+            size_t t = l.find('\t');
+            if (t != std::string::npos) h.push_back({fs::path(W(l.substr(0, t))), fs::path(W(l.substr(t + 1)))});
+        }
+        for (auto it = h.rbegin(); it != h.rend(); ++it) {   // (the newest conversion to an output wins)
+            add_item(it->first, it->second);
+            dirs.insert(it->first.parent_path().wstring());
+        }
+    }
+    Config cfg = make_config();
+    if (!cfg.ce_dir.empty()) dirs.insert((cfg.ce_dir / "maps").wstring());
+    if (!cfg.mcc_maps_dir.empty()) {
+        dirs.insert(cfg.mcc_maps_dir.wstring());
+        dirs.insert((cfg.mcc_maps_dir / "custom_edition").wstring());
+        dirs.insert(cfg.mcc_maps_dir.parent_path().wstring());
+    }
+    fs::path last(get_text(ID_IN));
+    if (!last.empty()) dirs.insert(last.parent_path().wstring());
+    std::map<std::wstring, fs::path> by_card, by_stem;   // card folder name / lower-case file stem -> input map
+    for (auto &d : dirs)
+        for (auto &e : fs::directory_iterator(fs::path(d), ec)) {
+            if (!e.is_regular_file(ec) || lower(e.path().extension().wstring()) != L".map") continue;
+            Game g = detect_game(e.path());
+            if (g != Game::CE && g != Game::MCC) continue;   // (Xbox maps aren't converted to the Xbox)
+            by_card[mapcard::card_dir(cards_root(), e.path()).filename().wstring()] = e.path();
+            by_stem.emplace(lower(e.path().stem().wstring()), e.path());
+        }
+    // Map cards: one per input map (its folder named for the input's path), with the output it was written beside.
+    for (auto &e : fs::directory_iterator(cards_root(), ec)) {
+        auto it = by_card.find(e.path().filename().wstring());
+        if (it == by_card.end()) continue;
+        mapcard::Card c = mapcard::load_card(e.path(), "");
+        if (!c.output.empty()) add_item(it->second, fs::u8path(c.output));
+    }
+    // Reports: "<map> - Xbox.txt", with "Output: <path>" (an input with the output's name).
+    for (auto &e : fs::directory_iterator(appdata_dir(CSIDL_LOCAL_APPDATA) / L"reports", ec)) {
+        std::wstring n = e.path().filename().wstring();
+        if (n.size() < 11 || n.compare(n.size() - 11, 11, L" - Xbox.txt") != 0) continue;
+        std::ifstream f(e.path(), std::ios::binary);
+        std::string l;
+        while (std::getline(f, l)) {
+            if (l.rfind("Output: ", 0) != 0) continue;
+            if (!l.empty() && l.back() == '\r') l.pop_back();
+            fs::path out = fs::u8path(l.substr(8));
+            auto it = by_stem.find(lower(out.stem().wstring()));
+            if (it != by_stem.end()) add_item(it->second, out);
+            break;
+        }
+    }
+    std::sort(found.begin(), found.end(), [](const batchui::Item &a, const batchui::Item &b) {
+        return lower(fs::path(a.in).filename().wstring()) < lower(fs::path(b.in).filename().wstring());
+    });
+    return found;
+}
+
+static std::atomic<bool> g_batch_stop{false};
+
+static void open_batch() {
+    if (g_busy) return;
+    save_settings();
+    batchui::Hooks h;
+    h.find = find_earlier_conversions;
+    h.current = [](batchui::Item &it) {
+        fs::path in(get_text(ID_IN)), out(get_text(ID_OUT));
+        if (in.empty() || out.empty() || !fs::exists(in) || combo_game(ID_TO) != Game::Xbox) return false;
+        it = {in.wstring(), out.wstring(), true, L""};
+        return true;
+    };
+    h.game_of = [](const std::wstring &in) {
+        Game g = detect_game(fs::path(in));
+        return g == Game::Unknown ? std::wstring(L"?") : W(game_name(g));
+    };
+    h.stop = [] { g_batch_stop = true; };
+    h.start = [](const std::vector<batchui::Item> &items, const std::vector<int> &which) {
+        // Each map's options, worked out here (they read the windows' saved picks; the worker reads nothing of the
+        // window): the Xbox tab's as they are, then the map's own.
+        struct Job1 { int index; fs::path in, out; Game from; Config cfg; Keys keys; fs::path card_dir; std::string card_name; };
+        auto jobs = std::make_shared<std::vector<Job1>>();
+        Config base = make_config();
+        apply_xbox_options(base);
+        bool share = checked(ID_SHARE);
+        for (int i : which) {
+            const auto &it = items[(size_t)i];
+            Job1 j;
+            j.index = i;
+            j.in = fs::path(it.in);
+            j.out = fs::path(it.out);
+            j.from = detect_game(j.in);
+            j.cfg = base;
+            apply_map_picks(j.cfg, j.in);
+            apply_shader_picks(j.cfg, j.in);
+            apply_user_scripts(j.cfg, j.in);
+            j.keys = keys_for(j.cfg, j.in, true);
+            // A map folder (Halo Universal XBE): its card, written again beside the map (its next version when it changed).
+            if (folder_mode() && fs::exists(j.out.parent_path() / "info.txt")) {
+                j.card_dir = mapcard::find_card_by_output(cards_root(), j.out);
+                if (j.card_dir.empty()) j.card_dir = mapcard::card_dir(cards_root(), j.in);
+                j.card_name = N(lower(j.in.stem().wstring()));
+                std::wstring note;
+                if (!write_card(j.card_dir, W(j.card_name), j.out, note)) j.card_dir.clear();
+            }
+            jobs->push_back(std::move(j));
+        }
+        g_batch_stop = false;
+        set_busy(true);
+        SetWindowTextW(g_log, L"");
+        append_log(L"Batch: converting " + std::to_wstring(jobs->size()) + L" maps for the Xbox" +
+                   (base.xbox_perfect ? L" (Perfect Conversion)" : L"") + L".");
+        std::thread([jobs, share] {
+            int ok = 0, linked = 0, failed = 0, done = 0;
+            Result last;
+            Keys last_keys;
+            std::string last_what;
+            for (auto &j : *jobs) {
+                if (g_batch_stop) break;
+                batchui::progress(j.index, L"Converting...");
+                post_log("");
+                post_log("==== " + N(j.in.filename().wstring()) + " -> " + N(j.out.wstring()));
+                Result r;
+                if (j.from == Game::Unknown || j.from == Game::Xbox) {
+                    r.error = "Not a Custom Edition or MCC map.";
+                } else {
+                    std::error_code ec;
+                    fs::create_directories(j.out.parent_path(), ec);
+                    r = convert_map(j.cfg, j.in, j.from, Game::Xbox, j.out, share, post_log, nullptr);
+                }
+                done++;
+                std::wstring st;
+                if (r.ok) {
+                    ok++;
+                    if (!j.card_dir.empty())
+                        if (std::string t = card_traits(j.cfg, j.card_dir, j.card_name, j.out, j.out.parent_path()); !t.empty()) post_log(t);
+                    remember_conversion(j.in, j.out);
+                    if (!r.link.empty()) { linked++; st = L"Done, linked"; }
+                    else if (j.cfg.xbox_perfect && !r.pair_check.empty()) st = L"Done, not linked: see its pair check";
+                    else st = L"Done";
+                    post_log("Done: " + N(j.out.wstring()) + (r.link.empty() ? "" : " (linked: " + N(r.link.wstring()) + ")"));
+                } else {
+                    failed++;
+                    std::string e = r.error.substr(0, r.error.find('\n'));
+                    st = L"Failed: " + W(e);
+                    post_log("FAILED: " + r.error);
+                }
+                batchui::progress(j.index, st);
+                last = r;
+                last_keys = j.keys;
+                last_what = "Batch: " + N(j.in.filename().wstring());
+            }
+            std::wstring sum = std::to_wstring(ok) + L" converted" + (linked ? L" (" + std::to_wstring(linked) + L" linked)" : L"") +
+                               (failed ? L", " + std::to_wstring(failed) + L" failed" : L"") +
+                               (done < (int)jobs->size() ? L", stopped before " + std::to_wstring(jobs->size() - done) + L" more" : L"") + L".";
+            batchui::done(sum);
+            // (the last map's conversion is the one the Xbox tab's windows and "Convert" can build from now)
+            if (done > 0) {
+                last.changes.clear();
+                finish(last, last_what + " (batch: " + N(sum) + ")", last_keys);
+            } else {
+                Result none;
+                none.error = "Stopped before any map was converted.";
+                finish(none, "Batch");
+            }
+        }).detach();
+        return true;
+    };
+    batchui::open(g_wnd, appdata_dir(CSIDL_LOCAL_APPDATA) / L"batch.txt", h);
 }
 
 // The Convert tab's "Unpack": the map's tags extracted (or the ones extracted before reused) and prepared for the Xbox
@@ -2362,6 +2570,10 @@ static void create_controls() {
     y += 40;
     button(0, L"Convert", 140, y, 140, ID_CONVERT, true);
     add(0, L"STATIC", L"", 0, 292, y - 1, 440, 36, ID_CONV_HINT);
+    y += 40;
+    button(0, L"Batch...", 140, y, 140, ID_BATCH);
+    add(0, L"STATIC", L"Converts a list of maps for the Xbox one after another, each to where you saved it before: your "
+                      L"earlier ports again with the options as they are now.", 0, 292, y - 1, 440, 36, ID_BATCH_HINT);
 
     // Build page
     y = 50;
@@ -2782,6 +2994,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             break;
         case ID_CONVERT: if (!g_busy) start_convert(); break;
         case ID_UNPACK: if (!g_busy) start_unpack(); break;
+        case ID_BATCH: if (!g_busy) open_batch(); break;
         case ID_BUILD: if (!g_busy) start_build(); break;
         case ID_S_INV_DL: if (!g_busy) start_download(); break;
         case ID_OPEN_FOLDER:
