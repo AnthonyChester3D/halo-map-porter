@@ -7275,8 +7275,13 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
         bool harder = mode >= 2, by_density = false, by_choice = false, by_setting = false, by_first_person = false;
         std::vector<std::string> trimmed, floor;
         size_t saved = 0;
-        for (auto &dep : own_models) {
+        // (Bungie's too, but only by your choice: made for the Xbox, the Trim setting leaves them as they are)
+        std::vector<std::string> to_trim = own_models;
+        to_trim.insert(to_trim.end(), stock_models.begin(), stock_models.end());
+        for (auto &dep : to_trim) {
             fs::path own = job.owner(dep);
+            const bool bungies = own == job.overlay;
+            if (bungies && chosen[dep].top != 't') continue;
             bool fp = first_person.count(dep) > 0;
             const lod::Choice &ch = chosen[dep];
             char kind = fp ? 'f' : kinds[dep];
@@ -7321,7 +7326,7 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
             if (!measured && ts.density > 0 &&
                 ms.triangles <= ts.density * lod::stock_triangles(kind, lod::model_size(own / from_u8(dep))) * ts.slack)
                 continue;   // (within its budget: trim_top would say so too)
-            fs::path ed = editable(dep, false);
+            fs::path ed = editable(dep, bungies);   // (Bungie's: an edited copy, your Xbox tags as they are)
             if (ed.empty()) continue;
             std::string before;
             {

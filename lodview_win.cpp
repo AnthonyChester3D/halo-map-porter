@@ -174,7 +174,7 @@ void enable_choice() {
     const LodView::Model *m = St->model >= 0 ? &St->v.models[St->model] : nullptr;
     bool any = m && !St->library.empty(), fp = m && m->kind == 'f', stock = m && is_stock(*m);
     int li = (int)SendMessageW(item(IDC_LODS), CB_GETCURSEL, 0, 0), ti = (int)SendMessageW(item(IDC_TOP), CB_GETCURSEL, 0, 0);
-    bool lods = any && !fp, make = lods && li == 1, top = any && !stock;
+    bool lods = any && !fp, make = lods && li == 1, top = any;   // (Bungie's too: trimmed only by your choice)
     for (int id : {IDC_LODS_LBL, IDC_LODS}) EnableWindow(item(id), lods);
     for (int id : {IDC_MED_LBL, IDC_MED, IDC_LOW_LBL, IDC_LOW, IDC_TRIS_LBL}) EnableWindow(item(id), make);
     for (int id : {IDC_TOP_LBL, IDC_TOP}) EnableWindow(item(id), top);
