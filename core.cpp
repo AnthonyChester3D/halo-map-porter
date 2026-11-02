@@ -868,6 +868,12 @@ struct Job {
         if (std::regex_search(msg, m, bitmap_type) && fix_bitmap_types() > 0) return true;
         static const std::regex anim_frames(R"(Animation #\d+ has an invalid (key frame|second key frame|sound frame) index)");
         if (std::regex_search(msg, m, anim_frames) && fix_animation_frames() > 0) return true;
+        // An animation that plays a sound its graph doesn't list (MCC plays none): no sound for it.
+        static const std::regex anim_sound(R"(Animation #(\d+) has an invalid sound index)");
+        if (std::regex_search(msg, m, anim_sound) && edit(tag, "animations[" + m[1].str() + "].sound", "65535")) {
+            note("[fix]  " + tag + ": animation #" + m[1].str() + " played a sound its graph doesn't list; it plays none (as MCC)");
+            return true;
+        }
         static const std::regex empty_chicago(R"(ShaderTransparentChicago(Extended)?::maps\w* must have at least 1 block)");
         if (std::regex_search(msg, m, empty_chicago) && fix_empty_chicago() > 0) return true;
         static const std::regex rotational(R"(Particle type #(\d+) uses complex sprite render mode 'rotational' that requires extra sequence)");

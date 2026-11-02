@@ -167,7 +167,7 @@ std::string check_for(const std::string &g, const std::string &k, bool &note) {
         return "gameplay-tags";
     }
     if (whole_group(g)) {
-        if (g == "model_animations" && under(k, "sound_references")) return "";
+        if (g == "model_animations" && (under(k, "sound_references") || k == "animations[].sound")) return "";   // (sounds)
         return "gameplay-tags";
     }
     if (g == "model") {
