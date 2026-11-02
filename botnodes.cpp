@@ -47,6 +47,7 @@ struct Level {
     struct Jump { uint32_t to; V3 from, land; };
     std::vector<std::vector<Jump>> jumps;   // each walkable surface's ways onto another piece (find_jumps)
     bool walkable(uint32_t s) const { return s < pf.size() && (pf[s] & 64); }
+    std::vector<std::vector<V3>> portals;   // the cluster portals' corners (where the level's maker put doorways)
 };
 
 bool load_level(const tagfile::Elem &r, Level &L, std::string &why) {
@@ -54,6 +55,15 @@ bool load_level(const tagfile::Elem &r, Level &L, std::string &why) {
     if (cbs.size() == 0 || !coll::read_bsp(cbs[0], L.b) || L.b.surfaces.empty()) { why = "has no collision BSP"; return false; }
     tagfile::Block pfs = r.block("pathfinding surfaces");
     if (pfs.size() == 0) { why = "has no pathfinding data (the AI can't walk it)"; return false; }
+    {
+        tagfile::Block cp = r.block("cluster portals");
+        for (size_t i = 0; i < cp.size(); i++) {
+            std::vector<V3> pts;
+            tagfile::Block vs = cp[i].block("vertices");
+            for (size_t k = 0; k < vs.size(); k++) pts.push_back({vs[k].num("point", 0), vs[k].num("point", 1), vs[k].num("point", 2)});
+            if (pts.size() >= 3) L.portals.push_back(std::move(pts));
+        }
+    }
     L.pf.resize(pfs.size());
     for (size_t i = 0; i < pfs.size(); i++) L.pf[i] = (uint8_t)pfs[i].integer("data");
     const size_t n = L.b.surfaces.size();
@@ -629,6 +639,41 @@ std::vector<Feature> find_features(const Level &L, const std::vector<V3> &spawns
         }
         return c;
     };
+    // Doorways: where a door-sized cluster portal (upright, 8 units across and high at most) stands on floor bots get
+    // to, a waypoint on its threshold, so the way through it is plain to the bots (first: the ones near it give way).
+    for (auto &pp : L.portals) {
+        double zlo = 1e30, zhi = -1e30, wide = 0;
+        for (auto &p : pp) { zlo = std::min(zlo, p[2]); zhi = std::max(zhi, p[2]); }
+        for (size_t i = 0; i < pp.size(); i++)
+            for (size_t j = i + 1; j < pp.size(); j++) wide = std::max(wide, std::hypot(pp[i][0] - pp[j][0], pp[i][1] - pp[j][1]));
+        double ux = pp[1][0] - pp[0][0], uy = pp[1][1] - pp[0][1], uz = pp[1][2] - pp[0][2];
+        double vx = pp[2][0] - pp[0][0], vy = pp[2][1] - pp[0][1], vz = pp[2][2] - pp[0][2];
+        double nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx, nl = std::sqrt(nx * nx + ny * ny + nz * nz);
+        if (nl < 1e-9 || std::fabs(nz / nl) > 0.3) continue;   // (a floor or ceiling portal)
+        if (wide < 0.8 || wide > 8.0 || zhi - zlo > 8.0 || zhi - zlo < 1.0) continue;
+        // (its foot: the middle of its lowest corners)
+        double mx = 0, my = 0;
+        int k = 0;
+        for (auto &p : pp)
+            if (p[2] < zlo + 0.3) { mx += p[0]; my += p[1]; k++; }
+        mx /= k;
+        my /= k;
+        int best = -1;
+        double bd = 1.0;
+        int ci0 = (int)std::floor((mx - g.x0) / g.h), cj0 = (int)std::floor((my - g.y0) / g.h), r = (int)std::ceil(1.0 / g.h);
+        for (int cj = cj0 - r; cj <= cj0 + r; cj++)
+            for (int ci = ci0 - r; ci <= ci0 + r; ci++) {
+                if (ci < 0 || cj < 0 || ci >= g.nx || cj >= g.ny) continue;
+                int c = cj * g.nx + ci;
+                for (int f = g.first[(size_t)c]; f < g.first[(size_t)c + 1]; f++) {
+                    const V3 &a = g.at[(size_t)f];
+                    if (!reach[(size_t)f] || a[2] < zlo - 0.6 || a[2] > zlo + 2.0) continue;
+                    double d = std::hypot(a[0] - mx, a[1] - my);
+                    if (d < bd) { bd = d; best = f; }
+                }
+            }
+        if (best >= 0) out.push_back({g.at[(size_t)best], 4});   // (4: a doorway's, counted with the narrow ways')
+    }
     // Ramps: the sloped floor that climbs a unit or more; from its lowest to its highest along it.
     {
         std::vector<char> in(n, 0);
@@ -927,6 +972,7 @@ std::vector<Feature> find_features(const Level &L, const std::vector<V3> &spawns
             }
         }
         for (auto &o : out) {
+            if (o.kind == 4) continue;   // (a doorway's: on its threshold, between its sides already)
             int ci = (int)std::floor((o.p[0] - g.x0) / g.h), cj = (int)std::floor((o.p[1] - g.y0) / g.h);
             if (ci < 0 || cj < 0 || ci >= g.nx || cj >= g.ny) continue;
             int c = cj * g.nx + ci, f0 = -1;
@@ -1089,7 +1135,7 @@ Result plan(const fs::path &bsp, const std::vector<V3> &points, int teleporters,
             tele_to.push_back(-1);
             res.added.push_back({gp[0], gp[1], gp[2] + 0.25});
             res.added_kind.push_back(f.kind);
-            (f.kind == 1 ? res.on_ramps : f.kind == 2 ? res.in_narrow : res.on_open)++;
+            (f.kind == 1 ? res.on_ramps : f.kind == 2 || f.kind == 4 ? res.in_narrow : res.on_open)++;
         }
         if (!res.added.empty()) {
             links = make_links(w, tele_to);

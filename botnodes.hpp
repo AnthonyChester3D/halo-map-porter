@@ -70,7 +70,7 @@ struct Result {
                                        // merged), or -1
     std::vector<V3> waypoints; // the map's, then the nodes added (on the ground)
     std::vector<V3> added;     // the nodes as placed in the scenario (a little above the ground)
-    std::vector<int> added_kind;   // each one's: 0 where the search can't finish a hop, 1 a ramp, 2 a narrow way, 3 open
+    std::vector<int> added_kind;   // each one's: 0 where the search can't finish a hop, 1 a ramp, 2 a narrow way, 3 open, 4 a doorway (a portal)
                                    // floor far from every waypoint
     int on_ramps = 0, in_narrow = 0, on_open = 0;
     std::vector<Hop> hops;     // the links (both ways) with the nodes added
