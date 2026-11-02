@@ -51,9 +51,34 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#else
+#include <cerrno>
+#include <signal.h>
+#include <unistd.h>
 #endif
 
 namespace porter {
+
+// This copy of the app's process, and whether another's is still running (copies share the app's cache folder).
+unsigned long this_process() {
+#ifdef _WIN32
+    return GetCurrentProcessId();
+#else
+    return (unsigned long)getpid();
+#endif
+}
+bool process_running(unsigned long pid) {
+#ifdef _WIN32
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
+    if (!h) return GetLastError() == ERROR_ACCESS_DENIED;
+    DWORD code = 0;
+    bool alive = GetExitCodeProcess(h, &code) && code == STILL_ACTIVE;
+    CloseHandle(h);
+    return alive;
+#else
+    return kill((pid_t)pid, 0) == 0 || errno == EPERM;
+#endif
+}
 
 const char *game_name(Game g) {
     switch (g) {
@@ -1172,6 +1197,8 @@ fs::path extract_stock(const Config &cfg, const Log &log, const fs::path &maps, 
         stock.push_back(e.path());
     }
     std::sort(stock.begin(), stock.end());
+    static std::mutex one_at_a_time;   // (maps converted at once: the first extracts, the others wait for it)
+    std::lock_guard<std::mutex> g(one_at_a_time);
     for (auto &p : stock) sig += p.filename().u8string() + ":" + std::to_string(fs::file_size(p)) + "\n";
     fs::path stamp = dst / ".porter_stamp";
     {
@@ -1375,7 +1402,7 @@ void xbox_scenery(Job &job, const std::vector<std::string> &deps);
 void xbox_scenery_sizes(Job &job, const std::vector<std::string> &deps);
 void xbox_weather(Job &job);
 void xbox_props(Job &job);
-static int g_cutout_textures = 0;   // cut-out textures halve_cutout made smaller (for the log)
+static thread_local int g_cutout_textures = 0;   // cut-out textures halve_cutout made smaller (for the log)
 static std::string thousands(long long v);
 static std::vector<std::string> performance_lines(Job &job);
 static LodView make_lod_view(Job &job, const std::string &map_name);
@@ -2689,7 +2716,7 @@ static void store_blob(const Config &cfg, const std::string &key, const std::str
     std::error_code ec;
     fs::path dir = results_dir(cfg);
     fs::create_directories(dir, ec);
-    fs::path tmp = dir / (key + ".tmp");
+    fs::path tmp = dir / (key + ".tmp" + std::to_string(this_process()));   // (another copy of the app may store it too)
     if (!write_all(tmp, b) || !write_all(dir / (key + ".note"), note)) { fs::remove(tmp, ec); return; }
     fs::rename(tmp, dir / (key + ".tag"), ec);
     if (ec) { fs::remove(tmp, ec); return; }
@@ -3069,15 +3096,14 @@ void put_be16(std::string &b, size_t o, uint16_t v) { b[o] = (char)(v >> 8); b[o
 
 uint32_t crc32_of(const char *d, size_t n) {
     static uint32_t table[256];
-    static bool init = false;
-    if (!init) {
+    static std::once_flag init;   // (maps converted at once share it)
+    std::call_once(init, [] {
         for (uint32_t i = 0; i < 256; i++) {
             uint32_t c = i;
             for (int k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320u ^ (c >> 1) : c >> 1;
             table[i] = c;
         }
-        init = true;
-    }
+    });
     uint32_t c = 0xFFFFFFFFu;
     for (size_t i = 0; i < n; i++) c = table[(c ^ (unsigned char)d[i]) & 0xFF] ^ (c >> 8);
     return c ^ 0xFFFFFFFFu;
@@ -3151,7 +3177,8 @@ static const uint32_t kXboxBumpPalette[256] = {
 // The palette entry nearest a normal (by red and green, as Bungie's tools and Invader pick it), red * 256 + green.
 static const std::vector<uint8_t> &p8_nearest() {
     static std::vector<uint8_t> nearest;
-    if (nearest.empty()) {
+    static std::once_flag made;
+    std::call_once(made, [] {
         nearest.resize(65536);
         for (int r = 0; r < 256; r++)
             for (int g = 0; g < 256; g++) {
@@ -3162,7 +3189,7 @@ static const std::vector<uint8_t> &p8_nearest() {
                 }
                 nearest[r * 256 + g] = (uint8_t)best;
             }
-    }
+    });
     return nearest;
 }
 
@@ -3387,7 +3414,7 @@ static bool halve_cutout(std::string &data, int &w, int &h, int &fmt, int &mips)
 // faded out (detail maps fade toward grey in their smaller levels by design), or one whose alpha thinned or is broken.
 // Then the new top level is a 2x2 average of the full-size one, and the smaller levels stay as they were. True if so
 // (data: the new top level and the rest; mips one fewer).
-static int g_remade_tops = 0;   // (for the log)
+static thread_local int g_remade_tops = 0;   // (for the log)
 static bool halve_unlike_mip(std::string &data, int w, int h, int fmt, int &mips) {
     size_t m0 = mip_bytes(w, h, fmt), m1 = mip_bytes(std::max(1, w / 2), std::max(1, h / 2), fmt);
     if (!m0 || mips < 1 || data.size() < m0 + m1 || fmt == 18 || fmt == 17) return false;   // (BC7 can't be written; P8 bumps keep theirs)
@@ -7993,7 +8020,7 @@ static LodView make_lod_view(Job &job, const std::string &map_name) {
         }
         auto orig = job.trim_originals.find(m.tag);
         if (m.trimmed_from > 0 && orig != job.trim_originals.end()) {   // its most detailed version as the map made it
-            fs::path tmp = job.cfg.cache_dir / "lods" / ("as_made" + fs::path(from_u8(m.tag)).extension().u8string());
+            fs::path tmp = job.cfg.cache_dir / "lods" / ("as_made" + job.cfg.work_tag + fs::path(from_u8(m.tag)).extension().u8string());
             std::error_code ec;
             fs::create_directories(tmp.parent_path(), ec);
             std::ofstream(tmp, std::ios::binary | std::ios::trunc) << orig->second;
@@ -13715,7 +13742,7 @@ bool prepare_models_for_pc(Job &job, std::string &err) {
 
 void fresh_work(Job &job, const std::string &name) {
     std::error_code ec;
-    job.work = job.cfg.cache_dir / "work" / name;
+    job.work = job.cfg.cache_dir / "work" / (job.cfg.work_tag.empty() ? name : name + "_" + job.cfg.work_tag);
     fs::remove_all(job.work, ec);
     job.fixes = job.work / "fixes";
     fs::create_directories(job.fixes, ec);
@@ -13839,17 +13866,47 @@ const int kExtractedKept = 3;
 std::mutex g_extracted_lock;
 std::map<std::string, int> g_extracted_in_use;   // entry folder -> jobs reading it
 
+// Another copy of the app (a batch running in one, maps worked on in the other) can't see g_extracted_in_use: a folder
+// in use also has a marker beside it, <folder>.inuse_<process id>, while this one uses it.
+fs::path in_use_marker(const std::string &dir) { return from_u8(dir + ".inuse_" + std::to_string(this_process())); }
+// (g_extracted_lock held by the callers)
+void hold_extracted(const std::string &dir) {
+    if (g_extracted_in_use[dir]++ == 0) std::ofstream(in_use_marker(dir), std::ios::binary) << "in use";
+}
+void let_go_extracted(const std::string &dir) {
+    if (--g_extracted_in_use[dir] <= 0) {
+        g_extracted_in_use.erase(dir);
+        std::error_code ec;
+        fs::remove(in_use_marker(dir), ec);
+    }
+}
+// In use here or by another copy of the app still running (a marker left by one that ended is removed).
+bool extracted_in_use(const fs::path &dir) {
+    if (g_extracted_in_use.count(u8(dir))) return true;
+    std::string prefix = dir.filename().u8string() + ".inuse_";
+    std::error_code ec;
+    bool used = false;
+    for (auto it = fs::directory_iterator(dir.parent_path(), ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+        std::string n = it->path().filename().u8string();
+        if (n.compare(0, prefix.size(), prefix) != 0) continue;
+        unsigned long pid = std::strtoul(n.c_str() + prefix.size(), nullptr, 10);
+        if (pid != this_process() && process_running(pid)) used = true;
+        else if (pid != this_process()) { std::error_code e; fs::remove(it->path(), e); }
+    }
+    return used;
+}
+
 struct ExtractedLease {
     std::string dir;
     ~ExtractedLease() {
         std::lock_guard<std::mutex> g(g_extracted_lock);
-        if (--g_extracted_in_use[dir] <= 0) g_extracted_in_use.erase(dir);
+        let_go_extracted(dir);
     }
 };
 std::shared_ptr<void> lease_extracted(const fs::path &entry) {
     auto l = std::make_shared<ExtractedLease>();
     l->dir = u8(entry);
-    g_extracted_in_use[l->dir]++;   // (g_extracted_lock held by the caller)
+    hold_extracted(l->dir);   // (g_extracted_lock held by the caller)
     return l;
 }
 
@@ -13902,14 +13959,14 @@ void trim_extracted(const Config &cfg) {
     for (auto it = fs::directory_iterator(extracted_root(cfg), ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
         if (!it->is_directory(ec)) continue;
         fs::path p = it->path();
-        if (g_extracted_in_use.count(u8(p))) continue;
+        if (extracted_in_use(p)) continue;
         std::error_code e;
-        if (!fs::exists(p / "key.txt", e)) { fs::remove_all(p, e); continue; }   // (left half made)
+        if (!fs::exists(p / "key.txt", e)) { fs::remove_all(p, e); continue; }   // (left half made; not in use)
         auto t = fs::last_write_time(p / "used", e);
         entries.push_back({e ? 0 : (long long)t.time_since_epoch().count(), p});
     }
     std::sort(entries.begin(), entries.end(), [](auto &a, auto &b) { return a.first > b.first; });
-    int keep = std::clamp(cfg.extracted_kept > 0 ? cfg.extracted_kept : kExtractedKept, 1, 100) - (int)g_extracted_in_use.size();
+    int keep = std::clamp(cfg.extracted_kept > 0 ? cfg.extracted_kept : kExtractedKept, 1, 100) - (int)g_extracted_in_use.size();   // (another copy's: it keeps its own count)
     for (size_t i = std::max(0, keep); i < entries.size(); i++) fs::remove_all(entries[i].second, ec);
 }
 
@@ -13928,7 +13985,7 @@ static fs::path find_extracted(Job &job, const std::string &key, std::string &pr
         std::error_code ec;
         if (!fs::exists(entry / "key.txt", ec) || slurp_text(entry / "key.txt") != key) return {};
         if (manifest_of(entry / "tags") != slurp_text(entry / "manifest.txt")) {   // (changed since: made again)
-            if (!g_extracted_in_use.count(u8(entry))) fs::remove_all(entry, ec);
+            if (!extracted_in_use(entry)) fs::remove_all(entry, ec);
             return {};
         }
         printed = slurp_text(entry / "output.txt");
@@ -13943,13 +14000,13 @@ static fs::path find_extracted(Job &job, const std::string &key, std::string &pr
 // use by `job`), or empty if the extraction failed (`printed` says why).
 static fs::path extract_kept(Job &job, const std::string &key, std::vector<std::string> cmd, std::string &printed) {
     fs::path entry = entry_for(job.cfg, key), tmp = entry;
-    tmp += ".tmp";
+    tmp += ".tmp" + std::to_string(this_process());   // (another copy of the app may extract the same map)
     std::error_code ec;
     {
         std::lock_guard<std::mutex> g(g_extracted_lock);
         fs::remove_all(tmp, ec);
         fs::create_directories(tmp / "tags", ec);
-        g_extracted_in_use[u8(tmp)]++;   // (so trimming leaves it alone while it's made)
+        hold_extracted(u8(tmp));   // (so trimming leaves it alone while it's made)
     }
     cmd.insert(cmd.begin() + 1, {"-t", u8(tmp / "tags")});
     int rc = run_process(cmd, printed);
@@ -13957,14 +14014,14 @@ static fs::path extract_kept(Job &job, const std::string &key, std::vector<std::
     fs::path tags;
     {
         std::lock_guard<std::mutex> g(g_extracted_lock);
-        if (--g_extracted_in_use[u8(tmp)] <= 0) g_extracted_in_use.erase(u8(tmp));
+        let_go_extracted(u8(tmp));
         if (rc != 0) { fs::remove_all(tmp, ec); return {}; }
         std::ofstream(tmp / "output.txt", std::ios::binary) << printed;
         std::ofstream(tmp / "manifest.txt", std::ios::binary) << manifest_of(tmp / "tags");
         std::ofstream(tmp / "key.txt", std::ios::binary) << key;   // (last: the entry is complete)
         mark_used(tmp);
         fs::path keep = tmp;
-        if (!g_extracted_in_use.count(u8(entry))) {   // (else an older copy is still being read: this one isn't kept)
+        if (!extracted_in_use(entry)) {   // (else an older copy is still being read: this one isn't kept)
             fs::remove_all(entry, ec);
             fs::rename(tmp, entry, ec);
             if (!ec) keep = entry;
@@ -14635,7 +14692,7 @@ bool read_map_scripts(const Config &cfg, const fs::path &input, std::vector<Scri
     if (!invader_ok(cfg)) { err = "Invader wasn't found. Set it up in Settings."; return false; }
     std::error_code ec;
     if (!fs::exists(input, ec)) { err = "The map isn't there any more: " + u8(input); return false; }
-    fs::path tmp = cfg.cache_dir / "work" / "scripts_read";
+    fs::path tmp = cfg.cache_dir / "work" / (cfg.work_tag.empty() ? std::string("scripts_read") : "scripts_read_" + cfg.work_tag);
     fs::remove_all(tmp, ec);
     fs::create_directories(tmp / "tags", ec);
     fs::create_directories(tmp / "data", ec);
@@ -14945,7 +15002,7 @@ uint64_t clear_working_files(const Config &cfg, std::string &what) {
     {
         std::lock_guard<std::mutex> g(g_extracted_lock);
         for (auto it = fs::directory_iterator(extracted_root(cfg), ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
-            if (!it->is_directory(ec) || g_extracted_in_use.count(u8(it->path()))) continue;
+            if (!it->is_directory(ec) || extracted_in_use(it->path())) continue;
             uint64_t n = folder_bytes(it->path());
             std::error_code e;
             if (fs::remove_all(it->path(), e) > 0 && !e) { freed += n; maps++; }
@@ -15307,7 +15364,7 @@ std::string name_list(const std::vector<std::string> &v, size_t most = 4) {
 bool analyze_map_traits(const Config &cfg, const fs::path &map, MapTraits &t, std::string *err) {
     t = MapTraits();
     std::error_code ec;
-    fs::path dir = cfg.cache_dir / "work" / "traits";
+    fs::path dir = cfg.cache_dir / "work" / (cfg.work_tag.empty() ? std::string("traits") : "traits_" + cfg.work_tag);
     fs::remove_all(dir, ec);
     fs::create_directories(dir, ec);
     std::string out;

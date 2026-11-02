@@ -15,7 +15,7 @@ namespace fs = std::filesystem;
 namespace {
 
 enum { IDC_INTRO = 400, IDC_LIST, IDC_FIND, IDC_ADD, IDC_REMOVE, IDC_ALL, IDC_NONE, IDC_GO, IDC_STOP, IDC_CLOSE, IDC_STATUS,
-       IDC_BROWSE };
+       IDC_BROWSE, IDC_AT_ONCE_LBL, IDC_AT_ONCE };
 const UINT WM_B_PROGRESS = WM_APP + 60, WM_B_DONE = WM_APP + 61;
 
 struct State {
@@ -140,7 +140,8 @@ void sort_by(int col) {
 void update_buttons() {
     int ticked = 0;
     for (auto &it : St->items) ticked += it.on;
-    for (int id : {IDC_FIND, IDC_ADD, IDC_BROWSE, IDC_REMOVE, IDC_ALL, IDC_NONE, IDC_CLOSE}) EnableWindow(item(id), !St->running);
+    for (int id : {IDC_FIND, IDC_ADD, IDC_BROWSE, IDC_REMOVE, IDC_ALL, IDC_NONE, IDC_CLOSE, IDC_AT_ONCE})
+        EnableWindow(item(id), !St->running);
     EnableWindow(item(IDC_GO), !St->running && ticked > 0);
     ShowWindow(item(IDC_STOP), St->running ? SW_SHOW : SW_HIDE);
     wchar_t b[200];
@@ -318,7 +319,8 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             fill();
             St->running = true;
             update_buttons();
-            if (!St->hooks.start(St->items, which)) {
+            int at_once = (int)SendMessageW(item(IDC_AT_ONCE), CB_GETCURSEL, 0, 0) + 1;
+            if (!St->hooks.start(St->items, which, std::clamp(at_once, 1, kMaxAtOnce))) {
                 St->running = false;
                 for (size_t i = 0; i < St->items.size(); i++) St->items[i].status = was[i];
                 fill();
@@ -328,8 +330,12 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case IDC_STOP:
             if (St->hooks.stop) St->hooks.stop();
-            SetWindowTextW(item(IDC_STATUS), L"Stopping after the map being converted...");
+            SetWindowTextW(item(IDC_STATUS), L"Stopping once the maps being converted are done...");
             EnableWindow(item(IDC_STOP), FALSE);
+            return 0;
+        case IDC_AT_ONCE:
+            if (HIWORD(wp) == CBN_SELCHANGE && St->hooks.at_once_changed)
+                St->hooks.at_once_changed((int)SendMessageW(item(IDC_AT_ONCE), CB_GETCURSEL, 0, 0) + 1);
             return 0;
         case IDC_CLOSE:
         case IDCANCEL:
@@ -376,7 +382,12 @@ void create_controls() {
     add(L"BUTTON", L"Remove selected", WS_TABSTOP, 540, 480, 130, 28, IDC_REMOVE);
     add(L"BUTTON", L"Tick all", WS_TABSTOP, 678, 480, 90, 28, IDC_ALL);
     add(L"BUTTON", L"Tick none", WS_TABSTOP, 776, 480, 90, 28, IDC_NONE);
-    add(L"STATIC", L"", SS_NOPREFIX | SS_ENDELLIPSIS, 16, 524, 560, 20, IDC_STATUS);
+    add(L"STATIC", L"", SS_NOPREFIX | SS_ENDELLIPSIS, 16, 524, 390, 20, IDC_STATUS);
+    // (each map at once is an Invader build of its own: about one per two processor cores)
+    add(L"STATIC", L"Maps at once:", SS_NOPREFIX | SS_RIGHT, 410, 524, 96, 20, IDC_AT_ONCE_LBL);
+    HWND at = add(L"COMBOBOX", L"", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 512, 520, 64, 240, IDC_AT_ONCE);
+    for (int i = 1; i <= kMaxAtOnce; i++) SendMessageW(at, CB_ADDSTRING, 0, (LPARAM)std::to_wstring(i).c_str());
+    SendMessageW(at, CB_SETCURSEL, (WPARAM)(std::clamp(St->hooks.at_once, 1, kMaxAtOnce) - 1), 0);
     add(L"BUTTON", L"Stop after this map", WS_TABSTOP, 590, 518, 150, 30, IDC_STOP);
     add(L"BUTTON", L"Convert ticked", WS_TABSTOP | BS_DEFPUSHBUTTON, 748, 518, 120, 30, IDC_GO);
     add(L"BUTTON", L"Close", WS_TABSTOP, 876, 518, 88, 30, IDC_CLOSE);

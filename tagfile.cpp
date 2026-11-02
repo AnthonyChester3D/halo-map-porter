@@ -1,5 +1,6 @@
 // Halo Map Porter - reading Halo CE tag files directly (see tagfile.hpp)
 #include "tagfile.hpp"
+#include <mutex>
 #include <algorithm>
 #include <cstring>
 #include <fstream>
@@ -340,15 +341,14 @@ static void emit(TagNode &node, std::string &buf, size_t base, std::string &out)
 
 static uint32_t crc32(const char *d, size_t n) {
     static uint32_t table[256];
-    static bool init = false;
-    if (!init) {
+    static std::once_flag init;   // (maps converted at once share it)
+    std::call_once(init, [] {
         for (uint32_t i = 0; i < 256; i++) {
             uint32_t c = i;
             for (int k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320u ^ (c >> 1) : c >> 1;
             table[i] = c;
         }
-        init = true;
-    }
+    });
     uint32_t c = 0xFFFFFFFFu;
     for (size_t i = 0; i < n; i++) c = table[(c ^ (unsigned char)d[i]) & 0xFF] ^ (c >> 8);
     return c ^ 0xFFFFFFFFu;

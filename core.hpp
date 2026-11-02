@@ -168,6 +168,9 @@ struct Config {
     // How many maps' extracted tags are kept (cache_dir/extracted), so converting one again skips extracting it: the
     // ones used last. 1 to 100.
     int extracted_kept = 3;
+    // Added to the names of the work folders (cache_dir/work) this conversion makes, so maps converted at the same time
+    // (the batch's "Maps at once") each have their own. "": the plain names.
+    std::string work_tag;
     // An Xbox map still over its file limit after every shrink (textures and sounds as far as they go for it): built for
     // this bigger limit instead, as shrunk (a modded Xbox's 115 MB). 0: it fails.
     double xbox_overflow_mb = 0;

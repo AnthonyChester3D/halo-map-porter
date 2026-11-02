@@ -837,8 +837,24 @@ static void on_input_chosen() {
 // The Settings tab's "Clear temp files": the working files the app deletes by itself as it goes (extracted maps beyond
 // "Maps kept unpacked", work folders), all of them now. The next conversion of a map extracts it again.
 static void save_last_prepared();
+// Another copy of the app open (its window), which may be using the work folders.
+static bool another_copy_open() {
+    bool found = false;
+    EnumWindows([](HWND w, LPARAM p) -> BOOL {
+        wchar_t cls[64];
+        if (w != g_wnd && GetClassNameW(w, cls, 64) && wcscmp(cls, L"HaloMapPorter") == 0) { *(bool *)p = true; return FALSE; }
+        return TRUE;
+    }, (LPARAM)&found);
+    return found;
+}
+
 static void clear_temp_files() {
     if (g_busy) return;
+    if (another_copy_open()) {
+        MessageBoxW(g_wnd, L"Another copy of Halo Map Porter is open, and may be converting with these files. Close it first.",
+                    L"Halo Map Porter", MB_ICONINFORMATION);
+        return;
+    }
     Config cfg = make_config();
     uint64_t now = porter::working_files_size(cfg);
     wchar_t q[600];
@@ -1832,7 +1848,11 @@ static void open_batch() {
         if (folder_mode()) return (save.parent_path().parent_path() / stem / (lower(stem) + L".map")).wstring();
         return (save.parent_path() / (lower(stem) + L".map")).wstring();
     };
-    h.start = [](const std::vector<batchui::Item> &items, const std::vector<int> &which) {
+    // (about one map per two processor cores, at most 4, unless changed)
+    unsigned cores = std::max(1u, std::thread::hardware_concurrency());
+    h.at_once = std::clamp(_wtoi(ini_get(L"batch_at_once", std::to_wstring(std::clamp(cores / 2, 1u, 4u)).c_str()).c_str()), 1, batchui::kMaxAtOnce);
+    h.at_once_changed = [](int n) { ini_set(L"batch_at_once", std::to_wstring(n)); };
+    h.start = [](const std::vector<batchui::Item> &items, const std::vector<int> &which, int at_once) {
         // Each map's options, worked out here (they read the windows' saved picks; the worker reads nothing of the
         // window): the Xbox tab's as they are, then the map's own.
         struct Job1 { int index; fs::path in, out; Game from; Config cfg; Keys keys; fs::path card_dir; std::string card_name; };
@@ -1854,6 +1874,7 @@ static void open_batch() {
             apply_shader_picks(j.cfg, j.in);
             apply_user_scripts(j.cfg, j.in);
             j.keys = keys_for(j.cfg, j.in, true);
+            j.cfg.work_tag = "b" + std::to_string(i);   // (its own work folders: maps converted at once)
             // A map folder (Halo Universal XBE): its card, written again beside the map (its next version when it changed).
             if (folder_mode()) {
                 j.card_dir = mapcard::find_card_by_output(cards_root(), j.out);
@@ -1867,25 +1888,33 @@ static void open_batch() {
         g_batch_stop = false;
         set_busy(true);
         SetWindowTextW(g_log, L"");
+        at_once = std::clamp(at_once, 1, (int)std::max<size_t>(1, jobs->size()));
         append_log(L"Batch: converting " + std::to_wstring(jobs->size()) + L" maps for the Xbox" +
-                   (base.xbox_perfect ? L" (Perfect Conversion)" : L"") + L".");
-        std::thread([jobs, share] {
-            int ok = 0, linked = 0, failed = 0, done = 0;
+                   (base.xbox_perfect ? L" (Perfect Conversion)" : L"") +
+                   (at_once > 1 ? L", " + std::to_wstring(at_once) + L" at once (each line starts with its map)" : L"") + L".");
+        std::thread([jobs, share, at_once] {
+            std::atomic<int> ok{0}, linked{0}, failed{0}, done{0};
+            std::atomic<size_t> next{0};
+            std::mutex last_lock;   // (the map finished last: the one the Xbox tab's windows build from)
             Result last;
             Keys last_keys;
             std::string last_what;
-            for (auto &j : *jobs) {
-                if (g_batch_stop) break;
+            auto worker = [&] {
+            for (size_t k; !g_batch_stop && (k = next++) < jobs->size();) {
+                auto &j = (*jobs)[k];
                 batchui::progress(j.index, L"Converting...");
+                // (several at once: each line says which map it's about)
+                std::string tag = at_once > 1 ? "[" + N(j.in.stem().wstring()) + "] " : "";
+                Log log = [tag](const std::string &l) { post_log(l.empty() || tag.empty() ? l : tag + l); };
                 post_log("");
-                post_log("==== " + N(j.in.filename().wstring()) + " -> " + N(j.out.wstring()));
+                log("==== " + N(j.in.filename().wstring()) + " -> " + N(j.out.wstring()));
                 Result r;
                 if (j.from == Game::Unknown || j.from == Game::Xbox) {
                     r.error = "Not a Custom Edition or MCC map.";
                 } else {
                     std::error_code ec;
                     fs::create_directories(j.out.parent_path(), ec);
-                    r = convert_map(j.cfg, j.in, j.from, Game::Xbox, j.out, share, post_log, nullptr);
+                    r = convert_map(j.cfg, j.in, j.from, Game::Xbox, j.out, share, log, nullptr);
                 }
                 done++;
                 std::wstring st, size = L"\x01";
@@ -1896,14 +1925,14 @@ static void open_batch() {
                     if (std::regex_search(r.info, sm, unc)) size = W(sm[1].str()) + L" MB";
                     ok++;
                     if (!j.card_dir.empty())
-                        if (std::string t = card_traits(j.cfg, j.card_dir, j.card_name, j.out, j.out.parent_path()); !t.empty()) post_log(t);
+                        if (std::string t = card_traits(j.cfg, j.card_dir, j.card_name, j.out, j.out.parent_path()); !t.empty()) log(t);
                     remember_conversion(j.in, j.out);
                     if (!r.link.empty()) { linked++; st = L"Done, linked"; }
                     else if (j.cfg.xbox_perfect && !r.pair_check.empty()) st = L"Done, not linked: see its pair check";
                     else st = L"Done";
                     for (auto &c : r.changes)
                         if (c.rfind("[size]", 0) == 0) st += L" (big-map limit: over 47 MB)";
-                    post_log("Done: " + N(j.out.wstring()) + (r.link.empty() ? "" : " (linked: " + N(r.link.wstring()) + ")"));
+                    log("Done: " + N(j.out.wstring()) + (r.link.empty() ? "" : " (linked: " + N(r.link.wstring()) + ")"));
                 } else {
                     failed++;
                     // (the line that says what went wrong, and the tag: the first line is often only "Build failed")
@@ -1915,13 +1944,19 @@ static void open_batch() {
                         else if (l.rfind("FATAL ERROR: ", 0) == 0 && e.rfind("Build failed", 0) == 0) e = l.substr(13);
                     }
                     st = L"Failed: " + W(e) + (tag.empty() ? L"" : L" (" + W(tag) + L")");
-                    post_log("FAILED: " + r.error);
+                    log("FAILED: " + r.error);
                 }
                 batchui::progress(j.index, st, r.ok ? size : std::wstring());
+                std::lock_guard<std::mutex> g(last_lock);
                 last = r;
                 last_keys = j.keys;
                 last_what = "Batch: " + N(j.in.filename().wstring());
             }
+            };
+            std::vector<std::thread> more;
+            for (int t = 1; t < at_once; t++) more.emplace_back(worker);
+            worker();
+            for (auto &t : more) t.join();
             std::wstring sum = std::to_wstring(ok) + L" converted" + (linked ? L" (" + std::to_wstring(linked) + L" linked)" : L"") +
                                (failed ? L", " + std::to_wstring(failed) + L" failed" : L"") +
                                (done < (int)jobs->size() ? L", stopped before " + std::to_wstring(jobs->size() - done) + L" more" : L"") + L".";

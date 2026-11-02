@@ -28,12 +28,17 @@ struct Hooks {
     std::function<std::wstring(const std::wstring &in)> game_of;
     // Converts these (the ticked ones, by their index in the list) in a worker thread; it reports with progress()
     // and done(). False (after telling the user) if it can't start.
-    std::function<bool(const std::vector<Item> &items, const std::vector<int> &which)> start;
+    // `at_once`: how many maps are converted at the same time (each in its own thread and work folder).
+    std::function<bool(const std::vector<Item> &items, const std::vector<int> &which, int at_once)> start;
     // Asked to stop after the map being converted.
     std::function<void()> stop;
     // Where a map picked with "Browse..." goes (its earlier output, else beside the others); "" if it can't tell.
     std::function<std::wstring(const std::wstring &in)> default_out;
+    // "Maps at once" as the window opens (1 to kMaxAtOnce), and told when it's changed (to keep it).
+    int at_once = 1;
+    std::function<void(int)> at_once_changed;
 };
+const int kMaxAtOnce = 8;
 
 // The window (modal); the list is read from and saved to `list_file`.
 void open(HWND owner, const std::filesystem::path &list_file, Hooks hooks);

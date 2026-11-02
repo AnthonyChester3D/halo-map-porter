@@ -11,6 +11,8 @@
 #include <fstream>
 #include <iterator>
 #include <map>
+#include <mutex>
+#include <thread>
 #include <set>
 #include <sstream>
 #include <vector>
@@ -481,7 +483,24 @@ bool skipped(const Settings &settings, const std::string &model_tag, const std::
     return false;
 }
 
+// The library's text files are read, changed and written whole: one map at a time (a batch converts several at once).
+static std::mutex g_library_lock;
+
+// A library file written under another name, then put in place: a map converted at the same time reads either the
+// old file or the whole new one, never half of it.
+static void write_whole(const fs::path &file, const std::string &b) {
+    std::ostringstream id;
+    id << std::this_thread::get_id();
+    fs::path tmp = file;
+    tmp += ".part" + id.str();
+    { std::ofstream(tmp, std::ios::binary) << b; }
+    std::error_code ec;
+    fs::rename(tmp, file, ec);
+    if (ec) fs::remove(tmp, ec);
+}
+
 bool add_skip(const Settings &settings, const std::string &model_tag, const std::string &comment) {
+    std::lock_guard<std::mutex> g(g_library_lock);
     if (settings.library.empty()) return false;
     std::error_code ec;
     fs::create_directories(settings.library, ec);
@@ -566,6 +585,7 @@ Choice choice(const Settings &settings, const std::string &model_tag, const std:
 }
 
 bool set_choice(const Settings &settings, const std::string &model_tag, const Choice &c, const std::string &note) {
+    std::lock_guard<std::mutex> g(g_library_lock);
     if (settings.library.empty()) return false;
     std::error_code ec;
     fs::create_directories(settings.library, ec);
@@ -675,13 +695,14 @@ static std::vector<TagNode> versions(const TagNode &geo, uint32_t checksum, doub
         fs::create_directories(settings.library, ec);
         std::string b = "HMPLOD1\n";
         for (auto &g : out) b += tagfile::write_node(g);
-        std::ofstream(file, std::ios::binary) << b;
+        write_whole(file, b);
     }
     return out;
 }
 
 // A line in the library's index.txt, its record of what it holds.
 static void index_line(const Settings &settings, const std::string &model, const std::string &what, const std::string &files) {
+    std::lock_guard<std::mutex> g(g_library_lock);
     std::time_t now = std::time(nullptr);
     char date[16];
     std::strftime(date, sizeof date, "%Y-%m-%d", std::localtime(&now));
@@ -837,7 +858,7 @@ static TagNode trimmed_version(const TagNode &geo, uint32_t checksum, double rat
     if (!file.empty()) {
         std::error_code ec;
         fs::create_directories(settings.library, ec);
-        std::ofstream(file, std::ios::binary) << "HMPTOP1\n" << tagfile::write_node(out);
+        write_whole(file, "HMPTOP1\n" + tagfile::write_node(out));
     }
     return out;
 }

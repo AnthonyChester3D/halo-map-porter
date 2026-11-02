@@ -640,8 +640,8 @@ bool faces_in(const double *A, const double *B, const double *C) {
 const int kW = 320, kH = 240;
 struct View { double fw[3], lf[3], up[3]; };
 const std::vector<View> &views() {
-    static std::vector<View> v;
-    if (!v.empty()) return v;
+    static const std::vector<View> v = [] {
+    std::vector<View> v;
     const int pitches[4] = {-15, 0, 15, 35};
     for (int pi = 0; pi < 4; pi++)
         for (int yi = 0; yi < 12; yi++) {
@@ -656,6 +656,8 @@ const std::vector<View> &views() {
             w.up[2] = fw[0] * lf[1] - fw[1] * lf[0];
             v.push_back(w);
         }
+    return v;
+    }();
     return v;
 }
 

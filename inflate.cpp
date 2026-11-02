@@ -1,6 +1,7 @@
 // Halo Map Porter - a small zlib/deflate decoder. See inflate.hpp.
 // Canonical Huffman decoding the way RFC 1951 describes it (counts per code length, symbols in code order).
 #include "inflate.hpp"
+#include <mutex>
 #include <algorithm>
 #include <vector>
 
@@ -92,8 +93,8 @@ bool codes(Bits &b, std::string &out, const Huff &lit, const Huff &dist) {
 
 bool fixed(Bits &b, std::string &out) {
     static Huff lit, dist;
-    static bool ready = false;
-    if (!ready) {
+    static std::once_flag ready;
+    std::call_once(ready, [] {
         short len[288];
         int s = 0;
         for (; s < 144; s++) len[s] = 8;
@@ -103,8 +104,7 @@ bool fixed(Bits &b, std::string &out) {
         build(lit, len, 288);
         for (s = 0; s < 30; s++) len[s] = 5;
         build(dist, len, 30);
-        ready = true;
-    }
+    });
     return codes(b, out, lit, dist);
 }
 
