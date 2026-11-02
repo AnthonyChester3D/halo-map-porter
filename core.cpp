@@ -940,6 +940,29 @@ struct Job {
             note("[fix]  " + tag + ": animation #" + m[1].str() + " played a sound its graph doesn't list; it plays none (as MCC)");
             return true;
         }
+        // A camera track with fewer control points than the 4 Invader needs (a fixed turret gunner's view: one point,
+        // as tool.exe let through): its last point repeated up to 4, so the view stays where it was.
+        static const std::regex camera_points(R"(CameraTrack::control_points must have at least (\d+) blocks?)");
+        if (std::regex_search(msg, m, camera_points)) {
+            const int need = std::stoi(m[1]);
+            fs::path own = owner(tag);
+            std::string out;
+            if (!own.empty() && (own == fixes || to_fixes(tag, own))) {
+                run_process({u8(tool(cfg, "invader-edit")), "-t", u8(fixes), tag, "-C", "control_points"}, out);
+                const int have = std::atoi(out.c_str());
+                std::vector<std::string> cmd{u8(tool(cfg, "invader-edit")), "-t", u8(fixes), tag};
+                if (have <= 0) cmd.insert(cmd.end(), {"-I", "control_points", std::to_string(need), "end"});
+                else
+                    for (int i = have; i < need; i++)
+                        cmd.insert(cmd.end(), {"-c", "control_points[" + std::to_string(have - 1) + "]", "end"});
+                if (have < need && run_process(cmd, out) == 0) {
+                    note("[fix]  " + tag + ": a camera track with " + std::to_string(have) + " control point" + (have == 1 ? "" : "s") +
+                         " (Invader needs " + std::to_string(need) + "); " +
+                         (have > 0 ? "its last one repeated, so the view stays the same" : "given blank ones"));
+                    return true;
+                }
+            }
+        }
         static const std::regex empty_chicago(R"(ShaderTransparentChicago(Extended)?::maps\w* must have at least 1 block)");
         if (std::regex_search(msg, m, empty_chicago) && fix_empty_chicago() > 0) return true;
         static const std::regex rotational(R"(Particle type #(\d+) uses complex sprite render mode 'rotational' that requires extra sequence)");
