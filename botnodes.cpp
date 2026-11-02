@@ -488,9 +488,19 @@ std::vector<Feature> find_features(const Level &L, const std::vector<V3> &spawns
             if (g.at[(size_t)f][2] <= p[2] + 0.5 && (best < 0 || g.at[(size_t)f][2] > g.at[(size_t)best][2])) best = f;
         if (best >= 0 && !reach[(size_t)best]) { reach[(size_t)best] = 1; q.push_back(best); }
     }
+    // (walked on slopes of 45 degrees at most: the AI calls steeper rock walkable, which would take the bots down a pit's
+    // walls to its bottom, or up a cliff face)
     for (size_t k = 0; k < q.size(); k++)
         for (int m : g.nb[(size_t)q[k]])
-            if (m >= 0 && !reach[(size_t)m]) { reach[(size_t)m] = 1; q.push_back(m); }
+            if (m >= 0 && !reach[(size_t)m] && g.nz[(size_t)m] >= 0.707f) { reach[(size_t)m] = 1; q.push_back(m); }
+    // Waypoints go only on floor a bot walks on gladly: 30 degrees at most (not a rock slope it scrambles over), and no
+    // lower than 1.5 units under the map's lowest point or 3 over its highest (not a pit's floor, not a rooftop).
+    {
+        double zlo = 1e30, zhi = -1e30;
+        for (auto &p : spawns) { zlo = std::min(zlo, p[2]); zhi = std::max(zhi, p[2]); }
+        for (size_t f = 0; f < n; f++)
+            if (reach[f] && (g.nz[f] < 0.866f || g.at[f][2] < zlo - 1.5 || g.at[f][2] > zhi + 3.0)) reach[f] = 0;
+    }
     // Each floor's width across the narrowest way (both ways along a line of the grid, to a wall or an edge), and how
     // far it goes the other way (along the passage).
     const int kMax = (int)std::ceil(12.0 / g.h);
@@ -1122,6 +1132,7 @@ Result plan(const fs::path &bsp, const std::vector<V3> &points, int teleporters,
                     V3 g;
                     uint32_t sf = ground(L, {m.at[0], m.at[1], m.at[2] + 0.25}, g);
                     if (sf == kNone || !L.walkable(sf)) continue;
+                    if (L.normal[sf][2] < 0.707) continue;   // (not on a slope steeper than 45 degrees: a rock face)
                     Way c{g, sf};
                     int ex = -1;
                     for (size_t i = 0; i < w.size() && ex < 0; i++)
