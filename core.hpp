@@ -36,7 +36,8 @@ struct Config {
     // Over it, "Shrink textures to fit" halves the map's own textures until they fit. 0 = no target.
     double xbox_texture_target_mb = 20;
     // Xbox multiplayer slots. The Xbox engine only spawns the vehicles in the first three entries of the
-    // globals multiplayer vehicle list. Empty = keep the Xbox default for that slot.
+    // globals multiplayer vehicle list. Empty = automatic: the map's own vehicle of the slot's kind, else the Xbox's
+    // (left out when nothing places it); "#xbox" = the Xbox's own.
     std::string xbox_vehicle_slots[3];
     // Halo Universal XBE: every placed vehicle can spawn (with the gametype's vehicles on Default), so keep
     // vehicles that have no slot of their own type instead of swapping them for a slotted one or removing them.

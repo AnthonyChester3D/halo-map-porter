@@ -42,7 +42,7 @@ struct State {
     Analyze analyze;
     std::vector<int> row_item;             // list row -> item index
     std::vector<std::string> combo_tags;   // "Replace with" entries -> tag ("\x01" = keep)
-    std::string slots[3];                  // the vehicle slots: the map's vehicle each one spawns ("" the Xbox's own)
+    std::string slots[3];                  // the vehicle slots: the map's vehicle each one spawns ("" automatic, "#xbox" the Xbox's own)
     std::vector<std::string> slot_tags;    // the slot lists' entries -> tag
     COLORREF total_color = 0;
 };
@@ -321,11 +321,12 @@ void add_group(int id, const wchar_t *text) {
     ListView_InsertGroup(St->list, -1, &g);
 }
 
-// The vehicle slots' lists: the Xbox's own, or one of the map's vehicles (one players can ride). A slot whose
-// vehicle the map no longer has goes back to the Xbox's own.
+// The vehicle slots' lists: automatic, the Xbox's own, or one of the map's vehicles (one players can ride). A slot
+// whose vehicle the map no longer has goes back to automatic.
 void fill_slots() {
-    St->slot_tags = {""};
-    std::vector<std::wstring> names{L"The Xbox's own"};
+    // ("" automatic: the map's own vehicle of the slot's kind, else none; "#xbox" the Xbox's own)
+    St->slot_tags = {"", "#xbox"};
+    std::vector<std::wstring> names{L"Automatic (the map's own, or none)", L"The Xbox's own"};
     if (St->an)
         for (auto &it : St->an->items)
             if (it.vehicle && it.in_map && it.piece_of.empty() && it.seats != 0) {

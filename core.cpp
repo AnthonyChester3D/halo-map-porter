@@ -11699,8 +11699,10 @@ const MpVehicle *mp_vehicle(const std::string &tag) {
         if (tag == v.tag) return &v;
     return nullptr;
 }
+// A slot's vehicle as chosen ("" automatic, "#xbox" the Xbox's own): the Xbox's own unless a vehicle is named.
 std::string slot_vehicle(const Config &cfg, int i) {
-    return cfg.xbox_vehicle_slots[i].empty() ? kXboxDefaultSlots[i] : cfg.xbox_vehicle_slots[i];
+    const std::string &v = cfg.xbox_vehicle_slots[i];
+    return v.empty() || v == "#xbox" ? kXboxDefaultSlots[i] : v;
 }
 
 struct PcWeapon { const char *name, *weapon, *collection, *def; };
@@ -12932,6 +12934,24 @@ void restrict_to_xbox_mp(Job &job, const fs::path &xsrc) {
     fs::path from = !job.user_tags.empty() ? job.user_tags : job.source;
     for (int i = 0; i < 3; i++) {
         std::string want = slot_vehicle(cfg, i);
+        // Automatic (nothing picked): the map's own vehicle of the slot's kind (its Warthog, Ghost or Scorpion, stock or
+        // custom), so its placements spawn as the map made them; with none, the Xbox's own, which the trim leaves out
+        // when nothing places it and there are no Race vehicle spawns (the slot stays empty).
+        if (cfg.xbox_vehicle_slots[i].empty()) {
+            const int t = vehicle_type(kXboxDefaultSlots[i]);
+            std::string own;
+            for (auto &v : placed) {
+                if (!fs::exists(xsrc / from_u8(v)) && !have(v)) continue;
+                int vt = mp_vehicle(v) ? vehicle_type(v) : guess_vehicle_type(v);
+                if (vt != t || !rides(v)) continue;
+                if (own.empty() || (mp_vehicle(v) && !mp_vehicle(own))) own = v;   // (a stock one before a custom one)
+            }
+            if (!own.empty() && own != want) {
+                want = own;
+                job.note(std::string("[slots] the \"") + slot_names[i] + "\" slot spawns the map's own " +
+                         fs::path(from_u8(own)).stem().u8string() + " (automatic: the map's vehicle of that kind)");
+            }
+        }
         job.xbox_slots[i] = want;
         if (want == kXboxDefaultSlots[i]) continue;
         // Only one of the map's own vehicles takes a slot: a slot never brings a vehicle the map doesn't have.
