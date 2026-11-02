@@ -39,8 +39,9 @@ struct Options {
                                // open floor far from every waypoint
     int max_features = 200;    // those at most
     std::vector<char> walk_from;   // per point given: bots walk on from it (empty: every point). Not an item spawn point:
-                                   // one on a platform only a ladder reaches (Snow Space's sniper rifles) would have the
-                                   // floor up there taken as floor bots walk
+                                   // one on a platform nothing reaches would have the floor up there taken as floor bots walk
+    std::vector<V3> ladder_tops;   // and from the top of each ladder (find_ladders): bots climb it, so a platform only a
+                                   // ladder reaches (Snow Space's sniper rifles) is floor they walk too
 };
 
 struct Hop {                   // a link, walked one way

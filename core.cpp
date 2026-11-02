@@ -12644,6 +12644,8 @@ void bot_route_points(Job &job, const fs::path &xsrc) {
     botnodes::Options bo;
     if (!job.cfg.xbox_bot_nodes) { bo.max_add = 0; bo.features = false; }
     for (auto &k : kind) bo.walk_from.push_back(k.rfind("item spawn point", 0) != 0);
+    std::vector<botnodes::Ladder> ladders = bdir.empty() ? std::vector<botnodes::Ladder>() : botnodes::find_ladders(bdir / from_u8(bsp));
+    for (auto &L : ladders) bo.ladder_tops.push_back(L.top);   // (Halo 1 Unlimited's bots climb them)
     botnodes::Result br = bdir.empty() ? botnodes::Result() : botnodes::plan(bdir / from_u8(bsp), points, tele, bo);
     if (!br.ok) {
         job.log("  [bots] the map's " + std::to_string(points.size()) + " points for Halo 1 Unlimited's bots (" + counts + ")" +
@@ -12654,7 +12656,7 @@ void bot_route_points(Job &job, const fs::path &xsrc) {
     int added = 0;
     std::vector<botnodes::V3> nodes = mine;   // (the window's, then the ones added)
     nodes.insert(nodes.end(), br.added.begin(), br.added.end());
-    std::vector<botnodes::Ladder> ladders = botnodes::find_ladders(bdir / from_u8(bsp));   // (green: for the bot file)
+    // (the ladders, green: for the bot file)
     if (job.cfg.xbox_perfect) {   // (the scenario's placements stay the map's: the waypoints go in the bot file)
         std::string name = fs::path(from_u8(job.scenario)).filename().u8string(), why;
         job.bot_file = botnodes::bot_file(name, br.added, mine, ladders, &why);

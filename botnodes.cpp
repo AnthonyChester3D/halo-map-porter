@@ -910,6 +910,7 @@ Result plan(const fs::path &bsp, const std::vector<V3> &points, int teleporters,
             for (size_t i = 0; i < points.size() && i < res.point_waypoint.size(); i++)
                 if (o.walk_from[i] && res.point_waypoint[i] >= 0) walk.push_back(w[(size_t)res.point_waypoint[i]].at);
         } else walk = from;
+        walk.insert(walk.end(), o.ladder_tops.begin(), o.ladder_tops.end());
         const int cap = std::max(0, o.budget - o.spare - (int)w.size());
         for (auto &f : find_features(L, from, walk)) {
             if ((int)res.added.size() >= std::min(cap, o.max_features)) break;
