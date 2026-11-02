@@ -379,6 +379,7 @@ struct Job {
     fs::path original;       // an Xbox conversion: the map's tags as extracted (Perfect Conversion compares with them)
     size_t lod_xbox_bytes = 0;
     std::vector<LodView::Model> lod_changes;   // the models whose levels of detail changed (for the LODs window)
+    std::set<std::string> crunched_models;   // models Perfect Conversion made a triangle per part (nothing uses them)
     std::map<std::string, std::string> trim_originals;   // trimmed models (tag) as the map made them, for that window
     // For "Update the map" (update_xbox_models): what xbox_lods was given, and each model file it changed as it was
     // before (path -> bytes), kept with the work folder; `update`: this run only redoes that on the tags prepared.
@@ -1968,7 +1969,13 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
         lod_view = make_lod_view(job, output.stem().u8string());
         lod_file = job.cfg.cache_dir / "lods" / (output.stem().u8string() + ".txt");
         LodView before;
-        if (job.update && load_lod_view(before, lod_file)) keep_collision(lod_view, before);   // (not redone)
+        if (job.update && load_lod_view(before, lod_file)) {
+            keep_collision(lod_view, before);   // (not redone)
+            for (auto &b : before.models)   // (nor is Perfect Conversion's crunching: what it found then holds)
+                if (b.unused)
+                    for (auto &m : lod_view.models)
+                        if (m.tag == b.tag) m.unused = true;
+        }
         if (save_lod_view(lod_view, lod_file)) r.lods = lod_file;
     }
 
@@ -8001,6 +8008,7 @@ static LodView make_lod_view(Job &job, const std::string &map_name) {
     };
     auto add_model = [&](LodView::Model m) {
         m.placed = per_model.count(m.tag) ? per_model[m.tag] : 0;
+        m.unused = job.crunched_models.count(m.tag) > 0;
         fs::path mf = find(m.tag);
         perf::ModelStats ms = mf.empty() ? perf::ModelStats() : perf::model_stats(mf);
         for (int i = 0; i < 5; i++) m.cutoffs[i] = ms.cutoff[i];
@@ -14307,7 +14315,7 @@ static void perfect_ghosts(Job &job) {
                                 *T = {tri};
                                 any = true;
                             }
-                if (any && et.save(job.fixes / from_u8(t))) models++;
+                if (any && et.save(job.fixes / from_u8(t))) { models++; job.crunched_models.insert(t); }
             }
         }
         edited++;
@@ -15267,7 +15275,7 @@ bool save_lod_view(const LodView &v, const fs::path &file) {
         f << m.tag << "\n" << m.name << "\n" << m.change << "\n" << m.kind << " " << m.undone << " " << m.placed << " " << m.radius;
         for (double c : m.cutoffs) f << " " << c;
         for (int l : m.level) f << " " << l;
-        f << " " << m.trimmed_from << " " << m.as_made << " " << m.coll_made << " " << m.coll_now << " " << m.density << " " << m.had_lods << " " << m.stock;
+        f << " " << m.trimmed_from << " " << m.as_made << " " << m.coll_made << " " << m.coll_now << " " << m.density << " " << m.had_lods << " " << m.stock << " " << m.unused;
         f << "\n" << m.collision << "\n" << m.note << "\n";
     }
     f << "end\n";
@@ -15303,6 +15311,7 @@ bool load_lod_view(LodView &out, const fs::path &file) {
         if (v3 && !(ss >> m.density >> m.had_lods)) return false;
         if (v4 && !(ss >> m.stock)) return false;
         if (!v4 && m.change == "stock") m.stock = true;
+        if (v4 && !(ss >> m.unused)) m.unused = false;   // (saved before it was kept)
         if (v2 && !text(m.collision)) return false;
         if (v3 && !text(m.note)) return false;
     }

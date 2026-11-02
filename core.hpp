@@ -273,6 +273,8 @@ struct LodView {
         bool stock = false;              // Bungie's (the Xbox tags'): its levels of detail can change, nothing else
         bool undone = false;             // taken out again: the map didn't fit with them
         int placed = 0;                  // how many are on the map (placed, or at weapon/item spawn points)
+        bool unused = false;             // nothing in a match can hand out what it's drawn for: crunched to a triangle
+                                         // per part (Perfect Conversion), so its levels of detail don't matter
         double cutoffs[5] = {0, 0, 0, 0, 0};   // switch distances, pixels across (super high, high, medium, low, super low)
         double radius = 0;               // the model's size (world units), for the distances in metres
         int level[5] = {-1, -1, -1, -1, -1};   // each level's drawing in `previews` (levels sharing a version share it)

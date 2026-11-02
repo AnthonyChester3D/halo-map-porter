@@ -23,7 +23,7 @@ using namespace porter;
 namespace {
 
 enum { IDC_INTRO = 400, IDC_FILTER_LBL, IDC_FILTER, IDC_LIST, IDC_VIEW, IDC_LEVEL0, IDC_LEVEL4 = IDC_LEVEL0 + 4, IDC_WIRE,
-       IDC_ASMADE, IDC_ABOUT, IDC_LIBRARY, IDC_CLOSE, IDC_SHOW_MODEL, IDC_SHOW_COLL, IDC_SHOW_COLL_MADE, IDC_GROUP,
+       IDC_ASMADE, IDC_ABOUT, IDC_LIBRARY, IDC_CLOSE, IDC_SHOW_MODEL, IDC_SHOW_COLL, IDC_SHOW_COLL_MADE, IDC_GROUP, IDC_HIDE_UNUSED,
        IDC_LODS_LBL, IDC_LODS, IDC_MED_LBL, IDC_MED, IDC_LOW_LBL, IDC_LOW, IDC_TRIS_LBL, IDC_TOP_LBL, IDC_TOP, IDC_TOPN,
        IDC_TOPN_LBL, IDC_STATUS, IDC_AGAIN, IDC_REDO };
 
@@ -54,6 +54,7 @@ struct State {
     lod::Choice saved;            // the shown model's choice, as saved
 };
 State *St = nullptr;
+bool g_hide_unused = true;   // "Hide unused assets" (kept while the app runs)
 
 int S(int v) { return MulDiv(v, St->dpi, 96); }
 HWND item(int id) { return GetDlgItem(St->wnd, id); }
@@ -350,7 +351,16 @@ std::wstring level_triangles(const LodView::Model &m) {
     return tris;
 }
 
+// "Hide unused assets (N)": greyed when there are none.
+void count_unused() {
+    int unused = 0;
+    for (auto &m : St->v.models) unused += m.unused;
+    SetWindowTextW(item(IDC_HIDE_UNUSED), (L"Hide unused assets (" + std::to_wstring(unused) + L")").c_str());
+    EnableWindow(item(IDC_HIDE_UNUSED), unused > 0);
+}
+
 bool shown_by_filter(const LodView::Model &m) {
+    if (g_hide_unused && m.unused) return false;
     if (St->filter == 1) return !m.had_lods && m.kind != 'f';
     if (St->filter == 2) return lod_changed(m) || !m.collision.empty();
     return true;
@@ -456,6 +466,7 @@ void reload(const fs::path &file) {
     for (size_t i = 0; i < St->v.models.size(); i++)
         if (St->v.models[i].tag == shown) keep = (int)i;
     St->model = keep;
+    count_unused();
     fill_list();
     if (keep >= 0) {
         select_model(keep);
@@ -568,6 +579,11 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case IDC_ASMADE:
             show_level(St->level);
             return 0;
+        case IDC_HIDE_UNUSED:
+            save_choice();
+            g_hide_unused = SendMessageW(item(IDC_HIDE_UNUSED), BM_GETCHECK, 0, 0) == BST_CHECKED;
+            fill_list();
+            return 0;
         case IDC_FILTER:
             if (code == CBN_SELCHANGE) {
                 save_choice();
@@ -665,6 +681,10 @@ void create_controls() {
     for (auto t : {L"Every model listed", L"Models made without lower-detail versions (LODs)", L"Models this conversion changed"})
         SendMessageW(f, CB_ADDSTRING, 0, (LPARAM)t);
     SendMessageW(f, CB_SETCURSEL, 0, 0);
+    // (models of things nothing in a match can hand out, crunched to a triangle per part: their LODs don't matter)
+    HWND hu = add(L"BUTTON", L"Hide unused assets", BS_AUTOCHECKBOX | WS_TABSTOP, 432, 57, 220, 22, IDC_HIDE_UNUSED);
+    SendMessageW(hu, BM_SETCHECK, g_hide_unused ? BST_CHECKED : BST_UNCHECKED, 0);
+    count_unused();
     St->list = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT |
                                LVS_SINGLESEL | LVS_SHOWSELALWAYS, S(16), S(84), S(700), S(452), St->wnd, (HMENU)(INT_PTR)IDC_LIST,
                                GetModuleHandleW(nullptr), nullptr);
