@@ -239,6 +239,36 @@ std::map<std::string, TagFile> scan(const std::string &root, int &count) {
     return m;
 }
 
+// A model's markers in each permutation, by name (then node and place): Invader stores them sorted by name in a
+// built model, so an extracted one lists them that way, whatever order the map's own had. The game finds a marker
+// by its name, so the order means nothing.
+void sort_markers(Flat &f) {
+    std::map<std::string, std::map<size_t, std::vector<std::pair<std::string, std::string>>>> el;   // block -> index -> fields
+    std::string where, rest;
+    size_t i;
+    Flat other;
+    for (auto &[k, v] : f) {
+        if (element_of(k, "regions[].permutations[].markers", where, i, rest)) el[where][i].push_back({rest, v});
+        else other.push_back({k, v});
+    }
+    if (el.empty()) return;
+    for (auto &[w, items] : el) {
+        std::vector<std::vector<std::pair<std::string, std::string>>> v;
+        for (auto &[n, fields] : items) v.push_back(fields);
+        auto key = [](const std::vector<std::pair<std::string, std::string>> &fs) {
+            std::string k;
+            for (const char *f : {".name", ".node_index", ".translation", ".rotation"})
+                for (auto &[n, val] : fs)
+                    if (n == f) k += val + "\x01";
+            return k;
+        };
+        std::stable_sort(v.begin(), v.end(), [&](auto &a, auto &b) { return key(a) < key(b); });
+        for (size_t n = 0; n < v.size(); n++)
+            for (auto &[r, val] : v[n]) other.push_back({w + "[" + std::to_string(n) + "]" + r, val});
+    }
+    f.swap(other);
+}
+
 // `ce_has`: whether the Custom Edition map's extraction has a tag ("path.group" as scan keys it).
 void compare(const std::string &tag, const std::string &g, Flat a, Flat b, Result &r, std::set<std::string> &hit,
              const std::function<bool(const std::string &)> &ce_has) {
@@ -250,7 +280,23 @@ void compare(const std::string &tag, const std::string &g, Flat a, Flat b, Resul
         keep_gameplay_elements(a, "events[].parts", "type");
         keep_gameplay_elements(b, "events[].parts", "type");
     }
+    if (g == "model") {
+        sort_markers(a);
+        sort_markers(b);
+    }
     std::map<std::string, std::string> A(a.begin(), a.end()), B(b.begin(), b.end());
+    // An animation graph's animations stored compressed in the Custom Edition map and as plain frames in the Xbox's
+    // (the same motion: Invader keeps the plain frames a compressed animation carries before its compressed copy,
+    // which the Xbox's engine can't read): the frames the Xbox map has are exactly that many bytes.
+    std::set<std::string> uncompressed;   // "animations[n]" whose compressed copy went
+    if (g == "model_animations")
+        for (auto &[k, v] : A) {
+            if (generic(k) != "animations[].flags" || v.find("compressed_data") == std::string::npos) continue;
+            std::string an = k.substr(0, k.size() - 6);
+            auto ib = B.find(k), off = A.find(an + ".offset_to_compressed_data"), fb = B.find(an + ".frame_data");
+            if (ib == B.end() || ib->second.find("compressed_data") != std::string::npos || off == A.end() || fb == B.end()) continue;
+            if (fb->second.rfind(off->second + " bytes", 0) == 0) uncompressed.insert(an);
+        }
     std::vector<std::string> keys;
     for (auto &kv : a) keys.push_back(kv.first);
     for (auto &kv : b)
@@ -279,6 +325,25 @@ void compare(const std::string &tag, const std::string &g, Flat a, Flat b, Resul
         }
         auto clean = [](const std::string &v) { return !v.empty() && v[0] == '@' ? v.substr(1) : v; };
         Diff d{c, tag, k, clean(va), clean(vb)};
+        if (!uncompressed.empty() && (gk == "animations[].flags" || gk == "animations[].offset_to_compressed_data" ||
+                                      gk == "animations[].frame_data")) {
+            size_t dot = k.find('.');
+            if (uncompressed.count(k.substr(0, dot))) {
+                if (gk != "animations[].flags") continue;
+                d.ce = "compressed (and its plain frames)";
+                d.xbox = "its plain frames";
+                note = true;
+            }
+        }
+        // An object overlay naming an animation the graph doesn't have (as Invader can't build it): none.
+        if (g == "model_animations" && gk == "objects[].animation") {
+            auto n = A.find("animations.size");
+            long have = n == A.end() ? 0 : std::atol(n->second.c_str());
+            if (std::atol(va.c_str()) >= have) {
+                d.ce += " (not one of its animations)";
+                note = true;
+            }
+        }
         // A value that's none of the field's choices (an enum out of range, as some of Gearbox's stock tags have):
         // Invader can't build it as it is (the first choice instead). Reported, not counted.
         if (va == "?") {

@@ -1002,7 +1002,8 @@ struct Job {
             if (swap_to_source(tag, msg)) return true;
             // Both copies corrupt: borrow a clean copy from another configured tag set
             // (H1A-EK tags or the Xbox tagset), if it has one.
-            if (!borrowed.count(tag)) {
+            // (Perfect Conversion: a gameplay tag stays the map's, with only the bad value reset)
+            if (!borrowed.count(tag) && !(cfg.xbox_perfect && pairs::gameplay_group(from_u8(tag).extension().u8string().erase(0, 1)))) {
                 for (fs::path alt : {cfg.ek_dir.empty() ? fs::path() : cfg.ek_dir / "tags", cfg.xbox_tags_dir}) {
                     if (alt.empty() || !fs::exists(alt / from_u8(tag)) || alt == overlay || alt == source) continue;
                     if (to_fixes(tag, alt)) {
