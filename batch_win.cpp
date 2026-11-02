@@ -203,6 +203,16 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 bool on = ListView_GetCheckState(St->list, v->iItem) != 0;
                 if (St->items[(size_t)v->iItem].on != on) {
                     St->items[(size_t)v->iItem].on = on;
+                    // A tick box of one of several rows selected: every selected row the same way.
+                    if (ListView_GetItemState(St->list, v->iItem, LVIS_SELECTED) & LVIS_SELECTED) {
+                        filling = true;
+                        for (int r = -1; (r = ListView_GetNextItem(St->list, r, LVNI_SELECTED)) >= 0;)
+                            if (r != v->iItem && r < (int)St->items.size()) {
+                                St->items[(size_t)r].on = on;
+                                ListView_SetCheckState(St->list, r, on);
+                            }
+                        filling = false;
+                    }
                     save();
                     update_buttons();
                 }
