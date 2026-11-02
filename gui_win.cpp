@@ -1838,6 +1838,34 @@ static void open_batch() {
         return g == Game::Unknown ? std::wstring(L"?") : W(game_name(g));
     };
     h.stop = [] { g_batch_stop = true; };
+    // (each map's card: the one last written beside its Xbox map, else its own; every card read once, again after an edit)
+    auto by_out = std::make_shared<std::map<std::string, fs::path>>(mapcard::cards_by_output(cards_root()));
+    auto dir_of = [by_out](const batchui::Item &it) {
+        auto c = by_out->find(mapcard::output_key(fs::path(it.out)));
+        return c != by_out->end() ? c->second : mapcard::card_dir(cards_root(), fs::path(it.in));
+    };
+    auto name_of = [](const batchui::Item &it) { return N(lower(fs::path(it.in).stem().wstring())); };
+    h.card_of = [dir_of, name_of](const batchui::Item &it) -> std::wstring {
+        fs::path d = dir_of(it);
+        std::error_code ec;
+        if (!fs::exists(d / "card.txt", ec)) return L"";
+        mapcard::Card c = mapcard::load_card(d, name_of(it));
+        std::wstring s;   // (what you made: a conversion's own player counts, game types and genres don't count)
+        if (!c.image.empty()) s += L"Picture";
+        if (!c.desc.empty()) s += std::wstring(s.empty() ? L"" : L", ") + L"Description";
+        if (!c.edited.empty()) s += std::wstring(s.empty() ? L"" : L", ") + L"Details";
+        return s;
+    };
+    h.open_card = [dir_of, name_of, by_out](HWND owner, const batchui::Item &it) {
+        fs::path d = dir_of(it), out(it.out);
+        std::string name = name_of(it);
+        mapcard::edit_card(owner, d, name, out.filename().wstring(), L"Map card - " + fs::path(it.in).filename().wstring(),
+                           [out](const mapcard::Card &) { return card_where(out, L"when this map is converted again."); });
+        // (its files beside the Xbox map now, when it's there and the maps are map folders: as a conversion writes them)
+        std::error_code ec;
+        if (folder_mode() && fs::exists(out, ec)) refresh_card_files(d, W(name), out);
+        *by_out = mapcard::cards_by_output(cards_root());
+    };
     // A map added with "Browse...": where it was saved before, else beside the Convert tab's "Save as" (each map in a
     // folder of its own, named for it, when the map list is map folders).
     auto earlier = std::make_shared<std::map<std::wstring, std::wstring>>();

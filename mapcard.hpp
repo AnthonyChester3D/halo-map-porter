@@ -6,6 +6,7 @@
 #pragma once
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -83,6 +84,10 @@ fs::path card_dir(const fs::path &cards_root, const fs::path &source);   // one 
 // The card whose files were last written next to `map_file` (so a built or copied map opens with the card
 // it was made with); empty when there's none. The newest one wins.
 fs::path find_card_by_output(const fs::path &cards_root, const fs::path &map_file);
+// The same for many maps at once: every card's folder by the map it was last written next to (newest wins), looked up
+// with output_key(map_file).
+std::map<std::string, fs::path> cards_by_output(const fs::path &cards_root);
+std::string output_key(const fs::path &map_file);
 Card load_card(const fs::path &dir, const std::string &default_name);
 bool save_card(const fs::path &dir, const Card &c);
 // The map browser's lines for info.txt ("Players: 4-16\r\nGametypes: ...", no line break at the end; "" = none)

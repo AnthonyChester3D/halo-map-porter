@@ -105,6 +105,8 @@ void fill() {
         ListView_SetItemText(St->list, row, 2, (LPWSTR)it.out.c_str());
         ListView_SetItemText(St->list, row, 3, (LPWSTR)it.size.c_str());
         ListView_SetItemText(St->list, row, 4, (LPWSTR)it.status.c_str());
+        std::wstring card = St->hooks.card_of ? St->hooks.card_of(it) : L"";
+        ListView_SetItemText(St->list, row, 5, (LPWSTR)card.c_str());
         ListView_SetCheckState(St->list, row, it.on);
     }
     SendMessageW(St->list, WM_SETREDRAW, TRUE, 0);
@@ -120,7 +122,8 @@ void sort_by(int col) {
     for (auto &it : St->items) {
         std::wstring k = col == 0 ? fs::path(it.in).filename().wstring()
                          : col == 1 ? (St->hooks.game_of ? St->hooks.game_of(it.in) : L"")
-                         : col == 2 ? it.out : col == 4 ? it.status : L"";
+                         : col == 2 ? it.out : col == 4 ? it.status
+                         : col == 5 ? (St->hooks.card_of ? St->hooks.card_of(it) : L"") : L"";
         if (col == 3) {   // (by size: as a number, padded)
             wchar_t b[32];
             swprintf(b, 32, L"%012.2f", _wtof(it.size.c_str()));
@@ -196,6 +199,23 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (n->idFrom == IDC_LIST && n->code == LVN_COLUMNCLICK && !St->running) {
             sort_by(((NMLISTVIEW *)lp)->iSubItem);
             fill();
+            return 0;
+        }
+        if (n->idFrom == IDC_LIST && n->code == NM_RCLICK && St->hooks.open_card) {   // (right click: its map card)
+            int r = ((NMITEMACTIVATE *)lp)->iItem;
+            if (r >= 0 && r < (int)St->items.size()) {
+                HMENU m = CreatePopupMenu();
+                AppendMenuW(m, MF_STRING, 1, L"Open map card...");
+                POINT pt;
+                GetCursorPos(&pt);
+                if (TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, h, nullptr) == 1) {
+                    Item it = St->items[(size_t)r];
+                    St->hooks.open_card(h, it);
+                    std::wstring card = St->hooks.card_of ? St->hooks.card_of(it) : L"";
+                    if (r < (int)St->items.size()) ListView_SetItemText(St->list, r, 5, (LPWSTR)card.c_str());
+                }
+                DestroyMenu(m);
+            }
             return 0;
         }
         if (n->idFrom == IDC_LIST && n->code == LVN_ITEMCHANGED && !filling) {
@@ -367,8 +387,9 @@ void create_controls() {
                                S(16), S(70), S(948), S(400), St->wnd, (HMENU)(INT_PTR)IDC_LIST, GetModuleHandleW(nullptr), nullptr);
     SendMessageW(St->list, WM_SETFONT, (WPARAM)St->font, TRUE);
     ListView_SetExtendedListViewStyle(St->list, LVS_EX_FULLROWSELECT | LVS_EX_CHECKBOXES | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP);
-    struct { const wchar_t *t; int w; } cols[] = {{L"Map", 170}, {L"From", 96}, {L"Saved to", 262}, {L"Size", 70}, {L"Last run", 322}};
-    for (int i = 0; i < 5; i++) {
+    struct { const wchar_t *t; int w; } cols[] = {{L"Map", 170}, {L"From", 90}, {L"Saved to", 236}, {L"Size", 66}, {L"Last run", 252},
+                                                  {L"Map card", 110}};
+    for (int i = 0; i < 6; i++) {
         LVCOLUMNW c{};
         c.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT;
         c.fmt = i == 3 ? LVCFMT_RIGHT : LVCFMT_LEFT;

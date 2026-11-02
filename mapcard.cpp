@@ -298,6 +298,29 @@ static std::string unesc(const std::string &s) {
     }
     return o;
 }
+std::string output_key(const fs::path &map_file) { return path_key(map_file); }
+std::map<std::string, fs::path> cards_by_output(const fs::path &cards_root) {
+    std::error_code ec;
+    std::map<std::string, std::pair<fs::file_time_type, fs::path>> best;
+    for (auto &e : fs::directory_iterator(cards_root, ec)) {
+        fs::path txt = e.path() / "card.txt";
+        std::ifstream f(txt, std::ios::binary);
+        std::string line;
+        while (std::getline(f, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line.compare(0, 7, "output=") != 0) continue;
+            std::string k = path_key(fs::u8path(unesc(line.substr(7))));
+            auto t = fs::last_write_time(txt, ec);
+            auto it = best.find(k);
+            if (it == best.end() || t > it->second.first) best[k] = {t, e.path()};
+            break;
+        }
+    }
+    std::map<std::string, fs::path> out;
+    for (auto &[k, v] : best) out[k] = v.second;
+    return out;
+}
+
 Card load_card(const fs::path &dir, const std::string &default_name) {
     Card c;
     c.folder = sanitize_folder(default_name);

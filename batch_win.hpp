@@ -34,6 +34,10 @@ struct Hooks {
     std::function<void()> stop;
     // Where a map picked with "Browse..." goes (its earlier output, else beside the others); "" if it can't tell.
     std::function<std::wstring(const std::wstring &in)> default_out;
+    // The map card you made for a map ("Picture, description"; "" none: what a conversion fills in itself doesn't
+    // count), and the card editor for it (modal).
+    std::function<std::wstring(const Item &)> card_of;
+    std::function<void(HWND owner, const Item &)> open_card;
     // "Maps at once" as the window opens (1 to kMaxAtOnce), and told when it's changed (to keep it).
     int at_once = 1;
     std::function<void(int)> at_once_changed;
