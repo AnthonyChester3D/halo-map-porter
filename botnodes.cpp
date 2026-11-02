@@ -780,6 +780,7 @@ std::vector<Feature> find_features(const Level &L, const std::vector<V3> &spawns
             for (int c = b; c >= 0; c = par[idx[c]]) way.push_back(c);
             std::reverse(way.begin(), way.end());
             if (way.size() < 2) continue;
+            const std::vector<int> main_line = way;   // (before it's moved to the middle: the branches start from it)
             // (its middle line: each step moved across to the middle of the narrow floor there)
             for (auto &c : way) {
                 const V3 &ax = axis[(size_t)c];
@@ -819,6 +820,43 @@ std::vector<Feature> find_features(const Level &L, const std::vector<V3> &spawns
             way.insert(way.begin(), beyond(way.front(), way[std::min<size_t>(3, way.size() - 1)], 1.5));
             way.push_back(beyond(way.back(), way[way.size() >= 5 ? way.size() - 5 : 0], 1.5));
             along_way(way, 2, ledge ? 2.0 : 6.0, !ledge);
+            // Its branches: a narrow way that forks (a doorway off a walkway, a side tunnel) is followed from end to end
+            // only along its longest line. Each part more than 2 units' walk from the lines followed so far gets a line
+            // of its own, from where it leaves them to its far end and on into the open there: its doorway, and each
+            // turn on the way.
+            {
+                std::set<int> inside(comp.begin(), comp.end());
+                std::vector<int> covered = main_line;
+                for (int br = 0; br < 8; br++) {
+                    std::map<int, double> far_of;
+                    std::map<int, int> from;
+                    using QE = std::pair<double, int>;
+                    std::priority_queue<QE, std::vector<QE>, std::greater<QE>> pq;
+                    for (int c : covered) { far_of[c] = 0; from[c] = -1; pq.push({0, c}); }
+                    while (!pq.empty()) {
+                        auto [d, c] = pq.top();
+                        pq.pop();
+                        if (d > far_of[c]) continue;
+                        for (int m : g.nb[(size_t)c]) {
+                            if (m < 0 || !inside.count(m)) continue;
+                            double nd = d + dist(g.at[(size_t)c], g.at[(size_t)m]);
+                            auto it = far_of.find(m);
+                            if (it == far_of.end() || nd < it->second) { far_of[m] = nd; from[m] = c; pq.push({nd, m}); }
+                        }
+                    }
+                    int tip = -1;
+                    double td = 2.0;
+                    for (auto &[c, d] : far_of)
+                        if (d > td) { td = d; tip = c; }
+                    if (tip < 0) break;
+                    std::vector<int> branch;
+                    for (int c = tip; c >= 0; c = from[c]) branch.push_back(c);
+                    std::reverse(branch.begin(), branch.end());   // (from the line it leaves to its far end)
+                    covered.insert(covered.end(), branch.begin(), branch.end());
+                    branch.push_back(beyond(branch.back(), branch[branch.size() >= 5 ? branch.size() - 5 : 0], 1.5));
+                    along_way(branch, 2, 6.0, false);
+                }
+            }
         }
     }
     // Open floor: wherever it's more than kOpen units' walk from every waypoint (the map's, yours, the ones above), one
