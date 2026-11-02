@@ -226,8 +226,8 @@ void save_choice() {
         ListView_SetItemText(St->list, r, 6, (LPWSTR)t.c_str());
     }
     std::wstring t = L"Saved for " + W(m.name) + L". " +
-                     (St->redo ? L"\"Make it again\" shows it now; " : L"") + L"\"" + (St->built ? L"Update" : L"Build") +
-                     L" the map\" puts it in the map.";
+                     (St->redo ? L"\"Make it again\" shows it now; " : L"") +
+                     (St->built ? L"converting the map again puts it in the map." : L"\"Build the map\" puts it in the map.");
     int top = triangles(m.level[0]);
     if (m.trimmed_from > 0) top = m.trimmed_from;
     if (c.lods == 'm' && m.had_lods) t += L" Its own lower-detail versions are replaced by ones the app makes.";
@@ -480,7 +480,7 @@ void finish_update(Result *res) {
     reload(r->lods);
     std::wstring t = r->ok ? (St->built ? L"Updated the map" : L"Built the map") : L"The map didn't build: " + W(r->error);
     if (r->ok) St->built = true;
-    SetWindowTextW(item(IDC_AGAIN), St->built ? L"Update the map" : L"Build the map");
+    if (St->built) ShowWindow(item(IDC_AGAIN), SW_HIDE);   // (built: Convert on the main window builds it again)
     if (r->ok && !r->memory.empty()) t += L" (" + W(r->memory) + L")";
     status(t + L".");
 }
@@ -519,8 +519,9 @@ void finish_redo(Result *res) {
     }
     std::string name = St->model >= 0 ? St->v.models[St->model].name : std::string();
     reload(r->lods);
-    status(L"Made " + W(name) + L" again: its levels above. Not in the map yet: \"" + (St->built ? L"Update" : L"Build") +
-           L" the map\" puts every model's choice in it.");
+    status(L"Made " + W(name) + L" again: its levels above. Not in the map yet: " +
+           (St->built ? L"converting the map again puts every model's choice in it."
+                      : L"\"Build the map\" puts every model's choice in it."));
 }
 
 LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
@@ -720,7 +721,10 @@ void create_controls() {
     add(L"BUTTON", L"Open the LOD library folder", WS_TABSTOP, 16, 650, 220, 30, IDC_LIBRARY);
     add(L"STATIC", L"", SS_NOPREFIX, 248, 650, 470, 34, IDC_STATUS);
     add(L"BUTTON", L"Make it again", WS_TABSTOP, 728, 650, 150, 30, IDC_REDO);
-    add(L"BUTTON", St->built ? L"Update the map" : L"Build the map", WS_TABSTOP, 888, 650, 150, 30, IDC_AGAIN);
+    // (only for a map prepared but not built yet: a built one is built again by converting it again, never from here
+    // by accident)
+    add(L"BUTTON", L"Build the map", WS_TABSTOP, 888, 650, 150, 30, IDC_AGAIN);
+    if (St->built) ShowWindow(item(IDC_AGAIN), SW_HIDE);
     if (!St->redo) ShowWindow(item(IDC_REDO), SW_HIDE);
     add(L"BUTTON", L"Close", WS_TABSTOP | BS_DEFPUSHBUTTON, 1048, 650, 116, 30, IDC_CLOSE);
     for (int i = 0; i < 5; i++) ShowWindow(item(IDC_LEVEL0 + i), SW_HIDE);
@@ -748,7 +752,8 @@ void create_controls() {
                    L"the map as built.");
     tip(IDC_REDO, L"Makes the model shown again with its choice above (its lower-detail versions and trim, from the model as "
                   L"the map made it), and shows its levels here: a moment, without building the map. Try triangle counts "
-                  L"until it looks right, then \"Update the map\" (or \"Build the map\") puts every model's choice in the map.");
+                  L"until it looks right, then convert the map again (or \"Build the map\" when it isn't built yet) to put every model's "
+                  L"choice in the map.");
 }
 
 }   // namespace
