@@ -1526,7 +1526,7 @@ static std::string shaders_key(const Config &cfg, const fs::path &in) {
     auto mt = fs::last_write_time(in, ec);
     return N(lower(in.wstring())) + "|" + std::to_string((long long)mt.time_since_epoch().count()) + "|" +
            (cfg.xbox_add_portals ? "p" : "-") + (cfg.xbox_replan_portals ? "r" : "-") +
-           "|5";   // (2: the bots' waypoints measured too, and spawn points that spawn nothing not drawn; 3: the sky; 4: its layers combined; 5: generic and water layers too)
+           "|6";   // (2: the bots' waypoints measured too, and spawn points that spawn nothing not drawn; 3: the sky; 4: its layers combined; 5: generic and water layers too; 6: measured again, past ones from before generic layers were fixed)
 }
 
 // The folder the Xbox map goes in (its showcase.txt goes beside its info.txt there): the Convert tab's output's, or
