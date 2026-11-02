@@ -1923,7 +1923,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
     };
     std::vector<std::string> cmd = make_cmd();
     bool scripts_tried = false;
-    int none_fixes = 0;
+    int none_fixes = 0, missing_fixes = 0;
     // The map doesn't fit the Xbox with the lower-detail versions the app made: take them out again (they're for
     // speed; the map's content comes first). `why` empty: quietly (measuring the map as it is without them).
     auto undo_lods = [&](const std::string &why) {
@@ -2231,6 +2231,36 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
                            "If that isn't enough, the map needs a simpler BSP or fewer custom objects.";
             r.error += size_breakdown(job);
             return r;
+        }
+        // A tag Invader couldn't extract from the map (its data out of bounds: Ambry's plasma cannon's first-person model)
+        // isn't there to build: the reference to it is left empty, so the rest of the map builds (in the game it draws
+        // nothing there). Textures and sounds are below (their data is in a resource map).
+        if (job.from != Game::Unknown && missing_fixes < 20) {
+            static const std::regex missing(R"(^Failed to find (.+\.(\w+))\s*$)"), compiling(R"(^Failed to compile tag (.+\.\w+)\s*$)");
+            std::vector<std::string> ls = unwrap(out);
+            bool fixed = false;
+            for (size_t i = 0; i + 1 < ls.size() && !fixed; i++) {
+                std::smatch mm, cm;
+                if (!std::regex_match(ls[i], mm, missing) || mm[2] == "bitmap" || mm[2] == "sound") continue;
+                if (!std::regex_match(ls[i + 1], cm, compiling)) continue;
+                std::string gone = norm_rel(mm[1]), user = norm_rel(cm[1]);
+                fs::path own = job.owner(user);
+                std::vector<std::pair<std::string, std::string>> flat;
+                if (own.empty() || !tagedit::flatten(u8(own / from_u8(user)), flat)) continue;
+                for (auto &[k, v] : flat) {
+                    if (v.size() < 2 || v[0] != '@') continue;
+                    std::string d = v.substr(1);
+                    std::replace(d.begin(), d.end(), '\\', '/');
+                    if (d != gone || !job.edit(user, k, "")) continue;
+                    job.note("[fix]  " + user + ": its " + k + " (" + gone + ") couldn't be extracted from the map (Invader "
+                             "found its data out of bounds), so it's left empty: nothing is drawn there");
+                    fixed = true;
+                }
+            }
+            if (fixed) {
+                missing_fixes++;
+                continue;
+            }
         }
         if (job.from != Game::Unknown) {
             // A converted map's texture or sound that extraction couldn't read: its data is in a resource map we lacked.

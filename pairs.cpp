@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <set>
 
 namespace pairs {
@@ -238,7 +239,9 @@ std::map<std::string, TagFile> scan(const std::string &root, int &count) {
     return m;
 }
 
-void compare(const std::string &tag, const std::string &g, Flat a, Flat b, Result &r, std::set<std::string> &hit) {
+// `ce_has`: whether the Custom Edition map's extraction has a tag ("path.group" as scan keys it).
+void compare(const std::string &tag, const std::string &g, Flat a, Flat b, Result &r, std::set<std::string> &hit,
+             const std::function<bool(const std::string &)> &ce_has) {
     if (object_group(g)) {
         keep_gameplay_elements(a, "attachments", "type");
         keep_gameplay_elements(b, "attachments", "type");
@@ -282,6 +285,16 @@ void compare(const std::string &tag, const std::string &g, Flat a, Flat b, Resul
             d.ce = "(not one of its choices)";
             note = true;
         }
+        // A reference to a tag that couldn't be extracted from the Custom Edition map (its data out of bounds): it
+        // can't be in the Xbox map either. Reported, not counted.
+        if (dep && va.size() > 1) {
+            std::string t = dep_key(va).substr(1);
+            std::replace(t.begin(), t.end(), '\\', '/');
+            if (!ce_has(t)) {
+                d.ce += " (couldn't be read from the Custom Edition map)";
+                note = true;
+            }
+        }
         if (note) {
             r.notes.push_back(d);
         } else {
@@ -318,7 +331,7 @@ Result check(const std::string &ce_dir, const std::string &xbox_dir) {
             r.diffs.push_back({"unreadable", key, "", "", ""});
             continue;
         }
-        compare(key, g, std::move(a), std::move(b), r, hit);
+        compare(key, g, std::move(a), std::move(b), r, hit, [&](const std::string &t) { return A.count(t) > 0; });
     }
     for (auto &[key, fb] : B) {
         std::string g = key.substr(key.rfind('.') + 1);
