@@ -38,6 +38,9 @@ struct Hooks {
     // count), and the card editor for it (modal).
     std::function<std::wstring(const Item &)> card_of;
     std::function<void(HWND owner, const Item &)> open_card;
+    // A map put on the Convert tab (its map and where it's saved): double-click, or right-click "Use on the Convert
+    // tab". The window closes after it (not while converting).
+    std::function<void(const Item &)> use;
     // "Maps at once" as the window opens (1 to kMaxAtOnce), and told when it's changed (to keep it).
     int at_once = 1;
     std::function<void(int)> at_once_changed;

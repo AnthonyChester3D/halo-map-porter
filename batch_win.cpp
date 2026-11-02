@@ -201,18 +201,32 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             fill();
             return 0;
         }
-        if (n->idFrom == IDC_LIST && n->code == NM_RCLICK && St->hooks.open_card) {   // (right click: its map card)
+        if (n->idFrom == IDC_LIST && n->code == NM_DBLCLK && St->hooks.use && !St->running) {   // (double click: use it)
+            int r = ((NMITEMACTIVATE *)lp)->iItem;
+            if (r >= 0 && r < (int)St->items.size()) {
+                St->hooks.use(St->items[(size_t)r]);
+                St->closing = true;
+            }
+            return 0;
+        }
+        if (n->idFrom == IDC_LIST && n->code == NM_RCLICK) {   // (right click: its map card, or use it)
             int r = ((NMITEMACTIVATE *)lp)->iItem;
             if (r >= 0 && r < (int)St->items.size()) {
                 HMENU m = CreatePopupMenu();
-                AppendMenuW(m, MF_STRING, 1, L"Open map card...");
+                if (St->hooks.use)
+                    AppendMenuW(m, MF_STRING | (St->running ? MF_GRAYED : 0), 2, L"Use on the Convert tab");
+                if (St->hooks.open_card) AppendMenuW(m, MF_STRING, 1, L"Open map card...");
                 POINT pt;
                 GetCursorPos(&pt);
-                if (TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, h, nullptr) == 1) {
-                    Item it = St->items[(size_t)r];
+                int pick = (int)TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, h, nullptr);
+                Item it = St->items[(size_t)r];
+                if (pick == 1) {
                     St->hooks.open_card(h, it);
                     std::wstring card = St->hooks.card_of ? St->hooks.card_of(it) : L"";
                     if (r < (int)St->items.size()) ListView_SetItemText(St->list, r, 5, (LPWSTR)card.c_str());
+                } else if (pick == 2 && !St->running) {
+                    St->hooks.use(it);
+                    St->closing = true;
                 }
                 DestroyMenu(m);
             }

@@ -1856,6 +1856,16 @@ static void open_batch() {
         if (!c.edited.empty()) s += std::wstring(s.empty() ? L"" : L", ") + L"Details";
         return s;
     };
+    h.use = [](const batchui::Item &it) {
+        set_text(ID_IN, it.in);
+        g_last_in.clear();   // (taken as a newly picked map, even the same one)
+        on_input_chosen();
+        set_text(ID_OUT, it.out);   // (where it was saved: as picked with "Save as")
+        g_out_manual = true;
+        sync_conv_name_from_out();
+        update_conv_hint();
+        save_settings();
+    };
     h.open_card = [dir_of, name_of, by_out](HWND owner, const batchui::Item &it) {
         fs::path d = dir_of(it), out(it.out);
         std::string name = name_of(it);
