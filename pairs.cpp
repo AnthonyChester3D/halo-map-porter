@@ -67,6 +67,15 @@ bool needed_group(const std::string &g) {
            g == "scenario_structure_bsp" || g == "globals";
 }
 
+// Tags the network names by ID (objects, damage, item collections, AI), and the level's own: one missing from the Xbox
+// map breaks the link. The rest (effects, point physics, collision, animations...) only count where a compared tag
+// uses them, and then the build has them: one missing is only used by looks (a slip effect from a material's
+// effects, a particle's point physics), so the Xbox tagset's own look took its place.
+bool named_group(const std::string &g) {
+    return object_group(g) || g == "damage_effect" || g == "continuous_damage_effect" || g == "item_collection" ||
+           g == "actor" || g == "actor_variant" || g == "scenario" || g == "scenario_structure_bsp" || g == "globals";
+}
+
 // "a[3].b[12].c" -> "a[].b[].c"
 std::string generic(const std::string &k) {
     std::string g;
@@ -296,7 +305,7 @@ Result check(const std::string &ce_dir, const std::string &xbox_dir) {
         std::string g = key.substr(key.rfind('.') + 1);
         auto it = B.find(key);
         if (it == B.end()) {
-            if (needed_group(g)) {
+            if (named_group(g)) {
                 r.diffs.push_back({"missing", key, "", "(in the map)", "(not in the map)"});
                 r.failed["missing"]++;
             }

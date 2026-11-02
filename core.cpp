@@ -888,6 +888,58 @@ struct Job {
                 return true;
             }
         }
+        // A weapon with more zoom levels than its zoom overlay crosshair's sequence has pictures (Halo 3's sniper rifle:
+        // one scope picture for both zooms; MCC draws the last one again): that picture repeated in the bitmap, as a
+        // sequence of its own added at the end (nothing else that uses the bitmap changes), and the overlay uses it.
+        static const std::regex zoom_seq(R"(Weapon has (\d+) zoom levels?, but the sequence referenced in crosshair overlay #(\d+) of crosshair #(\d+) only has (\d+) (bitmap|sprite))");
+        if (std::regex_search(msg, m, zoom_seq)) {
+            const int need = std::stoi(m[1]), have = std::stoi(m[4]);
+            const std::string o = m[2], c = m[3];
+            const bool sprites = m[5] == "sprite";
+            auto get = [&](const std::string &t, const std::string &key) {
+                fs::path own = owner(t);
+                std::string v;
+                if (own.empty() || run_process({u8(tool(cfg, "invader-edit")), "-t", u8(own), t, "-G", key}, v) != 0) return std::string();
+                while (!v.empty() && (v.back() == '\n' || v.back() == '\r' || v.back() == ' ')) v.pop_back();
+                return v;
+            };
+            auto ref = [&](const std::string &t, const std::string &key) {
+                std::string v = get(t, key);
+                return v.empty() || v[0] == '.' || v.find('\n') != std::string::npos ? std::string() : norm_rel(v);
+            };
+            std::string hud = ref(tag, "hud_interface");
+            std::string ov = "crosshairs[" + c + "].crosshair_overlays[" + o + "]";
+            std::string bm = hud.empty() ? std::string() : ref(hud, "crosshairs[" + c + "].crosshair_bitmap");
+            std::string seq = hud.empty() ? std::string() : get(hud, ov + ".sequence_index");
+            fs::path own = bm.empty() ? fs::path() : owner(bm);
+            if (need > have && have > 0 && !seq.empty() && isdigit((unsigned char)seq[0]) && !own.empty() &&
+                (own == fixes || to_fixes(bm, own))) {
+                std::vector<std::string> cmd{u8(tool(cfg, "invader-edit")), "-t", u8(fixes), bm, "-n"};
+                std::string s = "bitmap_group_sequence[" + seq + "]", out, new_seq;
+                if (sprites) {   // (more sprites in the same sequence: the last one again)
+                    for (int i = have; i < need; i++)
+                        cmd.insert(cmd.end(), {"-c", s + ".sprites[" + std::to_string(have - 1) + "]", "end"});
+                } else {
+                    int first = std::atoi(get(bm, s + ".first_bitmap_index").c_str());
+                    int bitmaps = 0;
+                    std::string nb, ns;
+                    run_process({u8(tool(cfg, "invader-edit")), "-t", u8(fixes), bm, "-C", "bitmap_data"}, nb);
+                    run_process({u8(tool(cfg, "invader-edit")), "-t", u8(fixes), bm, "-C", "bitmap_group_sequence"}, ns);
+                    bitmaps = std::atoi(nb.c_str());
+                    new_seq = std::to_string(std::atoi(ns.c_str()));
+                    for (int i = 0; i < need; i++)
+                        cmd.insert(cmd.end(), {"-c", "bitmap_data[" + std::to_string(first + std::min(i, have - 1)) + "]", "end"});
+                    cmd.insert(cmd.end(), {"-c", s, "end",
+                                           "-S", "bitmap_group_sequence[" + new_seq + "].first_bitmap_index", std::to_string(bitmaps),
+                                           "-S", "bitmap_group_sequence[" + new_seq + "].bitmap_count", std::to_string(need)});
+                }
+                if (run_process(cmd, out) == 0 && (sprites || edit(hud, ov + ".sequence_index", new_seq))) {
+                    note("[fix]  " + tag + ": " + std::to_string(need) + " zoom levels, but its zoom overlay (" + bm + ") had " +
+                         std::to_string(have) + " picture" + (have == 1 ? "" : "s") + " for them; the last one repeated for the others");
+                    return true;
+                }
+            }
+        }
         // A bitmap with textures but no sequence (MCC draws its first texture): one sequence of all of them.
         if (msg.find("Bitmap has no sequences") != std::string::npos) {
             fs::path own = owner(tag);
