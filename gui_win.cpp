@@ -1434,6 +1434,8 @@ static shadersui::Picks load_shader_picks(const fs::path &input) {
                         &L.top[1], &L.top[2], &L.dx, &L.dy, &down) >= 8) {
             L.down = down != 0;
             picks.ladders.push_back(L);
+        } else if (sscanf(bl.c_str(), "removed %lf %lf %lf", &p[0], &p[1], &p[2]) == 3) {
+            picks.bots_removed.push_back(p);
         } else if (sscanf(bl.c_str(), "%lf %lf %lf", &p[0], &p[1], &p[2]) == 3) picks.bots.push_back(p);
     }
     {   // (the bot file's name)
@@ -1457,13 +1459,17 @@ static void save_shader_picks(const fs::path &input, const shadersui::Picks &pic
     {
         fs::path bf = p;
         bf.replace_extension(L".bots.txt");
-        if (picks.bots.empty() && !picks.ladders_set) fs::remove(bf, ec);
+        if (picks.bots.empty() && picks.bots_removed.empty() && !picks.ladders_set) fs::remove(bf, ec);
         else {
             fs::create_directories(bf.parent_path(), ec);
             std::ofstream f(bf, std::ios::binary | std::ios::trunc);
             char b[256];
             for (auto &q : picks.bots) {
                 snprintf(b, sizeof b, "%.4f %.4f %.4f\n", q[0], q[1], q[2]);
+                f << b;
+            }
+            for (auto &q : picks.bots_removed) {
+                snprintf(b, sizeof b, "removed %.4f %.4f %.4f\n", q[0], q[1], q[2]);
                 f << b;
             }
             if (picks.ladders_set) {
@@ -1508,6 +1514,7 @@ static void apply_shader_picks(Config &cfg, const fs::path &input) {
     cfg.xbox_scenery_pixels = picks.tiny_px;
     cfg.xbox_showcase_text = picks.showcase;
     cfg.xbox_bot_waypoints = picks.bots;
+    cfg.xbox_bot_removed = picks.bots_removed;
     cfg.xbox_weather = picks.weather;
     cfg.xbox_rider_ai_off = picks.riders == 1;
     cfg.xbox_detailed_props_off = picks.props == 1;

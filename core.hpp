@@ -89,6 +89,8 @@ struct Config {
     bool xbox_bot_nodes = true;
     // Waypoints for the bots placed in the Level window (each where an item spawn point that spawns nothing goes).
     std::vector<std::array<double, 3>> xbox_bot_waypoints;
+    // Spots the Level window took added waypoints out of: none is added near them (botnodes::Options::removed).
+    std::vector<std::array<double, 3>> xbox_bot_removed;
     // And divide further the clusters of levels made with portals of their own, when that draws 15% less (each keeps
     // its cluster's sky, fog, sound and weather); also a second time over a level the app just gave portals.
     bool xbox_replan_portals = false;

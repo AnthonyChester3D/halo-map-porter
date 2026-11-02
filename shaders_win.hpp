@@ -43,6 +43,8 @@ struct Picks {
     // Config::xbox_bot_waypoints), and whether conversions add their own (Config::xbox_bot_nodes: the window plans as
     // a conversion would; not kept with the picks).
     std::vector<std::array<double, 3>> bots;
+    // Added waypoints you took out: spots no waypoint is added near (botnodes::Options::removed).
+    std::vector<std::array<double, 3>> bots_removed;
     bool bots_auto = true;
     // Ladders for Halo 1 Unlimited's bots (botnodes::Ladder: foot, top end, the way in, a way down too), written to the
     // map's bot file, never into the map. `ladders_set`: changed in the window (kept); else found in the level anew.

@@ -186,6 +186,16 @@ int main(int argc, char **argv) {
     }
     if (getenv("XNOPORTALS")) cfg.xbox_add_portals = false;
     if (getenv("XNOBOTS")) cfg.xbox_bot_nodes = false;
+    if (const char *w = getenv("XBOTOUT")) {   // spots added waypoints were taken out of: "x y z;x y z"
+        std::string all = w;
+        for (size_t at = 0; at < all.size();) {
+            size_t end = all.find(';', at);
+            if (end == std::string::npos) end = all.size();
+            std::array<double, 3> p{};
+            if (sscanf(all.substr(at, end - at).c_str(), "%lf %lf %lf", &p[0], &p[1], &p[2]) == 3) cfg.xbox_bot_removed.push_back(p);
+            at = end + 1;
+        }
+    }
     if (const char *w = getenv("XBOTWP")) {   // the Level window's bot waypoints: "x y z;x y z"
         std::string all = w;
         for (size_t at = 0; at < all.size();) {

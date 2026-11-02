@@ -822,6 +822,52 @@ std::vector<Feature> find_features(const Level &L, const std::vector<V3> &spawns
             spread(best);
         }
     }
+    // Away from walls and drops: a waypoint within a unit of one has bots rubbing the wall (crouching under it) or
+    // walking at the edge. Each is moved, up to a unit, to the floor nearby furthest from either.
+    {
+        const double kWant = 1.0;
+        std::vector<float> clear(n, 1e30f);
+        std::vector<int> q;
+        for (size_t f = 0; f < n; f++)
+            for (int d = 0; d < 8; d += 2)
+                if (g.nb[f][(size_t)d] < 0) { clear[f] = 0; q.push_back((int)f); break; }
+        for (size_t k = 0; k < q.size(); k++) {   // (breadth first: a grid step at a time)
+            int c = q[k];
+            if (clear[(size_t)c] >= kWant) continue;
+            for (int d = 0; d < 8; d++) {
+                int m = g.nb[(size_t)c][(size_t)d];
+                float nd = clear[(size_t)c] + (float)(g.h * ((d & 1) ? 1.4142 : 1.0));
+                if (m >= 0 && nd < clear[(size_t)m]) { clear[(size_t)m] = nd; q.push_back(m); }
+            }
+        }
+        for (auto &o : out) {
+            int ci = (int)std::floor((o.p[0] - g.x0) / g.h), cj = (int)std::floor((o.p[1] - g.y0) / g.h);
+            if (ci < 0 || cj < 0 || ci >= g.nx || cj >= g.ny) continue;
+            int c = cj * g.nx + ci, f0 = -1;
+            for (int f = g.first[(size_t)c]; f < g.first[(size_t)c + 1]; f++)
+                if (std::fabs(g.at[(size_t)f][2] - o.p[2]) < 0.6 && (f0 < 0 || std::fabs(g.at[(size_t)f][2] - o.p[2]) < std::fabs(g.at[(size_t)f0][2] - o.p[2]))) f0 = f;
+            if (f0 < 0 || clear[(size_t)f0] >= kWant) continue;
+            // (the floor within a unit's walk of it, on the same kind of floor: a ramp's stays on the ramp)
+            int best = f0;
+            std::map<int, double> seen{{f0, 0.0}};
+            std::vector<int> fr{f0};
+            for (size_t k = 0; k < fr.size(); k++) {
+                int c2 = fr[k];
+                double dc = seen[c2];
+                for (int d = 0; d < 8; d++) {
+                    int m = g.nb[(size_t)c2][(size_t)d];
+                    if (m < 0 || !reach[(size_t)m] || seen.count(m)) continue;
+                    double nd = dc + g.h * ((d & 1) ? 1.4142 : 1.0);
+                    if (nd > kWant) continue;
+                    if (o.kind == 1 && !slope((size_t)m)) continue;
+                    seen[m] = nd;
+                    fr.push_back(m);
+                    if (clear[(size_t)m] > clear[(size_t)best] + 0.01) best = m;
+                }
+            }
+            if (best != f0) o.p = g.at[(size_t)best];
+        }
+    }
     return out;
 }
 
@@ -951,6 +997,7 @@ Result plan(const fs::path &bsp, const std::vector<V3> &points, int teleporters,
             if (sf == kNone) continue;
             bool near = false;
             for (auto &x : w) near = near || dist(x.at, gp) < 1.6;
+            for (auto &x : o.removed) near = near || dist(x, gp) < kRemovedRadius;
             if (near) continue;
             w.push_back({gp, sf});
             tele_to.push_back(-1);
@@ -1042,6 +1089,11 @@ Result plan(const fs::path &bsp, const std::vector<V3> &points, int teleporters,
                     for (size_t i = 0; i < w.size() && ex < 0; i++)
                         if (dist(w[i].at, g) < 1.0) ex = (int)i;
                     if (ex >= 0) c = w[(size_t)ex];
+                    else {   // (not where you took one out)
+                        bool out = false;
+                        for (auto &x : o.removed) out = out || dist(x, g) < kRemovedRadius;
+                        if (out) continue;
+                    }
                     if (dist(c.at, cur.at) < 0.5 || !safe(cur, c) || !would_link(cur, c, ex >= 0 ? nullptr : &c)) continue;
                     pick = k;
                     next = c;

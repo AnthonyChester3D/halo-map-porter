@@ -12644,6 +12644,7 @@ void bot_route_points(Job &job, const fs::path &xsrc) {
     botnodes::Options bo;
     if (!job.cfg.xbox_bot_nodes) { bo.max_add = 0; bo.features = false; }
     for (auto &k : kind) bo.walk_from.push_back(k.rfind("item spawn point", 0) != 0);
+    bo.removed.assign(job.cfg.xbox_bot_removed.begin(), job.cfg.xbox_bot_removed.end());
     std::vector<botnodes::Ladder> ladders = bdir.empty() ? std::vector<botnodes::Ladder>() : botnodes::find_ladders(bdir / from_u8(bsp));
     for (auto &L : ladders) bo.ladder_tops.push_back(L.top);   // (Halo 1 Unlimited's bots climb them)
     botnodes::Result br = bdir.empty() ? botnodes::Result() : botnodes::plan(bdir / from_u8(bsp), points, tele, bo);
@@ -14880,6 +14881,7 @@ std::string xbox_prepare_key(const Config &c) {
     k << "anim=" << c.xbox_compress_animations << " coll=" << c.xbox_collision << " portals=" << c.xbox_add_portals
       << c.xbox_replan_portals << " bots=" << c.xbox_bot_nodes << "\n";
     for (auto &w : c.xbox_bot_waypoints) k << "waypoint=" << w[0] << " " << w[1] << " " << w[2] << "\n";
+    for (auto &w : c.xbox_bot_removed) k << "removed=" << w[0] << " " << w[1] << " " << w[2] << "\n";
     k << "fog=" << c.xbox_fog << " " << c.xbox_fog_scale << " " << c.xbox_fog_distance << " " << c.xbox_fog_start << "\n";
     k << "fx=" << c.xbox_effects << " sky=" << c.xbox_sky << " weather=" << c.xbox_weather << " riders=" << c.xbox_rider_ai_off
       << " props=" << c.xbox_detailed_props_off << " lights=" << c.xbox_object_lights << "\n";

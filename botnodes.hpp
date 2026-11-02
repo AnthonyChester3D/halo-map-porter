@@ -40,9 +40,13 @@ struct Options {
     int max_features = 200;    // those at most
     std::vector<char> walk_from;   // per point given: bots walk on from it (empty: every point). Not an item spawn point:
                                    // one on a platform nothing reaches would have the floor up there taken as floor bots walk
+    std::vector<V3> removed;       // spots you took an added waypoint out of (the Level window): none is added within
+                                   // kRemovedRadius of one, though the map's own and yours still are
     std::vector<V3> ladder_tops;   // and from the top of each ladder (find_ladders): bots climb it, so a platform only a
                                    // ladder reaches (Snow Space's sniper rifles) is floor they walk too
 };
+
+const double kRemovedRadius = 1.5;
 
 struct Hop {                   // a link, walked one way
     int a = -1, b = -1;        // waypoints (indices into Result::waypoints)

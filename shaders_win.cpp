@@ -108,6 +108,8 @@ struct State {
     std::vector<int> bot_mine_at;   // each of yours: its waypoint (in bot_res.waypoints), or -1
     std::vector<char> bot_mine_merged;   // (that waypoint an earlier point's: within 1 unit of it)
     int bot_sel = -1;               // (one of yours, picked)
+    int bot_auto_sel = -1;          // (an added one, orange, picked: in bot_res.waypoints; Delete takes it out)
+    int bot_out_sel = -1;           // (a spot one was taken out of, picked: in picks.bots_removed; Delete puts it back)
     // Ladders (botnodes::Ladder): St->picks.ladders, found in the level until you change them. A click in the picture
     // places a ladder's foot or top while lad_mode says so: 1 a new one's foot, 2 its top, 3 the picked one's foot,
     // 4 its top.
@@ -531,6 +533,7 @@ void set_sc_mode(bool on) {
 }
 // ---- the bots' waypoints (botnodes.hpp): in place of the list, drawn in the picture, yours added by clicking it
 const uint32_t kMapMark = 0xFF4A90FF, kMineMark = 0xFF36F07A, kAutoMark = 0xFFFF8C1A, kPickedMark = 0xFFFFFFFF;
+const uint32_t kOutMark = 0xFF8A2A2A;   // (a spot an added waypoint was taken out of)
 const uint32_t kGoodLine = 0x9050D070, kRoundLine = 0xB0F0B030, kStuckLine = 0xFFFF3A3A;
 const uint32_t kLadderLine = 0xFF3CDC5A, kLadderPicked = 0xFFB4FFC0, kStackedLine = 0xFFE040E0;
 
@@ -606,6 +609,12 @@ void bots_frame(glpreview::Frame &f) {
     for (auto &[a, b] : St->bot_stacked)
         if (a < (int)r.waypoints.size() && b < (int)r.waypoints.size())
             f.lines.push_back({up(r.waypoints[(size_t)a], 0.3), up(r.waypoints[(size_t)b], 0.3), kStackedLine, 2.5f});
+    if (!St->bots_hide)
+        for (size_t k = 0; k < St->picks.bots_removed.size(); k++)
+            f.marks.push_back({up(St->picks.bots_removed[k], 0.3), (int)k == St->bot_out_sel ? kPickedMark : kOutMark,
+                               (int)k == St->bot_out_sel ? 12.0f : 8.0f});
+    if (St->bot_auto_sel >= 0 && (size_t)St->bot_auto_sel < r.waypoints.size())
+        f.marks.push_back({up(r.waypoints[(size_t)St->bot_auto_sel], 0.3), kPickedMark, 15.0f});
     if (St->bot_sel >= 0 && (size_t)St->bot_sel < St->bot_mine_at.size()) {
         int i = St->bot_mine_at[(size_t)St->bot_sel];
         botnodes::V3 p = i >= 0 && (size_t)i < r.waypoints.size() ? r.waypoints[(size_t)i] : St->picks.bots[(size_t)St->bot_sel];
@@ -683,6 +692,9 @@ void bots_text() {
     t += L". The working links join " + pct(r.reach_after) + L"% of the ways between the map's own waypoints";
     if (!r.added.empty()) t += L" (" + pct(r.reach_before) + L"% without the orange ones)";
     t += L".";
+    if (!St->picks.bots_removed.empty())
+        t += L" Orange ones taken out: " + std::to_wstring(St->picks.bots_removed.size()) +
+             L" (dark red spots: none is added within 1.5 units; pick one and Delete to let it back).";
     t += L"\r\n\r\nLadders: " + std::to_wstring(St->picks.ladders.size()) + (St->picks.ladders_set ? L" (yours)" : L" found in the level") +
          L" (green; 16 at most)";
     if (!St->bot_stacked.empty())
@@ -701,7 +713,7 @@ void bots_fill_list() {
         SendMessageW(l, LB_ADDSTRING, 0, (LPARAM)s.c_str());
     }
     if (St->bot_sel >= 0) SendMessageW(l, LB_SETCURSEL, (WPARAM)St->bot_sel, 0);
-    EnableWindow(item(IDC_BOTS_DEL), St->bot_sel >= 0);
+    EnableWindow(item(IDC_BOTS_DEL), St->bot_sel >= 0 || St->bot_auto_sel >= 0 || St->bot_out_sel >= 0);
     EnableWindow(item(IDC_BOTS_CLEAR), !St->picks.bots.empty());
     HWND ll = item(IDC_LAD_LIST);
     SendMessageW(ll, LB_RESETCONTENT, 0, 0);
@@ -726,6 +738,9 @@ void bots_plan() {
     pts.insert(pts.begin() + (std::ptrdiff_t)at, St->picks.bots.begin(), St->picks.bots.end());
     botnodes::Options o;
     if (!St->picks.bots_auto || St->bots_hide) { o.max_add = 0; o.features = false; }
+    o.removed.assign(St->picks.bots_removed.begin(), St->picks.bots_removed.end());
+    for (auto &L : St->picks.ladders) o.ladder_tops.push_back(L.top);   // (as a conversion: floor bots climb to)
+    St->bot_auto_sel = -1;   // (the added ones are placed anew)
     HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
     {   // (bots walk on from every point but the item spawn points)
         std::vector<std::string> kinds = St->bot_kinds;
@@ -815,7 +830,8 @@ void set_bots_mode(bool on) {
     for (int id = IDC_BOTS_TEXT; id <= IDC_BOTS_HINT; id++) ShowWindow(item(id), on ? SW_SHOW : SW_HIDE);
     SetWindowTextW(item(IDC_BOTS), on ? L"Back to the reflections" : L"Bot waypoints...");
     if (on) {
-        SetWindowTextW(item(IDC_STATUS), L"Bot waypoints: click the level to put one there; click one of yours (green) to pick it.");
+        SetWindowTextW(item(IDC_STATUS), L"Bot waypoints: click the level to put one there; click one of yours (green) to pick it, "
+                                         L"or an added one (orange) to take it out with Delete.");
         if (!St->bots_loaded) bots_loaded_now();
         else bots_plan();
     } else {
@@ -931,11 +947,47 @@ void bots_click(int x, int y) {
     }
     if (best >= 0) {
         St->bot_sel = best;
+        St->bot_auto_sel = St->bot_out_sel = -1;
         bots_fill_list();
         SetWindowTextW(item(IDC_STATUS), (L"Picked your waypoint " + std::to_wstring(best + 1) + L" " +
                                           bots_where(St->picks.bots[(size_t)best]) + L": Delete removes it.").c_str());
         render(false);
         return;
+    }
+    // (else an added one, orange, or a spot one was taken out of)
+    if (!St->bots_hide) {
+        const auto &r = St->bot_res;
+        int ab = -1, ob = -1;
+        double ad = 12.0 * St->dpi / 96, od = ad;
+        for (size_t i = (size_t)std::max(0, r.given); i < r.waypoints.size(); i++) {
+            botnodes::V3 p = r.waypoints[i];
+            p[2] += 0.3;
+            double sx, sy;
+            if (project(p, rc.right, rc.bottom, sx, sy) && std::hypot(sx - x, sy - y) < ad) { ad = std::hypot(sx - x, sy - y); ab = (int)i; }
+        }
+        for (size_t k = 0; k < St->picks.bots_removed.size(); k++) {
+            botnodes::V3 p = St->picks.bots_removed[k];
+            p[2] += 0.3;
+            double sx, sy;
+            if (project(p, rc.right, rc.bottom, sx, sy) && std::hypot(sx - x, sy - y) < od) { od = std::hypot(sx - x, sy - y); ob = (int)k; }
+        }
+        if (ab >= 0 || ob >= 0) {
+            St->bot_sel = -1;
+            if (ob >= 0 && (ab < 0 || od <= ad)) {
+                St->bot_out_sel = ob;
+                St->bot_auto_sel = -1;
+                SetWindowTextW(item(IDC_STATUS), (L"Picked a spot an added waypoint was taken out of " +
+                                                  bots_where(St->picks.bots_removed[(size_t)ob]) + L": Delete lets one be added there again.").c_str());
+            } else {
+                St->bot_auto_sel = ab;
+                St->bot_out_sel = -1;
+                SetWindowTextW(item(IDC_STATUS), (L"Picked an added waypoint " + bots_where(r.waypoints[(size_t)ab]) +
+                                                  L": Delete takes it out (and none is added within 1.5 units of it).").c_str());
+            }
+            bots_fill_list();
+            render(false);
+            return;
+        }
     }
     std::array<double, 3> at{};
     int t = lshade::pick(St->data->p, St->cam, rc.right, rc.bottom, x, y, &at, nullptr);
@@ -961,6 +1013,7 @@ void bots_click(int x, int y) {
     if (St->bot_res.ok && too_close({at[0], at[1], at[2]}, near_)) { refuse(near_); return; }
     St->picks.bots.push_back({at[0], at[1], at[2] + 0.25});   // (a little above the floor: the bots drop it down)
     St->bot_sel = (int)St->picks.bots.size() - 1;
+    St->bot_out_sel = -1;
     bots_plan();
     int i = St->bot_mine_at.back();
     if (i >= 0 && St->bot_mine_merged.back()) {   // (its ground merged with one after all: taken back)
@@ -979,6 +1032,20 @@ void bots_click(int x, int y) {
 }
 
 void bots_delete() {
+    if (St->bot_auto_sel >= 0 && (size_t)St->bot_auto_sel < St->bot_res.waypoints.size()) {   // (an added one: taken out)
+        St->picks.bots_removed.push_back(St->bot_res.waypoints[(size_t)St->bot_auto_sel]);
+        St->bot_out_sel = -1;
+        bots_plan();
+        SetWindowTextW(item(IDC_STATUS), L"Took it out: no waypoint is added within 1.5 units of that spot (dark red).");
+        return;
+    }
+    if (St->bot_out_sel >= 0 && (size_t)St->bot_out_sel < St->picks.bots_removed.size()) {   // (let back)
+        St->picks.bots_removed.erase(St->picks.bots_removed.begin() + St->bot_out_sel);
+        St->bot_out_sel = -1;
+        bots_plan();
+        SetWindowTextW(item(IDC_STATUS), L"Let back: a waypoint can be added there again.");
+        return;
+    }
     if (St->bot_sel < 0 || (size_t)St->bot_sel >= St->picks.bots.size()) return;
     St->picks.bots.erase(St->picks.bots.begin() + St->bot_sel);
     St->bot_sel = -1;
@@ -2248,6 +2315,7 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (HIWORD(wp) == LBN_SELCHANGE) {
                 int k = (int)SendMessageW(item(IDC_BOTS_LIST), LB_GETCURSEL, 0, 0);
                 St->bot_sel = k >= 0 && (size_t)k < St->picks.bots.size() ? k : -1;
+                if (St->bot_sel >= 0) St->bot_auto_sel = St->bot_out_sel = -1;
                 EnableWindow(item(IDC_BOTS_DEL), St->bot_sel >= 0);
                 if (St->bot_sel >= 0) {   // (the picture looks at it)
                     const auto &p = St->picks.bots[(size_t)St->bot_sel];
