@@ -67,7 +67,11 @@ void load() {
         it.on = l.substr(0, a) == "1";
         it.in = W(l.substr(a + 1, b - a - 1));
         it.out = W(l.substr(b + 1, c == std::string::npos ? std::string::npos : c - b - 1));
-        if (c != std::string::npos) it.status = W(l.substr(c + 1));
+        if (c != std::string::npos) {   // (then its size)
+            size_t d = l.find('\t', c + 1);
+            it.status = W(l.substr(c + 1, d == std::string::npos ? std::string::npos : d - c - 1));
+            if (d != std::string::npos) it.size = W(l.substr(d + 1));
+        }
         St->items.push_back(it);
     }
 }
@@ -79,7 +83,7 @@ void save() {
         std::string st = N(it.status);
         for (auto &ch : st)
             if (ch == '\t' || ch == '\n' || ch == '\r') ch = ' ';
-        f << (it.on ? "1" : "0") << '\t' << N(it.in) << '\t' << N(it.out) << '\t' << st << '\n';
+        f << (it.on ? "1" : "0") << '\t' << N(it.in) << '\t' << N(it.out) << '\t' << st << '\t' << N(it.size) << '\n';
     }
 }
 
@@ -99,7 +103,8 @@ void fill() {
         int row = ListView_InsertItem(St->list, &lv);
         ListView_SetItemText(St->list, row, 1, (LPWSTR)game.c_str());
         ListView_SetItemText(St->list, row, 2, (LPWSTR)it.out.c_str());
-        ListView_SetItemText(St->list, row, 3, (LPWSTR)it.status.c_str());
+        ListView_SetItemText(St->list, row, 3, (LPWSTR)it.size.c_str());
+        ListView_SetItemText(St->list, row, 4, (LPWSTR)it.status.c_str());
         ListView_SetCheckState(St->list, row, it.on);
     }
     SendMessageW(St->list, WM_SETREDRAW, TRUE, 0);
@@ -115,7 +120,12 @@ void sort_by(int col) {
     for (auto &it : St->items) {
         std::wstring k = col == 0 ? fs::path(it.in).filename().wstring()
                          : col == 1 ? (St->hooks.game_of ? St->hooks.game_of(it.in) : L"")
-                         : col == 2 ? it.out : it.status;
+                         : col == 2 ? it.out : col == 4 ? it.status : L"";
+        if (col == 3) {   // (by size: as a number, padded)
+            wchar_t b[32];
+            swprintf(b, 32, L"%012.2f", _wtof(it.size.c_str()));
+            k = b;
+        }
         keys.push_back(lower(k) + L"\x01" + lower(fs::path(it.in).filename().wstring()));
     }
     std::vector<size_t> order(St->items.size());
@@ -154,12 +164,15 @@ void add_items(const std::vector<Item> &found, int &added) {
 LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_B_PROGRESS: {
-        std::unique_ptr<std::wstring> s((std::wstring *)lp);
+        std::unique_ptr<std::pair<std::wstring, std::wstring>> m((std::pair<std::wstring, std::wstring> *)lp);
+        const std::wstring *s = &m->first;
         int i = (int)wp;
         if (St && i >= 0 && i < (int)St->items.size()) {
             St->items[(size_t)i].status = *s;
+            if (m->second != L"\x01") St->items[(size_t)i].size = m->second;
             save();
-            ListView_SetItemText(St->list, i, 3, (LPWSTR)St->items[(size_t)i].status.c_str());
+            ListView_SetItemText(St->list, i, 3, (LPWSTR)St->items[(size_t)i].size.c_str());
+            ListView_SetItemText(St->list, i, 4, (LPWSTR)St->items[(size_t)i].status.c_str());
             ListView_EnsureVisible(St->list, i, FALSE);
             SetWindowTextW(item(IDC_STATUS), (fs::path(St->items[(size_t)i].in).filename().wstring() + L": " + *s).c_str());
         }
@@ -338,10 +351,11 @@ void create_controls() {
                                S(16), S(70), S(948), S(400), St->wnd, (HMENU)(INT_PTR)IDC_LIST, GetModuleHandleW(nullptr), nullptr);
     SendMessageW(St->list, WM_SETFONT, (WPARAM)St->font, TRUE);
     ListView_SetExtendedListViewStyle(St->list, LVS_EX_FULLROWSELECT | LVS_EX_CHECKBOXES | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP);
-    struct { const wchar_t *t; int w; } cols[] = {{L"Map", 180}, {L"From", 100}, {L"Saved to", 300}, {L"Last run", 340}};
-    for (int i = 0; i < 4; i++) {
+    struct { const wchar_t *t; int w; } cols[] = {{L"Map", 170}, {L"From", 96}, {L"Saved to", 262}, {L"Size", 70}, {L"Last run", 322}};
+    for (int i = 0; i < 5; i++) {
         LVCOLUMNW c{};
-        c.mask = LVCF_TEXT | LVCF_WIDTH;
+        c.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT;
+        c.fmt = i == 3 ? LVCFMT_RIGHT : LVCFMT_LEFT;
         c.pszText = (LPWSTR)cols[i].t;
         c.cx = S(cols[i].w);
         ListView_InsertColumn(St->list, i, &c);
@@ -360,8 +374,9 @@ void create_controls() {
 
 }   // namespace
 
-void progress(int index, const std::wstring &status) {
-    if (HWND t = g_target) PostMessageW(t, WM_B_PROGRESS, (WPARAM)index, (LPARAM) new std::wstring(status));
+void progress(int index, const std::wstring &status, const std::wstring &size) {
+    if (HWND t = g_target)
+        PostMessageW(t, WM_B_PROGRESS, (WPARAM)index, (LPARAM) new std::pair<std::wstring, std::wstring>(status, size));
 }
 void done(const std::wstring &summary) {
     if (HWND t = g_target) PostMessageW(t, WM_B_DONE, 0, (LPARAM) new std::wstring(summary));

@@ -16,6 +16,7 @@ struct Item {
     std::wstring in, out;   // the map converted, and where the Xbox map goes
     bool on = true;         // ticked: converted by "Convert ticked"
     std::wstring status;    // what happened the last time it was converted here (kept with the list)
+    std::wstring size;      // the Xbox map's size then ("32.95 MB", uncompressed: what the Xbox's limit counts)
 };
 
 struct Hooks {
@@ -36,8 +37,8 @@ struct Hooks {
 
 // The window (modal); the list is read from and saved to `list_file`.
 void open(HWND owner, const std::filesystem::path &list_file, Hooks hooks);
-// From the worker (any thread): item `index`'s status.
-void progress(int index, const std::wstring &status);
+// From the worker (any thread): item `index`'s status (and its map's size, when there's one).
+void progress(int index, const std::wstring &status, const std::wstring &size = L"\x01");
 // From the worker (any thread): the run is over.
 void done(const std::wstring &summary);
 

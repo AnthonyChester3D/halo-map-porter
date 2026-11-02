@@ -1839,6 +1839,8 @@ static void open_batch() {
         auto jobs = std::make_shared<std::vector<Job1>>();
         Config base = make_config();
         apply_xbox_options(base);
+        // (a map still over the standard Xbox's 47 MB after every shrink: built for the big-map limit, as shrunk)
+        if (base.xbox_max_mb <= 0) base.xbox_overflow_mb = 115;
         bool share = checked(ID_SHARE);
         for (int i : which) {
             const auto &it = items[(size_t)i];
@@ -1886,8 +1888,12 @@ static void open_batch() {
                     r = convert_map(j.cfg, j.in, j.from, Game::Xbox, j.out, share, post_log, nullptr);
                 }
                 done++;
-                std::wstring st;
+                std::wstring st, size = L"\x01";
                 if (r.ok) {
+                    // (its size as the Xbox's limit counts it: uncompressed, from invader-info)
+                    std::smatch sm;
+                    static const std::regex unc(R"(Uncompressed size:\s+([\d.]+))");
+                    if (std::regex_search(r.info, sm, unc)) size = W(sm[1].str()) + L" MB";
                     ok++;
                     if (!j.card_dir.empty())
                         if (std::string t = card_traits(j.cfg, j.card_dir, j.card_name, j.out, j.out.parent_path()); !t.empty()) post_log(t);
@@ -1895,6 +1901,8 @@ static void open_batch() {
                     if (!r.link.empty()) { linked++; st = L"Done, linked"; }
                     else if (j.cfg.xbox_perfect && !r.pair_check.empty()) st = L"Done, not linked: see its pair check";
                     else st = L"Done";
+                    for (auto &c : r.changes)
+                        if (c.rfind("[size]", 0) == 0) st += L" (big-map limit: over 47 MB)";
                     post_log("Done: " + N(j.out.wstring()) + (r.link.empty() ? "" : " (linked: " + N(r.link.wstring()) + ")"));
                 } else {
                     failed++;
@@ -1909,7 +1917,7 @@ static void open_batch() {
                     st = L"Failed: " + W(e) + (tag.empty() ? L"" : L" (" + W(tag) + L")");
                     post_log("FAILED: " + r.error);
                 }
-                batchui::progress(j.index, st);
+                batchui::progress(j.index, st, r.ok ? size : std::wstring());
                 last = r;
                 last_keys = j.keys;
                 last_what = "Batch: " + N(j.in.filename().wstring());

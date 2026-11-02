@@ -214,6 +214,7 @@ int main(int argc, char **argv) {
     if (getenv("XLIGHTS")) cfg.xbox_object_lights = atoi(getenv("XLIGHTS"));     // lights on the map's objects: 1 no specular, 2 off
     cfg.write_perf_tour = getenv("XTOUR") != nullptr;                              // a perf log camera tour beside the map
     cfg.xbox_perfect = getenv("XPERFECT") != nullptr;                              // Perfect Conversion (linked with CE)
+    if (getenv("XOVERFLOW")) cfg.xbox_overflow_mb = atof(getenv("XOVERFLOW"));     // over the limit after shrinking: this one
     if (const char *x = getenv("XREFL")) {   // keep | tag,tag,... (the level shaders window's picks)
         std::string w = x, item;
         if (w == "keep") cfg.xbox_drop_reflections = false;

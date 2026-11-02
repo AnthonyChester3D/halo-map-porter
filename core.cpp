@@ -1966,6 +1966,9 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
         r.ok = true;
         return r;
     }
+    // The map file's limit: the Xbox tab's (0: the standard Xbox's, which Invader checks), or the bigger one a map
+    // still over the standard limit after every shrink goes to (Config::xbox_overflow_mb).
+    double size_limit = cfg.xbox_max_mb;
     auto make_cmd = [&] {
         std::vector<std::string> cmd{u8(tool(cfg, "invader-build")), "-g", game_engine(job.target), "-H"};
         if (optimized) cmd.push_back("-O");
@@ -1974,7 +1977,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
         }
         for (auto &d : job.dirs()) cmd.insert(cmd.end(), {"-t", u8(d)});
         cmd.insert(cmd.end(), job.extra.begin(), job.extra.end());
-        if (job.target == Game::Xbox && cfg.xbox_max_mb > 0) cmd.push_back("-E"); // we check the bigger limit ourselves
+        if (job.target == Game::Xbox && size_limit > 0) cmd.push_back("-E"); // we check the bigger limit ourselves
         if (job.analysis) cmd.insert(cmd.end(), {"-E", "-T", "128M", "-l", "0"});  // measure: no limits, quick
         std::string scen_name = from_u8(scenario).filename().u8string();
         // The map's internal name must match its file name (Halo compares them case-insensitively),
@@ -2106,7 +2109,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
             r.ok = true;
             return r;
         }
-        if (rc == 0 && job.target == Game::Xbox && cfg.xbox_max_mb > 0) {
+        if (rc == 0 && job.target == Game::Xbox && size_limit > 0) {
             // Modded Xbox with a bigger map limit: Invader was told not to check, so check against that limit.
             // (the map's header says it: Invader writes the size it decompresses to there)
             double mb = 0;
@@ -2126,10 +2129,10 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
                 run_process({u8(tool(cfg, "invader-info")), "-T", "uncompressed_size", u8(tmp_out)}, sz);
                 mb = std::atof(sz.c_str()) / 1048576.0;
             }
-            if (mb > cfg.xbox_max_mb) {
+            if (mb > size_limit) {
                 char buf[160];
                 snprintf(buf, sizeof buf, "\nFATAL ERROR: Map file exceeds maximum size for the target engine when uncompressed "
-                                          "(%.4f MiB > %.4f MiB)\n", mb, cfg.xbox_max_mb);
+                                          "(%.4f MiB > %.4f MiB)\n", mb, size_limit);
                 out += buf;
                 rc = 1;
             }
@@ -2245,6 +2248,18 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
                 if (saved < need && saved / 3 < need - saved) shrink_hopeless = true;
                 continue;
             }
+        }
+        // Still over after every shrink: built for the bigger limit instead (as shrunk: the cuts made stay).
+        if (std::regex_search(out, tb, too_big) && job.target == Game::Xbox && size_limit <= 0 && cfg.xbox_overflow_mb > 0 &&
+            std::atof(tb[1].str().c_str()) <= cfg.xbox_overflow_mb) {
+            size_limit = cfg.xbox_overflow_mb;
+            char buf[300];
+            snprintf(buf, sizeof buf, "[size] %s MB is over the standard Xbox's %s MB even with everything shrunk as far as "
+                                      "it goes for that, so it's built for the big-map limit (%.0f MB, a modded Xbox) as shrunk",
+                     tb[1].str().substr(0, 5).c_str(), tb[2].str().substr(0, 5).c_str(), cfg.xbox_overflow_mb);
+            job.note(buf);
+            cmd = make_cmd();
+            continue;
         }
         if (std::regex_search(out, tb, too_big)) {
             measure_for_window();
