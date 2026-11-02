@@ -14071,14 +14071,20 @@ static void perfect_ghosts(Job &job) {
     const Flat &sf = flat(scen), &gf = flat(glob);
     if (sf.empty() || gf.empty()) return;
     std::set<std::pair<std::string, int>> placed;   // (palette, index)
-    bool race = false;
+    bool race = false, ai = false;
+    // Each placement block and the palette its placements are made from (scenery and devices too: a palette entry the
+    // map never places is never in a match; scripts make only placed objects, by their names).
+    static const std::pair<const char *, const char *> kPlacedFrom[] = {
+        {"weapons[].type", "weapon_palette"}, {"vehicles[].type", "vehicle_palette"}, {"equipment[].type", "equipment_palette"},
+        {"bipeds[].type", "biped_palette"}, {"scenery[].type", "scenery_palette"}, {"machines[].type", "machine_palette"},
+        {"controls[].type", "control_palette"}, {"light_fixtures[].type", "light_fixture_palette"},
+        {"sound_scenery[].type", "sound_scenery_palette"}};
     for (auto &[k, v] : sf) {
         std::string g = generic(k);
-        for (auto [block, pal] : {std::pair<const char *, const char *>{"weapons[].type", "weapon_palette"},
-                                  {"vehicles[].type", "vehicle_palette"}, {"equipment[].type", "equipment_palette"},
-                                  {"bipeds[].type", "biped_palette"}})
+        for (auto [block, pal] : kPlacedFrom)
             if (g == block && !v.empty() && isdigit((unsigned char)v[0])) placed.insert({pal, std::atoi(v.c_str())});
         if (g == "netgame_flags[].type" && v == "race_vehicle") race = true;
+        if (k == "encounters.size" && std::atoi(v.c_str()) > 0) ai = true;
     }
     std::string mp_unit;
     for (auto &[k, v] : gf)
@@ -14087,11 +14093,15 @@ static void perfect_ghosts(Job &job) {
     std::set<std::string> candidates;
     auto held_back = [&](const std::string &tag, const std::string &k, const std::string &target) {
         std::string g = generic(k), e = ext_of(target);
-        if (e != "weapon" && e != "vehicle" && e != "equipment" && e != "biped") return false;
+        if (e != "weapon" && e != "vehicle" && e != "equipment" && e != "biped" && e != "scenery" && e != "device_machine" &&
+            e != "device_control" && e != "device_light_fixture" && e != "sound_scenery")
+            return false;
         bool skip = false;
         if (tag == scen) {
-            for (auto pal : {"weapon_palette", "vehicle_palette", "equipment_palette", "biped_palette"})
-                if (g == std::string(pal) + "[].name" && !placed.count({pal, index_in(k)})) skip = true;
+            for (auto [block, pal] : kPlacedFrom)
+                if (g == std::string(pal) + "[].name" && !placed.count({pal, index_in(k)}) &&
+                    !(ai && std::string(pal) == "vehicle_palette"))   // (AI's starting locations name vehicles by palette)
+                    skip = true;
         } else if (tag == glob) {
             skip = g == "weapon_list[].weapon" || g == "cheat_powerups[].powerup" ||
                    (g == "multiplayer_information[].vehicles[].vehicle" && !race) ||
