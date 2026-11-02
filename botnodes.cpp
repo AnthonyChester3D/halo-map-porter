@@ -661,6 +661,38 @@ std::vector<Feature> find_features(const Level &L, const std::vector<V3> &spawns
             std::vector<int> way;
             for (int c = hi_c; c >= 0; c = par[idx[c]]) way.push_back(c);
             std::reverse(way.begin(), way.end());
+            // (its middle line: the shortest way from its lowest corner to its highest runs along one side, where a
+            // bot walks at the drop's edge; each step moved across the slope to the middle of the ramp there)
+            {
+                std::set<int> inside(comp.begin(), comp.end());
+                for (auto &c : way) {
+                    const auto &v = g.nxy[(size_t)c];
+                    double lv = std::hypot(v[0], v[1]);
+                    if (lv < 1e-4) continue;
+                    int dacross = -1;
+                    double best = 1e30;
+                    for (int d = 0; d < 4; d++) {   // (the grid's way most nearly level across the slope)
+                        double dot = std::fabs((kDir[d][0] * v[0] + kDir[d][1] * v[1]) / (lv * std::hypot(kDir[d][0], kDir[d][1])));
+                        if (dot < best) { best = dot; dacross = d; }
+                    }
+                    auto steps = [&](int d) {
+                        int k = 0;
+                        for (int t = c; k < kMax; k++) {
+                            int m = g.nb[(size_t)t][(size_t)d];
+                            if (m < 0 || !inside.count(m)) break;
+                            t = m;
+                        }
+                        return k;
+                    };
+                    int left = steps(dacross), right = steps(dacross + 4), shift = (left - right) / 2, t = c;
+                    for (int k = 0; k < std::abs(shift); k++) {
+                        int m = g.nb[(size_t)t][(size_t)(shift > 0 ? dacross : dacross + 4)];
+                        if (m < 0) break;
+                        t = m;
+                    }
+                    c = t;
+                }
+            }
             // (from the floor before its foot to the floor past its top)
             if (way.size() >= 2) {
                 way.insert(way.begin(), beyond(way.front(), way[std::min<size_t>(3, way.size() - 1)], 1.0));
