@@ -12607,8 +12607,22 @@ void bot_route_points(Job &job, const fs::path &xsrc) {
         points.push_back(pos(items[i]));
         kind.push_back(none ? "item spawn point that spawns nothing" : "item spawn point");
     }
-    // (the Level window's: added after the map's item spawn points, as they're put in the scenario; the window plans
-    // with its own, so they're left out of what it's given)
+    // The vehicles the map places (those that can spawn: drop_dead_placements took out the rest): a waypoint at each,
+    // so the bots' routes reach them. Added as the window's are (after the map's item spawn points), first.
+    std::vector<botnodes::V3> at_vehicles;
+    {
+        tagfile::Block veh = r.block("vehicles");
+        for (size_t i = 0; i < veh.size(); i++) {
+            if (veh[i].integer("not placed") & 1) continue;   // (automatically: not placed)
+            at_vehicles.push_back({pos(veh[i])[0], pos(veh[i])[1], pos(veh[i])[2] + 0.25});
+        }
+    }
+    for (auto &v : at_vehicles) {
+        points.push_back(v);
+        kind.push_back("vehicle spawn");
+    }
+    // (the Level window's: added after the map's item spawn points and the vehicles', as they're put in the scenario;
+    // the window plans with its own, so they're left out of what it's given)
     const size_t insert_at = points.size();
     const std::vector<botnodes::V3> mine(job.cfg.xbox_bot_waypoints.begin(), job.cfg.xbox_bot_waypoints.end());
     for (size_t i = 0; i < flags.size(); i++) {
@@ -12643,7 +12657,7 @@ void bot_route_points(Job &job, const fs::path &xsrc) {
     points = with_mine;
     botnodes::Options bo;
     if (!job.cfg.xbox_bot_nodes) { bo.max_add = 0; bo.features = false; }
-    for (auto &k : kind) bo.walk_from.push_back(k.rfind("item spawn point", 0) != 0);
+    for (auto &k : kind) bo.walk_from.push_back(k.rfind("item spawn point", 0) != 0 && k != "vehicle spawn");
     bo.removed.assign(job.cfg.xbox_bot_removed.begin(), job.cfg.xbox_bot_removed.end());
     std::vector<botnodes::Ladder> ladders = bdir.empty() ? std::vector<botnodes::Ladder>() : botnodes::find_ladders(bdir / from_u8(bsp));
     for (auto &L : ladders) bo.ladder_tops.push_back(L.top);   // (Halo 1 Unlimited's bots climb them)
@@ -12655,12 +12669,15 @@ void bot_route_points(Job &job, const fs::path &xsrc) {
     }
     // The nodes: item spawn points with every game type "none", each like one the map has (its item collection).
     int added = 0;
-    std::vector<botnodes::V3> nodes = mine;   // (the window's, then the ones added)
+    std::vector<botnodes::V3> nodes = at_vehicles;   // (the vehicles', the window's, then the ones added)
+    nodes.insert(nodes.end(), mine.begin(), mine.end());
     nodes.insert(nodes.end(), br.added.begin(), br.added.end());
     // (the ladders, green: for the bot file)
     if (job.cfg.xbox_perfect) {   // (the scenario's placements stay the map's: the waypoints go in the bot file)
         std::string name = fs::path(from_u8(job.scenario)).filename().u8string(), why;
-        job.bot_file = botnodes::bot_file(name, br.added, mine, ladders, &why);
+        std::vector<botnodes::V3> placed = at_vehicles;   // (the vehicles' and yours: placed, not planned)
+        placed.insert(placed.end(), mine.begin(), mine.end());
+        job.bot_file = botnodes::bot_file(name, br.added, placed, ladders, &why);
         added = (int)br.added.size();
         if (!why.empty()) job.log("  [bots] the bot file: " + why);
         nodes.clear();
@@ -12697,6 +12714,7 @@ void bot_route_points(Job &job, const fs::path &xsrc) {
     fs::remove(pic, ec);
     if (botnodes::picture(bdir / from_u8(bsp), br, pic, &ladders)) job.bots_picture = pic;
     const int total = br.given + added;
+    if (!at_vehicles.empty()) counts += ", " + std::to_string(at_vehicles.size()) + " at vehicles";
     if (!mine.empty()) counts += ", " + std::to_string(mine.size()) + " of yours (the Level window's)";
     // Its points as the bots take them: on the ground, those within 1 unit of one already taken that one, 512 at most.
     std::string l = "[bots] the map's " + std::to_string(points.size()) + " points (" + counts + ") make " + std::to_string(br.given) +

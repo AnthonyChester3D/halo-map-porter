@@ -746,7 +746,7 @@ void bots_plan() {
         std::vector<std::string> kinds = St->bot_kinds;
         kinds.insert(kinds.begin() + (std::ptrdiff_t)std::min(St->bot_insert, kinds.size()), St->picks.bots.size(), "waypoint of yours");
         if (kinds.size() == pts.size())
-            for (auto &k : kinds) o.walk_from.push_back(k.rfind("item spawn point", 0) != 0);
+            for (auto &k : kinds) o.walk_from.push_back(k.rfind("item spawn point", 0) != 0 && k != "vehicle spawn");
     }
     St->bot_res = botnodes::plan(St->bot_bsp, pts, St->bot_tele, o);
     St->bot_stacked = botnodes::stacked_hops(St->bot_res);
@@ -901,6 +901,10 @@ void export_bot_file() {
         bots_plan();
     }
     std::vector<botnodes::V3> added(r.waypoints.begin() + std::min<size_t>((size_t)r.given, r.waypoints.size()), r.waypoints.end()), mine;
+    // (the vehicles' waypoints: the map has no point there, so they're the bot file's to add, as yours are)
+    for (size_t i = 0; i < St->bot_kinds.size() && i < St->bot_insert && i < r.point_waypoint.size(); i++)
+        if (St->bot_kinds[i] == "vehicle spawn" && r.point_waypoint[i] >= 0 && (size_t)r.point_waypoint[i] < r.waypoints.size())
+            mine.push_back(r.waypoints[(size_t)r.point_waypoint[i]]);
     for (size_t k = 0; k < St->bot_mine_at.size(); k++)
         if (St->bot_mine_at[k] >= 0 && !St->bot_mine_merged[k] && (size_t)St->bot_mine_at[k] < r.waypoints.size())
             mine.push_back(r.waypoints[(size_t)St->bot_mine_at[k]]);
