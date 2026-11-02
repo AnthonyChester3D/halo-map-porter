@@ -15,7 +15,7 @@ namespace batchui {
 struct Item {
     std::wstring in, out;   // the map converted, and where the Xbox map goes
     bool on = true;         // ticked: converted by "Convert ticked"
-    std::wstring status;    // what happened last time (shown; not kept)
+    std::wstring status;    // what happened the last time it was converted here (kept with the list)
 };
 
 struct Hooks {
@@ -30,6 +30,8 @@ struct Hooks {
     std::function<bool(const std::vector<Item> &items, const std::vector<int> &which)> start;
     // Asked to stop after the map being converted.
     std::function<void()> stop;
+    // Where a map picked with "Browse..." goes (its earlier output, else beside the others); "" if it can't tell.
+    std::function<std::wstring(const std::wstring &in)> default_out;
 };
 
 // The window (modal); the list is read from and saved to `list_file`.

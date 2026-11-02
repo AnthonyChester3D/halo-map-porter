@@ -165,6 +165,9 @@ struct Config {
     // is made lighter. The bots' waypoints go to the map's bot file (bots.txt beside it), not the scenario. After the
     // build the two maps are compared tag by tag (pairs.hpp); when they match, <map>.h1ulink is written beside it.
     bool xbox_perfect = false;
+    // How many maps' extracted tags are kept (cache_dir/extracted), so converting one again skips extracting it: the
+    // ones used last. 1 to 100.
+    int extracted_kept = 3;
 };
 
 // A model to show in the weapons & vehicles window: its most detailed version (each region's first permutation),
@@ -319,6 +322,13 @@ int scripts_use_cheat_powerups(const std::string &script_text, int script_count)
 Game detect_game(const fs::path &map, std::string *scenario_name = nullptr);
 
 bool invader_ok(const Config &cfg);
+
+// The app's working files, the kind it deletes by itself: every map's extracted tags (cache_dir/extracted) and the
+// work folders conversions and measurements make (cache_dir/work), but none in use. Your picks, map cards, reports,
+// measurements and the LOD library stay. Returns the bytes freed; `what` says what went.
+uint64_t clear_working_files(const Config &cfg, std::string &what);
+// What those take now (bytes).
+uint64_t working_files_size(const Config &cfg);
 
 // Convert a compiled map from one game to another.
 // `measure` (Xbox): when the map doesn't fit (tag memory or file size) and no weapons & vehicles picks are applied,

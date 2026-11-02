@@ -13894,7 +13894,7 @@ void trim_extracted(const Config &cfg) {
         entries.push_back({e ? 0 : (long long)t.time_since_epoch().count(), p});
     }
     std::sort(entries.begin(), entries.end(), [](auto &a, auto &b) { return a.first > b.first; });
-    int keep = kExtractedKept - (int)g_extracted_in_use.size();
+    int keep = std::clamp(cfg.extracted_kept > 0 ? cfg.extracted_kept : kExtractedKept, 1, 100) - (int)g_extracted_in_use.size();
     for (size_t i = std::max(0, keep); i < entries.size(); i++) fs::remove_all(entries[i].second, ec);
 }
 
@@ -14911,6 +14911,40 @@ Result redo_model_lods(const Config &cfg, const fs::path &view_file, const std::
     r.lods = view_file;
     r.update = v.update;
     return r;
+}
+
+static uint64_t folder_bytes(const fs::path &d) {
+    uint64_t n = 0;
+    std::error_code ec;
+    for (auto it = fs::recursive_directory_iterator(d, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec))
+        if (it->is_regular_file(ec)) n += it->file_size(ec);
+    return n;
+}
+
+uint64_t working_files_size(const Config &cfg) { return folder_bytes(extracted_root(cfg)) + folder_bytes(cfg.cache_dir / "work"); }
+
+uint64_t clear_working_files(const Config &cfg, std::string &what) {
+    std::error_code ec;
+    uint64_t freed = 0;
+    int maps = 0, folders = 0;
+    {
+        std::lock_guard<std::mutex> g(g_extracted_lock);
+        for (auto it = fs::directory_iterator(extracted_root(cfg), ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+            if (!it->is_directory(ec) || g_extracted_in_use.count(u8(it->path()))) continue;
+            uint64_t n = folder_bytes(it->path());
+            std::error_code e;
+            if (fs::remove_all(it->path(), e) > 0 && !e) { freed += n; maps++; }
+        }
+    }
+    for (auto it = fs::directory_iterator(cfg.cache_dir / "work", ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+        uint64_t n = folder_bytes(it->path());
+        std::error_code e;
+        fs::remove_all(it->path(), e);
+        if (!e) { freed += n; folders++; }
+    }
+    what = std::to_string(maps) + " map" + (maps == 1 ? "" : "s") + "' extracted tags and " + std::to_string(folders) +
+           " work folder" + (folders == 1 ? "" : "s");
+    return freed;
 }
 
 Result convert_map(const Config &cfg, const fs::path &input, Game in_game, Game out_game,

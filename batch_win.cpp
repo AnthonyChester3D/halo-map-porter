@@ -2,6 +2,7 @@
 #include "batch_win.hpp"
 
 #include <commctrl.h>
+#include <commdlg.h>
 
 #include <algorithm>
 #include <fstream>
@@ -13,7 +14,8 @@ namespace fs = std::filesystem;
 
 namespace {
 
-enum { IDC_INTRO = 400, IDC_LIST, IDC_FIND, IDC_ADD, IDC_REMOVE, IDC_ALL, IDC_NONE, IDC_GO, IDC_STOP, IDC_CLOSE, IDC_STATUS };
+enum { IDC_INTRO = 400, IDC_LIST, IDC_FIND, IDC_ADD, IDC_REMOVE, IDC_ALL, IDC_NONE, IDC_GO, IDC_STOP, IDC_CLOSE, IDC_STATUS,
+       IDC_BROWSE };
 const UINT WM_B_PROGRESS = WM_APP + 60, WM_B_DONE = WM_APP + 61;
 
 struct State {
@@ -24,6 +26,8 @@ struct State {
     Hooks hooks;
     std::vector<Item> items;
     bool running = false, closing = false;
+    int sort_col = -1;
+    bool sort_up = true;
 };
 State *St = nullptr;
 HWND g_target = nullptr;   // (the open window, for progress from the worker)
@@ -58,10 +62,12 @@ void load() {
         if (!l.empty() && l.back() == '\r') l.pop_back();
         size_t a = l.find('\t'), b = a == std::string::npos ? a : l.find('\t', a + 1);
         if (b == std::string::npos) continue;
+        size_t c = l.find('\t', b + 1);   // (then the last run's result, if any)
         Item it;
         it.on = l.substr(0, a) == "1";
         it.in = W(l.substr(a + 1, b - a - 1));
-        it.out = W(l.substr(b + 1));
+        it.out = W(l.substr(b + 1, c == std::string::npos ? std::string::npos : c - b - 1));
+        if (c != std::string::npos) it.status = W(l.substr(c + 1));
         St->items.push_back(it);
     }
 }
@@ -69,7 +75,12 @@ void save() {
     std::error_code ec;
     fs::create_directories(St->file.parent_path(), ec);
     std::ofstream f(St->file, std::ios::binary | std::ios::trunc);
-    for (auto &it : St->items) f << (it.on ? "1" : "0") << '\t' << N(it.in) << '\t' << N(it.out) << '\n';
+    for (auto &it : St->items) {
+        std::string st = N(it.status);
+        for (auto &ch : st)
+            if (ch == '\t' || ch == '\n' || ch == '\r') ch = ' ';
+        f << (it.on ? "1" : "0") << '\t' << N(it.in) << '\t' << N(it.out) << '\t' << st << '\n';
+    }
 }
 
 bool filling = false;   // (ticks set while filling aren't the user's)
@@ -95,10 +106,31 @@ void fill() {
     filling = false;
 }
 
+// Sorted by a column (clicked again: the other way): map, game, where it's saved, last run.
+void sort_by(int col) {
+    if (St->running) return;
+    St->sort_up = col == St->sort_col ? !St->sort_up : true;
+    St->sort_col = col;
+    std::vector<std::wstring> keys;
+    for (auto &it : St->items) {
+        std::wstring k = col == 0 ? fs::path(it.in).filename().wstring()
+                         : col == 1 ? (St->hooks.game_of ? St->hooks.game_of(it.in) : L"")
+                         : col == 2 ? it.out : it.status;
+        keys.push_back(lower(k) + L"\x01" + lower(fs::path(it.in).filename().wstring()));
+    }
+    std::vector<size_t> order(St->items.size());
+    for (size_t i = 0; i < order.size(); i++) order[i] = i;
+    std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return St->sort_up ? keys[a] < keys[b] : keys[b] < keys[a]; });
+    std::vector<Item> sorted;
+    for (size_t i : order) sorted.push_back(St->items[i]);
+    St->items.swap(sorted);
+    save();
+}
+
 void update_buttons() {
     int ticked = 0;
     for (auto &it : St->items) ticked += it.on;
-    for (int id : {IDC_FIND, IDC_ADD, IDC_REMOVE, IDC_ALL, IDC_NONE, IDC_CLOSE}) EnableWindow(item(id), !St->running);
+    for (int id : {IDC_FIND, IDC_ADD, IDC_BROWSE, IDC_REMOVE, IDC_ALL, IDC_NONE, IDC_CLOSE}) EnableWindow(item(id), !St->running);
     EnableWindow(item(IDC_GO), !St->running && ticked > 0);
     ShowWindow(item(IDC_STOP), St->running ? SW_SHOW : SW_HIDE);
     wchar_t b[200];
@@ -126,6 +158,7 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         int i = (int)wp;
         if (St && i >= 0 && i < (int)St->items.size()) {
             St->items[(size_t)i].status = *s;
+            save();
             ListView_SetItemText(St->list, i, 3, (LPWSTR)St->items[(size_t)i].status.c_str());
             ListView_EnsureVisible(St->list, i, FALSE);
             SetWindowTextW(item(IDC_STATUS), (fs::path(St->items[(size_t)i].in).filename().wstring() + L": " + *s).c_str());
@@ -146,6 +179,11 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
     case WM_NOTIFY: {
         NMHDR *n = (NMHDR *)lp;
+        if (n->idFrom == IDC_LIST && n->code == LVN_COLUMNCLICK && !St->running) {
+            sort_by(((NMLISTVIEW *)lp)->iSubItem);
+            fill();
+            return 0;
+        }
         if (n->idFrom == IDC_LIST && n->code == LVN_ITEMCHANGED && !filling) {
             NMLISTVIEW *v = (NMLISTVIEW *)lp;
             if ((v->uChanged & LVIF_STATE) && v->iItem >= 0 && v->iItem < (int)St->items.size()) {
@@ -191,6 +229,42 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             update_buttons();
             return 0;
         }
+        case IDC_BROWSE: {
+            std::vector<wchar_t> buf(64 * 1024, 0);
+            OPENFILENAMEW ofn{};
+            ofn.lStructSize = sizeof ofn;
+            ofn.hwndOwner = h;
+            ofn.lpstrFilter = L"Halo maps (*.map)\0*.map\0";
+            ofn.lpstrFile = buf.data();
+            ofn.nMaxFile = (DWORD)buf.size();
+            ofn.lpstrTitle = L"Maps to add to the batch (Ctrl or Shift to pick several)";
+            ofn.Flags = OFN_ALLOWMULTISELECT | OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+            if (!GetOpenFileNameW(&ofn)) return 0;
+            std::vector<std::wstring> files;
+            std::wstring first = buf.data();
+            const wchar_t *p = buf.data() + first.size() + 1;
+            if (!*p) files.push_back(first);   // (one file: its full path)
+            for (; *p; p += wcslen(p) + 1) files.push_back((fs::path(first) / p).wstring());
+            std::vector<Item> found;
+            int unknown = 0;
+            HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
+            for (auto &f : files) {
+                std::wstring out = St->hooks.default_out ? St->hooks.default_out(f) : L"";
+                if (out.empty()) { unknown++; continue; }
+                found.push_back({f, out, true, L""});
+            }
+            SetCursor(old);
+            int added = 0;
+            add_items(found, added);
+            save();
+            fill();
+            update_buttons();
+            std::wstring t = L"Added " + std::to_wstring(added) + L" of " + std::to_wstring(files.size()) + L" maps";
+            if (added < (int)found.size()) t += L" (" + std::to_wstring(found.size() - added) + L" already in the list)";
+            if (unknown) t += L"; " + std::to_wstring(unknown) + L" left out: set \"Save as\" on the Convert tab first (new maps go beside it, each in a folder of its own)";
+            SetWindowTextW(item(IDC_STATUS), (t + L".").c_str());
+            return 0;
+        }
         case IDC_REMOVE: {
             std::vector<Item> keep;
             for (int i = 0; i < (int)St->items.size(); i++)
@@ -210,20 +284,20 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         case IDC_GO: {
             std::vector<int> which;
+            std::vector<std::wstring> was;
+            for (auto &it : St->items) was.push_back(it.status);
             for (int i = 0; i < (int)St->items.size(); i++)
                 if (St->items[(size_t)i].on) {
                     which.push_back(i);
                     St->items[(size_t)i].status = L"Waiting";
-                } else {
-                    St->items[(size_t)i].status.clear();
-                }
+                }   // (the others keep their last result)
             if (which.empty() || !St->hooks.start) return 0;
             fill();
             St->running = true;
             update_buttons();
             if (!St->hooks.start(St->items, which)) {
                 St->running = false;
-                for (auto &it : St->items) it.status.clear();
+                for (size_t i = 0; i < St->items.size(); i++) St->items[i].status = was[i];
                 fill();
                 update_buttons();
             }
@@ -258,13 +332,13 @@ void create_controls() {
     add(L"STATIC",
         L"Converts the ticked maps for the Xbox one after another, each to where it's saved, with the Xbox tab's options as "
         L"they are now (Perfect Conversion included) and each map's own picks: weapons & vehicles, Level, scripts. Every map's "
-        L"report, pair check and link file are written as for a single conversion.",
+        L"report, pair check and link file are written as for a single conversion. Click a column's title to sort by it.",
         SS_NOPREFIX, 16, 12, 948, 52, IDC_INTRO);
     St->list = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS,
                                S(16), S(70), S(948), S(400), St->wnd, (HMENU)(INT_PTR)IDC_LIST, GetModuleHandleW(nullptr), nullptr);
     SendMessageW(St->list, WM_SETFONT, (WPARAM)St->font, TRUE);
     ListView_SetExtendedListViewStyle(St->list, LVS_EX_FULLROWSELECT | LVS_EX_CHECKBOXES | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP);
-    struct { const wchar_t *t; int w; } cols[] = {{L"Map", 190}, {L"From", 110}, {L"Saved to", 400}, {L"Last run", 220}};
+    struct { const wchar_t *t; int w; } cols[] = {{L"Map", 180}, {L"From", 100}, {L"Saved to", 300}, {L"Last run", 340}};
     for (int i = 0; i < 4; i++) {
         LVCOLUMNW c{};
         c.mask = LVCF_TEXT | LVCF_WIDTH;
@@ -273,10 +347,11 @@ void create_controls() {
         ListView_InsertColumn(St->list, i, &c);
     }
     add(L"BUTTON", L"Find my earlier conversions", WS_TABSTOP, 16, 480, 210, 28, IDC_FIND);
-    add(L"BUTTON", L"Add the Convert tab's map", WS_TABSTOP, 234, 480, 200, 28, IDC_ADD);
-    add(L"BUTTON", L"Remove selected", WS_TABSTOP, 442, 480, 140, 28, IDC_REMOVE);
-    add(L"BUTTON", L"Tick all", WS_TABSTOP, 590, 480, 90, 28, IDC_ALL);
-    add(L"BUTTON", L"Tick none", WS_TABSTOP, 688, 480, 90, 28, IDC_NONE);
+    add(L"BUTTON", L"Add the Convert tab's map", WS_TABSTOP, 234, 480, 190, 28, IDC_ADD);
+    add(L"BUTTON", L"Browse...", WS_TABSTOP, 432, 480, 100, 28, IDC_BROWSE);
+    add(L"BUTTON", L"Remove selected", WS_TABSTOP, 540, 480, 130, 28, IDC_REMOVE);
+    add(L"BUTTON", L"Tick all", WS_TABSTOP, 678, 480, 90, 28, IDC_ALL);
+    add(L"BUTTON", L"Tick none", WS_TABSTOP, 776, 480, 90, 28, IDC_NONE);
     add(L"STATIC", L"", SS_NOPREFIX | SS_ENDELLIPSIS, 16, 524, 560, 20, IDC_STATUS);
     add(L"BUTTON", L"Stop after this map", WS_TABSTOP, 590, 518, 150, 30, IDC_STOP);
     add(L"BUTTON", L"Convert ticked", WS_TABSTOP | BS_DEFPUSHBUTTON, 748, 518, 120, 30, IDC_GO);

@@ -99,6 +99,8 @@ enum {
     ID_X_PERFECT, ID_X_PERFECT_HINT,
     // the Convert tab's batch of conversions
     ID_BATCH, ID_BATCH_HINT,
+    // how many maps' extracted tags are kept; clearing the working files
+    ID_S_KEEP_LBL, ID_S_KEEP, ID_S_CLEAR,
 };
 
 #define WM_APP_LOG (WM_APP + 1)
@@ -201,6 +203,7 @@ static void save_settings() {
     ini_set(L"share", checked(ID_SHARE) ? L"1" : L"0");
     ini_set(L"x_shrink", checked(ID_X_SHRINK) ? L"1" : L"0");
     ini_set(L"write_tour", checked(ID_S_TOUR) ? L"1" : L"0");
+    ini_set(L"keep_unpacked", std::to_wstring(std::clamp(_wtoi(get_text(ID_S_KEEP).c_str()), 1, 100)));
     ini_set(L"x_target", std::to_wstring(std::max(0, sel(ID_X_TARGET))));
     ini_set(L"x_perfect", checked(ID_X_PERFECT) ? L"1" : L"0");
     ini_set(L"pk_size", std::to_wstring(std::max(0, sel(ID_PK_SIZE))));
@@ -217,6 +220,7 @@ static Config make_config() {
     c.invader_dir = fs::path(get_text(ID_S_INV));
     c.cache_dir = appdata_dir(CSIDL_LOCAL_APPDATA);
     c.lod_library = fs::path(get_text(ID_S_LOD));
+    c.extracted_kept = std::clamp(_wtoi(get_text(ID_S_KEEP).c_str()), 1, 100);
     return c;
 }
 
@@ -828,6 +832,37 @@ static void on_input_chosen() {
     // a map picked: the Xbox tab's windows are for it now
     if (g != Game::Unknown) set_xbox_for(0);
     else update_xbox_for();
+}
+
+// The Settings tab's "Clear temp files": the working files the app deletes by itself as it goes (extracted maps beyond
+// "Maps kept unpacked", work folders), all of them now. The next conversion of a map extracts it again.
+static void save_last_prepared();
+static void clear_temp_files() {
+    if (g_busy) return;
+    Config cfg = make_config();
+    uint64_t now = porter::working_files_size(cfg);
+    wchar_t q[600];
+    swprintf(q, 600, L"Delete the app's temporary files (%.1f GB)?\n\nThat's the maps' extracted tags (kept so converting a map "
+                     L"again skips extracting it) and the work folders conversions leave behind, including the tags the "
+                     L"last conversion prepared (Convert then prepares the map again).\n\nYour converted maps, picks, map "
+                     L"cards, reports, Level measurements and LOD library stay.",
+             now / 1073741824.0);
+    if (MessageBoxW(g_wnd, q, L"Halo Map Porter", MB_YESNO | MB_ICONQUESTION) != IDYES) return;
+    HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
+    std::string what;
+    uint64_t freed = porter::clear_working_files(cfg, what);
+    SetCursor(old);
+    // (the prepared tags are gone: nothing to build from or open the windows on)
+    g_last_update.clear();
+    g_last_lods.clear();
+    g_last_update_key.clear();
+    g_last_models_key.clear();
+    g_last_build_key.clear();
+    save_last_prepared();
+    ShowWindow(GetDlgItem(g_wnd, ID_SEE_LODS), SW_HIDE);
+    wchar_t b[300];
+    swprintf(b, 300, L"Cleared the temporary files: %hs (%.1f GB freed).", what.c_str(), freed / 1073741824.0);
+    append_log(b);
 }
 
 // The Settings tab's "Read perf logs...": each log's report in the log (and in a text file beside the first), and with
@@ -1780,6 +1815,23 @@ static void open_batch() {
         return g == Game::Unknown ? std::wstring(L"?") : W(game_name(g));
     };
     h.stop = [] { g_batch_stop = true; };
+    // A map added with "Browse...": where it was saved before, else beside the Convert tab's "Save as" (each map in a
+    // folder of its own, named for it, when the map list is map folders).
+    auto earlier = std::make_shared<std::map<std::wstring, std::wstring>>();
+    auto looked = std::make_shared<bool>(false);
+    h.default_out = [earlier, looked](const std::wstring &in) -> std::wstring {
+        if (!*looked) {
+            *looked = true;
+            for (auto &it : find_earlier_conversions()) earlier->emplace(lower(it.in), it.out);
+        }
+        auto e = earlier->find(lower(in));
+        if (e != earlier->end()) return e->second;
+        fs::path save(get_text(ID_OUT));
+        if (save.empty()) return L"";
+        std::wstring stem = fs::path(in).stem().wstring();
+        if (folder_mode()) return (save.parent_path().parent_path() / stem / (lower(stem) + L".map")).wstring();
+        return (save.parent_path() / (lower(stem) + L".map")).wstring();
+    };
     h.start = [](const std::vector<batchui::Item> &items, const std::vector<int> &which) {
         // Each map's options, worked out here (they read the windows' saved picks; the worker reads nothing of the
         // window): the Xbox tab's as they are, then the map's own.
@@ -1801,7 +1853,7 @@ static void open_batch() {
             apply_user_scripts(j.cfg, j.in);
             j.keys = keys_for(j.cfg, j.in, true);
             // A map folder (Halo Universal XBE): its card, written again beside the map (its next version when it changed).
-            if (folder_mode() && fs::exists(j.out.parent_path() / "info.txt")) {
+            if (folder_mode()) {
                 j.card_dir = mapcard::find_card_by_output(cards_root(), j.out);
                 if (j.card_dir.empty()) j.card_dir = mapcard::card_dir(cards_root(), j.in);
                 j.card_name = N(lower(j.in.stem().wstring()));
@@ -1846,8 +1898,15 @@ static void open_batch() {
                     post_log("Done: " + N(j.out.wstring()) + (r.link.empty() ? "" : " (linked: " + N(r.link.wstring()) + ")"));
                 } else {
                     failed++;
-                    std::string e = r.error.substr(0, r.error.find('\n'));
-                    st = L"Failed: " + W(e);
+                    // (the line that says what went wrong, and the tag: the first line is often only "Build failed")
+                    std::string e = r.error.substr(0, r.error.find('\n')), tag;
+                    std::istringstream es(r.error);
+                    for (std::string l; std::getline(es, l);) {
+                        if (l.rfind("Error: ", 0) == 0) e = l.substr(7);
+                        else if (l.rfind("Tag: ", 0) == 0) tag = l.substr(5);
+                        else if (l.rfind("FATAL ERROR: ", 0) == 0 && e.rfind("Build failed", 0) == 0) e = l.substr(13);
+                    }
+                    st = L"Failed: " + W(e) + (tag.empty() ? L"" : L" (" + W(tag) + L")");
                     post_log("FAILED: " + r.error);
                 }
                 batchui::progress(j.index, st);
@@ -2720,8 +2779,10 @@ static void create_controls() {
     add(4, L"STATIC", L"The lower-detail versions the app makes are kept here, so the same model in another map reuses them, "
         L"with your choices for models from the LODs window (choices.txt).", 0, 190, y, 544, 36, ID_S_LOD_HINT);
     y += 44;
-    check(4, L"With each Xbox build, write a camera tour for Halo 1 Unlimited's perf log (perf\\tours, beside the map)", 26, y,
-          708, ID_S_TOUR);
+    check(4, L"Write a camera tour for Halo 1 Unlimited's perf log with each Xbox build", 26, y, 420, ID_S_TOUR);
+    label(4, L"Maps kept unpacked:", 452, y - 1, 124, ID_S_KEEP_LBL);
+    add(4, L"EDIT", L"", WS_TABSTOP | ES_NUMBER | ES_CENTER, 578, y - 1, 40, 24, ID_S_KEEP, WS_EX_CLIENTEDGE);
+    button(4, L"Clear temp files", 624, y - 2, 110, ID_S_CLEAR);
     y += 28;
     button(4, L"Read perf logs...", 26, y, 150, ID_S_PERF);
     add(4, L"STATIC", L"Halo 1 Unlimited's logs: what limits a map's frame rate on the Xbox (the game, drawing or the "
@@ -2807,6 +2868,7 @@ static void create_controls() {
     set_check(ID_B_SHARE, ini_get(L"share", L"1") == L"1");
     set_check(ID_X_SHRINK, ini_get(L"x_shrink", L"1") == L"1");
     set_check(ID_S_TOUR, ini_get(L"write_tour", L"0") == L"1");
+    set_text(ID_S_KEEP, ini_get(L"keep_unpacked", L"3"));
     {
         int k = _wtoi(ini_get(L"x_target", L"1").c_str());
         SendDlgItemMessageW(g_wnd, ID_X_TARGET, CB_SETCURSEL, k >= 0 && k < 3 ? k : 1, 0);
@@ -2976,6 +3038,14 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case ID_B_MCC_BROWSE: case ID_B_CE_BROWSE: case ID_S_CE_BROWSE: case ID_S_MCC_BROWSE:
         case ID_B_XBOX_BROWSE: case ID_S_XT_BROWSE: case ID_S_XM_BROWSE:
+        case ID_S_CLEAR: if (!g_busy) clear_temp_files(); break;
+        case ID_S_KEEP:
+            if (code == EN_KILLFOCUS) {
+                int n = std::clamp(_wtoi(get_text(ID_S_KEEP).c_str()), 1, 100);
+                set_text(ID_S_KEEP, std::to_wstring(n));
+                save_settings();
+            }
+            break;
         case ID_S_PERF:
             read_perf_logs();
             break;
