@@ -539,7 +539,8 @@ std::vector<Feature> find_features(const Level &L, const std::vector<V3> &spawns
                     if (m < 0 || !in[(size_t)m] || id[(size_t)m] >= 0) continue;
                     if (one_slope) {   // (a ramp is one slope: its neighbour on another isn't part of it)
                         const auto &a = g.nxy[(size_t)c], &b = g.nxy[(size_t)m];
-                        if (a[0] * b[0] + a[1] * b[1] + g.nz[(size_t)c] * g.nz[(size_t)m] < 0.998) continue;
+                        // (within about 8 degrees: a flight's triangles tilt a little apart, as a spiral stair's do)
+                        if (a[0] * b[0] + a[1] * b[1] + g.nz[(size_t)c] * g.nz[(size_t)m] < 0.99) continue;
                     }
                     id[(size_t)m] = id[f];
                     st.push_back(m);
@@ -699,6 +700,43 @@ std::vector<Feature> find_features(const Level &L, const std::vector<V3> &spawns
                 way.push_back(beyond(way.back(), way[way.size() >= 5 ? way.size() - 5 : 0], 1.0));
             }
             along_way(way, 1, 4.0, true);
+        }
+    }
+    // Landings: a small flat floor with sloped floor going up from it and sloped floor going down (the corners of a
+    // stair that turns, a spiral's): a waypoint in its middle, so the bots' way turns there instead of cutting across.
+    {
+        std::vector<char> flat(n, 0);
+        for (size_t f = 0; f < n; f++) flat[f] = reach[f] && !slope(f);
+        std::vector<std::vector<int>> comps;
+        pieces(flat, comps);
+        for (auto &comp : comps) {
+            if (comp.size() * g.h * g.h > 16.0) continue;   // (a floor, not a landing)
+            double z = 0;
+            for (int c : comp) z += g.at[(size_t)c][2];
+            z /= (double)comp.size();
+            bool up = false, down = false;
+            std::set<int> inside(comp.begin(), comp.end());
+            int edge = 0;
+            std::vector<int> rim;
+            for (int c : comp)
+                for (int m : g.nb[(size_t)c]) {
+                    if (m >= 0 && inside.count(m)) continue;
+                    rim.push_back(c);
+                    if (m < 0 || !reach[(size_t)m] || !slope((size_t)m)) continue;
+                    if (g.at[(size_t)m][2] > z + 0.1) up = true;
+                    if (g.at[(size_t)m][2] < z - 0.1) down = true;
+                    edge++;
+                }
+            if (!up || !down) continue;
+            // (its middle: the cell furthest from its rim)
+            int best = comp[0];
+            double bd = -1;
+            for (int c : comp) {
+                double d = 1e30;
+                for (int e : rim) d = std::min(d, dist(g.at[(size_t)c], g.at[(size_t)e]));
+                if (d > bd) { bd = d; best = c; }
+            }
+            out.push_back({g.at[(size_t)best], 1});
         }
     }
     // The grid cell next to a floor's, in direction d: no floor there as high as it (less half a unit), or none at
