@@ -594,6 +594,46 @@ struct Job {
     // Animation frame indices past the animation's last frame (an MCC mod's animation shortened without
     // updating them): MCC never reaches such a key frame; Invader refuses. Key frames go to the frame count (still
     // never reached), the sound frame to 0. Every animation tag the build uses is checked at once.
+    // Effects whose particles or parts name a location the effect doesn't have (MCC uses the first): every such one
+    // in the map pointed at the first location at once, instead of one per build (Requiem has dozens).
+    int fix_effect_locations() {
+        int fixed = 0, refs = 0;
+        std::set<std::string> seen;
+        static const std::regex loc_re(R"(^events\[\d+\]\.(particles|parts)\[\d+\]\.location$)");
+        for (const fs::path &d : {fixes, source}) {
+            if (d.empty() || !fs::exists(d)) continue;
+            std::error_code ec;
+            for (auto it = fs::recursive_directory_iterator(d, ec); it != fs::recursive_directory_iterator(); it.increment(ec)) {
+                if (it->path().extension() != ".effect") continue;
+                std::string rel = fs::relative(it->path(), d).generic_u8string();
+                if (!seen.insert(rel).second || owner(rel) != d) continue;   // only the copy the build uses
+                std::vector<std::pair<std::string, std::string>> flat;
+                if (!tagedit::flatten(u8(it->path()), flat)) continue;
+                long n = 0;
+                for (auto &[k, v] : flat)
+                    if (k == "locations.size") n = std::atol(v.c_str());
+                std::vector<std::string> sets;
+                for (auto &[k, v] : flat)
+                    if (std::regex_match(k, loc_re) && !v.empty() && isdigit((unsigned char)v[0]) && std::atol(v.c_str()) >= n &&
+                        std::atol(v.c_str()) != 65535)
+                        sets.insert(sets.end(), {"-S", k, n > 0 ? "0" : "null"});
+                if (sets.empty()) continue;
+                if (d != fixes && !to_fixes(rel, d)) continue;
+                std::vector<std::string> cmd{u8(tool(cfg, "invader-edit")), "-t", u8(fixes), rel};
+                cmd.insert(cmd.end(), sets.begin(), sets.end());
+                std::string out;
+                if (run_process(cmd, out) == 0) {
+                    fixed++;
+                    refs += (int)sets.size() / 3;
+                }
+            }
+        }
+        if (fixed)
+            note("[fix]  " + std::to_string(refs) + " particles and parts of " + std::to_string(fixed) + " effect" + (fixed == 1 ? "" : "s") +
+                 " pointed at locations their effect doesn't have; they use its first location (as MCC does)");
+        return fixed;
+    }
+
     int fix_animation_frames() {
         int fixed = 0;
         std::set<std::string> seen;
@@ -969,6 +1009,8 @@ struct Job {
         }
         static const std::regex bad_index(R"((\w+)::(\w+) references an invalid index of \S+ \((\d+) >= (\d+)\))");
         if (std::regex_search(msg, m, bad_index)) {
+            if (m[1] == "EffectParticle" || m[1] == "EffectPart")
+                if (fix_effect_locations() > 0) return true;
             std::string key = join(m[2]);
             if (edit(tag, key, std::stoi(m[4]) > 0 ? "0" : "null")) {
                 note("[fix]  " + tag + ": " + key + " pointed at missing entry #" + m[3].str() + "; reset to 0");
@@ -1004,9 +1046,30 @@ struct Job {
             // (H1A-EK tags or the Xbox tagset), if it has one.
             // (Perfect Conversion: a gameplay tag stays the map's, with only the bad value reset)
             if (!borrowed.count(tag) && !(cfg.xbox_perfect && pairs::gameplay_group(from_u8(tag).extension().u8string().erase(0, 1)))) {
-                for (fs::path alt : {cfg.ek_dir.empty() ? fs::path() : cfg.ek_dir / "tags", cfg.xbox_tags_dir}) {
+                // (for the Xbox, the Xbox tagset's first: an MCC tag still names Gearbox models and extended shaders)
+                fs::path ek = cfg.ek_dir.empty() ? fs::path() : cfg.ek_dir / "tags";
+                for (fs::path alt : target == Game::Xbox ? std::vector<fs::path>{cfg.xbox_tags_dir, ek}
+                                                         : std::vector<fs::path>{ek, cfg.xbox_tags_dir}) {
                     if (alt.empty() || !fs::exists(alt / from_u8(tag)) || alt == overlay || alt == source) continue;
                     if (to_fixes(tag, alt)) {
+                        if (target == Game::Xbox && alt == ek) {   // (its references as the Xbox's tags name them)
+                            std::vector<std::pair<std::string, std::string>> flat;
+                            std::vector<std::string> cmd{u8(tool(cfg, "invader-edit")), "-t", u8(fixes), tag};
+                            if (tagedit::flatten(u8(fixes / from_u8(tag)), flat))
+                                for (auto &[k, v] : flat) {
+                                    if (v.size() < 2 || v[0] != '@') continue;
+                                    std::string d = v.substr(1);
+                                    std::replace(d.begin(), d.end(), '\\', '/');
+                                    for (auto [from, to] : {std::pair<const char *, const char *>{".gbxmodel", ".model"},
+                                                            {".shader_transparent_chicago_extended", ".shader_transparent_chicago"}}) {
+                                        std::string f = from;
+                                        if (d.size() > f.size() && d.compare(d.size() - f.size(), f.size(), f) == 0)
+                                            cmd.insert(cmd.end(), {"-S", k, d.substr(0, d.size() - f.size()) + to});
+                                    }
+                                }
+                            std::string out;
+                            if (cmd.size() > 4) run_process(cmd, out);
+                        }
                         borrowed.insert(tag);
                         note("[swap] " + tag + ": every copy is corrupt (" + msg + "); using the clean copy from " + u8(alt));
                         return true;
@@ -2333,6 +2396,14 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
                       "\nFull log: " + u8(job.work / "build.log");
             return r;
         }
+    }
+    if (!fs::exists(tmp_out, ec)) {   // (200 builds, each fixing something, and still failing)
+        std::ofstream(job.work / "build.log") << out;
+        Failure f;
+        parse_failure(out, f);
+        r.error = "Build failed: still failing after 200 automatic fixes.\nError: " + f.msg + "\nTag: " + f.tag +
+                  "\nFull log: " + u8(job.work / "build.log");
+        return r;
     }
     for (auto &l : unwrap(out))
         if (l.rfind("WARNING", 0) == 0) r.warnings.push_back(l);
