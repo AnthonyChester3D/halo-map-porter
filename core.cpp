@@ -1352,7 +1352,11 @@ static double tag_space_used(const std::string &build_out);
 // memory between them that OpenCE (test build 24 and later) lends to its texture cache for the map (from the tag
 // data's end to the lowest BSP, in whole 16 KB pages, when it's 1 MB or more), and the memory all the map's
 // textures take (each bitmap's pixel data).
-struct XboxMemoryUse { double tag_mb = 0, bsp_mb = 0, lend_mb = 0, texture_mb = 0; int textures = 0; };
+struct XboxMemoryUse {
+    double tag_mb = 0, bsp_mb = 0, lend_mb = 0, texture_mb = 0;
+    int textures = 0;
+    std::vector<std::pair<double, std::string>> bitmaps;   // each bitmap's textures, MB, and its tag path
+};
 static bool measure_xbox_memory(const fs::path &map, XboxMemoryUse &u) {
     const uint32_t base = 0x803A6000, top = base + 0x1600000, page = 16384;
     std::ifstream f(map, std::ios::binary);
@@ -1396,9 +1400,18 @@ static bool measure_xbox_memory(const fs::path &map, XboxMemoryUse &u) {
         } else if (cls == "mtib") {                                   // a bitmap: its textures' pixel data
             uint32_t n = u32(td, data + 0x60);
             size_t list = at(u32(td, data + 0x64));
+            double mine = 0;
             for (uint32_t k = 0; list != (size_t)-1 && k < n && k < 4096; k++) {
                 tex_bytes += u32(td, list + k * 0x30 + 0x1C);
+                mine += u32(td, list + k * 0x30 + 0x1C);
                 u.textures++;
+            }
+            size_t name = at(u32(td, e + 16));
+            if (name != (size_t)-1 && mine > 0) {
+                size_t z = td.find('\0', name);
+                std::string p = td.substr(name, z == std::string::npos ? std::string::npos : z - name);
+                std::replace(p.begin(), p.end(), '\\', '/');
+                u.bitmaps.push_back({mine / 1048576.0, p + ".bitmap"});
             }
         }
     }
@@ -1409,6 +1422,40 @@ static bool measure_xbox_memory(const fs::path &map, XboxMemoryUse &u) {
     u.lend_mb = lend >= 1048576 ? lend / 1048576.0 : 0;
     u.texture_mb = tex_bytes / 1048576.0;
     return true;
+}
+size_t shrink_bitmap_tag(const fs::path &p, bool write, bool alpha_tested);
+// Over the texture target: where the texture memory goes (the map's own, Bungie's, the HUD's and menus'), and the
+// biggest bitmaps with why each one is still that big.
+static std::string texture_breakdown(Job &job, const XboxMemoryUse &use) {
+    double own_mb = 0, stock_mb = 0, hud_mb = 0;
+    auto hud = [](std::string l) {
+        for (auto &c : l) c = (char)tolower((unsigned char)c);
+        l = "/" + l;
+        return l.find("/ui/") != std::string::npos || l.find("/hud") != std::string::npos;
+    };
+    std::vector<std::pair<double, std::string>> sorted = use.bitmaps;
+    std::sort(sorted.rbegin(), sorted.rend());
+    std::string list;
+    for (size_t i = 0; i < sorted.size(); i++) {
+        const std::string &t = sorted[i].second;
+        fs::path own = job.owner(t);
+        const bool stock = !own.empty() && own == job.overlay, ui = hud(t);
+        (ui ? hud_mb : stock ? stock_mb : own_mb) += sorted[i].first;
+        if (i >= 10) continue;
+        std::string why = ui ? "the HUD's or menus' (left as made)"
+                        : stock ? "Bungie's (left as made)"
+                        : own.empty() ? "not found"
+                        : shrink_bitmap_tag(own / from_u8(t), false, false) == 0
+                              ? "can't be halved: a sprite sheet, cube map, 3D or interface bitmap, or already small"
+                              : "the map's own, could be halved further";
+        char b[48];
+        snprintf(b, sizeof b, " %.1f MB", sorted[i].first);
+        list += std::string(list.empty() ? "" : "; ") + t + b + " (" + why + ")";
+    }
+    char b[200];
+    snprintf(b, sizeof b, ".\n    Where the texture memory goes: the map's own %.1f MB, Bungie's %.1f MB, the HUD's and menus' %.1f MB. "
+                          "The biggest: ", own_mb, stock_mb, hud_mb);
+    return b + list;
 }
 void convert_bc7_textures(Job &job);
 void xbox_content_passes(Job &job);
@@ -1633,7 +1680,8 @@ std::string size_breakdown(Job &job) {
     for (auto &d : job.dirs()) cmd.insert(cmd.end(), {"-t", u8(d)});
     cmd.push_back(job.scenario + ".scenario");
     run_process(cmd, out);
-    std::map<std::string, double> mb;
+    std::map<std::string, double> mb, stock_kind;   // (Bungie's: by kind too)
+    std::vector<std::pair<double, std::string>> biggest;
     double bsp = 0;
     std::istringstream ss(out + "\n" + job.scenario + ".scenario");
     std::string dep;
@@ -1647,6 +1695,12 @@ std::string size_breakdown(Job &job) {
         double size = (double)fs::file_size(own / from_u8(dep), ec) / 1048576.0;
         if (ec) continue;
         std::string ext = fs::path(from_u8(dep)).extension().u8string(), what = "other";
+        auto kind_of = [&]() -> std::string {
+            return ext == ".bitmap" ? "textures" : ext == ".sound" ? "sounds" : ext == ".model" || ext == ".gbxmodel" ? "models"
+                   : ext == ".model_animations" ? "animations" : "other";
+        };
+        biggest.push_back({size, dep + (own == job.overlay ? " (Bungie's)" : "")});
+        if (own == job.overlay) stock_kind[kind_of()] += size;
         if (own == job.overlay) what = "stock content";
         else if (ext == ".bitmap") what = "textures";
         else if (ext == ".sound") what = "sounds";
@@ -1663,6 +1717,26 @@ std::string size_breakdown(Job &job) {
         char buf[64];
         snprintf(buf, sizeof buf, "%.1f MB", parts[i].first);
         r += (i ? ", " : "") + parts[i].second + " " + buf;
+    }
+    r += ".";
+    if (!stock_kind.empty()) {   // (Bungie's content: what it is, so it can be gone after)
+        std::vector<std::pair<double, std::string>> k;
+        for (auto &[n, v] : stock_kind) k.push_back({v, n});
+        std::sort(k.rbegin(), k.rend());
+        r += "\nBungie's content by kind: ";
+        for (size_t i = 0; i < k.size(); i++) {
+            char buf[64];
+            snprintf(buf, sizeof buf, "%.1f MB", k[i].first);
+            r += (i ? ", " : "") + k[i].second + " " + buf;
+        }
+        r += ".";
+    }
+    std::sort(biggest.rbegin(), biggest.rend());
+    r += "\nThe biggest tags: ";
+    for (size_t i = 0; i < biggest.size() && i < 10; i++) {
+        char buf[32];
+        snprintf(buf, sizeof buf, " %.1f MB", biggest[i].first);
+        r += (i ? "; " : "") + biggest[i].second + buf;
     }
     r += ".";
     (void)bsp;
@@ -2241,7 +2315,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
                              "they may not all fit the Xbox's texture memory at once (slowdowns where many are in view)",
                              use.texture_mb, budget, !cfg.xbox_shrink ? " (\"Shrink textures to fit\" is off)"
                              : texture_rounds ? " even with your textures shrunk" : "; your own textures can't shrink further");
-                    texture_warning = buf;
+                    texture_warning = buf + texture_breakdown(job, use);
                 }
                 job.textures_fitted = true;   // (as far as it goes)
             }
@@ -6122,14 +6196,18 @@ static std::string map_first_person_hands(Job &job) {
 // passes below treat them as the weapons' first-person models are, their shaders and textures included).
 static std::vector<std::string> content_dependencies(Job &job) {
     auto deps = tag_dependencies(job, job.scenario + ".scenario", true);
-    std::string hands = map_first_person_hands(job);
-    if (!hands.empty()) {
-        std::set<std::string> have(deps.begin(), deps.end());
-        std::vector<std::string> more = tag_dependencies(job, hands, true);
-        more.push_back(hands);
+    std::set<std::string> have(deps.begin(), deps.end());
+    auto add = [&](const std::string &root) {
+        std::vector<std::string> more = tag_dependencies(job, root, true);
+        more.push_back(root);
         for (auto &d : more)
             if (have.insert(d).second) deps.push_back(d);
-    }
+    };
+    std::string hands = map_first_person_hands(job);
+    if (!hands.empty()) add(hands);
+    // (and what the globals use: the build takes them though the scenario doesn't name them, so the player's biped,
+    // its armour's textures (Halo 3's Mark VI, 16 MB on [h3]new_mombasa) and the multiplayer weapons are the map's too)
+    if (!job.owner("globals/globals.globals").empty()) add("globals/globals.globals");
     return deps;
 }
 
