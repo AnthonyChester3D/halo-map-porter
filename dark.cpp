@@ -117,6 +117,25 @@ LRESULT CALLBACK tabs(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PT
     return DefSubclassProc(h, msg, wp, lp);
 }
 
+// A list view's column titles: its header draws them dark on the dark style; light instead (the header asks the list
+// view, its parent, how to draw each title).
+LRESULT CALLBACK list_titles(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
+    if (msg == WM_NOTIFY) {
+        NMHDR *n = (NMHDR *)lp;
+        if (n->code == NM_CUSTOMDRAW && n->hwndFrom == ListView_GetHeader(h)) {
+            NMCUSTOMDRAW *cd = (NMCUSTOMDRAW *)lp;
+            if (cd->dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
+            if (cd->dwDrawStage == CDDS_ITEMPREPAINT) {
+                SetTextColor(cd->hdc, kText);
+                return CDRF_DODEFAULT;
+            }
+        }
+    } else if (msg == WM_NCDESTROY) {
+        RemoveWindowSubclass(h, list_titles, 3);
+    }
+    return DefSubclassProc(h, msg, wp, lp);
+}
+
 bool is(const wchar_t *cls, const wchar_t *name) { return _wcsicmp(cls, name) == 0; }
 
 // Each window as it's made (after its WM_CREATE).
@@ -150,6 +169,7 @@ void made(HWND h) {
         ListView_SetBkColor(h, kWindow);
         ListView_SetTextBkColor(h, kWindow);
         ListView_SetTextColor(h, kText);
+        SetWindowSubclass(h, list_titles, 3, 0);
     } else if (is(cls, WC_HEADERW)) {
         theme(h, L"ItemsView");
     } else if (is(cls, WC_TABCONTROLW)) {
