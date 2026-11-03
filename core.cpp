@@ -7272,7 +7272,10 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
     // as made, or trimmed to the triangles chosen (allowed to move 5% of its size to get there).
     {
         const int mode = job.cfg.xbox_trim_models;
-        bool harder = mode >= 2, by_density = false, by_choice = false, by_setting = false, by_first_person = false;
+        // (4: every model first made as simple as its shape allows, within 0.05% of its size; then trimmed as 1 does)
+        const bool simplest = mode == 4;
+        bool harder = mode == 2, by_density = false, by_choice = false, by_setting = false, by_first_person = false;
+        std::vector<std::string> cleaned;
         std::vector<std::string> trimmed, floor;
         size_t saved = 0;
         // (Bungie's too, but only by your choice: made for the Xbox, the Trim setting leaves them as they are)
@@ -7297,7 +7300,7 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
                 ts.max_units = 1;
             } else if (mode <= 0) {
                 continue;
-            } else if (mode >= 3) {   // 1.5x Bungie's for its kind and size, when over that by a quarter
+            } else if (mode == 3) {   // 1.5x Bungie's for its kind and size, when over that by a quarter
                 ts.density = 1.5;
                 ts.kind = kind;
                 ts.max_change = 0.01;
@@ -7321,20 +7324,62 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
                 if (!measured) note(dep, "not measured in first person: " + why);
             }
             if (measured) ts.seen = &seen;
-            perf::ModelStats ms = perf::model_stats(own / from_u8(dep));
-            if (!ms.ok || (!measured && ts.density <= 0 && ms.triangles <= ts.budget)) continue;
-            if (!measured && ts.density > 0 &&
-                ms.triangles <= ts.density * lod::stock_triangles(kind, lod::model_size(own / from_u8(dep))) * ts.slack)
-                continue;   // (within its budget: trim_top would say so too)
-            fs::path ed = editable(dep, bungies);   // (Bungie's: an edited copy, your Xbox tags as they are)
-            if (ed.empty()) continue;
+            // Simplest first: as few triangles as keep its shape within 0.05% of its size, however many it has; the
+            // trim below then goes on from that version.
+            int cleaned_from = 0;
             std::string before;
-            {
+            fs::path ed;
+            if (simplest) {
+                ed = editable(dep, bungies);
+                if (ed.empty()) continue;
                 std::ifstream in(ed / from_u8(dep), std::ios::binary);
                 before.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                in.close();
+                keep_original(ed / from_u8(dep), before);
+                lod::TrimSettings clean;
+                clean.budget = 0;
+                clean.max_change = 0.0005;
+                clean.max_units = 1e9;
+                lod::Trim c = lod::trim_top(ed / from_u8(dep), clean, lod_settings, dep);
+                if (c.changed) {
+                    cleaned_from = c.before;
+                    saved += c.xbox_bytes_saved;
+                    cleaned.push_back(name_of(dep) + " " + thousands(c.before) + " > " + thousands(c.after));
+                }
             }
-            keep_original(ed / from_u8(dep), before);
+            fs::path now = simplest ? ed : own;
+            perf::ModelStats ms = perf::model_stats(now / from_u8(dep));
+            bool trim = ms.ok;
+            if (trim && !measured && ts.density <= 0 && ms.triangles <= ts.budget) trim = false;
+            if (trim && !measured && ts.density > 0 &&
+                ms.triangles <= ts.density * lod::stock_triangles(kind, lod::model_size(now / from_u8(dep))) * ts.slack)
+                trim = false;   // (within its budget: trim_top would say so too)
+            if (!trim) {
+                if (cleaned_from > 0 && !job.analysis) {   // (simplified, and within its budget after)
+                    job.trim_originals[dep] = std::move(before);
+                    record(dep, kind, "trimmed").trimmed_from = cleaned_from;
+                }
+                continue;
+            }
+            if (!simplest) {
+                ed = editable(dep, bungies);   // (Bungie's: an edited copy, your Xbox tags as they are)
+                if (ed.empty()) continue;
+                std::ifstream in(ed / from_u8(dep), std::ios::binary);
+                before.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                in.close();
+                keep_original(ed / from_u8(dep), before);
+            }
             lod::Trim r = lod::trim_top(ed / from_u8(dep), ts, lod_settings, dep);
+            if (cleaned_from > 0) {   // (from the model as made)
+                if (!r.changed) {
+                    if (!job.analysis) {
+                        job.trim_originals[dep] = std::move(before);
+                        record(dep, kind, "trimmed").trimmed_from = cleaned_from;
+                    }
+                    continue;
+                }
+                r.before = cleaned_from;
+            }
             if (!r.changed) {
                 if (r.before <= r.budget * ts.slack) continue;   // (within its budget)
                 floor.push_back(name_of(dep) + " " + thousands(r.before));
@@ -7343,13 +7388,13 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
             }
             saved += r.xbox_bytes_saved;
             std::string about = mine ? " (your choice" : r.before <= r.budget * ts.slack ? " (" : r.after > r.budget * 1.1 ? " ("
-                              : mode >= 3 ? " (its target" : " (its budget";
+                              : mode == 3 ? " (its target" : " (its budget";
             if (r.unseen > 0)
                 about += std::string(about.size() > 2 ? "; " : "") + thousands(r.unseen) + " never on screen in its animations";
             about += ")";
             trimmed.push_back(name_of(dep) + " " + thousands(r.before) + " > " + thousands(r.after) + (about == " ()" ? "" : about));
             if (measured) by_first_person = true;
-            (mine ? by_choice : mode >= 3 ? by_density : by_setting) = true;
+            (mine ? by_choice : mode == 3 ? by_density : by_setting) = true;
             if (!job.analysis) {
                 job.trim_originals[dep] = std::move(before);
                 record(dep, kind, "trimmed").trimmed_from = r.before;
@@ -7369,6 +7414,10 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
                      (trimmed.size() == 1 ? " model" : " models") + " lighter" + how + " (" + size +
                      " less of the Xbox's tag memory and map file; triangles as made > now): " + list(trimmed));
         }
+        if (!cleaned.empty())
+            job.note("[heavy] simplified " + std::to_string(cleaned.size()) + (cleaned.size() == 1 ? " model" : " models") +
+                     " as far as their shapes allow first (no point moving more than 0.05% of its size; triangles as made > "
+                     "simplified, before any trim): " + list(cleaned));
         if (!floor.empty())
             job.note("[heavy] left as they are (every triangle shows, or keeps a texture in place): " + list(floor, 4));
     }

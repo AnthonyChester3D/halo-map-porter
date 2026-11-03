@@ -469,8 +469,8 @@ static void apply_xbox_options(Config &cfg) {
     cfg.xbox_lod_stock_models = checked(ID_X_LODSTOCK);
     cfg.xbox_make_lods = checked(ID_X_MAKELOD);
     cfg.xbox_bot_nodes = checked(ID_X_BOTS);
-    cfg.xbox_trim_models = std::clamp(sel(ID_X_TRIM), 0, 3);
-    cfg.xbox_collision = std::min(cfg.xbox_trim_models, 2);   // (heavy models: their collision too)
+    cfg.xbox_trim_models = std::clamp(sel(ID_X_TRIM), 0, 4);
+    cfg.xbox_collision = cfg.xbox_trim_models == 4 ? 1 : std::min(cfg.xbox_trim_models, 2);   // (heavy models: their collision too)
     cfg.xbox_compress_animations = std::clamp(sel(ID_X_ANIM), 0, 2);
     cfg.xbox_add_portals = sel(ID_X_PORTALS) >= 1;
     cfg.xbox_replan_portals = sel(ID_X_PORTALS) == 2;
@@ -2806,7 +2806,7 @@ static void create_controls() {
     label(2, L"Heavy models:", 410, y - 2, 86, ID_X_TRIM_LBL);
     list_combo(2, 500, y - 2, 234, ID_X_TRIM,
                {L"Leave them as made", L"Trim (they look the same)", L"Trim harder (details change)",
-                L"Trim to 1.5x Bungie's density"});
+                L"Trim to 1.5x Bungie's density", L"Simplify fully, then trim (shape within 0.05%)"});
     y += 24;
     check(2, L"Also make and use LODs for Bungie's models (retail didn't)", 26, y, 380, ID_X_LODSTOCK);
     label(2, L"Animations:", 410, y - 2, 86, ID_X_ANIM_LBL);
@@ -2918,7 +2918,7 @@ static void create_controls() {
     set_check(ID_X_LODSTOCK, ini_get(L"x_lodstock", L"0") == L"1");
     set_check(ID_X_MAKELOD, ini_get(L"x_makelod", L"1") == L"1");
     set_check(ID_X_BOTS, ini_get(L"x_bots", L"1") == L"1");
-    SendDlgItemMessageW(g_wnd, ID_X_TRIM, CB_SETCURSEL, std::clamp(_wtoi(ini_get(L"x_trim", L"1").c_str()), 0, 3), 0);
+    SendDlgItemMessageW(g_wnd, ID_X_TRIM, CB_SETCURSEL, std::clamp(_wtoi(ini_get(L"x_trim", L"1").c_str()), 0, 4), 0);
     SendDlgItemMessageW(g_wnd, ID_X_ANIM, CB_SETCURSEL, std::clamp(_wtoi(ini_get(L"x_anim", L"1").c_str()), 0, 2), 0);
     SendDlgItemMessageW(g_wnd, ID_X_PORTALS, CB_SETCURSEL, std::clamp(_wtoi(ini_get(L"x_portals", L"1").c_str()), 0, 2), 0);
     {

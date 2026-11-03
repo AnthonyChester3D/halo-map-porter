@@ -67,7 +67,9 @@ struct Config {
     // models over their kind's budget (vehicles and scenery 4,000 triangles, characters and first-person weapons 3,000,
     // weapons and items 2,000), and never below it. 3: trimmed to 1.5x what Bungie's models of their kind and size have
     // (lod.hpp stock_triangles), when over it by a quarter, the shape moving at most 1% of the model's size (0.03
-    // units). A model's own choice in the LODs window (lod.hpp Choice) comes first.
+    // units). 4: every model first made as simple as its shape allows (no point moving more than 0.05% of its size,
+    // whatever its triangles), then trimmed as 1 from that. A model's own choice in the LODs window (lod.hpp Choice)
+    // comes first (after the simplifying, with 4).
     int xbox_trim_models = 1;
     // Store the map's animations (its own and the Xbox's it uses) the way Bungie stored the Xbox's cinematics: as
     // keyframes ("compressed", animcomp.hpp), about half the tag memory for first-person animations, a quarter less
