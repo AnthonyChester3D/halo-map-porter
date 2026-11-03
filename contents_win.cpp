@@ -1,5 +1,6 @@
 // Halo Map Porter - the Xbox tab's "Weapons & vehicles" window (Windows). See contents_win.hpp.
 #include "statuslamp_win.hpp"
+#include "dark.hpp"
 #include "contents_win.hpp"
 
 #include <commctrl.h>
@@ -504,7 +505,7 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         SetBkMode(dc, TRANSPARENT);
         if ((HWND)lp == item(IDC_TOTAL)) SetTextColor(dc, St->total_color);
         else if ((HWND)lp == item(IDC_STATUS) || (HWND)lp == item(IDC_FILE)) SetTextColor(dc, kGrey);
-        return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
+        return (LRESULT)dark::sysbrush(COLOR_WINDOW);
     }
     case WM_NOTIFY: {
         NMHDR *n = (NMHDR *)lp;
@@ -637,7 +638,7 @@ bool edit_picks(HWND owner, const std::wstring &title, const std::string &key, A
         wc.hInstance = inst;
         wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
         wc.lpfnWndProc = proc;
-        wc.hbrBackground = GetSysColorBrush(COLOR_WINDOW);
+        wc.hbrBackground = dark::sysbrush(COLOR_WINDOW);
         wc.lpszClassName = L"HMPContents";
         wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(1));
         RegisterClassExW(&wc);

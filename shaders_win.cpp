@@ -1,5 +1,6 @@
 // Halo Map Porter - the Xbox tab's "Level shaders" window (Windows). See shaders_win.hpp.
 #include "statuslamp_win.hpp"
+#include "dark.hpp"
 #include "shaders_win.hpp"
 
 #include <commctrl.h>
@@ -2622,7 +2623,7 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_CTLCOLORSTATIC:
         SetBkMode((HDC)wp, TRANSPARENT);
-        return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
+        return (LRESULT)dark::sysbrush(COLOR_WINDOW);
     }
     return DefWindowProcW(h, msg, wp, lp);
 }
@@ -2648,7 +2649,7 @@ bool edit(HWND owner, const std::wstring &title, const std::string &key, Measure
         wc.hInstance = inst;
         wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
         wc.lpfnWndProc = proc;
-        wc.hbrBackground = GetSysColorBrush(COLOR_WINDOW);
+        wc.hbrBackground = dark::sysbrush(COLOR_WINDOW);
         wc.lpszClassName = L"HMPLevelShaders";
         wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(1));
         RegisterClassExW(&wc);

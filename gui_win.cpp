@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "statuslamp_win.hpp"
+#include "dark.hpp"
 #include "core.hpp"
 #include "contents_win.hpp"
 #include "lodview_win.hpp"
@@ -100,7 +101,7 @@ enum {
     // the Convert tab's batch of conversions
     ID_BATCH, ID_BATCH_HINT,
     // how many maps' extracted tags are kept; clearing the working files
-    ID_S_KEEP_LBL, ID_S_KEEP, ID_S_CLEAR,
+    ID_S_KEEP_LBL, ID_S_KEEP, ID_S_CLEAR, ID_S_THEME_LBL, ID_S_THEME,
 };
 
 #define WM_APP_LOG (WM_APP + 1)
@@ -204,6 +205,7 @@ static void save_settings() {
     ini_set(L"x_shrink", checked(ID_X_SHRINK) ? L"1" : L"0");
     ini_set(L"x_shrink_stock", checked(ID_X_SHRINK_STOCK) ? L"1" : L"0");
     ini_set(L"write_tour", checked(ID_S_TOUR) ? L"1" : L"0");
+    ini_set(L"theme", std::to_wstring(std::max(0, sel(ID_S_THEME))));
     ini_set(L"keep_unpacked", std::to_wstring(std::clamp(_wtoi(get_text(ID_S_KEEP).c_str()), 1, 100)));
     ini_set(L"x_target", std::to_wstring(std::max(0, sel(ID_X_TARGET))));
     ini_set(L"x_perfect", checked(ID_X_PERFECT) ? L"1" : L"0");
@@ -647,7 +649,7 @@ static std::wstring card_where(const fs::path &map_path, const wchar_t *later) {
 
 static void update_invader_status() {
     Config c = make_config();
-    set_text(ID_S_INV_STATUS, invader_ok(c) ? L"Invader found - you're all set" : L"Invader not found - click Download or Browse");
+    set_text(ID_S_INV_STATUS, invader_ok(c) ? L"Invader found - all set" : L"Invader not found: Download or Browse");
 }
 
 static HWND g_lamp = nullptr;   // (working, done or failed, at a glance: statuslamp_win.hpp)
@@ -2398,7 +2400,7 @@ static void pk_draw(const DRAWITEMSTRUCT *di) {
     HDC dc = di->hDC;
     bool has = g_pk_sel >= 0 && g_pk_sel < (int)g_pack.maps.size() && g_pack.maps[g_pk_sel].preview.size() == 16384;
     if (!has) {
-        FillRect(dc, &r, GetSysColorBrush(COLOR_BTNFACE));
+        FillRect(dc, &r, dark::sysbrush(COLOR_BTNFACE));
         SetBkMode(dc, TRANSPARENT);
         SelectObject(dc, g_font);
         RECT t = r;
@@ -2856,7 +2858,9 @@ static void create_controls() {
     button(4, L"Browse...", 638, y - 1, 96, ID_S_INV_BROWSE);
     y += 34;
     button(4, L"Download Invader", 190, y, 140, ID_S_INV_DL);
-    add(4, L"STATIC", L"", 0, 342, y + 5, 390, 20, ID_S_INV_STATUS);
+    add(4, L"STATIC", L"", 0, 342, y + 5, 230, 20, ID_S_INV_STATUS);
+    label(4, L"Theme:", 580, y + 4, 44, ID_S_THEME_LBL);   // (Light, Dark, as Windows is: from the next start)
+    list_combo(4, 626, y, 108, ID_S_THEME, {L"Light", L"Dark", L"As Windows"});
     y += 34;
     add(4, L"STATIC",
         L"Xbox tags folder: an Xbox tagset such as haloxbox-revised (recommended). Xbox maps: your own Xbox stock "
@@ -2961,6 +2965,7 @@ static void create_controls() {
     set_check(ID_X_SHRINK_STOCK, ini_get(L"x_shrink_stock", L"0") == L"1");
     set_check(ID_S_TOUR, ini_get(L"write_tour", L"0") == L"1");
     set_text(ID_S_KEEP, ini_get(L"keep_unpacked", L"3"));
+    SendDlgItemMessageW(g_wnd, ID_S_THEME, CB_SETCURSEL, std::clamp(_wtoi(ini_get(L"theme", L"0").c_str()), 0, 2), 0);
     {
         int k = _wtoi(ini_get(L"x_target", L"1").c_str());
         SendDlgItemMessageW(g_wnd, ID_X_TARGET, CB_SETCURSEL, k >= 0 && k < 3 ? k : 1, 0);
@@ -3011,9 +3016,9 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         break;
     case WM_CTLCOLORSTATIC: {
         // Plain window background for labels; keep the read-only log white.
-        if ((HWND)lp == g_log) return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
+        if ((HWND)lp == g_log) return (LRESULT)dark::sysbrush(COLOR_WINDOW);
         SetBkMode((HDC)wp, TRANSPARENT);
-        return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
+        return (LRESULT)dark::sysbrush(COLOR_WINDOW);
     }
     case WM_COMMAND: {
         int id = LOWORD(wp), code = HIWORD(wp);
@@ -3131,6 +3136,12 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case ID_B_MCC_BROWSE: case ID_B_CE_BROWSE: case ID_S_CE_BROWSE: case ID_S_MCC_BROWSE:
         case ID_B_XBOX_BROWSE: case ID_S_XT_BROWSE: case ID_S_XM_BROWSE:
         case ID_S_CLEAR: if (!g_busy) clear_temp_files(); break;
+        case ID_S_THEME:
+            if (code == CBN_SELCHANGE) {
+                save_settings();
+                MessageBoxW(g_wnd, L"The theme changes the next time Halo Map Porter starts.", L"Halo Map Porter", MB_ICONINFORMATION);
+            }
+            break;
         case ID_S_KEEP:
             if (code == EN_KILLFOCUS) {
                 int n = std::clamp(_wtoi(get_text(ID_S_KEEP).c_str()), 1, 100);
@@ -3271,6 +3282,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_TAB_CLASSES | ICC_STANDARD_CLASSES | ICC_LISTVIEW_CLASSES};
     InitCommonControlsEx(&icc);
+    dark::init(std::clamp(_wtoi(ini_get(L"theme", L"0").c_str()), 0, 2));   // (before any window: each is themed as it's made)
     contentsui::set_cache_folder(appdata_dir(CSIDL_LOCAL_APPDATA) / L"measurements");
     shadersui::set_cache_folder(appdata_dir(CSIDL_LOCAL_APPDATA) / L"levels");
     HDC dc = GetDC(nullptr);
@@ -3283,7 +3295,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     wc.lpfnWndProc = wnd_proc;
     wc.hInstance = inst;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.hbrBackground = GetSysColorBrush(COLOR_WINDOW);
+    wc.hbrBackground = dark::sysbrush(COLOR_WINDOW);
     wc.lpszClassName = L"HaloMapPorter";
     wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(1));
     wc.hIconSm = wc.hIcon;

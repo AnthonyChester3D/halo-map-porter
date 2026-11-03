@@ -6,6 +6,7 @@
 #define _UNICODE
 #endif
 #include "scripts_win.hpp"
+#include "dark.hpp"
 
 #include <commctrl.h>
 #include <shellapi.h>
@@ -526,16 +527,16 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         HWND c = (HWND)lp;
         HDC dc = (HDC)wp;
         if (c == box()) {   // (read-only: grey)
-            SetBkColor(dc, GetSysColor(COLOR_3DFACE));
-            return (LRESULT)GetSysColorBrush(COLOR_3DFACE);
+            SetBkColor(dc, dark::syscolor(COLOR_3DFACE));
+            return (LRESULT)dark::sysbrush(COLOR_3DFACE);
         }
         if (c == item(IDC_NOTES)) {
-            SetBkColor(dc, GetSysColor(COLOR_WINDOW));
-            return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
+            SetBkColor(dc, dark::syscolor(COLOR_WINDOW));
+            return (LRESULT)dark::sysbrush(COLOR_WINDOW);
         }
         SetBkMode(dc, TRANSPARENT);
         if (c == item(IDC_STATE) && M->view == kMine && M->edited) SetTextColor(dc, RGB(170, 70, 0));   // (not saved yet)
-        return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
+        return (LRESULT)dark::sysbrush(COLOR_WINDOW);
     }
     case WM_CLOSE: close(); return 0;
     }
@@ -578,7 +579,7 @@ bool edit(HWND owner, const std::wstring &title, const std::filesystem::path &di
         wc.hInstance = inst;
         wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
         wc.lpfnWndProc = proc;
-        wc.hbrBackground = GetSysColorBrush(COLOR_WINDOW);
+        wc.hbrBackground = dark::sysbrush(COLOR_WINDOW);
         wc.lpszClassName = L"HMPScripts";
         wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(1));
         RegisterClassExW(&wc);

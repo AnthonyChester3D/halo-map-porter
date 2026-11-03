@@ -2,6 +2,7 @@
 #define UNICODE
 #define _UNICODE
 #include "mapcard_win.hpp"
+#include "dark.hpp"
 
 #include <commctrl.h>
 #include <commdlg.h>
@@ -716,7 +717,7 @@ static LRESULT CALLBACK editor_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         int id = GetDlgCtrlID((HWND)lp);
         SetBkMode(dc, TRANSPARENT);
         if (id >= 2000 && id < 2064 && E->tone[id - 2000]) SetTextColor(dc, E->tone[id - 2000]);
-        return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
+        return (LRESULT)dark::sysbrush(COLOR_WINDOW);
     }
     case WM_COMMAND: {
         int id = LOWORD(wp), code = HIWORD(wp);
@@ -866,7 +867,7 @@ void edit_card(HWND owner, const fs::path &dir, const std::string &default_name,
         wc.hInstance = inst;
         wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
         wc.lpfnWndProc = editor_proc;
-        wc.hbrBackground = GetSysColorBrush(COLOR_WINDOW);
+        wc.hbrBackground = dark::sysbrush(COLOR_WINDOW);
         wc.lpszClassName = L"HMPMapCard";
         wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(1));
         RegisterClassExW(&wc);

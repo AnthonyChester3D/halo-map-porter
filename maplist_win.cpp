@@ -6,6 +6,7 @@
 #define _UNICODE
 #endif
 #include "maplist_win.hpp"
+#include "dark.hpp"
 #include "maplist_edit.hpp"
 
 #include <commctrl.h>
@@ -335,7 +336,7 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_CTLCOLORSTATIC:
         SetBkMode((HDC)wp, TRANSPARENT);
         if (GetDlgCtrlID((HWND)lp) == IDC_HINT) SetTextColor((HDC)wp, RGB(96, 96, 96));
-        return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
+        return (LRESULT)dark::sysbrush(COLOR_WINDOW);
     case WM_SCANNED: scanned((Scanned *)lp); return 0;
     case WM_SCAN_DONE: if (M->scanning) scan_done(); return 0;
     case WM_NOTIFY: {
@@ -413,7 +414,7 @@ void edit_map_list(HWND owner, std::wstring &maps_dir, std::wstring &stats_file,
         wc.hInstance = inst;
         wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
         wc.lpfnWndProc = proc;
-        wc.hbrBackground = GetSysColorBrush(COLOR_WINDOW);
+        wc.hbrBackground = dark::sysbrush(COLOR_WINDOW);
         wc.lpszClassName = L"HMPMapList";
         wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(1));
         RegisterClassExW(&wc);

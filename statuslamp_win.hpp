@@ -3,6 +3,7 @@
 // red when it failed, grey before anything has run. Done or failed also flashes the taskbar button when another app
 // is in front. Windows only; header-only (the class registers itself).
 #pragma once
+#include "dark.hpp"
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
@@ -33,7 +34,7 @@ inline LRESULT CALLBACK lamp_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         GetClientRect(h, &rc);
         int state = (int)GetWindowLongPtrW(h, GWLP_USERDATA);
         COLORREF c = state == kWorking ? RGB(232, 168, 32) : state == kDone ? RGB(46, 170, 70)
-                     : state == kFailed ? RGB(210, 50, 50) : RGB(205, 205, 205);
+                     : state == kFailed ? RGB(210, 50, 50) : dark::on() ? RGB(70, 70, 70) : RGB(205, 205, 205);
         HBRUSH b = CreateSolidBrush(c);
         FillRect(dc, &rc, b);
         DeleteObject(b);

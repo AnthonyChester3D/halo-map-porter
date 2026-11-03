@@ -1,5 +1,6 @@
 // Halo Map Porter - the "LODs" window (see lodview_win.hpp)
 #include "lodview_win.hpp"
+#include "dark.hpp"
 
 #include <commctrl.h>
 #include <shellapi.h>
@@ -540,8 +541,8 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_CTLCOLORSTATIC: {
         HDC dc = (HDC)wp;
         SetBkMode(dc, TRANSPARENT);
-        if (!IsWindowEnabled((HWND)lp)) SetTextColor(dc, GetSysColor(COLOR_GRAYTEXT));
-        return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
+        if (!IsWindowEnabled((HWND)lp)) SetTextColor(dc, dark::syscolor(COLOR_GRAYTEXT));
+        return (LRESULT)dark::sysbrush(COLOR_WINDOW);
     }
     case WM_NOTIFY: {
         NMHDR *n = (NMHDR *)lp;
@@ -800,7 +801,7 @@ bool show(HWND owner, const std::filesystem::path &file, const std::filesystem::
         wc.hInstance = inst;
         wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
         wc.lpfnWndProc = proc;
-        wc.hbrBackground = GetSysColorBrush(COLOR_WINDOW);
+        wc.hbrBackground = dark::sysbrush(COLOR_WINDOW);
         wc.lpszClassName = L"HMPLods";
         wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(1));
         RegisterClassExW(&wc);

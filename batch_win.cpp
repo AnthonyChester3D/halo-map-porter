@@ -1,5 +1,6 @@
 // Halo Map Porter - the batch window (batch_win.hpp).
 #include "batch_win.hpp"
+#include "dark.hpp"
 
 #include <commctrl.h>
 #include <commdlg.h>
@@ -193,7 +194,7 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_CTLCOLORSTATIC:
         SetBkMode((HDC)wp, TRANSPARENT);
-        return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
+        return (LRESULT)dark::sysbrush(COLOR_WINDOW);
     case WM_NOTIFY: {
         NMHDR *n = (NMHDR *)lp;
         if (n->idFrom == IDC_LIST && n->code == LVN_COLUMNCLICK && !St->running) {
@@ -448,7 +449,7 @@ void open(HWND owner, const fs::path &list_file, Hooks hooks) {
         wc.hInstance = inst;
         wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
         wc.lpfnWndProc = proc;
-        wc.hbrBackground = GetSysColorBrush(COLOR_WINDOW);
+        wc.hbrBackground = dark::sysbrush(COLOR_WINDOW);
         wc.lpszClassName = L"HMPBatch";
         wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(1));
         RegisterClassExW(&wc);
