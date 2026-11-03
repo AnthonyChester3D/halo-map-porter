@@ -38,12 +38,14 @@ struct Options {
     bool features = true;      // waypoints along the level's ramps and narrow ways (doorways, tunnels, bridges), and on
                                // open floor far from every waypoint
     int max_features = 400;    // those at most (the bots' 512 waypoints, less the map's, usually stop them first)
-    std::vector<char> walk_from;   // per point given: bots walk on from it (empty: every point). Not an item spawn point:
-                                   // one on a platform nothing reaches would have the floor up there taken as floor bots walk
+    std::vector<char> walk_from;   // per point given: bots walk on from it (empty: every point). The player spawns and your
+                                   // waypoints: an item spot, flag or teleporter on a ledge only a trick jump reaches would
+                                   // have the floor up there taken as floor bots walk (a teleporter's way out counts once its
+                                   // way in is reached)
     std::vector<V3> removed;       // spots you took an added waypoint out of (the Level window): none is added within
                                    // kRemovedRadius of one, though the map's own and yours still are
-    std::vector<V3> ladder_tops;   // and from the top of each ladder (find_ladders): bots climb it, so a platform only a
-                                   // ladder reaches (Snow Space's sniper rifles) is floor they walk too
+    std::vector<V3> ladder_tops;   // each ladder's top and foot (find_ladders): bots climb it, so a platform only a ladder
+    std::vector<V3> ladder_feet;   // reaches (Snow Space's sniper rifles) is floor they walk too, once its foot is
 };
 
 const double kRemovedRadius = 1.5;

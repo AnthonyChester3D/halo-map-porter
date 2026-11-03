@@ -12805,10 +12805,13 @@ void bot_route_points(Job &job, const fs::path &xsrc) {
     points = with_mine;
     botnodes::Options bo;
     if (!job.cfg.xbox_bot_nodes) { bo.max_add = 0; bo.features = false; }
-    for (auto &k : kind) bo.walk_from.push_back(k.rfind("item spawn point", 0) != 0 && k != "vehicle spawn");
+    for (auto &k : kind) bo.walk_from.push_back(k == "player spawn" || k == "waypoint of yours");
     bo.removed.assign(job.cfg.xbox_bot_removed.begin(), job.cfg.xbox_bot_removed.end());
     std::vector<botnodes::Ladder> ladders = bdir.empty() ? std::vector<botnodes::Ladder>() : botnodes::find_ladders(bdir / from_u8(bsp));
-    for (auto &L : ladders) bo.ladder_tops.push_back(L.top);   // (Halo 1 Unlimited's bots climb them)
+    for (auto &L : ladders) {   // (Halo 1 Unlimited's bots climb them)
+        bo.ladder_tops.push_back(L.top);
+        bo.ladder_feet.push_back(L.foot);
+    }
     botnodes::Result br = bdir.empty() ? botnodes::Result() : botnodes::plan(bdir / from_u8(bsp), points, tele, bo);
     if (!br.ok) {
         job.log("  [bots] the map's " + std::to_string(points.size()) + " points for Halo 1 Unlimited's bots (" + counts + ")" +

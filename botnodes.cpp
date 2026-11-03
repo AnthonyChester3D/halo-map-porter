@@ -476,7 +476,10 @@ void build_grid(const Level &L, const V3 &lo, const V3 &hi, Grid &g) {
 // every few units), on the floor players can walk to from their spawns. `kind`: 1 ramp, 2 narrow way.
 struct Feature { V3 p; int kind; };
 // `spawns`: every waypoint; `walk`: the ones bots walk on from (the floor they get to is walked from these).
-std::vector<Feature> find_features(const Level &L, const std::vector<V3> &spawns, const std::vector<V3> &walk_from) {
+// `links`: ways onto other floor a bot takes once it's at their start (a teleporter's way in to its way out, a ladder's
+// foot to its top): the floor there is the bots' only when the start is.
+std::vector<Feature> find_features(const Level &L, const std::vector<V3> &spawns, const std::vector<V3> &walk_from,
+                                   const std::vector<std::pair<V3, V3>> &links) {
     std::vector<Feature> out;
     if (spawns.empty()) return out;
     V3 lo{1e30, 1e30, 1e30}, hi{-1e30, -1e30, -1e30};
@@ -490,24 +493,48 @@ std::vector<Feature> find_features(const Level &L, const std::vector<V3> &spawns
     // The floor players get to: walked from each waypoint's floor.
     std::vector<char> reach(n, 0);
     std::vector<int> q;
-    for (auto &p : walk_from) {
+    auto cell_of = [&](const V3 &p) {   // (the floor under a point)
         int ci = (int)std::floor((p[0] - g.x0) / g.h), cj = (int)std::floor((p[1] - g.y0) / g.h);
-        if (ci < 0 || cj < 0 || ci >= g.nx || cj >= g.ny) continue;
+        if (ci < 0 || cj < 0 || ci >= g.nx || cj >= g.ny) return -1;
         int c = cj * g.nx + ci, best = -1;
         for (int f = g.first[(size_t)c]; f < g.first[(size_t)c + 1]; f++)
             if (g.at[(size_t)f][2] <= p[2] + 0.5 && (best < 0 || g.at[(size_t)f][2] > g.at[(size_t)best][2])) best = f;
+        return best;
+    };
+    auto seed = [&](const V3 &p) {
+        int best = cell_of(p);
         if (best >= 0 && !reach[(size_t)best]) { reach[(size_t)best] = 1; q.push_back(best); }
-    }
+    };
+    for (auto &p : walk_from) seed(p);
     // (walked on slopes of 45 degrees at most: the AI calls steeper rock walkable, which would take the bots down a pit's
-    // walls to its bottom, or up a cliff face)
-    for (size_t k = 0; k < q.size(); k++)
-        for (int m : g.nb[(size_t)q[k]])
-            if (m >= 0 && !reach[(size_t)m] && g.nz[(size_t)m] >= 0.707f) { reach[(size_t)m] = 1; q.push_back(m); }
+    // walls to its bottom, or up a cliff face); then across each teleporter or ladder whose start is reached, and on
+    std::vector<char> taken(links.size(), 0);
+    for (size_t k = 0;;) {
+        for (; k < q.size(); k++)
+            for (int m : g.nb[(size_t)q[k]])
+                if (m >= 0 && !reach[(size_t)m] && g.nz[(size_t)m] >= 0.707f) { reach[(size_t)m] = 1; q.push_back(m); }
+        bool more = false;
+        for (size_t i = 0; i < links.size(); i++) {
+            if (taken[i]) continue;
+            int a = cell_of(links[i].first);
+            if (a < 0 || !reach[(size_t)a]) continue;
+            taken[i] = 1;
+            size_t before = q.size();
+            seed(links[i].second);
+            more = more || q.size() > before;
+        }
+        if (!more) break;
+    }
     // Waypoints go only on floor a bot walks on gladly: 30 degrees at most (not a rock slope it scrambles over), and no
     // lower than 1.5 units under the map's lowest point or 3 over its highest (not a pit's floor, not a rooftop).
     {
         double zlo = 1e30, zhi = -1e30;
-        for (auto &p : spawns) { zlo = std::min(zlo, p[2]); zhi = std::max(zhi, p[2]); }
+        for (auto &p : spawns) {   // (the map's points the bots get to)
+            int c = cell_of(p);
+            if (c < 0 || !reach[(size_t)c]) continue;
+            zlo = std::min(zlo, p[2]);
+            zhi = std::max(zhi, p[2]);
+        }
         for (size_t f = 0; f < n; f++)
             if (reach[f] && (g.nz[f] < 0.866f || g.at[f][2] < zlo - 1.5 || g.at[f][2] > zhi + 3.0)) reach[f] = 0;
     }
@@ -1121,14 +1148,17 @@ Result plan(const fs::path &bsp, const std::vector<V3> &points, int teleporters,
             for (size_t i = 0; i < points.size() && i < res.point_waypoint.size(); i++)
                 if (o.walk_from[i] && res.point_waypoint[i] >= 0) walk.push_back(w[(size_t)res.point_waypoint[i]].at);
         } else walk = from;
-        walk.insert(walk.end(), o.ladder_tops.begin(), o.ladder_tops.end());
+        // (teleporters, as given first: each way in, then its way out; ladders: foot to top)
+        std::vector<std::pair<V3, V3>> crossings;
+        for (int i = 0; i + 1 < teleporters && (size_t)i + 1 < points.size(); i += 2) crossings.push_back({points[(size_t)i], points[(size_t)i + 1]});
+        for (size_t i = 0; i < o.ladder_tops.size() && i < o.ladder_feet.size(); i++) crossings.push_back({o.ladder_feet[i], o.ladder_tops[i]});
         // (the bots' waypoints left, less some kept for finishing the links the search can't: doorways and ramps
         // first, then the rest shared, 60% to filling open floor and 40% to narrow ways, either one's unused share to
         // the other)
         const int kForLinks = 64;
         const int cap = std::min(o.max_features, std::max(0, o.budget - o.spare - (int)w.size() - kForLinks)) +
                         (int)res.added.size();
-        std::vector<Feature> all = find_features(L, from, walk);
+        std::vector<Feature> all = find_features(L, from, walk, crossings);
         auto place = [&](const Feature &f) {   // (false: not placed, no ground or a waypoint near)
             V3 gp;
             uint32_t sf = ground(L, {f.p[0], f.p[1], f.p[2] + 0.25}, gp);

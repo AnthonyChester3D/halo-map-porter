@@ -740,14 +740,17 @@ void bots_plan() {
     botnodes::Options o;
     if (!St->picks.bots_auto || St->bots_hide) { o.max_add = 0; o.features = false; }
     o.removed.assign(St->picks.bots_removed.begin(), St->picks.bots_removed.end());
-    for (auto &L : St->picks.ladders) o.ladder_tops.push_back(L.top);   // (as a conversion: floor bots climb to)
+    for (auto &L : St->picks.ladders) {   // (as a conversion: floor bots climb to)
+        o.ladder_tops.push_back(L.top);
+        o.ladder_feet.push_back(L.foot);
+    }
     St->bot_auto_sel = -1;   // (the added ones are placed anew)
     HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
     {   // (bots walk on from every point but the item spawn points)
         std::vector<std::string> kinds = St->bot_kinds;
         kinds.insert(kinds.begin() + (std::ptrdiff_t)std::min(St->bot_insert, kinds.size()), St->picks.bots.size(), "waypoint of yours");
         if (kinds.size() == pts.size())
-            for (auto &k : kinds) o.walk_from.push_back(k.rfind("item spawn point", 0) != 0 && k != "vehicle spawn");
+            for (auto &k : kinds) o.walk_from.push_back(k == "player spawn" || k == "waypoint of yours");
     }
     St->bot_res = botnodes::plan(St->bot_bsp, pts, St->bot_tele, o);
     St->bot_stacked = botnodes::stacked_hops(St->bot_res);
