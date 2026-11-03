@@ -16,5 +16,5 @@ for f in allocator simplifier stripifier; do   # meshoptimizer (MIT, see meshopt
 done
 $CC -O2 -c stb_impl.c -o build/stb_impl.o
 $CXX -municode -mwindows -static -O2 -s -o HaloMapPorter.exe build/*.o build/app.res \
-  -lcomctl32 -lcomdlg32 -lgdi32 -lole32 -lopengl32 -lshell32 -lurlmon -luuid
+  -lcomctl32 -lcomdlg32 -lgdi32 -lole32 -lopengl32 -lshell32 -lurlmon -luuid -luxtheme
 echo "built HaloMapPorter.exe"

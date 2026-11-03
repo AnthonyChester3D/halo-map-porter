@@ -3,6 +3,7 @@
 
 #include <commctrl.h>
 #include <uxtheme.h>
+#include <vssym32.h>
 
 #include <cwchar>
 #include <map>
@@ -48,6 +49,33 @@ bool windows_is_dark() {
 // colours (a status line's red, a hint's grey: those stay; a brush of its own stays too).
 LRESULT CALLBACK colors(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
     switch (msg) {
+    case WM_NOTIFY: {   // (a list view's group titles: Windows draws them a dark blue; drawn light here instead)
+        NMHDR *n = (NMHDR *)lp;
+        if (n->code != NM_CUSTOMDRAW) break;
+        wchar_t cls[32] = {};
+        GetClassNameW(n->hwndFrom, cls, 32);
+        if (_wcsicmp(cls, WC_LISTVIEWW) != 0) break;
+        NMLVCUSTOMDRAW *cd = (NMLVCUSTOMDRAW *)lp;
+        if (cd->nmcd.dwDrawStage == CDDS_PREPAINT && cd->dwItemType == LVCDI_GROUP) {
+            wchar_t t[256] = {};
+            LVGROUP g{};
+            g.cbSize = sizeof g;
+            g.mask = LVGF_HEADER;
+            g.pszHeader = t;
+            g.cchHeader = 255;
+            ListView_GetGroupInfo(n->hwndFrom, (int)cd->nmcd.dwItemSpec, &g);
+            RECT r = cd->rcText;
+            FillRect(cd->nmcd.hdc, &r, sysbrush(COLOR_WINDOW));
+            SetBkMode(cd->nmcd.hdc, TRANSPARENT);
+            SetTextColor(cd->nmcd.hdc, RGB(120, 180, 255));
+            r.left += 6;
+            DrawTextW(cd->nmcd.hdc, t, -1, &r, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            return CDRF_SKIPDEFAULT;
+        }
+        if (cd->nmcd.dwDrawStage == CDDS_PREPAINT)   // (the list as a whole: its groups told of too)
+            return DefSubclassProc(h, msg, wp, lp) | CDRF_NOTIFYITEMDRAW;
+        break;
+    }
     case WM_CTLCOLORSTATIC: case WM_CTLCOLOREDIT: case WM_CTLCOLORLISTBOX: case WM_CTLCOLORBTN: case WM_CTLCOLORDLG: {
         HDC dc = (HDC)wp;
         SetTextColor(dc, kText);
@@ -120,6 +148,12 @@ LRESULT CALLBACK tabs(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PT
 // A list view's column titles: its header draws them dark on the dark style; light instead (the header asks the list
 // view, its parent, how to draw each title).
 LRESULT CALLBACK list_titles(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
+    if (msg == WM_ERASEBKGND && !IsWindowEnabled(h)) {   // (disabled, Windows paints it white: dark instead)
+        RECT rc;
+        GetClientRect(h, &rc);
+        FillRect((HDC)wp, &rc, sysbrush(COLOR_WINDOW));
+        return 1;
+    }
     if (msg == WM_NOTIFY) {
         NMHDR *n = (NMHDR *)lp;
         if (n->code == NM_CUSTOMDRAW && n->hwndFrom == ListView_GetHeader(h)) {
@@ -136,6 +170,90 @@ LRESULT CALLBACK list_titles(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, D
     return DefSubclassProc(h, msg, wp, lp);
 }
 
+// Tick boxes and option buttons: Windows' dark box, with the text drawn here (the dark style draws it black; the plain
+// style draws it embossed when disabled).
+LRESULT CALLBACK boxes(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
+    switch (msg) {
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(h, &ps);
+        RECT rc;
+        GetClientRect(h, &rc);
+        FillRect(dc, &rc, sysbrush(COLOR_WINDOW));
+        const LONG_PTR style = GetWindowLongPtrW(h, GWL_STYLE), type = style & BS_TYPEMASK;
+        const bool radio = type == BS_RADIOBUTTON || type == BS_AUTORADIOBUTTON, enabled = IsWindowEnabled(h) != 0;
+        const LRESULT check = SendMessageW(h, BM_GETCHECK, 0, 0), st = SendMessageW(h, BM_GETSTATE, 0, 0);
+        int part = radio ? BP_RADIOBUTTON : BP_CHECKBOX;
+        int state = (check == BST_CHECKED ? 4 : check == BST_INDETERMINATE ? 8 : 0) +
+                    (!enabled ? 4 : (st & BST_PUSHED) ? 3 : (st & BST_HOT) ? 2 : 1);   // (normal, hot, pressed, disabled)
+        SIZE box{13, 13};
+        HTHEME th = OpenThemeData(h, L"Button");
+        if (th) GetThemePartSize(th, dc, part, state, nullptr, TS_DRAW, &box);
+        RECT b{rc.left, rc.top + (rc.bottom - rc.top - box.cy) / 2, rc.left + box.cx, 0};
+        b.bottom = b.top + box.cy;
+        if (th) {
+            DrawThemeBackground(th, dc, part, state, &b, nullptr);
+            CloseThemeData(th);
+        } else {
+            DrawFrameControl(dc, &b, DFC_BUTTON, (radio ? DFCS_BUTTONRADIO : DFCS_BUTTONCHECK) | (check ? DFCS_CHECKED : 0) |
+                                                     (enabled ? 0 : DFCS_INACTIVE));
+        }
+        wchar_t t[512] = {};
+        GetWindowTextW(h, t, 511);
+        HGDIOBJ old = SelectObject(dc, (HFONT)SendMessageW(h, WM_GETFONT, 0, 0));
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, enabled ? kText : kGray);
+        RECT tr{b.right + 4, rc.top, rc.right, rc.bottom};
+        UINT how = DT_LEFT | ((style & BS_MULTILINE) ? DT_WORDBREAK : DT_SINGLELINE | DT_VCENTER);
+        if (style & BS_MULTILINE) {   // (several lines: centred as a block)
+            RECT m = tr;
+            DrawTextW(dc, t, -1, &m, how | DT_CALCRECT);
+            OffsetRect(&tr, 0, ((rc.bottom - rc.top) - (m.bottom - m.top)) / 2);
+        }
+        DrawTextW(dc, t, -1, &tr, how);
+        if (GetFocus() == h && !(SendMessageW(h, WM_QUERYUISTATE, 0, 0) & UISF_HIDEFOCUS)) {
+            RECT f = tr;
+            DrawTextW(dc, t, -1, &f, how | DT_CALCRECT);
+            InflateRect(&f, 1, 1);
+            DrawFocusRect(dc, &f);
+        }
+        SelectObject(dc, old);
+        EndPaint(h, &ps);
+        return 0;
+    }
+    case BM_SETCHECK: case BM_SETSTATE: case WM_ENABLE: case WM_SETTEXT: case WM_SETFOCUS: case WM_KILLFOCUS:
+    case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_KEYUP: case WM_UPDATEUISTATE: case WM_MOUSELEAVE: case WM_CAPTURECHANGED: {
+        LRESULT r = DefSubclassProc(h, msg, wp, lp);   // (Windows draws its own look straight away: drawn again)
+        InvalidateRect(h, nullptr, FALSE);
+        return r;
+    }
+    case WM_MOUSEMOVE: {
+        TRACKMOUSEEVENT tme{sizeof tme, TME_LEAVE, h, 0};
+        TrackMouseEvent(&tme);
+        LRESULT r = DefSubclassProc(h, msg, wp, lp);
+        InvalidateRect(h, nullptr, FALSE);
+        return r;
+    }
+    case WM_NCDESTROY:
+        RemoveWindowSubclass(h, boxes, 4);
+        break;
+    }
+    return DefSubclassProc(h, msg, wp, lp);
+}
+
+// A combo box's list and edit box ask it for their colours: dark.
+LRESULT CALLBACK combo(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
+    if (msg == WM_CTLCOLORLISTBOX || msg == WM_CTLCOLOREDIT) {
+        SetTextColor((HDC)wp, kText);
+        SetBkColor((HDC)wp, kWindow);
+        return (LRESULT)sysbrush(COLOR_WINDOW);
+    }
+    if (msg == WM_NCDESTROY) RemoveWindowSubclass(h, combo, 5);
+    return DefSubclassProc(h, msg, wp, lp);
+}
+
 bool is(const wchar_t *cls, const wchar_t *name) { return _wcsicmp(cls, name) == 0; }
 
 // Each window as it's made (after its WM_CREATE).
@@ -144,6 +262,10 @@ void made(HWND h) {
     GetClassNameW(h, cls, 64);
     const LONG_PTR style = GetWindowLongPtrW(h, GWL_STYLE);
     if (is(cls, L"#32770") || is(cls, L"tooltips_class32") || is(cls, L"IME")) return;   // (Windows' own)
+    if (is(cls, L"ComboLBox")) {   // (a combo box's drop-down list: a pop-up, not a child)
+        theme(h, L"DarkMode_Explorer");
+        return;
+    }
     if (!(style & WS_CHILD)) {   // a window of the app's own: its title bar, and the colours its controls ask for
         BOOL yes = TRUE;
         if (g_allow) g_allow(h, true);
@@ -155,15 +277,20 @@ void made(HWND h) {
         const LONG_PTR type = style & BS_TYPEMASK;
         const bool box = type == BS_CHECKBOX || type == BS_AUTOCHECKBOX || type == BS_RADIOBUTTON || type == BS_3STATE ||
                          type == BS_AUTO3STATE || type == BS_AUTORADIOBUTTON || type == BS_GROUPBOX;
-        // (tick boxes, option buttons and group boxes in the plain style, whose text takes the colours asked for;
-        // Windows' dark style draws their text black)
-        if (box && !(style & BS_PUSHLIKE)) theme(h, L"", L"");
-        else theme(h, L"DarkMode_Explorer");
-    } else if (is(cls, L"Edit") || is(cls, L"ListBox") || is(cls, L"ComboLBox") || is(cls, L"ScrollBar") ||
-               is(cls, L"SysTreeView32")) {
+        // (group boxes in the plain style, whose text takes the colours asked for; tick boxes and option buttons
+        // drawn here; push buttons in Windows' dark style)
+        if (type == BS_GROUPBOX) theme(h, L"", L"");
+        else if (box && !(style & BS_PUSHLIKE) && !(style & BS_OWNERDRAW)) {
+            theme(h, L"DarkMode_Explorer");
+            SetWindowSubclass(h, boxes, 4, 0);
+        } else theme(h, L"DarkMode_Explorer");
+    } else if (is(cls, L"Edit")) {
+        theme(h, L"DarkMode_CFD");   // (the dark field style: stays dark while typed in)
+    } else if (is(cls, L"ListBox") || is(cls, L"ScrollBar") || is(cls, L"SysTreeView32")) {
         theme(h, L"DarkMode_Explorer");
     } else if (is(cls, L"ComboBox")) {
         theme(h, L"DarkMode_CFD");
+        SetWindowSubclass(h, combo, 5, 0);
     } else if (is(cls, WC_LISTVIEWW)) {
         theme(h, L"DarkMode_Explorer");
         ListView_SetBkColor(h, kWindow);
