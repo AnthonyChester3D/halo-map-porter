@@ -58,7 +58,7 @@ enum {
     // added for Xbox (each *_BROWSE directly follows its edit box)
     ID_B_XBOX_OUT, ID_B_XBOX_BROWSE, ID_S_XT_LBL, ID_S_XT, ID_S_XT_BROWSE, ID_S_XM_LBL, ID_S_XM, ID_S_XM_BROWSE, ID_B_XBOX_NAME_LBL, ID_B_XBOX_NAME, ID_XONLY, ID_XSHRINK, ID_B_XONLY, ID_B_XSHRINK,
     // Xbox tab
-    ID_X_SHRINK, ID_X_VLBL, ID_X_V0_LBL, ID_X_V0, ID_X_V1_LBL, ID_X_V1, ID_X_V2_LBL, ID_X_V2, ID_X_VHINT,
+    ID_X_SHRINK, ID_X_SHRINK_STOCK, ID_X_VLBL, ID_X_V0_LBL, ID_X_V0, ID_X_V1_LBL, ID_X_V1, ID_X_V2_LBL, ID_X_V2, ID_X_VHINT,
     ID_X_WLBL, ID_X_W0_LBL, ID_X_W0, ID_X_W1_LBL, ID_X_W1, ID_X_WHINT,
     // Xbox map names
     ID_X_MAPLIST_LBL, ID_X_MAPLIST, ID_X_MAPLIST_HINT, ID_C_XNAME_LBL, ID_C_XNAME, ID_X_LIMIT_LBL, ID_X_LIMIT,
@@ -202,6 +202,7 @@ static void save_settings() {
     ini_set(L"x_lm", std::to_wstring(sel(ID_X_LM)));
     ini_set(L"share", checked(ID_SHARE) ? L"1" : L"0");
     ini_set(L"x_shrink", checked(ID_X_SHRINK) ? L"1" : L"0");
+    ini_set(L"x_shrink_stock", checked(ID_X_SHRINK_STOCK) ? L"1" : L"0");
     ini_set(L"write_tour", checked(ID_S_TOUR) ? L"1" : L"0");
     ini_set(L"keep_unpacked", std::to_wstring(std::clamp(_wtoi(get_text(ID_S_KEEP).c_str()), 1, 100)));
     ini_set(L"x_target", std::to_wstring(std::max(0, sel(ID_X_TARGET))));
@@ -457,6 +458,7 @@ static void fill_map_combo(int id, const std::wstring &own, const std::wstring &
 
 static void apply_xbox_options(Config &cfg) {
     cfg.xbox_shrink = checked(ID_X_SHRINK);
+    cfg.xbox_shrink_stock = checked(ID_X_SHRINK_STOCK);
     cfg.write_perf_tour = checked(ID_S_TOUR);
     cfg.xbox_max_mb = sel(ID_X_LIMIT) == 1 ? 115 : 0; // 0 = standard 47 MB
     {
@@ -2778,8 +2780,9 @@ static void create_controls() {
     add(2, L"STATIC", L"Which names the \"Xbox name\" lists offer. The map you port takes the name of the map it replaces.",
         0, 410, y, 324, 36, ID_X_MAPLIST_HINT);
     y += 34;
-    check(2, L"Use the Xbox's own weapons, vehicles and player model instead of the map's custom copies (much smaller)",
-          26, y, 708, ID_X_STOCK);
+    check(2, L"Use the Xbox's own weapons, vehicles and player model (much smaller)", 26, y, 450, ID_X_STOCK);
+    // (when the map's own content shrunk as far as it goes still isn't enough: Bungie's textures and long sounds too)
+    check(2, L"Also shrink Bungie's content to fit", 490, y, 244, ID_X_SHRINK_STOCK);
     y += 27;
     label(2, L"Max texture size:", 26, y, 140, ID_X_TEX_LBL);
     list_combo(2, 170, y, 220, ID_X_TEX, {L"Stock-like budget (smoothest)", L"512 max (sharper)", L"1024", L"No limit"});
@@ -2955,6 +2958,7 @@ static void create_controls() {
     set_check(ID_SHARE, ini_get(L"share", L"1") == L"1");
     set_check(ID_B_SHARE, ini_get(L"share", L"1") == L"1");
     set_check(ID_X_SHRINK, ini_get(L"x_shrink", L"1") == L"1");
+    set_check(ID_X_SHRINK_STOCK, ini_get(L"x_shrink_stock", L"0") == L"1");
     set_check(ID_S_TOUR, ini_get(L"write_tour", L"0") == L"1");
     set_text(ID_S_KEEP, ini_get(L"keep_unpacked", L"3"));
     {
@@ -3052,7 +3056,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case ID_X_PERFECT:
             if (code == BN_CLICKED) { update_perfect(); save_settings(); }
             break;
-        case ID_X_LODSTOCK: case ID_X_MAKELOD: case ID_X_BOTS:
+        case ID_X_LODSTOCK: case ID_X_MAKELOD: case ID_X_BOTS: case ID_X_SHRINK_STOCK:
             if (code == BN_CLICKED) save_settings();
             break;
         case ID_X_PORTALS: case ID_X_TRIM: case ID_X_ANIM:

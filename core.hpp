@@ -30,6 +30,9 @@ struct Config {
     fs::path cache_dir;    // app cache (stock tags, work dirs, reports)
     // Xbox-only build options
     bool xbox_shrink = false;  // halve the map's own textures until it fits the Xbox size limit
+    // And when the map is still over after its own are shrunk as far as they go: Bungie's (the Xbox tags' the map uses)
+    // too, on edited copies (your Xbox tags stay as they are): long stereo sounds to 22.05 kHz, then mono; textures halved.
+    bool xbox_shrink_stock = false;
     double xbox_max_mb = 0;    // 0 = the standard Xbox limit (47 MB); otherwise a modded Xbox's bigger limit
     // Texture memory target (MB): the memory all the map's textures take (stock weapons, vehicles and HUD included),
     // plus the tag memory the map leaves free, which OpenCE (test build 24 and later) lends to its texture cache.

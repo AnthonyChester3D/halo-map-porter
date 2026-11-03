@@ -1318,6 +1318,7 @@ std::string tag_path_noext(const fs::path &rel) {
 bool prepare_for_xbox(Job &job, std::string &err);
 size_t shrink_textures_to_fit(Job &job, size_t needed, int &count, bool hard = true);
 size_t shrink_sounds_to_fit(Job &job, size_t needed, bool mono, std::vector<std::string> &names);
+size_t shrink_stock_to_fit(Job &job, size_t needed, int round, std::vector<std::string> &names);
 void restrict_to_xbox_mp(Job &job, const fs::path &xsrc);
 void drop_dead_placements(Job &job, const fs::path &xsrc);
 void bot_route_points(Job &job, const fs::path &xsrc);
@@ -2152,7 +2153,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
 
     job.log(std::string(job.analysis ? "Measuring the map for " : "Building for ") + game_name(job.target) + "...");
     std::string out;
-    int shrink_rounds = 0, sound_rounds = 0;
+    int shrink_rounds = 0, sound_rounds = 0, stock_rounds = 0;
     bool shrink_hopeless = false;
     int texture_rounds = 0;
     bool texture_hopeless = false;
@@ -2303,6 +2304,26 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
                          (g_cutout_textures ? "; see-through cut-outs kept as solid" : "") + ")");
                 // Halving again saves about a quarter as much each time; stop if that can't cover the rest.
                 if (saved < need && saved / 3 < need - saved) shrink_hopeless = true;
+                continue;
+            }
+        }
+        // Still over after the map's own are shrunk as far as they go: Bungie's too ("Also shrink Bungie's content"):
+        // their long stereo sounds, then their textures halved, a round at a time (edited copies).
+        if (std::regex_search(out, tb, too_big) && job.target == Game::Xbox && cfg.xbox_shrink && cfg.xbox_shrink_stock &&
+            stock_rounds < 6) {
+            double over = std::atof(tb[1].str().c_str()) - std::atof(tb[2].str().c_str());
+            size_t need = (size_t)(over * 1048576.0) + 256 * 1024;
+            std::vector<std::string> names;
+            size_t saved = 0;
+            while (stock_rounds < 6 && saved == 0) saved = shrink_stock_to_fit(job, need, stock_rounds++, names);
+            if (saved > 0) {
+                job.cut = true;
+                std::string list;
+                for (size_t i = 0; i < names.size() && i < 6; i++) list += (i ? ", " : "") + fs::path(from_u8(names[i])).stem().u8string();
+                if (names.size() > 6) list += " and " + std::to_string(names.size() - 6) + " more";
+                job.note("[shrink] " + tb[1].str().substr(0, 5) + " MB is still over the limit with the map's own shrunk; " +
+                         "shrank " + std::to_string(names.size()) + " of Bungie's (saved about " +
+                         std::to_string(saved / 1048576.0).substr(0, 4) + " MB; edited copies, your Xbox tags as they are): " + list);
                 continue;
             }
         }
@@ -11762,6 +11783,56 @@ size_t shrink_sounds_to_fit(Job &job, size_t needed, bool mono, std::vector<std:
     return saved;
 }
 
+// Bungie's content the map uses (the Xbox tags'), shrunk on edited copies in fixes: round 0 their long stereo 44.1 kHz
+// sounds to 22.05 kHz, round 1 long stereo 22.05 kHz ones to mono, rounds 2 on their textures halved (the biggest saving
+// first; not the HUD's or menus'). What it saved; `names` the tags.
+size_t shrink_stock_to_fit(Job &job, size_t needed, int round, std::vector<std::string> &names) {
+    if (job.overlay.empty()) return 0;
+    std::vector<std::string> deps = content_dependencies(job);
+    struct Cand { size_t saves; std::string tag; };
+    std::vector<Cand> cands;
+    const bool sounds = round < 2, mono = round == 1;
+    for (auto &dep : deps) {
+        if (!fs::exists(job.overlay / from_u8(dep))) continue;   // (Bungie's only)
+        fs::path own = job.owner(dep);
+        if (own.empty() || (own != job.overlay && own != job.fixes)) continue;
+        if (sounds) {
+            if (!has_suffix(dep, ".sound")) continue;
+            SndTag t;
+            if (!read_sound_tag(own / from_u8(dep), t) || t.channels != 2 || t.rate != (mono ? 22050 : 44100)) continue;
+            size_t bytes = 0;
+            for (auto &rg : t.ranges)
+                for (auto &pm : rg.perms) bytes += pm.data.size();
+            if (bytes >= 1048576) cands.push_back({bytes / 2, dep});
+        } else {
+            if (!has_suffix(dep, ".bitmap")) continue;
+            std::string l = "/" + dep;
+            for (auto &c : l) c = (char)tolower((unsigned char)c);
+            if (l.find("/ui/") != std::string::npos || l.find("/hud") != std::string::npos) continue;   // HUD and menus
+            size_t s = shrink_bitmap_tag(own / from_u8(dep), false);
+            if (s) cands.push_back({s, dep});
+        }
+    }
+    std::sort(cands.begin(), cands.end(), [](const Cand &a, const Cand &b) { return a.saves != b.saves ? a.saves > b.saves : a.tag < b.tag; });
+    size_t saved = 0;
+    for (auto &c : cands) {
+        if (saved >= needed) break;
+        fs::path ed = editable_owner(job, c.tag, true);   // (a copy in fixes: your Xbox tags stay as they are)
+        if (ed.empty()) continue;
+        if (sounds) {
+            std::string why;
+            if (!reencode_sound_now(job, ed, c.tag, why, 22050, mono)) continue;
+            saved += c.saves;
+        } else {
+            size_t s = shrink_bitmap_tag(ed / from_u8(c.tag), true, job.alpha_tested.count(c.tag) > 0);
+            if (!s) continue;
+            saved += s;
+        }
+        names.push_back(c.tag);
+    }
+    return saved;
+}
+
 size_t shrink_textures_to_fit(Job &job, size_t needed, int &count, bool hard) {
     // Only textures the map actually uses.
     std::vector<std::string> deps = content_dependencies(job);
@@ -14966,7 +15037,7 @@ std::string xbox_prepare_key(const Config &c) {
     path("xtags", c.xbox_tags_dir);
     path("xmaps", c.xbox_maps_dir);
     path("cache", c.cache_dir);
-    k << "shrink=" << c.xbox_shrink << " max=" << c.xbox_max_mb << " texmb=" << c.xbox_texture_target_mb << "\n";
+    k << "shrink=" << c.xbox_shrink << c.xbox_shrink_stock << " max=" << c.xbox_max_mb << " texmb=" << c.xbox_texture_target_mb << "\n";
     for (auto &v : c.xbox_vehicle_slots) k << "slot=" << v << "\n";
     k << "allveh=" << c.xbox_keep_all_vehicles << " stock=" << c.xbox_use_stock_versions << "\n";
     for (auto &w : c.xbox_keep_weapons) k << "keep=" << w << "\n";
