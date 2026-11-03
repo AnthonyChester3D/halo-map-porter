@@ -37,7 +37,7 @@ struct Options {
     int rounds = 3;            // plans again with the nodes' own links
     bool features = true;      // waypoints along the level's ramps and narrow ways (doorways, tunnels, bridges), and on
                                // open floor far from every waypoint
-    int max_features = 200;    // those at most
+    int max_features = 400;    // those at most (the bots' 512 waypoints, less the map's, usually stop them first)
     std::vector<char> walk_from;   // per point given: bots walk on from it (empty: every point). Not an item spawn point:
                                    // one on a platform nothing reaches would have the floor up there taken as floor bots walk
     std::vector<V3> removed;       // spots you took an added waypoint out of (the Level window): none is added within
