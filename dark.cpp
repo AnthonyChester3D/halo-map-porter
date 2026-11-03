@@ -243,6 +243,46 @@ LRESULT CALLBACK boxes(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_P
     return DefSubclassProc(h, msg, wp, lp);
 }
 
+// A label, when disabled: Windows draws its text embossed whatever colour is asked for; grey instead.
+LRESULT CALLBACK labels(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
+    switch (msg) {
+    case WM_PAINT: {
+        if (IsWindowEnabled(h)) break;
+        const LONG_PTR style = GetWindowLongPtrW(h, GWL_STYLE), type = style & SS_TYPEMASK;
+        if (type != SS_LEFT && type != SS_CENTER && type != SS_RIGHT && type != SS_LEFTNOWORDWRAP && type != SS_SIMPLE) break;
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(h, &ps);
+        RECT rc;
+        GetClientRect(h, &rc);
+        HBRUSH b = (HBRUSH)SendMessageW(GetParent(h), WM_CTLCOLORSTATIC, (WPARAM)dc, (LPARAM)h);
+        FillRect(dc, &rc, b ? b : sysbrush(COLOR_WINDOW));
+        wchar_t t[1024] = {};
+        GetWindowTextW(h, t, 1023);
+        HGDIOBJ old = SelectObject(dc, (HFONT)SendMessageW(h, WM_GETFONT, 0, 0));
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, kGray);
+        UINT how = type == SS_CENTER ? DT_CENTER : type == SS_RIGHT ? DT_RIGHT : DT_LEFT;
+        how |= type == SS_LEFTNOWORDWRAP || type == SS_SIMPLE ? DT_SINGLELINE : DT_WORDBREAK;
+        if (style & SS_NOPREFIX) how |= DT_NOPREFIX;
+        if (style & SS_ENDELLIPSIS) how |= DT_END_ELLIPSIS;
+        if (style & SS_CENTERIMAGE) how |= DT_VCENTER | DT_SINGLELINE;
+        DrawTextW(dc, t, -1, &rc, how);
+        SelectObject(dc, old);
+        EndPaint(h, &ps);
+        return 0;
+    }
+    case WM_ENABLE: {
+        LRESULT r = DefSubclassProc(h, msg, wp, lp);
+        InvalidateRect(h, nullptr, TRUE);
+        return r;
+    }
+    case WM_NCDESTROY:
+        RemoveWindowSubclass(h, labels, 6);
+        break;
+    }
+    return DefSubclassProc(h, msg, wp, lp);
+}
+
 // A combo box's list and edit box ask it for their colours: dark.
 LRESULT CALLBACK combo(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
     if (msg == WM_CTLCOLORLISTBOX || msg == WM_CTLCOLOREDIT) {
@@ -280,7 +320,7 @@ void made(HWND h) {
         // (group boxes in the plain style, whose text takes the colours asked for; tick boxes and option buttons
         // drawn here; push buttons in Windows' dark style)
         if (type == BS_GROUPBOX) theme(h, L"", L"");
-        else if (box && !(style & BS_PUSHLIKE) && !(style & BS_OWNERDRAW)) {
+        else if (box && !(style & BS_PUSHLIKE)) {
             theme(h, L"DarkMode_Explorer");
             SetWindowSubclass(h, boxes, 4, 0);
         } else theme(h, L"DarkMode_Explorer");
@@ -301,7 +341,9 @@ void made(HWND h) {
         theme(h, L"ItemsView");
     } else if (is(cls, WC_TABCONTROLW)) {
         SetWindowSubclass(h, tabs, 2, 0);
-    } else if (!is(cls, L"Static") && wcsncmp(cls, L"msctls_", 7) != 0 && wcsncmp(cls, L"RichEdit", 8) != 0) {
+    } else if (is(cls, L"Static")) {
+        SetWindowSubclass(h, labels, 6, 0);
+    } else if (wcsncmp(cls, L"msctls_", 7) != 0 && wcsncmp(cls, L"RichEdit", 8) != 0) {
         SetWindowSubclass(h, colors, 1, 0);   // (a panel of the app's own, with controls of its own)
     }
 }
