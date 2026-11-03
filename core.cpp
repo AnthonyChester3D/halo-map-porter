@@ -2220,7 +2220,12 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
                         size_t need = (size_t)((use.texture_mb - budget) * 1048576.0) + 256 * 1024;
                         int n = 0;
                         g_cutout_textures = 0;
-                        size_t saved = shrink_textures_to_fit(job, need, n, false);
+                        // (the first round spares the textures seen close up, first-person ones, when the rest can't get
+                        // there anyway; when it falls short, the next ones take those too: over the target, the Xbox's
+                        // texture cache overflows where many are in view, Halo 1 Unlimited's "YOU GOT STABBED")
+                        bool hard = texture_rounds > 0;
+                        size_t saved = shrink_textures_to_fit(job, need, n, hard);
+                        if (saved == 0 && !hard) saved = shrink_textures_to_fit(job, need, n, hard = true);
                         if (saved > 0) {
                             job.cut = true;
                             texture_rounds++;
@@ -2228,7 +2233,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
                                      "your textures (saved %.1f MB%s)", use.texture_mb, budget, n, saved / 1048576.0,
                                      g_cutout_textures ? "; see-through cut-outs kept as solid" : "");
                             job.note(buf);
-                            if (saved < need && saved / 3 < need - saved) texture_hopeless = true;
+                            if (hard && saved < need && saved / 3 < need - saved) texture_hopeless = true;
                             continue;
                         }
                     }
