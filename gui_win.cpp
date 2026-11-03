@@ -599,20 +599,37 @@ static bool write_card(const fs::path &card_dir, const std::wstring &map_name, c
     return true;
 }
 // Halo Universal XBE build 20: what a map offers goes into its card's map browser lines (gametypes, a player guess,
-// genre suggestions) unless you set them yourself. `rewrite`: info.txt next to the map is written again. Returns a
-// line for the log ("" = nothing changed). Safe on the worker thread (no windows, no pictures).
+// genre suggestions) unless you set them yourself. `rewrite`: info.txt next to the map is written again, with its
+// [Vehicles] section (Halo 1 Unlimited's vehicle categories). Returns
+// lines for the log ("" = nothing changed). Safe on the worker thread (no windows, no pictures).
 static std::string card_traits(const Config &cfg, const fs::path &card_dir, const std::string &map_name, const fs::path &map,
                                const fs::path &rewrite) {
     porter::MapTraits t;
     std::string err;
     if (!porter::analyze_map_traits(cfg, map, t, &err)) return "Map card: couldn't read what the map offers (" + err + ").";
     mapcard::Card c = mapcard::load_card(card_dir, map_name);
-    std::string said = mapcard::apply_analysis(c, t.gametypes, t.pmin, t.pmax, t.genres, t.players_why);
-    if (said.empty()) return "";
-    mapcard::save_card(card_dir, c);
-    if (!rewrite.empty() && !mapcard::write_info_txt(c, rewrite, err)) return "Map card: " + err;
-    if (said.find("suggested Genres") != std::string::npos && !t.why_genres.empty()) said += " (" + t.why_genres + ")";
-    return "Map card, for the Halo Universal XBE's map list: " + said + ". Change them under \"Map card...\".";
+    std::string said = mapcard::apply_analysis(c, t.gametypes, t.pmin, t.pmax, t.genres, t.players_why), o;
+    if (!said.empty()) {
+        mapcard::save_card(card_dir, c);
+        if (!rewrite.empty() && !mapcard::write_info_txt(c, rewrite, err)) return "Map card: " + err;
+        if (said.find("suggested Genres") != std::string::npos && !t.why_genres.empty()) said += " (" + t.why_genres + ")";
+        o = "Map card, for the Halo Universal XBE's map list: " + said + ". Change them under \"Map card...\".";
+    }
+    // info.txt's [Vehicles], for Halo 1 Unlimited's vehicle-category gametype option
+    if (!rewrite.empty()) {
+        std::vector<std::pair<std::string, std::string>> rows;
+        std::string v;
+        for (auto &x : t.vehicle_categories) {
+            rows.push_back({x.tag, x.category});
+            v += "\n  " + x.tag + " = " + x.category + ": " + x.why;
+        }
+        if (!mapcard::write_vehicles_section(rewrite, rows, err)) v = "\nVehicle categories not written: " + err;
+        else v = t.vehicle_categories.empty() ? "\ninfo.txt [Vehicles]: the map has no vehicles in its palette."
+                                              : "\ninfo.txt [Vehicles] (Halo 1 Unlimited's vehicle categories):" + v;
+        o += v;
+        if (!o.empty() && o[0] == '\n') o.erase(0, 1);
+    }
+    return o;
 }
 static bool check_card_folder(const mapcard::Card &c) {
     std::string p = mapcard::folder_problem(c.folder);

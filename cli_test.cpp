@@ -247,7 +247,8 @@ int main(int argc, char **argv) {
         if (!analyze_map_traits(cfg, argv[2], t, &err)) { std::cout << "FAILED: " << err << "\n"; return 1; }
         std::cout << "Gametypes: " << t.gametypes << "\nPlayers: " << t.pmin << "-" << t.pmax << "\nGenres:";
         for (auto &g : t.genres) std::cout << " [" << g << "]";
-        std::cout << "\nwhy: " << t.why_genres << "\nplayers: " << t.players_why << "\n";
+        std::cout << "\nwhy: " << t.why_genres << "\nplayers: " << t.players_why << "\n[Vehicles]\n";
+        for (auto &v : t.vehicle_categories) std::cout << v.tag << " = " << v.category << "    (" << v.why << ")\n";
         return 0;
     }
     if (mode == "shaders") {   // cli_test shaders <in.map|scenario> x x: the level shaders window's measurement

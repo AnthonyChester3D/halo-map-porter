@@ -326,6 +326,10 @@ struct MapTraits {
     std::vector<std::string> custom_vehicles, custom_weapons;   // short names, for the log
     std::string character;               // the multiplayer character, when it isn't Halo's
     std::string why_genres;              // a line for the log
+    // Halo 1 Unlimited's vehicle categories: every vehicle in the scenario's vehicle palette ("vehicles\\warthog\\
+    // mp_warthog", lowercase, no extension), its category (light, medium, heavy, flying or turret) and why, for the log.
+    struct Vehicle { std::string tag, category, why; };
+    std::vector<Vehicle> vehicle_categories;
 };
 // Reads the scenario, globals and item collections of a built map (any game). False when it can't.
 bool analyze_map_traits(const Config &cfg, const fs::path &map, MapTraits &out, std::string *err = nullptr);

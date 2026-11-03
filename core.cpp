@@ -15624,6 +15624,136 @@ std::string name_list(const std::vector<std::string> &v, size_t most = 4) {
     if (v.size() > most) o += " and " + std::to_string(v.size() - most) + " more";
     return o;
 }
+
+// Halo 1 Unlimited's vehicle categories (info.txt's [Vehicles]). Each vehicle starts from its tag's vehicle type; its
+// name overrides that (a "hog" is medium whatever its type says); its seats, guns, top speed and mass (against the
+// other vehicles in the palette) settle a name that says two things ("hog_tank") and adjust a type with no name to go
+// by (a jeep with one seat that's the fastest thing here is light).
+template <class Lines>
+void categorize_vehicles(const fs::path &dir, const std::vector<std::string> &palette, Lines &&lines,
+                         std::vector<MapTraits::Vehicle> &out) {
+    struct V {
+        std::string path, stem;
+        bool read = false;
+        int type = -1, seats = 0;
+        double speed = 0, mass = 0;
+        bool big_gun = false;
+        std::vector<std::string> guns;
+    };
+    std::vector<V> vs;
+    std::set<std::string> seen;
+    for (auto &p : palette) {
+        std::string r = ref_path(p, ".vehicle");
+        if (r.empty() || !seen.insert(r).second) continue;
+        V v;
+        v.path = r;
+        v.stem = short_name(r);
+        tagfile::Tag tag;
+        if (tag.load(dir / from_u8(r + ".vehicle"))) {
+            tagfile::Elem e = tag.root();
+            v.read = true;
+            v.type = (int)e.integer("vehicle type");
+            v.speed = e.num("maximum forward speed");
+            v.seats = (int)e.block("seats").size();
+            tagfile::Block w = e.block("weapons");
+            for (size_t i = 0; i < w.size(); i++) {
+                std::string g = w[i].ref("weapon");
+                if (g.empty()) continue;
+                g = short_name(ref_path(g, ".weapon"));
+                v.guns.push_back(g);
+                for (const char *k : {"cannon", "rocket", "mortar", "fuel", "missile", "artillery", "launcher"})
+                    if (g.find(k) != std::string::npos) v.big_gun = true;
+            }
+            std::string ph = e.ref("physics");
+            if (!ph.empty() && fs::exists(dir / from_u8(ph))) {
+                auto m = lines(ph, "mass");
+                if (!m.empty()) v.mass = std::atof(m[0].c_str());
+            }
+        }
+        vs.push_back(v);
+    }
+    // the palette's middle speed and mass: "fast", "slow" and "heavy" are against the map's own vehicles
+    auto median = [&](double V::*f) {
+        std::vector<double> x;
+        for (auto &v : vs) if (v.read && v.*f > 0) x.push_back(v.*f);
+        if (x.size() < 2) return 0.0;
+        std::sort(x.begin(), x.end());
+        return x[x.size() / 2];
+    };
+    const double mid_speed = median(&V::speed), mid_mass = median(&V::mass);
+    static const char *const kTypeName[] = {"human tank", "human jeep", "human boat", "human plane", "alien scout",
+                                            "alien fighter", "turret"};
+    static const char *const kTypeCat[] = {"heavy", "medium", "medium", "flying", "light", "flying", "turret"};
+    // a name's words: whole words for the short ones ("gun", not "gunship"), anywhere for the long ones
+    struct Word { const char *w; bool whole; const char *cat; };
+    static const Word kWords[] = {
+        {"warthog", false, "medium"}, {"hog", false, "medium"}, {"jeep", false, "medium"},
+        {"ghost", false, "light"}, {"mongoose", false, "light"}, {"scout", false, "light"},
+        {"scorpion", false, "heavy"}, {"wraith", false, "heavy"}, {"tank", false, "heavy"},
+        {"banshee", false, "flying"}, {"pelican", false, "flying"}, {"phantom", false, "flying"},
+        {"hornet", false, "flying"}, {"plane", false, "flying"}, {"dropship", false, "flying"},
+        {"turret", false, "turret"}, {"shade", false, "turret"}, {"gun", true, "turret"},
+    };
+    for (auto &v : vs) {
+        // the name: the file's, else its folder's ("vehicles/scorpion/mp" -> scorpion)
+        std::set<std::string> said;
+        std::string words;
+        auto look = [&](std::string n) {
+            for (auto &c : n) c = isalnum((unsigned char)c) ? c : ' ';
+            std::string padded = " " + n + " ";
+            for (auto &k : kWords) {
+                bool hit = k.whole ? padded.find(" " + std::string(k.w) + " ") != std::string::npos
+                                   : n.find(k.w) != std::string::npos;
+                if (hit && said.insert(k.cat).second) words += (words.empty() ? "" : ", ") + std::string(k.w);
+            }
+        };
+        look(v.stem);
+        if (said.empty()) {
+            size_t a = v.path.rfind('/');
+            size_t b = a == std::string::npos || a == 0 ? std::string::npos : v.path.rfind('/', a - 1);
+            if (a != std::string::npos) look(v.path.substr(b == std::string::npos ? 0 : b + 1, a - (b == std::string::npos ? 0 : b + 1)));
+        }
+        const bool typed = v.type >= 0 && v.type < 7;
+        const std::string type_cat = typed ? kTypeCat[v.type] : "";
+        const bool fast = mid_speed > 0 && v.speed > mid_speed * 1.15, slow = mid_speed > 0 && v.speed > 0 && v.speed < mid_speed * 0.85;
+        const bool weighty = mid_mass > 0 && v.mass > mid_mass * 1.5;
+        // what the stats alone point to (empty: nothing clear)
+        std::string stats;
+        if (v.read && v.speed <= 0 && v.seats <= 1 && !v.guns.empty()) stats = "turret";
+        else if (v.read && v.big_gun && (slow || weighty)) stats = "heavy";
+        else if (v.read && v.seats == 1 && fast && !v.big_gun) stats = "light";
+        char facts[200];
+        snprintf(facts, sizeof facts, "%d seat%s, %s, top speed %.3g%s, mass %.4g%s", v.seats, v.seats == 1 ? "" : "s",
+                 v.guns.empty() ? "no guns" : ("guns " + name_list(v.guns, 3)).c_str(), v.speed,
+                 fast ? " (fast here)" : slow ? " (slow here)" : "", v.mass, weighty ? " (heavy here)" : "");
+        std::string cat, why;
+        if (said.size() == 1) {
+            cat = *said.begin();
+            why = "name says " + cat + " (" + words + ")";
+            if (typed && type_cat != cat) why += std::string(", over its type ") + kTypeName[v.type];
+        } else if (said.size() > 1) {
+            if (!stats.empty() && said.count(stats)) { cat = stats; why = "name says " + words + "; its stats pick " + cat; }
+            else if (typed && said.count(type_cat)) { cat = type_cat; why = "name says " + words + "; its type " + kTypeName[v.type] + " picks " + cat; }
+            else {
+                for (const char *c : {"turret", "flying", "heavy", "medium", "light"}) if (said.count(c)) { cat = c; break; }
+                why = "name says " + words + "; nothing else settles it, so " + cat;
+            }
+        } else if (typed) {
+            cat = type_cat;
+            why = std::string("type ") + kTypeName[v.type];
+            if (!stats.empty() && stats != cat && !(cat == "flying" && stats != "turret")) {
+                why += " (" + cat + "), but its stats say " + stats;
+                cat = stats;
+            }
+        } else {
+            cat = stats.empty() ? (v.seats >= 3 ? "medium" : "light") : stats;
+            why = v.read ? "no type or name to go by; its stats say " + cat : "couldn't read the tag; guessed " + cat;
+        }
+        std::string tag = v.path;
+        std::replace(tag.begin(), tag.end(), '/', '\\');
+        out.push_back({tag, cat, why + (v.read ? " [" + std::string(facts) + "]" : "")});
+    }
+}
 }   // namespace
 
 bool analyze_map_traits(const Config &cfg, const fs::path &map, MapTraits &t, std::string *err) {
@@ -15639,7 +15769,7 @@ bool analyze_map_traits(const Config &cfg, const fs::path &map, MapTraits &t, st
         return false;
     };
     if (run_process({u8(tool(cfg, "invader-extract")), "-G", "-n", "-t", u8(dir), "-s", "*.scenario", "-s",
-                     "globals/globals.globals", "-s", "*.item_collection", u8(map)}, out) != 0)
+                     "globals/globals.globals", "-s", "*.item_collection", "-s", "*.vehicle", "-s", "*.physics", u8(map)}, out) != 0)
         return fail("couldn't read the map's scenario: " + out.substr(out.size() > 300 ? out.size() - 300 : 0));
     std::string scen;
     std::vector<std::string> collections;
@@ -15762,6 +15892,7 @@ bool analyze_map_traits(const Config &cfg, const fs::path &map, MapTraits &t, st
         std::string r = u.empty() ? std::string() : ref_path(u[0], ".biped");
         if (!r.empty() && !listed(kStockCharacters, std::size(kStockCharacters), r)) t.character = short_name(r);
     }
+    categorize_vehicles(dir, lines(scen, "vehicle_palette[*].name"), lines, t.vehicle_categories);
     std::vector<std::string> why;
     if (!t.custom_vehicles.empty()) {
         t.genres.push_back("Custom vehicles");

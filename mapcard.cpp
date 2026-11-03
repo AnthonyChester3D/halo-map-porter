@@ -496,8 +496,15 @@ bool read_info(const fs::path &txt, std::string &name, std::string &desc, InfoLi
     std::u32string n, d, l;
     bool first = true;
     InfoLines got;
+    bool in_section = false;   // from a "[Vehicles]" line on: Halo 1 Unlimited's section, not the description
     auto end_line = [&] {   // a description line, unless it's one of the map browser's
         std::string v;
+        if (!in_section && l.size() == 10) {
+            std::string a;
+            for (char32_t c : l) a += c < 128 ? (char)tolower((int)c) : '?';
+            in_section = a == "[vehicles]";
+        }
+        if (in_section) { l.clear(); return; }
         int k = info_line(l, v);
         if (k == 0) got.players = v;
         else if (k == 1) got.gametypes = v;
@@ -905,6 +912,53 @@ bool next_version(Card &c, const fs::path &map_file) {
     c.version_hash = fp;
     return c.version != before;
 }
+// The [Vehicles] section at the end of an info.txt (from that line on), CRLF line ends; "" if none.
+static bool vehicles_line(std::string t) {   // "[Vehicles]", any case
+    for (auto &c : t) c = (char)tolower((unsigned char)c);
+    return t == "[vehicles]";
+}
+static std::string info_sections(const fs::path &txt) {
+    std::ifstream f(txt, std::ios::binary);
+    if (!f) return std::string();
+    std::string raw((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>()), o, l;
+    bool in = false;
+    std::istringstream ss(raw);
+    while (std::getline(ss, l)) {
+        while (!l.empty() && (l.back() == '\r' || l.back() == ' ')) l.pop_back();
+        if (!in && vehicles_line(l)) in = true;
+        if (in) o += l + "\r\n";
+    }
+    return o;
+}
+bool write_vehicles_section(const fs::path &folder, const std::vector<std::pair<std::string, std::string>> &rows, std::string &err) {
+    fs::path txt = folder / "info.txt";
+    std::ifstream f(txt, std::ios::binary);
+    if (!f) { err = "no info.txt in " + folder.u8string(); return false; }
+    std::string raw((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    f.close();
+    // everything but an old [Vehicles] section (up to the next section, if any), as it was
+    std::string keep, line;
+    bool skip = false;
+    for (size_t i = 0; i < raw.size();) {
+        size_t e = raw.find('\n', i);
+        size_t next = e == std::string::npos ? raw.size() : e + 1;
+        line = raw.substr(i, next - i);
+        std::string t = line;
+        while (!t.empty() && (t.back() == '\n' || t.back() == '\r' || t.back() == ' ')) t.pop_back();
+        if (t.size() > 2 && t.front() == '[' && t.back() == ']') skip = vehicles_line(t);
+        if (!skip) keep += line;
+        i = next;
+    }
+    if (!keep.empty() && keep.back() != '\n') keep += "\r\n";
+    if (!rows.empty()) {
+        keep += "[Vehicles]\r\n";
+        for (auto &r : rows) keep += r.first + " = " + r.second + "\r\n";
+    }
+    std::ofstream o(txt, std::ios::binary | std::ios::trunc);
+    o << keep;
+    if (!o) { err = "Couldn't write " + txt.u8string(); return false; }
+    return true;
+}
 bool write_info_txt(const Card &c, const fs::path &folder, std::string &err) {
     std::error_code ec;
     fs::create_directories(folder, ec);
@@ -917,6 +971,7 @@ bool write_info_txt(const Card &c, const fs::path &folder, std::string &err) {
     // the map browser's lines go last: the Xbox doesn't show them, and Halo's description buffer can't cut them short
     if (std::string l = info_lines(c); !l.empty()) txt += "\r\n" + l;
     txt += "\r\n";
+    txt += info_sections(folder / "info.txt");   // ([Vehicles], written after a build, stays)
     std::ofstream f(folder / "info.txt", std::ios::binary | std::ios::trunc);
     f << txt;
     if (!f) { err = "Couldn't write " + (folder / "info.txt").u8string(); return false; }

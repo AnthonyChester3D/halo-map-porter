@@ -94,6 +94,10 @@ bool save_card(const fs::path &dir, const Card &c);
 std::string info_lines(const Card &c);
 // Write just info.txt into `folder` (the picture stays as it is).
 bool write_info_txt(const Card &c, const fs::path &folder, std::string &err);
+// info.txt's "[Vehicles]" section for Halo 1 Unlimited's vehicle-category gametype option: "tag\\path = category" rows
+// at the end of the file in `folder`, replacing an old [Vehicles] section; the rest of the file stays as it is. (A
+// rewrite of info.txt keeps the sections at its end.)
+bool write_vehicles_section(const fs::path &folder, const std::vector<std::pair<std::string, std::string>> &rows, std::string &err);
 // Write info.txt and preview.bin (or remove a stale preview.bin when there's no picture) into `folder`.
 bool write_folder_files(const Card &c, const Image *img, const fs::path &folder, std::string &err);
 

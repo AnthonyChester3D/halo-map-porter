@@ -2141,6 +2141,13 @@ sort). The card has a field for each, at the bottom of "Map card...":
 They go at the end of info.txt as "Players:", "Gametypes:", "Genres:" and
 "Version:" lines, which the Xbox doesn't show in the description. Older XBEs show
 them as part of the description.
+After those, a [Vehicles] section for Halo 1 Unlimited's vehicle-category
+gametype option: one "vehicles\warthog\mp_warthog = medium" line for each
+vehicle in the scenario's vehicle palette (light, medium, heavy, flying or
+turret). Each starts from the tag's vehicle type; its name overrides that (a
+"hog" is medium, a "banshee" flying), and its seats, guns, top speed and mass,
+against the map's other vehicles, settle the rest. The log lists each one's
+category and why. A build writes the section again; a map card change keeps it.
 After each build or conversion the app reads the finished map and fills
 in what you haven't set yourself:
   - Gametypes from the map's own markers: both CTF flags, a hill, a ball
