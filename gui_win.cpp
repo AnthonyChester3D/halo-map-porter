@@ -463,6 +463,9 @@ static void apply_xbox_options(Config &cfg) {
     cfg.xbox_shrink_stock = checked(ID_X_SHRINK_STOCK);
     cfg.write_perf_tour = checked(ID_S_TOUR);
     cfg.xbox_max_mb = sel(ID_X_LIMIT) == 1 ? 115 : 0; // 0 = standard 47 MB
+    // (as the batch: a map still over the standard Xbox's 47 MB after every shrink is built for the big-map limit, as
+    // shrunk, and the user is told plainly, rather than failing)
+    cfg.xbox_overflow_mb = cfg.xbox_max_mb <= 0 ? 115 : 0;
     {
         static const double target[3] = {22, 20, 18};   // the texture memory target: Max, Recommended, Safe
         int k = sel(ID_X_TARGET);
@@ -936,6 +939,7 @@ struct Done {
     std::wstring msg, output, report, lods, update;
     Keys key;                 // what was converted (with `update`)
     bool open_lods = false;   // prepared for the LODs window: open it
+    std::wstring oversize;    // built for the big-map limit: over the standard Xbox's 47 MB (said loudly)
 };
 
 // `prepared`: the map was only prepared (Unpack, or for the LODs window), not built.
@@ -950,6 +954,14 @@ static void finish(const Result &r, const std::string &what, const Keys &key = {
         std::ostringstream s;
         s << "DONE: " << what << " -> " << u8(r.output) << "\n   " << r.changes.size() << " automatic fixes, "
           << r.warnings.size() << " warnings. Report: " << u8(r.report);
+        for (auto &c : r.changes)
+            if (c.rfind("[size]", 0) == 0) {   // (over the 47 MB: built for the big-map limit)
+                std::smatch sm;   // (its size as the Xbox's limit counts it: uncompressed, from invader-info)
+                static const std::regex unc(R"(Uncompressed size:\s+([\d.]+))");
+                d->oversize = std::regex_search(r.info, sm, unc) ? W(sm[1].str()) + L" MB" : L"over 47 MB";
+                s << "\n\n   !!! OVER 47 MB: this map doesn't fit a standard Xbox. It was built for the big-map limit (115 MB) and "
+                     "needs a modded Xbox with the big-map XBE. !!!";
+            }
         d->msg = W(s.str());
     } else {
         d->msg = W("FAILED: " + what + " failed:\n" + r.error);
@@ -1909,7 +1921,7 @@ static void open_batch() {
         Config base = make_config();
         apply_xbox_options(base);
         // (a map still over the standard Xbox's 47 MB after every shrink: built for the big-map limit, as shrunk)
-        if (base.xbox_max_mb <= 0) base.xbox_overflow_mb = 115;
+        if (base.xbox_max_mb <= 0) base.xbox_overflow_mb = 115;   // (make_config's too)
         bool share = checked(ID_SHARE);
         for (int i : which) {
             const auto &it = items[(size_t)i];
@@ -3259,6 +3271,15 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             save_last_prepared();
         }
         if (d->ok && d->open_lods && !d->lods.empty()) PostMessageW(h, WM_COMMAND, ID_SEE_LODS, 0);
+        if (d->ok && !d->oversize.empty()) {   // (built, but not for a standard Xbox: said where it can't be missed)
+            statuslamp::set(g_lamp, statuslamp::kWarning);   // (orange, not green)
+            MessageBoxW(h, (L"The map is built, but it's OVER 47 MB: " + d->oversize + L" as the Xbox counts it.\n\n"
+                            L"Even with every shrink it didn't fit the standard Xbox's 47 MB, so it was built for the big-map "
+                            L"limit (115 MB) instead. It needs a modded Xbox running the big-map XBE; a standard one won't load it.\n\n"
+                            L"To get it under 47 MB: replace or drop weapons and vehicles (Xbox tab, \"Weapons & vehicles...\"), "
+                            L"tick \"Also shrink Bungie's content to fit\", or pick a smaller texture target.").c_str(),
+                        L"Halo Map Porter - over 47 MB", MB_ICONWARNING);
+        }
         update_invader_status();
         update_conv_hint();
         if (!d->ok) MessageBeep(MB_ICONWARNING);

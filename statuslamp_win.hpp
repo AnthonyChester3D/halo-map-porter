@@ -9,7 +9,7 @@
 
 namespace statuslamp {
 
-enum State { kIdle = 0, kWorking = 1, kDone = 2, kFailed = 3 };
+enum State { kIdle = 0, kWorking = 1, kDone = 2, kFailed = 3, kWarning = 4 };   // (4: done, but not as hoped: orange)
 const UINT kSetState = WM_USER + 1;   // wParam: a State
 
 inline LRESULT CALLBACK lamp_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
@@ -34,7 +34,7 @@ inline LRESULT CALLBACK lamp_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         GetClientRect(h, &rc);
         int state = (int)GetWindowLongPtrW(h, GWLP_USERDATA);
         COLORREF c = state == kWorking ? RGB(232, 168, 32) : state == kDone ? RGB(46, 170, 70)
-                     : state == kFailed ? RGB(210, 50, 50) : dark::on() ? RGB(70, 70, 70) : RGB(205, 205, 205);
+                     : state == kFailed ? RGB(210, 50, 50) : state == kWarning ? RGB(240, 120, 20) : dark::on() ? RGB(70, 70, 70) : RGB(205, 205, 205);
         HBRUSH b = CreateSolidBrush(c);
         FillRect(dc, &rc, b);
         DeleteObject(b);
