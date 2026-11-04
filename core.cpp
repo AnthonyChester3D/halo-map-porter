@@ -11623,6 +11623,15 @@ static void xbox_scripts(Job &job, const fs::path &xsrc) {
         fs::create_directories(xdata, ec); // invader-recover requires the data folder to exist
         run_process({u8(tool(cfg, "invader-recover")), "-t", u8(xsrc), "-d", u8(xdata), job.scenario + ".scenario"}, out);
     }
+    // The data folder's global_scripts.hsc: Invader compiles it into every level with the level's own scripts (MCC's
+    // tagset keeps globals and scripts the campaign levels share there: global_delay_music, player0,
+    // cinematic_skip_start...). Copied beside them, at the root, as the data folder has it. (invader-recover puts the
+    // map's back out there itself.)
+    if (!data.empty() && fs::exists(data / "global_scripts.hsc", ec) && fs::exists(xdata / scen_dir / "scripts", ec) &&
+        !fs::exists(xdata / "global_scripts.hsc", ec)) {
+        fs::copy_file(data / "global_scripts.hsc", xdata / "global_scripts.hsc", ec);
+        if (!ec) job.log("  Scripts: with the data folder's global_scripts.hsc (scripts and globals every level shares)");
+    }
     bool any_hsc = false;
     if (fs::exists(xdata, ec))
         for (auto &e : fs::recursive_directory_iterator(xdata, ec))
