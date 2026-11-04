@@ -695,6 +695,9 @@ Levels of detail (LODs)
   character's shield shimmer is its whole body again with the shield's
   shader; a weapon's hologram over its gauge) gets exactly the triangles
   the part below keeps.
+  Every Trim setting goes by shape, not by a number of triangles: each
+  model loses every triangle it can while its shape stays within the
+  setting's limit, however few that leaves.
     Leave them as made   Nothing trimmed.
     Trim (they look the same)   The default. The shape moves at most
                          0.25% of the model's size (characters 0.18%:
@@ -705,16 +708,16 @@ Levels of detail (LODs)
                          0.25%), at most 0.015 units: much lighter, but
                          small details (a seat, a bumper bar, fingers)
                          can lose their shape up close.
-    Trim to 1.5x Bungie's density   The lightest. Each model aims at 1.5
-                         times the triangles Bungie's own models of its
-                         kind and size have (below), when it's over that
-                         by more than a quarter. The shape moves at most
+    Trim, then on to Bungie's density   As "Trim (they look the same)",
+                         then a model still over the triangles Bungie's
+                         own models of its kind and size have (below)
+                         goes on towards that. The shape moves at most
                          1% of the model's size and never more than 0.03
                          world units (about 9 cm), so a model that can't
                          get there without visibly changing stops short.
-  The first three trim only models over their kind's budget, and never
-  below it: vehicles and scenery 4,000 triangles, characters and
-  first-person weapons 3,000, weapons and items 2,000. Stock models and
+    Simplify (0.05%), then on to Bungie's density   The same, with a
+                         first pass that keeps the shape within 0.05%.
+  Stock models and
   the models in skip.txt are left alone, and a model's own choice in the
   LODs window comes first (see "Seeing them" below). A model whose
   triangles all show (a mech made of hundreds of separately textured
@@ -756,7 +759,7 @@ Levels of detail (LODs)
   its size (the diagonal of the box around it). Volume doesn't predict
   them: a sniper rifle is about five times a pistol's length and has
   less than twice its triangles. Bungie gave each kind a budget that
-  grows slowly with size, so the targets (1.5x) are:
+  grows slowly with size; 1.5 times it is about:
     first-person weapons   about 2,250 for a pistol, 2,800 for a rifle,
                            3,300 for a sniper rifle (Bungie's: 1,030 to
                            2,259)

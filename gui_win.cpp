@@ -2840,7 +2840,7 @@ static void create_controls() {
     label(2, L"Heavy models:", 410, y - 2, 86, ID_X_TRIM_LBL);
     list_combo(2, 500, y - 2, 234, ID_X_TRIM,
                {L"Leave them as made", L"Trim (they look the same)", L"Trim harder (details change)",
-                L"Trim to 1.5x Bungie's density", L"Simplify fully, then trim (shape within 0.05%)"});
+                L"Trim, then on to Bungie's density", L"Simplify (0.05%), then on to Bungie's density"});
     y += 24;
     check(2, L"Also make and use LODs for Bungie's models (retail didn't)", 26, y, 380, ID_X_LODSTOCK);
     label(2, L"Animations:", 410, y - 2, 86, ID_X_ANIM_LBL);

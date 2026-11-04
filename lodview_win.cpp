@@ -199,7 +199,7 @@ void load_choice() {
                        : L"What every conversion does with the model, from now on";
     SetWindowTextW(item(IDC_GROUP), g.c_str());
     std::wstring tl = L"triangles";
-    if (m && m->density > 0) tl += L" (1.5x what Bungie's models of its kind and size have: " + thousands(m->density) + L")";
+    if (m && m->density > 0) tl += L" (what Bungie's models of its kind and size have: " + thousands(m->density) + L")";
     SetWindowTextW(item(IDC_TOPN_LBL), tl.c_str());
     St->loading = false;
     enable_choice();
@@ -596,7 +596,7 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case IDC_TOP:
             if (code == CBN_SELCHANGE && !St->loading) {
                 // (a model with lower-detail versions of its own: "Make them" replaces them with ones the app makes)
-                // "Trim it to": starting from 1.5x Bungie's for its kind and size (or half its triangles)
+                // "Trim it to": starting from Bungie's for its kind and size (or half its triangles)
                 if (id == IDC_TOP && SendMessageW(item(IDC_TOP), CB_GETCURSEL, 0, 0) == 2 && number(IDC_TOPN) <= 0 &&
                     St->model >= 0) {
                     const LodView::Model &m = St->v.models[St->model];
@@ -694,7 +694,7 @@ void create_controls() {
     struct { const wchar_t *t; int w; int fmt; } cols[] = {{L"Model", 124, LVCFMT_LEFT}, {L"Kind", 100, LVCFMT_LEFT},
                                                           {L"What changed", 96, LVCFMT_LEFT},
                                                           {L"Triangles by level", 136, LVCFMT_LEFT},
-                                                          {L"1.5x Bungie", 80, LVCFMT_RIGHT},
+                                                          {L"Bungie's", 80, LVCFMT_RIGHT},
                                                           {L"On map", 56, LVCFMT_RIGHT},
                                                           {L"Your choice", 104, LVCFMT_LEFT}};
     for (int i = 0; i < 7; i++) {
@@ -766,7 +766,7 @@ void create_controls() {
                   L"no switch distances either.\n\nKept in choices.txt in the LOD library, for every map that uses the model.");
     tip(IDC_TOP, L"As \"Heavy models\" says: the Xbox tab's choice.\n\nKeep it as made: never trimmed.\n\nTrim it to: aims at "
                  L"that many triangles, whatever the Xbox tab says (the shape may move up to 5% of the model's size to get "
-                 L"there). It starts at 1.5x what Bungie's models of its kind and size have.\n\nKept in choices.txt in the "
+                 L"there). It starts at what Bungie's models of its kind and size have.\n\nKept in choices.txt in the "
                  L"LOD library, for every map that uses the model.");
     tip(IDC_AGAIN, L"Puts your choices in the map: its models' levels of detail and trims are done again on the tags the "
                    L"conversion prepared, and the map is built (the rest of the map stays as converted). The list then shows "

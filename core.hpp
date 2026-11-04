@@ -65,14 +65,13 @@ struct Config {
     bool xbox_make_lods = true;
     fs::path lod_library;
     // The most detailed version of the map's own heavy models made lighter (lod.hpp trim_top), before any LODs are
-    // made from it: 0 as made, 1 trimmed so they look the same (shape kept within 0.25% of the model's size, 0.18% for
-    // characters, 0.12% for first-person weapons), 2 trimmed harder (0.6%, 0.4%, 0.25%: small details may change). Only
-    // models over their kind's budget (vehicles and scenery 4,000 triangles, characters and first-person weapons 3,000,
-    // weapons and items 2,000), and never below it. 3: trimmed to 1.5x what Bungie's models of their kind and size have
-    // (lod.hpp stock_triangles), when over it by a quarter, the shape moving at most 1% of the model's size (0.03
-    // units). 4: every model first made as simple as its shape allows (no point moving more than 0.05% of its size,
-    // whatever its triangles), then trimmed as 1 from that. A model's own choice in the LODs window (lod.hpp Choice)
-    // comes first (after the simplifying, with 4).
+    // made from it, by shape: each model loses every triangle it can while its shape stays within a limit, however few
+    // that leaves. 0 as made, 1 so they look the same (shape kept within 0.25% of the model's size, 0.18% for
+    // characters, 0.12% for first-person weapons, at most 0.006 units), 2 harder (0.6%, 0.4%, 0.25%, 0.015 units: small
+    // details may change). 3: as 1, then a model still over what Bungie's models of its kind and size have (lod.hpp
+    // stock_triangles) goes on towards that, its shape moving at most 1% of its size (0.03 units). 4: as 3, with a
+    // first pass of 0.05%. First-person weapons lose what's never on screen whatever the limit. A model's own choice in
+    // the LODs window (lod.hpp Choice) comes first.
     int xbox_trim_models = 1;
     // Store the map's animations (its own and the Xbox's it uses) the way Bungie stored the Xbox's cinematics: as
     // keyframes ("compressed", animcomp.hpp), about half the tag memory for first-person animations, a quarter less
@@ -275,7 +274,7 @@ struct LodView {
                                          // "distances" (switch distances for its own), "stock" (a stock model's),
                                          // "trimmed" (only its most detailed version made lighter), "" left as made
         std::string note;                // left as made (or partly): why, e.g. "only 640 triangles"
-        int density = 0;                 // 1.5x Bungie's triangles for its kind and size (lod.hpp stock_triangles)
+        int density = 0;                 // Bungie's triangles for its kind and size (lod.hpp stock_triangles)
         bool had_lods = false;           // the map made it with lower-detail versions of its own
         bool stock = false;              // Bungie's (the Xbox tags'): its levels of detail can change, nothing else
         bool undone = false;             // taken out again: the map didn't fit with them

@@ -7367,7 +7367,7 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
 
     // The map's own models (drawn in the world, or first-person weapons), each with its choices (lod.hpp Choice: the
     // LODs window's, or skip.txt). The window lists them all, changed or not, with what Bungie's of its kind and size
-    // have (x1.5).
+    // have.
     std::vector<std::string> own_models;
     std::map<std::string, lod::Choice> chosen;
     for (auto &dep : deps) {
@@ -7382,7 +7382,7 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
         char kind = fp ? 'f' : kinds[dep];
         LodView::Model &m = record(dep, kind, "");
         double size = lod::model_size(own / from_u8(dep));
-        if (size > 0) m.density = (int)std::lround(1.5 * lod::stock_triangles(kind, size));
+        if (size > 0) m.density = (int)std::lround(lod::stock_triangles(kind, size));
     }
     // Bungie's models drawn in the world (the Xbox tags'): those with no lower-detail versions of their own get them
     // with the Xbox tab's option for Bungie's models, or a model's own choice (edited copies: your tags stay as they
@@ -7402,10 +7402,13 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
     // the map has them so. First-person weapons too (drawn whenever they're held, always in full, and close up: kept
     // closer to their shape), and characters (they bend as before: lod.cpp, Bones). A model's own choice first: kept
     // as made, or trimmed to the triangles chosen (allowed to move 5% of its size to get there).
+    // The Trim setting goes by shape, not by a number of triangles: each model first loses every triangle it can
+    // while its shape stays within the setting's limit, however few that leaves (1 "look the same", 2 "harder": a
+    // looser limit). 3 and 4 then aim for Bungie's own triangles for its kind and size: a model still over that may
+    // move further (up to 1% of its size) to get there; 4's first pass is tighter (0.05%).
     {
         const int mode = job.cfg.xbox_trim_models;
-        // (4: every model first made as simple as its shape allows, within 0.05% of its size; then trimmed as 1 does)
-        const bool simplest = mode == 4;
+        const bool simplest = mode >= 1;   // (the shape-first pass: every Trim setting)
         bool harder = mode == 2, by_density = false, by_choice = false, by_setting = false, by_first_person = false;
         std::vector<std::string> cleaned;
         std::vector<std::string> trimmed, floor;
@@ -7432,17 +7435,27 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
                 ts.max_units = 1;
             } else if (mode <= 0) {
                 continue;
-            } else if (mode == 3) {   // 1.5x Bungie's for its kind and size, when over that by a quarter
-                ts.density = 1.5;
+            } else if (mode == 3 || mode == 4) {   // then on to Bungie's for its kind and size, when still over it
+                ts.density = 1.0;
                 ts.kind = kind;
                 ts.max_change = 0.01;
                 ts.max_units = 0.03;
-                ts.slack = 1.25;
+                ts.slack = 1.0;
             } else {
-                ts.budget = kind == 'f' || kind == 'b' ? 3000 : kind == 'w' ? 2000 : 4000;
-                // (first-person weapons are seen closest; characters up close too, and their fingers thin out first)
-                ts.max_change = fp ? (harder ? 0.0025 : 0.0012) : kind == 'b' ? (harder ? 0.004 : 0.0018) : (harder ? 0.006 : 0.0025);
-                ts.max_units = harder ? 0.015 : 0.006;
+                ts.budget = -1;   // (1, 2: the shape-first pass is all)
+            }
+            // The shape-first pass's limit: how far its shape may move (share of its size, and world units). First-
+            // person weapons are seen closest (what's never on screen goes whatever the limit, and what's seen least
+            // may move three times as far); characters up close too, and their fingers thin out first.
+            lod::TrimSettings clean;
+            clean.budget = 0;
+            if (mode == 4) {
+                clean.max_change = 0.0005;
+                clean.max_units = 1e9;
+            } else {
+                const bool loose = mode == 2;
+                clean.max_change = fp ? (loose ? 0.0025 : 0.0012) : kind == 'b' ? (loose ? 0.004 : 0.0018) : (loose ? 0.006 : 0.0025);
+                clean.max_units = loose ? 0.015 : 0.006;
             }
             // A first-person model: what's on screen in its animations, so what never is goes (even within its budget)
             // and what's seen least is simplified first. Not one that's its weapon's model in the world too (some
@@ -7455,33 +7468,31 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
                 measured = first_person_seen(job, dep, fp_animations[dep], lod_settings.look, seen, why);
                 if (!measured) note(dep, "not measured in first person: " + why);
             }
-            if (measured) ts.seen = &seen;
-            // Simplest first: as few triangles as keep its shape within 0.05% of its size, however many it has; the
-            // trim below then goes on from that version.
+            if (measured) ts.seen = clean.seen = &seen;
+            // Shape first: as few triangles as keep its shape within the limit, however many it has; the trim below (3,
+            // 4) then goes on from that version.
             int cleaned_from = 0;
             std::string before;
             fs::path ed;
-            if (simplest) {
+            if (simplest && !mine) {
                 ed = editable(dep, bungies);
                 if (ed.empty()) continue;
                 std::ifstream in(ed / from_u8(dep), std::ios::binary);
                 before.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
                 in.close();
                 keep_original(ed / from_u8(dep), before);
-                lod::TrimSettings clean;
-                clean.budget = 0;
-                clean.max_change = 0.0005;
-                clean.max_units = 1e9;
                 lod::Trim c = lod::trim_top(ed / from_u8(dep), clean, lod_settings, dep);
                 if (c.changed) {
                     cleaned_from = c.before;
                     saved += c.xbox_bytes_saved;
-                    cleaned.push_back(name_of(dep) + " " + thousands(c.before) + " > " + thousands(c.after));
+                    if (measured) by_first_person = true;
+                    cleaned.push_back(name_of(dep) + " " + thousands(c.before) + " > " + thousands(c.after) +
+                                      (c.unseen > 0 ? " (" + thousands(c.unseen) + " never on screen)" : ""));
                 }
             }
-            fs::path now = simplest ? ed : own;
+            fs::path now = simplest && !mine ? ed : own;
             perf::ModelStats ms = perf::model_stats(now / from_u8(dep));
-            bool trim = ms.ok;
+            bool trim = ms.ok && ts.budget >= 0;
             if (trim && !measured && ts.density <= 0 && ms.triangles <= ts.budget) trim = false;
             if (trim && !measured && ts.density > 0 &&
                 ms.triangles <= ts.density * lod::stock_triangles(kind, lod::model_size(now / from_u8(dep))) * ts.slack)
@@ -7493,7 +7504,7 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
                 }
                 continue;
             }
-            if (!simplest) {
+            if (!simplest || mine) {
                 ed = editable(dep, bungies);   // (Bungie's: an edited copy, your Xbox tags as they are)
                 if (ed.empty()) continue;
                 std::ifstream in(ed / from_u8(dep), std::ios::binary);
@@ -7520,13 +7531,13 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
             }
             saved += r.xbox_bytes_saved;
             std::string about = mine ? " (your choice" : r.before <= r.budget * ts.slack ? " (" : r.after > r.budget * 1.1 ? " ("
-                              : mode == 3 ? " (its target" : " (its budget";
+                              : mode >= 3 ? " (its target" : " (its budget";
             if (r.unseen > 0)
                 about += std::string(about.size() > 2 ? "; " : "") + thousands(r.unseen) + " never on screen in its animations";
             about += ")";
             trimmed.push_back(name_of(dep) + " " + thousands(r.before) + " > " + thousands(r.after) + (about == " ()" ? "" : about));
             if (measured) by_first_person = true;
-            (mine ? by_choice : mode == 3 ? by_density : by_setting) = true;
+            (mine ? by_choice : mode >= 3 ? by_density : by_setting) = true;
             if (!job.analysis) {
                 job.trim_originals[dep] = std::move(before);
                 record(dep, kind, "trimmed").trimmed_from = r.before;
@@ -7536,7 +7547,7 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
             char size[32];
             if (saved >= 1048576) snprintf(size, sizeof size, "%.1f MB", saved / 1048576.0);
             else snprintf(size, sizeof size, "%d KB", (int)((saved + 1023) / 1024));
-            std::string how = by_density ? ", to about 1.5x the triangles Bungie's models of their kind and size have"
+            std::string how = by_density ? ", on to about the triangles Bungie's models of their kind and size have"
                               : by_setting ? (harder ? ", trimmed harder so small details may change" : ", so they look the same")
                                            : ", to the triangles chosen in the LODs window";
             if (by_first_person)
@@ -7548,8 +7559,13 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
         }
         if (!cleaned.empty())
             job.note("[heavy] simplified " + std::to_string(cleaned.size()) + (cleaned.size() == 1 ? " model" : " models") +
-                     " as far as their shapes allow first (no point moving more than 0.05% of its size; triangles as made > "
-                     "simplified, before any trim): " + list(cleaned));
+                     " as far as their shapes allow (" +
+                     (mode == 4 ? std::string("no point moving more than 0.05% of its size")
+                                : mode == 2 ? std::string("trimmed harder: small details may change")
+                                            : std::string("so they look the same")) +
+                     (by_first_person ? "; first-person weapons lose what's never on screen first, and what's seen least goes further" : "") +
+                     (mode >= 3 ? "; then on to Bungie's triangles where still over" : "") +
+                     "; triangles as made > now): " + list(cleaned));
         if (!floor.empty())
             job.note("[heavy] left as they are (every triangle shows, or keeps a texture in place): " + list(floor, 4));
     }
@@ -15142,7 +15158,7 @@ Result update_xbox_models(const Config &cfg, const fs::path &file, const Log &lo
 
 std::string xbox_prepare_key(const Config &c) {
     std::ostringstream k;
-    k << "HMP prepare 3\n";   // (3: bot waypoints; 2: automatic picks, the gravity rifle and spare needlers)
+    k << "HMP prepare 4\n";   // (4: trimming by shape; 3: bot waypoints; 2: automatic picks, the gravity rifle and spare needlers)
     auto path = [&](const char *n, const fs::path &p) { k << n << "=" << u8(p) << "\n"; };
     path("invader", c.invader_dir);
     path("ce", c.ce_dir);
