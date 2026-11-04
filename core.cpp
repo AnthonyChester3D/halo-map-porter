@@ -1087,8 +1087,11 @@ struct Job {
             if (m[1] == "EffectParticle" || m[1] == "EffectPart")
                 if (fix_effect_locations() > 0) return true;
             std::string key = join(m[2]);
-            if (edit(tag, key, std::stoi(m[4]) > 0 ? "0" : "null")) {
-                note("[fix]  " + tag + ": " + key + " pointed at missing entry #" + m[3].str() + "; reset to 0");
+            // (to the first entry; with none to point at, to none: the 65535 / -1 an index holds for none, or "null")
+            if (std::stoi(m[4]) > 0 ? edit(tag, key, "0")
+                                    : edit(tag, key, "65535") || edit(tag, key, "-1") || edit(tag, key, "null")) {
+                note("[fix]  " + tag + ": " + key + " pointed at missing entry #" + m[3].str() +
+                     (std::stoi(m[4]) > 0 ? "; reset to 0" : "; now none (there are none)"));
                 return true;
             }
         }
