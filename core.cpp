@@ -1988,6 +1988,18 @@ static void keep_collision(LodView &now, const LodView &before) {
 
 static void level_extras_for_update(Job &job);
 
+// Whether the job's scenario is a campaign (solo) one: its type, the HEK tag's big-endian 16 bits after the 64-byte
+// header and 60 bytes in (0 solo, 1 multiplayer, 2 user interface). False when it can't be read.
+static bool scenario_is_campaign(const Job &job) {
+    std::string s = job.scenario + ".scenario";
+    fs::path d = job.owner(s);
+    if (d.empty()) return false;
+    std::ifstream f(d / from_u8(s), std::ios::binary);
+    unsigned char b[2];
+    if (!f.seekg(64 + 60) || !f.read((char *)b, 2)) return false;
+    return (b[0] << 8 | b[1]) == 0;
+}
+
 Result run_build(Job &job, const std::string &scenario, const fs::path &output, bool share) {
     job.scenario = scenario;
     Result r;
@@ -2101,6 +2113,13 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
     // The map file's limit: the Xbox tab's (0: the standard Xbox's, which Invader checks), or the bigger one a map
     // still over the standard limit after every shrink goes to (Config::xbox_overflow_mb).
     double size_limit = cfg.xbox_max_mb;
+    // A campaign map's is its own: the Xbox's campaign cache files hold 278 MB (a map's size as it decompresses), which
+    // Invader checks. The Xbox tab's choice and the big-map limit are for multiplayer maps (47 MB cache files).
+    const bool campaign = job.target == Game::Xbox && scenario_is_campaign(job);
+    if (campaign) {
+        size_limit = 0;
+        job.log("A campaign map: its file limit is the Xbox's campaign one (278 MB), not the multiplayer 47 MB.");
+    }
     auto make_cmd = [&] {
         std::vector<std::string> cmd{u8(tool(cfg, "invader-build")), "-g", game_engine(job.target), "-H"};
         if (optimized) cmd.push_back("-O");
@@ -2153,7 +2172,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
     auto read_measurement = [&](ContentAnalysis &a, const std::vector<std::string> &mcmd, const fs::path &mout,
                                 const std::string &bout, std::string &err) {
         a.map_name = stem;
-        a.file_limit_mb = cfg.xbox_max_mb > 0 ? cfg.xbox_max_mb : 47;
+        a.file_limit_mb = campaign ? 278 : cfg.xbox_max_mb > 0 ? cfg.xbox_max_mb : 47;
         if (!analyze_built_map(job, mout, stock_choices, a, err)) return false;
         if (a.used_mb > a.limit_mb) {   // what the optimize rebuild (used when a map is over) would save
             job.log("Measuring what Invader's optimize option saves...");
@@ -2407,7 +2426,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
             }
         }
         // Still over after every shrink: built for the bigger limit instead (as shrunk: the cuts made stay).
-        if (std::regex_search(out, tb, too_big) && job.target == Game::Xbox && size_limit <= 0 && cfg.xbox_overflow_mb > 0 &&
+        if (std::regex_search(out, tb, too_big) && job.target == Game::Xbox && size_limit <= 0 && !campaign && cfg.xbox_overflow_mb > 0 &&
             std::atof(tb[1].str().c_str()) <= cfg.xbox_overflow_mb) {
             size_limit = cfg.xbox_overflow_mb;
             char buf[300];
