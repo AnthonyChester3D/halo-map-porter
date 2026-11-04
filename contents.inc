@@ -756,9 +756,35 @@ static void apply_replacements(Job &job, const fs::path &xsrc) {
                 picks[from] = to;
                 automatic.insert(from);
             }
-    // MCC's extras the Xbox game never had: the Reach moa statues (a collectible MCC's campaign levels hide), out of the
-    // scenery palette with their placements.
+    // MCC's extras the Xbox game never had. Its scavenger hunt: a child scenario per level ("a10_scavenger") that the
+    // build merges in, placing the Reach moa statues; the link goes.
     std::set<std::string> mcc_extras;
+    {
+        const std::string scen = job.scenario + ".scenario";
+        fs::path sd = job.owner(scen);
+        static const std::regex child(R"(^child_scenarios\[(\d+)\]\.child_scenario$)");
+        std::vector<int> drop;
+        std::string names;
+        if (!sd.empty())
+            for (auto &[k, v] : list_values(cfg, sd, scen)) {
+                std::smatch m;
+                if (std::regex_match(k, m, child) && v.find("_scavenger") != std::string::npos) {
+                    drop.push_back(std::stoi(m[1]));
+                    names += (names.empty() ? "" : ", ") + fs::path(from_u8(norm_rel(v))).stem().u8string();
+                }
+            }
+        if (!drop.empty() && (sd == job.fixes || job.to_fixes(scen, sd))) {
+            std::sort(drop.rbegin(), drop.rend());
+            std::vector<std::string> cmd{u8(tool(cfg, "invader-edit")), "-t", u8(job.fixes), scen};
+            for (int i : drop) cmd.insert(cmd.end(), {"-E", "child_scenarios[" + std::to_string(i) + "]"});
+            std::string o;
+            if (run_process(cmd, o) == 0)
+                job.note("[replace] MCC's scavenger hunt left out (its child scenario " + names +
+                         ", which places the Reach moa statues): the Xbox game never had it");
+            sd = job.fixes;
+        }
+    }
+    // The Reach moa statues placed in a level itself: out of the scenery palette with their placements.
     {
         const std::string scen = job.scenario + ".scenario";
         fs::path sd = job.owner(scen);
