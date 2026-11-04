@@ -756,9 +756,25 @@ static void apply_replacements(Job &job, const fs::path &xsrc) {
                 picks[from] = to;
                 automatic.insert(from);
             }
+    // MCC's extras the Xbox game never had: the Reach moa statues (a collectible MCC's campaign levels hide), out of the
+    // scenery palette with their placements.
+    std::set<std::string> mcc_extras;
+    {
+        const std::string scen = job.scenario + ".scenario";
+        fs::path sd = job.owner(scen);
+        static const std::regex spal(R"(^scenery_palette\[\d+\]\.name$)");
+        if (!sd.empty())
+            for (auto &[k, v] : list_values(cfg, sd, scen)) {
+                std::string t = norm_rel(v);
+                if (std::regex_match(k, spal) && t.find("reach_moa") != std::string::npos && !picks.count(t)) {
+                    picks[t] = "";
+                    mcc_extras.insert(t);
+                }
+            }
+    }
     if (picks.empty()) return;
     std::string out;
-    std::vector<std::string> notes, auto_notes;
+    std::vector<std::string> notes, auto_notes, mcc_notes;
     int emptied_all = 0;
     job.log(automatic.size() == picks.size() ? "Leaving out weapons nothing spawns..." : "Applying your weapons & vehicles picks...");
     // Tags that refer to each picked one (and each replacement, for a later pick of it), found in one pass over
@@ -771,7 +787,7 @@ static void apply_replacements(Job &job, const fs::path &xsrc) {
     auto referrers = find_referrers({job.fixes, xsrc, job.overlay}, targets, {job.scenario + ".scenario", "globals/globals.globals"});
     for (auto &[from, to] : picks) {
         if (from.empty() || from == to) continue;
-        auto &said = automatic.count(from) ? auto_notes : notes;
+        auto &said = mcc_extras.count(from) ? mcc_notes : automatic.count(from) ? auto_notes : notes;
         bool stock_from = !job.overlay.empty() && fs::exists(job.overlay / from_u8(from));
         std::vector<std::string> refs;
         for (auto &l : referrers[from])
@@ -838,7 +854,8 @@ static void apply_replacements(Job &job, const fs::path &xsrc) {
                 // scripts know by name stay, with no type (the engine leaves those out): Invader only compiles scripts
                 // whose object names belong to a placement. The scripts then find no object there (a jet's pieces
                 // are never made, health reads -1), which they handle like an object that's been destroyed.
-                for (PalBlock pl : {PalBlock{"weapon_palette", "weapons"}, PalBlock{"vehicle_palette", "vehicles"}, PalBlock{"equipment_palette", "equipment"}}) {
+                for (PalBlock pl : {PalBlock{"weapon_palette", "weapons"}, PalBlock{"vehicle_palette", "vehicles"}, PalBlock{"equipment_palette", "equipment"},
+                                   PalBlock{"scenery_palette", "scenery"}}) {
                     auto kv = values(d, r);
                     int pi = -1;
                     std::regex name_re("^" + std::string(pl.palette) + R"(\[(\d+)\]\.name$)");
@@ -882,6 +899,11 @@ static void apply_replacements(Job &job, const fs::path &xsrc) {
         }
         said.push_back(label + " -> none" + (left.empty() ? "" : " (still used by " + left[0] + ", so it stays in the map)"));
         emptied_all += emptied;
+    }
+    if (!mcc_notes.empty()) {
+        std::string list = mcc_notes[0];
+        for (size_t i = 1; i < mcc_notes.size(); i++) list += ", " + mcc_notes[i];
+        job.note("[replace] MCC's extras the Xbox game never had, left out with their placements: " + list);
     }
     if (!auto_notes.empty()) {
         std::string list = auto_notes[0];
