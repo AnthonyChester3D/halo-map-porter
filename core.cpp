@@ -972,6 +972,23 @@ struct Job {
                  ", which the map doesn't have (that line never played); the name cleared");
             return true;
         }
+        // A model with its top-level markers filled in (MCC's tagset has some: the Reach moa collectible): that list is
+        // the tools' own, made from the permutations' markers when a map is built, so it's emptied (the markers stay).
+        static const std::regex model_markers(R"((?:GBX)?Model::markers must have no more than 0 blocks)");
+        if (std::regex_search(msg, m, model_markers)) {
+            fs::path own = owner(tag);
+            std::string out;
+            if (!own.empty() && (own == fixes || to_fixes(tag, own))) {
+                run_process({u8(tool(cfg, "invader-edit")), "-t", u8(fixes), tag, "-C", "markers"}, out);
+                const int n = std::atoi(out.c_str());
+                if (n > 0 && run_process({u8(tool(cfg, "invader-edit")), "-t", u8(fixes), tag, "-E",
+                                          "markers[0-" + std::to_string(n - 1) + "]"}, out) == 0) {
+                    note("[fix]  " + tag + ": its top-level marker list was filled in (" + std::to_string(n) +
+                         "); emptied, as the tools fill it themselves when a map is built (its permutations' markers stay)");
+                    return true;
+                }
+            }
+        }
         static const std::regex empty_chicago(R"(ShaderTransparentChicago(Extended)?::maps\w* must have at least 1 block)");
         if (std::regex_search(msg, m, empty_chicago) && fix_empty_chicago() > 0) return true;
         static const std::regex rotational(R"(Particle type #(\d+) uses complex sprite render mode 'rotational' that requires extra sequence)");
