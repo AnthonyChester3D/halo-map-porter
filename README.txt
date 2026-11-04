@@ -708,6 +708,10 @@ Levels of detail (LODs)
                          0.25%), at most 0.015 units: much lighter, but
                          small details (a seat, a bumper bar, fingers)
                          can lose their shape up close.
+    Trim hardest (thin parts change)   1% (characters 0.65%, first
+                         person 0.4%), at most 0.025 units. An H3 ODST:
+                         4,043 > about 2,200, fingers kept (they go at
+                         about 0.75%).
     Trim, then on to Bungie's density   As "Trim (they look the same)",
                          then a model still over the triangles Bungie's
                          own models of its kind and size have (below)

@@ -70,7 +70,7 @@ struct Config {
     // characters, 0.12% for first-person weapons, at most 0.006 units), 2 harder (0.6%, 0.4%, 0.25%, 0.015 units: small
     // details may change). 3: as 1, then a model still over what Bungie's models of its kind and size have (lod.hpp
     // stock_triangles) goes on towards that, its shape moving at most 1% of its size (0.03 units). 4: as 3, with a
-    // first pass of 0.05%. First-person weapons lose what's never on screen whatever the limit. A model's own choice in
+    // first pass of 0.05%. 5 hardest (1%, characters 0.65%, first-person weapons 0.4%, 0.025 units: thin parts change). First-person weapons lose what's never on screen whatever the limit. A model's own choice in
     // the LODs window (lod.hpp Choice) comes first.
     int xbox_trim_models = 1;
     // Store the map's animations (its own and the Xbox's it uses) the way Bungie stored the Xbox's cinematics: as

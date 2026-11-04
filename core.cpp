@@ -7409,7 +7409,7 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
     {
         const int mode = job.cfg.xbox_trim_models;
         const bool simplest = mode >= 1;   // (the shape-first pass: every Trim setting)
-        bool harder = mode == 2, by_density = false, by_choice = false, by_setting = false, by_first_person = false;
+        bool harder = mode == 2 || mode == 5, by_density = false, by_choice = false, by_setting = false, by_first_person = false;
         std::vector<std::string> cleaned;
         std::vector<std::string> trimmed, floor;
         size_t saved = 0;
@@ -7452,6 +7452,10 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
             if (mode == 4) {
                 clean.max_change = 0.0005;
                 clean.max_units = 1e9;
+            } else if (mode == 5) {   // hardest: about where a character's fingers still hold (an H3 ODST: 4,043 > 2,200;
+                                      // its fingers go at about 0.75%)
+                clean.max_change = fp ? 0.004 : kind == 'b' ? 0.0065 : 0.01;
+                clean.max_units = 0.025;
             } else {
                 const bool loose = mode == 2;
                 clean.max_change = fp ? (loose ? 0.0025 : 0.0012) : kind == 'b' ? (loose ? 0.004 : 0.0018) : (loose ? 0.006 : 0.0025);
@@ -7561,6 +7565,7 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
             job.note("[heavy] simplified " + std::to_string(cleaned.size()) + (cleaned.size() == 1 ? " model" : " models") +
                      " as far as their shapes allow (" +
                      (mode == 4 ? std::string("no point moving more than 0.05% of its size")
+                                : mode == 5 ? std::string("trimmed hardest: details and thin parts change")
                                 : mode == 2 ? std::string("trimmed harder: small details may change")
                                             : std::string("so they look the same")) +
                      (by_first_person ? "; first-person weapons lose what's never on screen first, and what's seen least goes further" : "") +
