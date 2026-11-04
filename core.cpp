@@ -963,6 +963,15 @@ struct Job {
                 }
             }
         }
+        // An AI conversation participant naming an encounter the scenario doesn't have (tool.exe let it through; the
+        // game finds no one there and that line never plays): the name cleared, the same as the game had it.
+        static const std::regex lost_encounter(R"(Participant #(\d+) of conversation #(\d+) \((.*?)\) references a\s+nonexistent encounter \((.*?)\))");
+        if (std::regex_search(msg, m, lost_encounter) &&
+            edit(tag, "ai_conversations[" + m[2].str() + "].participants[" + m[1].str() + "].encounter_name", "")) {
+            note("[fix]  " + tag + ": conversation " + m[3].str() + "'s participant #" + m[1].str() + " named encounter " + m[4].str() +
+                 ", which the map doesn't have (that line never played); the name cleared");
+            return true;
+        }
         static const std::regex empty_chicago(R"(ShaderTransparentChicago(Extended)?::maps\w* must have at least 1 block)");
         if (std::regex_search(msg, m, empty_chicago) && fix_empty_chicago() > 0) return true;
         static const std::regex rotational(R"(Particle type #(\d+) uses complex sprite render mode 'rotational' that requires extra sequence)");
