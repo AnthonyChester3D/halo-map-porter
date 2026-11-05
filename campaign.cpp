@@ -471,6 +471,16 @@ bool strip_scenario(const fs::path &scenario, const Strip &s, Stripped &out) {
     std::vector<std::string> object_names;
     if (auto *on = tagfile::block(root, "object names"))
         for (auto &n : *on) object_names.push_back(lower(tagfile::get_str(n, "name")));
+    auto ai_named = [&](const std::string &n) {
+        if (n.empty()) return false;
+        if (s.names.count(n)) return true;
+        for (auto &x : s.names) if (x.size() > n.size() && x.compare(0, n.size(), n) == 0 && x[n.size()] == '/') return true;
+        return false;
+    };
+    // (a piece with no AI left: its vehicle palette goes as the others do; AI picks vehicles by their place in it)
+    bool no_ai = s.piece;
+    if (auto *enc = tagfile::block(root, "encounters"))
+        for (auto &e : *enc) if (ai_named(lower(tagfile::get_str(e, "name")))) no_ai = false;
     // The conversations kept: their participants' objects ("use this object", "set new name") stay placed.
     auto conversation_kept = [&](const std::string &n) {
         return s.piece ? s.names.count(n) > 0 : !(s.drop.count(n) && !s.names.count(n));
@@ -531,7 +541,8 @@ bool strip_scenario(const fs::path &scenario, const Strip &s, Stripped &out) {
         const size_t gone_here = before - left.size();
         out.placements += (int)gone_here;
         *items = std::move(left);
-        if (!k.prune || (!s.piece && gone_here == 0)) continue;   // (the level: only palettes it took placements from)
+        const bool prune = k.prune || (no_ai && std::string(k.palette) == "vehicle palette");
+        if (!prune || (!s.piece && gone_here == 0)) continue;   // (the level: only palettes it took placements from)
         std::vector<int> used(pal->size(), 0), remap(pal->size(), -1);
         for (auto &p : *items) {
             int t = (int)num(p, "type");
@@ -549,12 +560,6 @@ bool strip_scenario(const fs::path &scenario, const Strip &s, Stripped &out) {
         }
     }
     // Encounters and conversations: by name ("enc_k_covenant/boss" names its encounter).
-    auto ai_named = [&](const std::string &n) {
-        if (n.empty()) return false;
-        if (s.names.count(n)) return true;
-        for (auto &x : s.names) if (x.size() > n.size() && x.compare(0, n.size(), n) == 0 && x[n.size()] == '/') return true;
-        return false;
-    };
     auto ai_dropped = [&](const std::string &n) {
         if (s.drop.count(n)) return true;
         for (auto &x : s.drop) if (x.size() > n.size() && x.compare(0, n.size(), n) == 0 && x[n.size()] == '/') return true;
