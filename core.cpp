@@ -7415,23 +7415,44 @@ static bool distant_seen(Job &job, const std::string &model, const std::vector<s
     auto world = [](const Place &pl, const double *v, double *w) {
         for (int k = 0; k < 3; k++) w[k] = pl.p[k] + pl.f[k] * v[0] + pl.l[k] * v[1] + pl.u[k] * v[2];
     };
-    // Where players' eyes can be.
+    // Where players' eyes can be, in the BSPs it's drawn in (a campaign level's BSPs overlap: only the loaded one's
+    // objects inside it are drawn, so another BSP's floors at the same place never see it).
     std::vector<std::array<double, 3>> eyes;
     portals::PlayArea area = portals::play_area(sdir / from_u8(scen));
     tagfile::Block bsps = sc.block("structure bsps");
+    std::vector<portals::V3> centers;
+    for (auto &pl : places) {
+        double c[3];
+        world(pl, mc, c);
+        centers.push_back({c[0], c[1], c[2]});
+    }
+    std::vector<fs::path> its_bsps;
     for (size_t i = 0; i < bsps.size(); i++) {
         std::string b = bsps[i].ref("structure bsp");
         fs::path bo = b.empty() ? fs::path() : job.owner(b);
+        std::vector<char> in;
+        if (bo.empty() || !portals::inside_level(bo / from_u8(b), centers, in)) continue;
+        if (std::find(in.begin(), in.end(), 1) == in.end()) continue;
+        its_bsps.push_back(bo / from_u8(b));
         std::vector<portals::V3> pts;
-        if (!bo.empty() && portals::eye_points(bo / from_u8(b), area, 2500, pts))
+        if (portals::eye_points(bo / from_u8(b), area, 2500, pts))
             for (auto &q : pts) eyes.push_back({q[0], q[1], q[2]});
     }
+    if (its_bsps.empty()) { why = "it isn't inside any of the level's BSPs (never drawn)"; return false; }
     std::map<std::string, std::array<double, 3>> camera_at;
     for (const char *blk : {"player starting locations", "cutscene camera points"}) {
         tagfile::Block pts = sc.block(blk);
         for (size_t i = 0; i < pts.size(); i++) {
             std::array<double, 3> q{pts[i].num("position", 0), pts[i].num("position", 1), pts[i].num("position", 2)};
-            if (q[0] != 0 || q[1] != 0 || q[2] != 0) eyes.push_back(q);
+            if (q[0] == 0 && q[1] == 0 && q[2] == 0) continue;
+            // (a point in one of its BSPs: elsewhere, the level loaded there isn't one it's drawn in)
+            bool in_its = false;
+            for (auto &bf : its_bsps) {
+                std::vector<char> in;
+                if (portals::inside_level(bf, {{q[0], q[1], q[2]}}, in) && !in.empty() && in[0]) { in_its = true; break; }
+            }
+            if (!in_its) continue;
+            eyes.push_back(q);
             if (std::string(blk) == "cutscene camera points") camera_at[lc(pts[i].str("name"))] = q;
         }
     }
@@ -7457,13 +7478,25 @@ static bool distant_seen(Job &job, const std::string &model, const std::vector<s
         }
     }
     if (eyes.empty()) { why = "the level has nowhere players stand"; return false; }
-    // How near: from each spot to each placement's bounding sphere.
+    // How near: from each spot to the nearest of each placement's vertices (its hull, not a sphere round it: a long
+    // ship is far nearer its sphere's edge than its hull from the side); spots past its sphere checked by the sphere.
     d.nearest = 1e30;
     for (auto &pl : places) {
         double c[3];
         world(pl, mc, c);
-        for (auto &e : eyes)
-            d.nearest = std::min(d.nearest, std::sqrt((e[0] - c[0]) * (e[0] - c[0]) + (e[1] - c[1]) * (e[1] - c[1]) + (e[2] - c[2]) * (e[2] - c[2])) - radius);
+        std::vector<std::array<double, 3>> wv;
+        for (auto &pt : parts)
+            for (auto &v : pt.v) {
+                double w[3];
+                world(pl, v.data(), w);
+                wv.push_back({w[0], w[1], w[2]});
+            }
+        for (auto &e : eyes) {
+            double to_center = std::sqrt((e[0] - c[0]) * (e[0] - c[0]) + (e[1] - c[1]) * (e[1] - c[1]) + (e[2] - c[2]) * (e[2] - c[2]));
+            if (to_center - radius >= d.nearest) continue;   // (can't be nearer than the nearest yet)
+            for (auto &w : wv)
+                d.nearest = std::min(d.nearest, std::sqrt((e[0] - w[0]) * (e[0] - w[0]) + (e[1] - w[1]) * (e[1] - w[1]) + (e[2] - w[2]) * (e[2] - w[2])));
+        }
     }
     d.eyes = eyes.size();
     d.placed = places.size();
@@ -7727,6 +7760,8 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
                         }
                     }
                     far_models.push_back(name_of(dep) + " (" + std::to_string((int)dd.nearest) + " units)");
+                } else if (why.rfind("players come within", 0) == 0 || why.rfind("it isn't inside", 0) == 0) {
+                    note(dep, "not trimmed as far scenery: " + why);   // (the LODs window says why)
                 }
             }
             if (measured) ts.seen = clean.seen = &seen;

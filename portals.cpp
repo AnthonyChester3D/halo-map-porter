@@ -1643,6 +1643,21 @@ bool eye_points(const fs::path &bsp_file, const PlayArea &area, int count, std::
     return !out.empty();
 }
 
+bool inside_level(const fs::path &bsp_file, const std::vector<V3> &points, std::vector<char> &inside) {
+    inside.assign(points.size(), 0);
+    tagfile::Tag t;
+    if (!t.load(bsp_file)) return false;
+    tagfile::Elem r = t.root();
+    Bsp b;
+    if (!load_bsp(r, b, nullptr)) return false;
+    tagfile::Block sl = r.block("leaves");
+    for (size_t i = 0; i < points.size(); i++) {
+        int leaf = b.leaf_at(points[i]);
+        inside[i] = leaf >= 0 && (size_t)leaf < sl.size() && sl[(size_t)leaf].integer("cluster") >= 0;
+    }
+    return true;
+}
+
 Result add_portals(const fs::path &file, const Options &options) {
     using tagfile::TagNode;
     Result r;

@@ -116,6 +116,9 @@ bool sample_views(const std::filesystem::path &bsp, const PlayArea &area, int co
 // Where a player's eyes can be: up to `count` spots 0.62 units above the level's floors (spread by their area; in the
 // play area when it has floors there), inside the level. False when it has no floors.
 bool eye_points(const std::filesystem::path &bsp, const PlayArea &area, int count, std::vector<V3> &out);
+// Which of `points` are inside the level (in one of its rooms, not solid or outside): where an object is drawn while
+// this BSP is loaded. False when it can't be read.
+bool inside_level(const std::filesystem::path &bsp, const std::vector<V3> &points, std::vector<char> &inside);
 
 // The clusters add_portals would make: each leaf's new cluster. `report`: what it did, or why it couldn't.
 bool plan(const std::filesystem::path &bsp, const Options &options, Leaves &leaves, std::vector<int> &cluster_of_leaf,
