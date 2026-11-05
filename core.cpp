@@ -6594,7 +6594,7 @@ static void xbox_collision(Job &job, const std::vector<std::string> &deps) {
     const int level = job.cfg.xbox_collision;
     if (level <= 0 || job.analysis) return;
     const long budget = level >= 2 ? 90000 : 130000, bungie = 115000;   // (Bungie's densest MP scenery: about 115,000)
-    struct Use { bool placed = true, vehicle = true; std::set<std::string> models; std::string name; };
+    struct Use { bool placed = true, vehicle = true, biped = false, item = false; std::set<std::string> models; std::string name; };
     std::map<std::string, Use> uses;   // collision model -> what uses it
     for (auto &dep : deps) {
         bool place = has_suffix(dep, ".scenery") || has_suffix(dep, ".device_machine"), vehicle = has_suffix(dep, ".vehicle");
@@ -6610,6 +6610,8 @@ static void xbox_collision(Job &job, const std::vector<std::string> &deps) {
         Use &u = uses[cm];
         u.placed = u.placed && place;
         u.vehicle = u.vehicle && (vehicle || place);
+        if (has_suffix(dep, ".biped")) u.biped = true;
+        else if (other) u.item = true;   // (a weapon's, item's or projectile's)
         if (std::string m = ot.root().ref("model"); !m.empty()) u.models.insert(m);
         if ((place || vehicle) && u.name.empty()) u.name = fs::path(from_u8(dep)).stem().u8string();
     }
@@ -6624,6 +6626,27 @@ static void xbox_collision(Job &job, const std::vector<std::string> &deps) {
             Stock st{v, coll::read_nodes(ct.root()), {}};
             if (coll::read_rig(mt.root(), st.rig)) stock.push_back(std::move(st));
         }
+    // Bungie's characters, for the map's own characters' collision (an Elite made of a mesh round each bone where
+    // Bungie's has a box: 430 KB of tag memory for Lumoria's shielded Elite, Bungie's 23 KB). Matched by their nodes'
+    // names, "frame " (a rig's prefix) left off.
+    std::vector<Stock> stock_chars;
+    if (!job.overlay.empty())
+        for (const char *v : {"elite/elite", "grunt/grunt", "jackal/jackal", "marine/marine", "hunter/hunter", "cyborg/cyborg"}) {
+            std::string base = std::string("characters/") + v;
+            tagfile::Tag ct, mt;
+            if (!ct.load(job.overlay / from_u8(base + ".model_collision_geometry")) || !mt.load(job.overlay / from_u8(base + ".model"))) continue;
+            Stock st{fs::path(v).stem().u8string(), coll::read_nodes(ct.root()), {}};
+            if (coll::read_rig(mt.root(), st.rig)) stock_chars.push_back(std::move(st));
+        }
+    auto node_name = [](std::string n) {
+        for (auto &c : n) c = (char)tolower((unsigned char)c);
+        if (n.rfind("frame ", 0) == 0) n = n.substr(6);
+        return n;
+    };
+    for (auto &st : stock_chars) {
+        for (auto &n : st.nodes) n.name = node_name(n.name);
+        for (auto &n : st.rig.names) n = node_name(n);
+    }
     auto times = [&](long work) {   // as a multiple of Bungie's densest
         char t[32];
         snprintf(t, sizeof t, "%.1fx", (double)work / bungie);
@@ -6631,7 +6654,8 @@ static void xbox_collision(Job &job, const std::vector<std::string> &deps) {
     };
     std::vector<std::string> fitted, done, left;
     for (auto &[cm, use] : uses) {
-        if (!use.vehicle) continue;   // (a character's, weapon's or item's too)
+        if (!use.vehicle && !(use.biped && !use.item)) continue;   // (a weapon's or item's too)
+        const bool character = !use.vehicle;
         fs::path own = job.owner(cm);
         if (own.empty() || own == job.overlay) continue;
         tagfile::Tag t;
@@ -6656,10 +6680,14 @@ static void xbox_collision(Job &job, const std::vector<std::string> &deps) {
         {
             const Stock *best = nullptr;
             int best_shared = 0, with_bsps = 0;
-            for (auto &n : nodes) with_bsps += !n.bsps.empty();
-            for (auto &st : stock) {
+            const std::vector<Stock> &pool = character ? stock_chars : stock;
+            std::vector<coll::NodeBsps> named = nodes;   // (characters: names as matched)
+            if (character)
+                for (auto &n : named) n.name = node_name(n.name);
+            for (auto &n : named) with_bsps += !n.bsps.empty();
+            for (auto &st : pool) {
                 int shared = 0;
-                for (auto &n : nodes)
+                for (auto &n : named)
                     if (!n.bsps.empty())
                         for (auto &sn : st.nodes)
                             if (sn.name == n.name && !sn.bsps.empty()) { shared++; break; }
@@ -6672,7 +6700,9 @@ static void xbox_collision(Job &job, const std::vector<std::string> &deps) {
                     tagfile::Tag mt;
                     coll::Rig rig;
                     if (mo.empty() || !mt.load(mo / from_u8(m)) || !coll::read_rig(mt.root(), rig)) { fits.clear(); break; }
-                    fits.push_back(coll::fit_stock(nodes, rig, best->nodes, best->rig));
+                    if (character)
+                        for (auto &n : rig.names) n = node_name(n);
+                    fits.push_back(coll::fit_stock(named, rig, best->nodes, best->rig));
                 }
                 size_t before = 0, after = 0;
                 int parts = 0;
@@ -6692,6 +6722,16 @@ static void xbox_collision(Job &job, const std::vector<std::string> &deps) {
                     }
                     std::string what = "the " + best->name + "'s on " + std::to_string(parts) + " part" + (parts == 1 ? "" : "s") + ": " +
                                        std::to_string(before) + " surfaces now " + std::to_string(after);
+                    if (character && name == fs::path(from_u8(cm)).stem().u8string())   // (a character: named by its biped)
+                        for (auto &dep : deps)
+                            if (has_suffix(dep, ".biped")) {
+                                fs::path own = job.owner(dep);
+                                tagfile::Tag bt;
+                                if (!own.empty() && bt.load(own / from_u8(dep)) && bt.root().ref("collision model") == cm) {
+                                    what = fs::path(from_u8(dep)).stem().u8string() + ": " + what;
+                                    break;
+                                }
+                            }
                     fitted.push_back(name + " (" + what + ")");
                     how = "Bungie's " + best->name + " collision where it fits, on " + std::to_string(parts) + " part" + (parts == 1 ? "" : "s") +
                           ": " + std::to_string(before) + " surfaces now " + std::to_string(after) + ".";
@@ -6763,7 +6803,7 @@ static void xbox_collision(Job &job, const std::vector<std::string> &deps) {
     };
     if (!fitted.empty())
         job.note("[collision] gave " + std::to_string(fitted.size()) + " model" + (fitted.size() == 1 ? "" : "s") +
-                 " Bungie's own collision where it sits on them as well as on Bungie's vehicle: " + join(fitted));
+                 " Bungie's own collision where it sits on them as well as on Bungie's vehicle or character: " + join(fitted));
     if (!done.empty())
         job.note("[collision] made " + std::to_string(done.size()) + " dense scenery collision model" + (done.size() == 1 ? "" : "s") +
                  " simpler, as Bungie made theirs (a biped's collision work next to it, as a multiple of Bungie's densest scenery): " + join(done));
