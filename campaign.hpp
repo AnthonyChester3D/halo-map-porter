@@ -68,6 +68,9 @@ std::vector<std::pair<fs::path, std::string>> level_texts(const Analysis &a, boo
 // still skippable, then map_name `next`; the closing ends as the level did).
 // `start_bsp` > 0: the piece switches there first (a closing cutscene plays where the level was).
 std::string piece_text(const Analysis &a, bool opening, const std::string &next, int start_bsp = 0);
+// The scripts with every script and global that names one of `gone` (an encounter, "enc/squad" too, or a
+// conversation) left out, and those naming what was left out, until none is: each file's new text. `dropped`: how many.
+std::vector<std::pair<fs::path, std::string>> texts_without(const Analysis &a, const std::set<std::string> &gone, int &dropped);
 // The names object_..._containing calls are given (the objects with any of them in their names are theirs).
 std::vector<std::string> containing_patterns(const std::string &text);
 // The cutscene camera points a script sets, in order.
@@ -89,8 +92,15 @@ struct Strip {
     std::set<std::string> names, drop;
     std::vector<std::string> patterns;
     bool piece = false;
+    // (the level only) Encounters by where they are too: one whose starting locations and firing positions are all in
+    // BSPs that go, goes (and the conversations whose participants are its).
+    bool by_place = false;
 };
-struct Stripped { int placements = 0, palette = 0, encounters = 0, conversations = 0, actors = 0, bsps = 0; std::string why; };
+struct Stripped {
+    int placements = 0, palette = 0, encounters = 0, conversations = 0, actors = 0, bsps = 0;
+    std::set<std::string> gone_ai;   // (by_place: the encounters and conversations that went, lowercase)
+    std::string why;
+};
 bool strip_scenario(const fs::path &scenario, const Strip &s, Stripped &out);
 
 }   // namespace campaign

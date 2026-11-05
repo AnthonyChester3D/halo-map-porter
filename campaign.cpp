@@ -390,6 +390,43 @@ std::vector<std::pair<fs::path, std::string>> level_texts(const Analysis &a, boo
     return out;
 }
 
+std::vector<std::pair<fs::path, std::string>> texts_without(const Analysis &a, const std::set<std::string> &gone, int &dropped) {
+    dropped = 0;
+    std::set<std::string> names = gone;   // (what's gone: grows with the scripts and globals left out)
+    std::vector<char> dead(a.defs.size(), 0);
+    std::vector<std::set<std::string>> uses(a.defs.size());
+    for (size_t i = 0; i < a.defs.size(); i++) {
+        const Def &d = a.defs[i];
+        const Node &form = a.files[d.file].forms[d.form];
+        for (auto x : atoms(slice(a.files[d.file].text, form.b, form.e))) {
+            size_t slash = x.find('/');
+            if (slash != std::string::npos) x = x.substr(0, slash);
+            if (x != d.name) uses[i].insert(x);
+        }
+    }
+    for (bool more = true; more;) {
+        more = false;
+        for (size_t i = 0; i < a.defs.size(); i++) {
+            if (dead[i]) continue;
+            for (auto &x : uses[i])
+                if (names.count(x)) { dead[i] = 1; names.insert(a.defs[i].name); dropped++; more = true; break; }
+        }
+    }
+    std::vector<std::string> texts;
+    for (auto &f : a.files) texts.push_back(f.text);
+    std::vector<std::pair<size_t, std::pair<size_t, size_t>>> cut;   // (file, [b, e))
+    for (size_t i = 0; i < a.defs.size(); i++)
+        if (dead[i]) {
+            const Node &form = a.files[a.defs[i].file].forms[a.defs[i].form];
+            cut.push_back({a.defs[i].file, {form.b, form.e}});
+        }
+    std::sort(cut.begin(), cut.end(), [](auto &x, auto &y) { return x.first != y.first ? x.first < y.first : x.second.first > y.second.first; });
+    for (auto &c : cut) texts[c.first].erase(c.second.first, c.second.second - c.second.first);
+    std::vector<std::pair<fs::path, std::string>> out;
+    for (size_t i = 0; i < a.files.size(); i++) out.push_back({a.files[i].path, texts[i]});
+    return out;
+}
+
 std::string piece_text(const Analysis &a, bool opening, const std::string &next, int start_bsp) {
     const Cut &c = opening ? a.opening : a.closing;
     if (!c.found) return "";
@@ -570,6 +607,18 @@ bool strip_scenario(const fs::path &scenario, const Strip &s, Stripped &out) {
         for (auto &e : *enc) {
             std::string n = lower(tagfile::get_str(e, "name"));
             bool keep = s.piece ? ai_named(n) : !(ai_dropped(n) && !ai_named(n));
+            if (keep && s.by_place && !s.piece && s.inside) {   // (all of it in BSPs that go: it goes)
+                std::vector<std::array<double, 3>> pts;
+                auto at = [&](TagNode &l) { pts.push_back({num(l, "position", 0), num(l, "position", 1), num(l, "position", 2)}); };
+                if (auto *sq = tagfile::block(e, "squads"))
+                    for (auto &q : *sq)
+                        if (auto *st = tagfile::block(q, "starting locations")) for (auto &l : *st) at(l);
+                if (auto *fp = tagfile::block(e, "firing positions")) for (auto &l : *fp) at(l);
+                std::vector<int> where = pts.empty() ? std::vector<int>() : s.inside(pts);
+                bool in_kept = false, in_gone = false;
+                for (int w : where) { if (w & 1) in_kept = true; if (w & 2) in_gone = true; }
+                if (in_gone && !in_kept) { keep = false; out.gone_ai.insert(n); }
+            }
             if (!keep) { out.encounters++; continue; }
             int mb = (int)num(e, "manual bsp index");
             if (mb >= 0 && mb < 65535) tagfile::set_num(e, "manual bsp index", std::max(0, new_bsp(mb)));
@@ -582,6 +631,12 @@ bool strip_scenario(const fs::path &scenario, const Strip &s, Stripped &out) {
         for (auto &c : *conv) {
             std::string n = lower(tagfile::get_str(c, "name"));
             if (!conversation_kept(n)) { out.conversations++; continue; }
+            bool gone_with = false;   // (by_place: a participant of an encounter that went)
+            if (!out.gone_ai.empty())
+                if (auto *pp = tagfile::block(c, "participants"))
+                    for (auto &p : *pp)
+                        if (out.gone_ai.count(lower(tagfile::get_str(p, "encounter name")))) gone_with = true;
+            if (gone_with) { out.conversations++; out.gone_ai.insert(n); continue; }
             left.push_back(c);
         }
         *conv = std::move(left);

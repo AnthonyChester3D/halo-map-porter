@@ -103,7 +103,7 @@ enum {
     // how many maps' extracted tags are kept; clearing the working files
     ID_S_KEEP_LBL, ID_S_KEEP, ID_S_CLEAR, ID_S_THEME_LBL, ID_S_THEME,
     // the Campaign tab: a campaign level's cutscenes, split off into maps of their own
-    ID_CA_HINT, ID_CA_MAP, ID_CA_FIND, ID_CA_OPEN, ID_CA_CLOSE, ID_CA_CONVERT, ID_CA_REPORT,
+    ID_CA_HINT, ID_CA_MAP, ID_CA_FIND, ID_CA_OPEN, ID_CA_CLOSE, ID_CA_CONVERT, ID_CA_REPORT, ID_CA_HALVES,
 };
 
 #define WM_APP_LOG (WM_APP + 1)
@@ -965,9 +965,13 @@ struct Done {
 };
 
 // `prepared`: the map was only prepared (Unpack, or for the LODs window), not built.
-static void finish(const Result &r, const std::string &what, const Keys &key = {}, bool open_lods = false, bool prepared = false) {
+// `measured`: only measured (nothing to open or build from).
+static void finish(const Result &r, const std::string &what, const Keys &key = {}, bool open_lods = false, bool prepared = false,
+                   bool measured = false) {
     auto *d = new Done{r.ok, L"", W(u8(r.output)), W(u8(r.report)), W(u8(r.lods)), W(u8(r.update)), key, open_lods};
-    if (r.ok && open_lods) {
+    if (r.ok && measured) {
+        d->msg = W("DONE: " + what + ".");
+    } else if (r.ok && open_lods) {
         d->msg = W("DONE: " + what + ". The map isn't built yet: the LODs window's \"Build the map\" builds it.");
     } else if (r.ok && prepared) {
         d->msg = W("DONE: " + what + ". The map isn't built yet: the Xbox tab's windows open on it now, and Convert builds "
@@ -1792,6 +1796,7 @@ static void create_campaign_page() {
     check(P, L"Split off the closing cutscene (the level's last stretch, through the end), as a map that plays after it", 26, y, 708, ID_CA_CLOSE);
     y += 32;
     button(P, L"Convert the pieces", 26, y, 160, ID_CA_CONVERT, true);
+    button(P, L"Estimate halves", 196, y, 140, ID_CA_HALVES);
     y += 36;
     add(P, L"EDIT", L"", WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 26, y, 708, 466 - y, ID_CA_REPORT, WS_EX_CLIENTEDGE);
 }
@@ -1851,6 +1856,32 @@ static void start_campaign_find() {
                                           : "Couldn't prepare the map: " + r.error);
         PostMessageW(g_wnd, WM_APP_CAMPAIGN, 0, (LPARAM)text);
         finish(r, "Prepared the map", Keys{"", "", "", true}, false, true);
+    }).detach();
+}
+// "Estimate halves": the level (without the cutscenes ticked) prepared, then built as two halves at each place its
+// BSPs switch, for what each would need of the tag memory (Config::campaign_halves). Nothing is written to the output.
+static void start_campaign_halves() {
+    fs::path in, out;
+    Game from;
+    if (!campaign_ready(in, out, from)) return;
+    save_settings();
+    Config cfg = campaign_config(in);
+    const bool opening = checked(ID_CA_OPEN), closing = checked(ID_CA_CLOSE);
+    cfg.campaign_split = (opening ? 1 : 0) | (closing ? 2 : 0);
+    cfg.campaign_piece = 0;
+    cfg.campaign_level_folder = N(out.parent_path().filename().wstring());
+    cfg.campaign_closing_folder = N(campaign_outputs(out)[2].parent_path().filename().wstring());
+    cfg.campaign_halves = true;
+    cfg.work_tag = "halves";
+    set_busy(true);
+    SetWindowTextW(g_log, L"");
+    campaign_report("Estimating the halves (the map is prepared as for Convert, then each half built quickly: this takes a while)...");
+    append_log(L"Estimating " + in.filename().wstring() + L" split in two...");
+    std::thread([=] {
+        fs::path dummy = cfg.cache_dir / "campaign" / (in.stem().u8string() + ".map");
+        Result r = convert_map(cfg, in, from, Game::Xbox, dummy, false, post_log, nullptr);
+        PostMessageW(g_wnd, WM_APP_CAMPAIGN, 0, (LPARAM) new std::string(r.ok ? r.campaign : "Couldn't prepare the map: " + r.error));
+        finish(r, "Estimated the halves (the Campaign tab shows them)", Keys{}, false, false, true);
     }).detach();
 }
 static void start_campaign_convert() {
@@ -3354,6 +3385,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case ID_CONVERT: if (!g_busy) start_convert(); break;
         case ID_CA_FIND: if (!g_busy) start_campaign_find(); break;
         case ID_CA_CONVERT: if (!g_busy) start_campaign_convert(); break;
+        case ID_CA_HALVES: if (!g_busy) start_campaign_halves(); break;
         case ID_UNPACK: if (!g_busy) start_unpack(); break;
         case ID_BATCH: if (!g_busy) open_batch(); break;
         case ID_BUILD: if (!g_busy) start_build(); break;

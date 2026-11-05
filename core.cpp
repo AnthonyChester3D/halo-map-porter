@@ -2042,6 +2042,135 @@ static bool scenario_is_campaign(const Job &job) {
     return (b[0] << 8 | b[1]) == 0;
 }
 
+// Config::campaign_halves: the prepared level built as two halves (its BSPs in the order a player reaches them, cut at
+// each place they switch: the first half its BSPs up to there, the second the rest), each built quickly (`cmd`: the
+// build's command) for its tag memory. A half keeps what stands in its BSPs and the encounters there, and the scripts
+// that don't name an encounter that went (an estimate: the real split would also carry the player over). The
+// scenario and scripts are put back after.
+static std::string campaign_halves(Job &job, std::vector<std::string> cmd) {
+    std::error_code ec;
+    const std::string scen = job.scenario + ".scenario";
+    fs::path sdir = job.owner(scen);
+    if (sdir.empty()) return "The scenario couldn't be found.";
+    if (sdir != job.fixes && !job.to_fixes(scen, sdir)) return "The scenario couldn't be copied to measure it.";
+    const fs::path sp = job.fixes / from_u8(scen);
+    std::string original;
+    {
+        std::ifstream f(sp, std::ios::binary);
+        original.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    }
+    std::vector<std::string> bsp_tags;
+    std::vector<std::pair<int, int>> edges;
+    int start = 0;
+    {
+        tagfile::Tag t;
+        if (!t.load(sp)) return "The scenario couldn't be read.";
+        tagfile::Elem r = t.root();
+        tagfile::Block b = r.block("structure bsps");
+        for (size_t i = 0; i < b.size(); i++) bsp_tags.push_back(b[i].ref("structure bsp"));
+        tagfile::Block sw = r.block("bsp switch trigger volumes");
+        for (size_t i = 0; i < sw.size(); i++) edges.push_back({(int)sw[i].integer("source"), (int)sw[i].integer("destination")});
+        tagfile::Block ps = r.block("player starting locations");
+        if (ps.size()) start = (int)ps[0].integer("bsp index");
+    }
+    const int n = (int)bsp_tags.size();
+    if (n < 2) return "The level has one BSP: there's nowhere to split it.";
+    if (start < 0 || start >= n) start = 0;
+    // The order a player reaches them: from where the level starts, along its switches (then any not reached).
+    std::vector<int> order{start};
+    std::vector<char> seen((size_t)n, 0);
+    seen[(size_t)start] = 1;
+    for (size_t i = 0; i < order.size(); i++)
+        for (auto &[a, b] : edges)
+            if (a == order[i] && b >= 0 && b < n && !seen[(size_t)b]) { seen[(size_t)b] = 1; order.push_back(b); }
+    for (int i = 0; i < n; i++) if (!seen[(size_t)i]) order.push_back(i);
+    auto stem = [&](int b) { return fs::path(from_u8(bsp_tags[(size_t)b])).stem().u8string(); };
+
+    campaign::Analysis a;
+    std::string why;
+    const fs::path xdata = job.work / "xbox_data";
+    const bool scripts = campaign::load(xdata, a, why);
+    // A quick build: no file limits, no compression, identical data stored once (as an over-full map is built).
+    for (auto it = cmd.begin() + 1; it != cmd.end();) it = (*it == "-O" || *it == "-E") ? cmd.erase(it) : it + 1;
+    cmd.insert(cmd.begin() + 1, {"-O", "-E", "-T", "128M", "-l", "0"});
+    auto measure = [&](std::string &err) {
+        std::string out;
+        int rc = run_process(cmd, out);
+        double mb = tag_space_used(out);
+        if (rc != 0 || mb <= 0) {
+            std::istringstream in(out);
+            std::string l, last;
+            while (std::getline(in, l)) if (!l.empty()) last = l;
+            err = last;
+            return -1.0;
+        }
+        return mb;
+    };
+    auto put_back = [&] {
+        std::ofstream(sp, std::ios::binary | std::ios::trunc) << original;
+        if (scripts)
+            for (auto &f : a.files) std::ofstream(f.path, std::ios::binary | std::ios::trunc) << f.text;
+    };
+    char buf[400];
+    std::string report = "Halves (each built quickly for its tag memory, of the Xbox's 22 MB; the BSPs in the order a player reaches them: ";
+    for (size_t i = 0; i < order.size(); i++) report += (i ? ", " : "") + stem(order[i]);
+    report += "):\n";
+    job.log("Measuring the level as it is...");
+    std::string err;
+    double whole = measure(err);
+    snprintf(buf, sizeof buf, "- the level as one map: %.1f MB\n", whole);
+    report += whole > 0 ? std::string(buf) : "- the level as one map: couldn't be built (" + err + ")\n";
+    job.log("  " + std::string(whole > 0 ? buf : "couldn't be built: " + err));
+    for (int k = 1; k < n; k++) {
+        double mb[2] = {0, 0};
+        std::string line, errs[2];
+        int scripts_dropped[2] = {0, 0}, enc[2] = {0, 0};
+        for (int h = 0; h < 2; h++) {
+            std::vector<int> keep(order.begin() + (h ? k : 0), h ? order.end() : order.begin() + k);
+            std::set<int> kept(keep.begin(), keep.end());
+            std::map<int, int> to;
+            for (size_t i = 0; i < keep.size(); i++) to[keep[i]] = (int)i;
+            job.log(std::string("Measuring the ") + (h ? "second" : "first") + " half split before " + stem(order[(size_t)k]) + "...");
+            put_back();
+            campaign::Strip st;
+            st.keep_bsps = keep;
+            st.by_place = true;
+            st.inside = [&](const std::vector<std::array<double, 3>> &pts) {
+                std::vector<int> where(pts.size(), 0);
+                for (int b = 0; b < n; b++) {
+                    fs::path bo = bsp_tags[(size_t)b].empty() ? fs::path() : job.owner(bsp_tags[(size_t)b]);
+                    std::vector<char> in;
+                    if (bo.empty() || !portals::inside_level(bo / from_u8(bsp_tags[(size_t)b]), pts, in)) continue;
+                    for (size_t i = 0; i < in.size(); i++) if (in[i]) where[i] |= kept.count(b) ? 1 : 2;
+                }
+                return where;
+            };
+            campaign::Stripped out;
+            if (!campaign::strip_scenario(sp, st, out)) { errs[h] = out.why; mb[h] = -1; continue; }
+            enc[h] = out.encounters;
+            if (scripts)
+                for (auto &[path, text] : campaign::texts_without(a, out.gone_ai, scripts_dropped[h]))
+                    std::ofstream(path, std::ios::binary | std::ios::trunc) << campaign::renumber_bsps(text, to);
+            mb[h] = measure(errs[h]);
+        }
+        std::string first, second;
+        for (int i = 0; i < k; i++) first += (i ? ", " : "") + stem(order[(size_t)i]);
+        for (int i = k; i < n; i++) second += (i > k ? ", " : "") + stem(order[(size_t)i]);
+        auto half = [&](int h, const std::string &bsps) {
+            if (mb[h] < 0) return "(" + bsps + ") couldn't be built: " + errs[h];
+            snprintf(buf, sizeof buf, "%.1f MB (%s; %d encounters and %d scripts left out)", mb[h], bsps.c_str(), enc[h], scripts_dropped[h]);
+            return std::string(buf);
+        };
+        line = "- split before " + stem(order[(size_t)k]) + ": first half " + half(0, first) + "; second half " + half(1, second);
+        report += line + "\n";
+        job.log("  " + line);
+    }
+    put_back();
+    report += "\n(Estimates: a half keeps what stands in its BSPs and the encounters there, and the scripts that don't need an "
+              "encounter that went. A real split would also need the player carried over to the second half.)\n";
+    return report;
+}
+
 Result run_build(Job &job, const std::string &scenario, const fs::path &output, bool share) {
     job.scenario = scenario;
     Result r;
@@ -2196,6 +2325,11 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
         return cmd;
     };
     std::vector<std::string> cmd = make_cmd();
+    if (cfg.campaign_halves && job.target == Game::Xbox && !job.analysis) {   // (measured, not built)
+        r.campaign = campaign_halves(job, cmd);
+        r.ok = true;
+        return r;
+    }
     bool scripts_tried = false;
     int none_fixes = 0, missing_fixes = 0;
     // The map doesn't fit the Xbox with the lower-detail versions the app made: take them out again (they're for

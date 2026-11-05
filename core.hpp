@@ -186,6 +186,9 @@ struct Config {
     // and the closing cutscene's. Each piece logs what was found ([campaign] lines; Result::campaign).
     int campaign_split = 0, campaign_piece = 0;
     std::string campaign_level_folder, campaign_closing_folder;
+    // The Campaign tab's "Estimate halves": the level (its cutscenes split off as ticked) prepared, then built quickly
+    // as two halves at each place its BSPs switch, for each half's tag memory; nothing is kept (Result::campaign).
+    bool campaign_halves = false;
 };
 
 // A model to show in the weapons & vehicles window: its most detailed version (each region's first permutation),
