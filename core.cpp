@@ -442,6 +442,17 @@ struct Job {
         return {};
     }
 
+    // The step after which the scenario was no longer in any tag folder (watch): said in the log at once, and in the
+    // error if the build can't find it.
+    std::string scenario_lost;
+    void watch(const char *step) {
+        if (!scenario_lost.empty() || scenario.empty() || !owner(scenario + ".scenario").empty()) return;
+        std::error_code ec;
+        scenario_lost = std::string(step) + " (fixes " + (fs::exists(fixes, ec) ? "there" : "gone") + ", source " +
+                        (fs::exists(source, ec) ? "there" : "gone") + ")";
+        log("  [check] the scenario went missing from the tag folders after " + scenario_lost);
+    }
+
     bool quiet = false;   // fixes made only for a measurement aren't the convert's changes
     void note(const std::string &s) {
         if (quiet) return;
@@ -2065,22 +2076,29 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
     } else {
         keep_map_level_tags(job);
         std::string err;
+        job.watch("the start");
         if (job.target == Game::Xbox) {
             if (!prepare_for_xbox(job, err)) { r.error = err; return r; }
         } else {
             if (!prepare_models_for_pc(job, err)) { r.error = err; return r; }
         }
+        job.watch("preparing the tags");
         if (!job.user_tags.empty() && !job.overlay.empty() && job.target != Game::MCC) keep_user_edits(job);
         if (job.target != Game::MCC) convert_bc7_textures(job);
+        job.watch("keeping your edits / BC7 textures");
         if (job.target == Game::Xbox && cfg.xbox_perfect) {
             perfect_keep_gameplay(job);
             perfect_ghosts(job);
+            job.watch("Perfect Conversion");
         }
         if (job.target == Game::Xbox) xbox_content_passes(job);
         else if (job.from == Game::Xbox) reorder_multipurpose_maps(job, tag_dependencies(job, job.scenario + ".scenario", true));
         water_volumes(job);
+        job.watch("water volumes");
         place_kept_level_tags(job);
+        job.watch("placing the map's level tags");
     }
+    job.watch("the preparation");
     std::vector<std::string> performance;   // the report's "Performance" section (Xbox)
     if (job.target == Game::Xbox && !job.analysis) {
         performance = performance_lines(job);
@@ -2147,6 +2165,12 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
     double size_limit = cfg.xbox_max_mb;
     // A campaign map's is its own: the Xbox's campaign cache files hold 278 MB (a map's size as it decompresses), which
     // Invader checks. The Xbox tab's choice and the big-map limit are for multiplayer maps (47 MB cache files).
+    job.watch("the performance report and LODs window");
+    if (!job.scenario_lost.empty()) {
+        r.error = "The map's scenario (" + job.scenario + ".scenario) went missing from the work folders after " + job.scenario_lost +
+                  ". Was another copy of Halo Map Porter converting at the same time? Please send this log.";
+        return r;
+    }
     const bool campaign = job.target == Game::Xbox && scenario_is_campaign(job);
     if (campaign) {
         size_limit = 0;
@@ -6298,21 +6322,30 @@ void xbox_content_passes(Job &job) {
     if (flares)
         job.note("[xbox] removed the reflections from " + std::to_string(flares) +
                  " lens flares that have no bitmap to draw them with");
+    job.watch("the textures");
     if (!job.cfg.level_shaders_only) {
         xbox_materials(job, deps);
         xbox_scenery_sizes(job, deps);   // (before the levels of detail, xbox_scenery after them)
+        job.watch("the materials and scenery sizes");
         xbox_lods(job, deps);
+        job.watch("the levels of detail");
         xbox_animations(job, deps);
         xbox_collision(job, deps);
+        job.watch("the animations and collision");
     }
     xbox_lights(job, deps);
     xbox_portals(job);
+    job.watch("the lights and portals");
     xbox_reflections(job);
+    job.watch("the reflections");
     if (!job.cfg.level_shaders_only) {   // (after the level is measured: the window shows the fog as the map has it)
         xbox_fog(job);
+        job.watch("the fog");
         xbox_scenery(job, deps);
+        job.watch("the scenery");
         xbox_weather(job);
         xbox_props(job);
+        job.watch("the weather and props");
     }
 }
 
@@ -12348,7 +12381,9 @@ bool prepare_for_xbox(Job &job, std::string &err) {
 
     // Scripts: PC renamed player_effect_set_max_rumble to ..._vibrate; Xbox only knows rumble.
     xbox_scripts(job, xsrc);
+    job.watch("the scripts");
     campaign_apply(job);   // (a campaign level: its cutscenes, split off when asked)
+    job.watch("splitting the campaign level");
     if (!job.analysis) note_script_tricks(job, xsrc);
 
     job.source = xsrc;

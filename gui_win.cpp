@@ -1882,6 +1882,7 @@ static void start_campaign_convert() {
             if ((piece == 1 && !opening) || (piece == 2 && !closing)) continue;
             Config c = cfg;
             c.campaign_piece = piece;
+            c.work_tag = piece == 1 ? "opening" : "ending";   // (its own work folder: kept for a look if it fails)
             const fs::path o = outs[(size_t)piece];
             std::error_code ec;
             fs::create_directories(o.parent_path(), ec);
