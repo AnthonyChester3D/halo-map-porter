@@ -1591,6 +1591,342 @@ void write_part(TagNode &part, const Trim &t) {
     if (compressed) *C = std::move(nc);
 }
 
+// ---- Flattening: a run of still layers, one after another in the order drawn, baked into one (sky.hpp).
+// A layer can join one: a plain alpha-blended chicago layer (plain_layer) whose maps don't move, read, one pass, its
+// texture no finer than the bake keeps (texels per degree round and up). The bake: round the sky (yaw 0-360) from the
+// lowest to the highest the run's layers reach, each texel what the run draws in that direction, layer over layer
+// (alpha over: colour and coverage, so drawn once it's the same).
+struct FlatRun { size_t a = 0, b = 0; double pmin = 0, pmax = 0, du = 0, dv = 0, fill = 0; };
+
+bool flat_layer(const Part &p, const ShaderI &s, double bu, double bv, double &du, double &dv, double &pmin, double &pmax) {
+    if (!plain_layer(s) || s.passes != 1 || !p.one_node || p.tris.empty()) return false;
+    for (auto &mp : s.maps) if (mp.moving || !mp.img) return false;
+    double ylo = 1e9, yhi = -1e9, u0 = 1e9, u1 = -1e9, v0 = 1e9, v1 = -1e9;
+    pmin = 1e9;
+    pmax = -1e9;
+    for (auto &v : p.v) {
+        double h = std::sqrt(v.p[0] * v.p[0] + v.p[1] * v.p[1]);
+        double y = std::atan2(v.p[1], v.p[0]) * 180 / kPi, pt = std::atan2(v.p[2], h) * 180 / kPi;
+        ylo = std::min(ylo, y); yhi = std::max(yhi, y);
+        pmin = std::min(pmin, pt); pmax = std::max(pmax, pt);
+        u0 = std::min(u0, v.uv[0] * bu); u1 = std::max(u1, v.uv[0] * bu);
+        v0 = std::min(v0, v.uv[1] * bv); v1 = std::max(v1, v.uv[1] * bv);
+    }
+    double ys = std::max(1.0, yhi - ylo), ps = std::max(1.0, pmax - pmin);
+    du = dv = 0;
+    for (auto &mp : s.maps) {
+        du = std::max(du, std::fabs(mp.us) * (u1 - u0) * mp.img->w / ys);
+        dv = std::max(dv, std::fabs(mp.vs) * (v1 - v0) * mp.img->h / ps);
+    }
+    return true;
+}
+
+bool flatten(Model &m, Context &cx, const Find &find, const Edit &edit, std::vector<std::string> &written,
+             std::vector<std::string> &what, int &vertices_added) {
+    const bool inward = inward_winding(m.parts);
+    const double kMaxTexels = 512;
+    std::vector<FlatRun> runs;
+    {
+        FlatRun cur;
+        size_t len = 0;
+        auto close = [&](size_t end) {
+            cur.b = end;
+            if (len >= 2 && cur.fill >= 0.3) runs.push_back(cur);
+            len = 0;
+        };
+        for (size_t i = 0; i <= m.parts.size(); i++) {
+            double du = 0, dv = 0, lo = 0, hi = 0;
+            bool ok = false;
+            if (i < m.parts.size()) {
+                const Part &p = m.parts[i];
+                if (p.shader >= 0 && p.shader < (int)m.shader_refs.size()) {
+                    const ShaderI &s = cx.shader(m.shader_refs[(size_t)p.shader]);
+                    ok = flat_layer(p, s, m.bu, m.bv, du, dv, lo, hi);
+                    if (ok) {
+                        if (!len) { cur = FlatRun(); cur.a = i; cur.pmin = lo; cur.pmax = hi; }
+                        cur.pmin = std::min(cur.pmin, lo);
+                        cur.pmax = std::max(cur.pmax, hi);
+                        cur.du = std::max(cur.du, du);
+                        cur.dv = std::max(cur.dv, dv);
+                        cur.fill += part_fill(p.v, p.tris, s.two_sided(), inward);
+                        len++;
+                        continue;
+                    }
+                }
+            }
+            close(i);
+            // (a layer that couldn't join may start the next run)
+            if (i < m.parts.size() && !ok) {
+                const Part &p = m.parts[i];
+                if (p.shader >= 0 && p.shader < (int)m.shader_refs.size()) {
+                    const ShaderI &s = cx.shader(m.shader_refs[(size_t)p.shader]);
+                    if (flat_layer(p, s, m.bu, m.bv, du, dv, lo, hi)) {
+                        cur = FlatRun();
+                        cur.a = i; cur.pmin = lo; cur.pmax = hi; cur.du = du; cur.dv = dv;
+                        cur.fill = part_fill(p.v, p.tris, s.two_sided(), inward);
+                        len = 1;
+                    }
+                }
+            }
+        }
+    }
+    if (runs.empty()) return false;
+    TagNode &r = m.tag.root();
+    auto *shaders = tagfile::block(r, "shaders");
+    auto *geos = tagfile::block(r, "geometries");
+    if (!shaders || !geos) return false;
+    bool did = false;
+    for (size_t ri = 0; ri < runs.size(); ri++) {
+        const FlatRun &run = runs[ri];
+        // As fine as its layers are, up to what the Xbox's screen shows (640 pixels across 70 degrees: past that a
+        // texture is only seen smaller), in up to 4 textures round the sky of up to 512 each.
+        const double screen = 640 / 70.0, du = std::min(run.du, screen), dv = std::min(run.dv, screen);
+        const int S = std::clamp((int)std::ceil(du * 360 / kMaxTexels * 0.99), 1, 4);
+        const int W = std::clamp(pow2_at_least(du * 360 / S * 0.99), 64, (int)kMaxTexels);
+        if ((int)(run.b - run.a) < S) continue;   // (a part to draw each)
+        std::vector<std::vector<size_t>> drawn;
+        std::vector<const ShaderI *> sh;
+        // Each layer's drawn triangles by direction (2-degree cells of yaw and pitch), so each texel tests a few.
+        const int GY = 180, GP = 90;
+        std::vector<std::vector<std::vector<uint32_t>>> cells;
+        for (size_t i = run.a; i < run.b; i++) {
+            const Part &p = m.parts[i];
+            sh.push_back(&cx.shader(m.shader_refs[(size_t)p.shader]));
+            drawn.push_back(drawn_triangles(p, sh.back()->two_sided(), inward));
+            std::vector<std::vector<uint32_t>> c((size_t)GY * GP);
+            for (size_t t : drawn.back()) {
+                // Where it reaches: its corners and a grid of points inside (a big ground triangle near the camera dips
+                // far below its corners), the yaws as the shortest arc round them.
+                const double *A = p.v[p.tris[t]].p, *B = p.v[p.tris[t + 1]].p, *C = p.v[p.tris[t + 2]].p;
+                double plo = 90, phi = -90;
+                std::vector<double> ys;
+                const int N = 12;
+                for (int i = 0; i <= N; i++)
+                    for (int j = 0; i + j <= N; j++) {
+                        double u = (double)i / N, v = (double)j / N, q[3];
+                        for (int k = 0; k < 3; k++) q[k] = A[k] + (B[k] - A[k]) * u + (C[k] - A[k]) * v;
+                        double h = std::sqrt(q[0] * q[0] + q[1] * q[1]);
+                        double pt = std::atan2(q[2], h) * 180 / kPi;
+                        plo = std::min(plo, pt);
+                        phi = std::max(phi, pt);
+                        if (h > 1e-9) ys.push_back(std::atan2(q[1], q[0]) * 180 / kPi);
+                    }
+                plo -= 2;
+                phi += 2;
+                {   // (a triangle round straight down or up: all the way round)
+                    const double down[3] = {0, 0, -1}, up[3] = {0, 0, 1};
+                    double tt, x, y;
+                    if (ray_hit(down, A, B, C, tt, x, y)) plo = -90;
+                    if (ray_hit(up, A, B, C, tt, x, y)) phi = 90;
+                }
+                bool all_round = phi > 80 || plo < -80 || ys.empty();
+                int p0 = std::clamp((int)std::floor((plo + 90) / 2), 0, GP - 1), p1 = std::clamp((int)std::floor((phi + 90) / 2), 0, GP - 1);
+                auto add = [&](int yc) { for (int pc = p0; pc <= p1; pc++) c[(size_t)pc * GY + (size_t)((yc % GY + GY) % GY)].push_back((uint32_t)t); };
+                if (all_round) { for (int yc = 0; yc < GY; yc++) add(yc); continue; }
+                std::sort(ys.begin(), ys.end());
+                double gap = ys.front() + 360 - ys.back(), from = ys.front(), to = ys.back();   // (the largest gap isn't covered)
+                for (size_t i = 1; i < ys.size(); i++)
+                    if (ys[i] - ys[i - 1] > gap) { gap = ys[i] - ys[i - 1]; from = ys[i]; to = ys[i - 1] + 360; }
+                if (gap < 90) { for (int yc = 0; yc < GY; yc++) add(yc); continue; }
+                for (int yc = (int)std::floor((from + 180) / 2) - 1; yc <= (int)std::floor((to + 180) / 2) + 1; yc++) add(yc);
+            }
+            cells.push_back(std::move(c));
+        }
+        auto meets_fast = [&](size_t k, const double *d, size_t &tri, double &b1, double &b2) {
+            const Part &p = m.parts[run.a + k];
+            double yw = std::atan2(d[1], d[0]) * 180 / kPi, pt = std::atan2(d[2], std::sqrt(d[0] * d[0] + d[1] * d[1])) * 180 / kPi;
+            int yc = std::clamp((int)std::floor((yw + 180) / 2), 0, GY - 1), pc = std::clamp((int)std::floor((pt + 90) / 2), 0, GP - 1);
+            double best = 1e300;
+            bool hit = false;
+            for (uint32_t t : cells[k][(size_t)pc * GY + (size_t)yc]) {
+                double tt, x, y;
+                if (ray_hit(d, p.v[p.tris[t]].p, p.v[p.tris[t + 1]].p, p.v[p.tris[t + 2]].p, tt, x, y) && tt < best) {
+                    best = tt; tri = t; b1 = x; b2 = y; hit = true;
+                }
+            }
+            return hit;
+        };
+        // How low and high the run reaches (its triangles' insides too: a flat ground's middle is below its rim), on a
+        // degree's grid.
+        double pmin = 90, pmax = -90;
+        for (double pt = -89.5; pt <= 89.5; pt += 1)
+            for (double yw = -179; yw < 180; yw += 2) {
+                double d[3] = {std::cos(pt * kPi / 180) * std::cos(yw * kPi / 180), std::cos(pt * kPi / 180) * std::sin(yw * kPi / 180), std::sin(pt * kPi / 180)};
+                size_t t;
+                double b1, b2;
+                bool hit = false;
+                for (size_t k = 0; k < sh.size() && !hit; k++) hit = meets_fast(k, d, t, b1, b2);
+                if (hit) { pmin = std::min(pmin, pt - 1); pmax = std::max(pmax, pt + 1); break; }
+            }
+        if (pmax <= pmin) continue;
+        pmin = std::max(-89.9, pmin);
+        pmax = std::min(89.9, pmax);
+        const double span = pmax - pmin;
+        const int H = std::clamp(pow2_at_least(dv * span * 0.99), 16, (int)kMaxTexels);
+        // The texels round the sky: S textures side by side, each W x H.
+        const int WT = W * S;
+        std::vector<float> px((size_t)WT * H * 4, 0.f);
+        bool any = false;
+        for (int y = 0; y < H; y++) {
+            double pt = (pmax - (y + 0.5) / H * span) * kPi / 180;
+            for (int x = 0; x < WT; x++) {
+                double yw = (x + 0.5) / WT * 2 * kPi;
+                double d[3] = {std::cos(pt) * std::cos(yw), std::cos(pt) * std::sin(yw), std::sin(pt)};
+                float C[3] = {0, 0, 0}, A = 0;   // (premultiplied, over)
+                for (size_t k = 0; k < sh.size(); k++) {
+                    const Part &p = m.parts[run.a + k];
+                    size_t t;
+                    double b1, b2;
+                    if (!meets_fast(k, d, t, b1, b2)) continue;
+                    const Vtx &A3 = p.v[p.tris[t]], &B3 = p.v[p.tris[t + 1]], &C3 = p.v[p.tris[t + 2]];
+                    double u = (A3.uv[0] + (B3.uv[0] - A3.uv[0]) * b1 + (C3.uv[0] - A3.uv[0]) * b2) * m.bu;
+                    double v = (A3.uv[1] + (B3.uv[1] - A3.uv[1]) * b1 + (C3.uv[1] - A3.uv[1]) * b2) * m.bv;
+                    V4 T[4];
+                    for (size_t mi = 0; mi < sh[k]->maps.size() && mi < 4; mi++) {
+                        const MapI &mp = sh[k]->maps[mi];
+                        T[mi] = sample(*mp.img, u * mp.us + mp.uo, v * mp.vs + mp.vo, (mp.flags & 4) != 0, (mp.flags & 8) != 0);
+                    }
+                    V4 o = chicago_eval(sh[k]->maps, T);
+                    float a = std::min(1.f, std::max(0.f, o.v[3]));
+                    for (int c = 0; c < 3; c++) C[c] = o.v[c] * a + C[c] * (1 - a);
+                    A = a + A * (1 - a);
+                }
+                float *q = &px[((size_t)y * WT + x) * 4];
+                if (A > 1e-4f) {
+                    for (int c = 0; c < 3; c++) q[c] = C[c] / A;
+                    q[3] = A;
+                    any = true;
+                }
+            }
+        }
+        if (!any) continue;
+        // (a texel the run doesn't cover takes its nearest covered neighbour's colour, clear: no dark fringe as it's
+        // filtered)
+        for (int pass = 0; pass < 4; pass++)
+            for (int y = 0; y < H; y++)
+                for (int x = 0; x < WT; x++) {
+                    float *q = &px[((size_t)y * WT + x) * 4];
+                    if (q[3] > 0 || q[0] + q[1] + q[2] > 0) continue;
+                    for (auto [dx, dy] : {std::pair<int, int>{1, 0}, {-1, 0}, {0, 1}, {0, -1}}) {
+                        int xx = (x + dx + WT) % WT, yy = y + dy;
+                        if (yy < 0 || yy >= H) continue;
+                        const float *n = &px[((size_t)yy * WT + xx) * 4];
+                        if (n[3] > 0) { q[0] = n[0]; q[1] = n[1]; q[2] = n[2]; break; }
+                    }
+                }
+        // Each sector: its texture, its shader (the first layer's, its maps made over: one) and a band of triangles
+        // (rows every 5 degrees or less, columns every 10, at the run's distance), drawn by one of the run's parts; the
+        // run's other parts draw nothing.
+        const ShaderI &first = *sh[0];
+        fs::path like = find(first.maps[0].bitmap), sf_in = find(first.tag);
+        if (like.empty() || sf_in.empty()) continue;
+        double R = 0;
+        size_t nv = 0;
+        for (size_t i = run.a; i < run.b; i++)
+            for (auto &v : m.parts[i].v) { R += std::sqrt(v.p[0] * v.p[0] + v.p[1] * v.p[1] + v.p[2] * v.p[2]); nv++; }
+        R = nv ? R / nv : 1;
+        bool ok = true;
+        std::vector<std::string> made_shaders;
+        for (int sec = 0; sec < S && ok; sec++) {
+            std::vector<float> tex((size_t)W * H * 4);
+            for (int y = 0; y < H; y++)
+                std::copy(&px[((size_t)y * WT + (size_t)sec * W) * 4], &px[((size_t)y * WT + (size_t)sec * W + W) * 4], &tex[(size_t)y * W * 4]);
+            std::string name = stem(first.tag) + " flat" + (ri ? std::to_string(ri + 1) : std::string()) + (S > 1 ? " " + std::to_string(sec + 1) : std::string());
+            std::string bitmap = dir_of(first.tag) + name + ".bitmap", shader_tag = dir_of(first.tag) + name + ".shader_transparent_chicago";
+            fs::path bout = edit(bitmap), sf = edit(shader_tag);
+            if (bout.empty() || sf.empty() || !write_bitmap(like, bout, W, H, tex)) { ok = false; break; }
+            written.push_back(bitmap);
+            tagfile::EditTag st;
+            if (!st.load(sf_in)) { ok = false; break; }
+            auto *maps = tagfile::block(st.root(), "maps");
+            if (!maps || maps->empty()) { ok = false; break; }
+            TagNode t = (*maps)[0];
+            tagfile::set_num(t, "flags", S > 1 ? 4 | 8 : 8);   // (clamped; one texture round the sky goes round in u)
+            tagfile::set_num(t, "color function", 0);
+            tagfile::set_num(t, "alpha function", 0);
+            tagfile::set_num(t, "map u scale", 1);
+            tagfile::set_num(t, "map v scale", 1);
+            tagfile::set_num(t, "map u offset", 0);
+            tagfile::set_num(t, "map v offset", 0);
+            tagfile::set_num(t, "map rotation", 0);
+            tagfile::set_num(t, "mipmap bias", 0);
+            for (const char *ax0 : {"u", "v", "rotation"}) {
+                std::string ax = ax0;
+                tagfile::set_num(t, (ax + " animation source").c_str(), 0);
+                tagfile::set_num(t, (ax + " animation function").c_str(), 1);
+                tagfile::set_num(t, (ax + " animation period").c_str(), 1);
+                tagfile::set_num(t, (ax + " animation phase").c_str(), 0);
+                tagfile::set_num(t, (ax + " animation scale").c_str(), ax == "rotation" ? 360 : 1);
+            }
+            if (std::string *rp = tagfile::ref_path(t, "map")) {
+                *rp = no_ext(bitmap);
+                std::replace(rp->begin(), rp->end(), '/', '\\');
+            }
+            maps->assign(1, t);
+            if (auto *layers = tagfile::block(st.root(), "extra layers")) layers->clear();
+            std::error_code ec;
+            fs::create_directories(sf.parent_path(), ec);
+            if (!st.save(sf)) { ok = false; break; }
+            written.push_back(shader_tag);
+            made_shaders.push_back(shader_tag);
+        }
+        if (!ok) continue;
+        const int cols = std::max(1, 36 / S), rows = std::max(1, (int)std::ceil(span / 5));
+        for (int sec = 0; sec < S; sec++) {
+            Trim band;
+            for (int ry = 0; ry <= rows; ry++) {
+                double vv = (double)ry / rows, pt = (pmax - vv * span) * kPi / 180;
+                for (int c = 0; c <= cols; c++) {
+                    double uu = (double)c / cols, yw = ((double)sec + uu) / S * 2 * kPi;
+                    Vtx v;
+                    v.p[0] = R * std::cos(pt) * std::cos(yw);
+                    v.p[1] = R * std::cos(pt) * std::sin(yw);
+                    v.p[2] = R * std::sin(pt);
+                    for (int k = 0; k < 3; k++) v.n[k] = -v.p[k] / R;
+                    v.uv[0] = uu / m.bu;
+                    v.uv[1] = vv / m.bv;
+                    band.v.push_back(v);
+                }
+            }
+            for (int ry = 0; ry < rows; ry++)
+                for (int c = 0; c < cols; c++) {
+                    uint32_t a = (uint32_t)(ry * (cols + 1) + c), b = a + 1, cc = a + (uint32_t)cols + 1, d = cc + 1;
+                    for (auto tri : {std::array<uint32_t, 3>{a, cc, b}, std::array<uint32_t, 3>{b, cc, d}}) {
+                        if (faces_in(band.v[tri[0]].p, band.v[tri[1]].p, band.v[tri[2]].p) != inward) std::swap(tri[1], tri[2]);
+                        band.tris.insert(band.tris.end(), tri.begin(), tri.end());
+                    }
+                }
+            const Part &host = m.parts[run.a + (size_t)sec];
+            TagNode ref = (*shaders)[(size_t)host.shader];
+            if (std::string *rp = tagfile::ref_path(ref, "shader")) {
+                *rp = no_ext(made_shaders[(size_t)sec]);
+                std::replace(rp->begin(), rp->end(), '/', '\\');
+            }
+            shaders->push_back(ref);
+            TagNode &hn = (*tagfile::block((*geos)[(size_t)host.geometry], "parts"))[(size_t)host.part];
+            vertices_added += (int)band.v.size() - (int)host.v.size();
+            write_part(hn, band);
+            tagfile::set_num(hn, "shader index", (double)(shaders->size() - 1));
+        }
+        std::string list;
+        for (size_t i = run.a; i < run.b; i++) {
+            const Part &p = m.parts[i];
+            if (i >= run.a + (size_t)S) {
+                vertices_added -= (int)p.v.size();
+                tagfile::block((*tagfile::block((*geos)[(size_t)p.geometry], "parts"))[(size_t)p.part], "triangles")->clear();
+            }
+            std::string sn = stem(cx.shader(m.shader_refs[(size_t)p.shader]).tag);
+            if (i - run.a < 4) list += (list.empty() ? "" : ", ") + sn;
+        }
+        if (run.b - run.a > 4) list += " and " + std::to_string(run.b - run.a - 4) + " more";
+        what.push_back(list + " (" + std::to_string(run.b - run.a) + " layers, in " + (S > 1 ? std::to_string(S) + " textures of " : std::string("a texture of ")) +
+                       std::to_string(W) + "x" + std::to_string(H) + ")");
+        did = true;
+    }
+    if (did) tidy_model(r);
+    return did;
+}
+
 const int kMaxNewVertices = 1500;   // over the whole sky (each costs the Xbox 32 bytes)
 
 }   // namespace
@@ -1628,6 +1964,28 @@ std::vector<Layer> layers(const std::string &sky_tag, const Find &find) {
             l.passes = s.passes;
             for (auto &mp : s.maps) if (mp.moving) l.moving = true;
             l.fill = part_fill(p.v, p.tris, s.two_sided(), inward) * s.passes;
+            l.plain = plain_layer(s) && !l.moving;
+            double ylo = 1e9, yhi = -1e9, u0 = 1e9, u1 = -1e9;
+            l.pitch_lo = 1e9;
+            l.pitch_hi = -1e9;
+            double prev = 1e9, unwrap = 0;
+            for (auto &v : p.v) {
+                double y = std::atan2(v.p[1], v.p[0]) * 180 / kPi, h = std::sqrt(v.p[0] * v.p[0] + v.p[1] * v.p[1]);
+                double pt = std::atan2(v.p[2], h) * 180 / kPi;
+                (void)prev; (void)unwrap;
+                ylo = std::min(ylo, y);
+                yhi = std::max(yhi, y);
+                l.pitch_lo = std::min(l.pitch_lo, pt);
+                l.pitch_hi = std::max(l.pitch_hi, pt);
+                u0 = std::min(u0, v.uv[0] * m.bu);
+                u1 = std::max(u1, v.uv[0] * m.bu);
+            }
+            l.yaw_span = yhi - ylo;
+            if (!s.maps.empty() && s.maps[0].img) {
+                l.map_w = s.maps[0].img->w;
+                l.map_h = s.maps[0].img->h;
+                if (l.yaw_span > 1) l.texels_per_degree = std::fabs(s.maps[0].us) * (u1 - u0) * l.map_w / l.yaw_span;
+            }
         }
         out.push_back(l);
     }
@@ -1664,6 +2022,15 @@ Lightened lighten(const std::string &sky_tag, const Find &find, const Edit &edit
             did = changed = true;
         }
         if (!did || !parse_model(m)) break;
+    }
+    // Flattening: runs of still layers baked into one.
+    {
+        Context cx(find);
+        int added = 0;
+        if (flatten(m, cx, find, edit, out.written, out.flattened, added)) {
+            changed = true;
+            parse_model(m);
+        }
     }
     size_t verts_folded = 0;
     for (auto &p : m.parts) verts_folded += p.v.size();

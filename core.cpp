@@ -8839,6 +8839,10 @@ void xbox_sky(Job &job) {
             for (size_t k = 0; k < r.merged.size(); k++) what += (k ? "; " : "") + r.merged[k];
             what += r.merged.size() == 1 ? " in one pass" : " in one pass each";
         }
+        if (!r.flattened.empty()) {
+            what += what.empty() ? "baked the still layers drawn one after another into one: " : "; baked the still layers drawn one after another into one: ";
+            for (size_t k = 0; k < r.flattened.size(); k++) what += (k ? "; " : "") + r.flattened[k];
+        }
         if (!r.trimmed.empty()) {
             what += what.empty() ? "cut away the clear parts of " : "; cut away the clear parts of ";
             for (size_t k = 0; k < r.trimmed.size(); k++) what += (k ? ", " : "") + r.trimmed[k];

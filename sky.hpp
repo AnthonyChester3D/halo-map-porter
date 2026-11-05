@@ -16,6 +16,10 @@
 //    Precipice: its two cloud domes, haze band and sun rays in one pass.
 //  - Trimming: the parts of a layer where its texture is clear (nothing drawn: the corners of a planet's square) are
 //    cut away, on a finer grid of the same triangles.
+//  - Flattening: a run of still layers drawn one after another (nothing moves in them, each blended by its alpha) is
+//    one picture wherever the player looks: it's baked into one texture round the sky (as fine as theirs, up to 512
+//    texels across and up), on one band of triangles, and drawn once. Lumoria's seven stacked landscape bands: 2.8
+//    layers per pixel in one.
 #pragma once
 #include <array>
 #include <cstdint>
@@ -43,7 +47,13 @@ Fill measure(const std::string &sky, const Find &find);
 // Its layers, in the order they're drawn: each part's shader, the layers per pixel it adds (its share of measure's,
 // passes counted), whether its texture moves (clouds sliding: it can't be baked with the others without losing that),
 // and how it blends (0 by its alpha, 1 added, 2 multiplied, 3 multiplied twice).
-struct Layer { std::string shader; double fill = 0; bool moving = false; int blend = 0, passes = 1; };
+struct Layer {
+    std::string shader; double fill = 0; bool moving = false; int blend = 0, passes = 1;
+    bool plain = false;              // (a still alpha-blended chicago layer: one that can be baked with others)
+    double yaw_span = 0, pitch_lo = 0, pitch_hi = 0;   // degrees its vertices cover
+    double texels_per_degree = 0;    // its first map's, across (u)
+    int map_w = 0, map_h = 0;
+};
 std::vector<Layer> layers(const std::string &sky, const Find &find);
 
 struct Lightened {
@@ -51,6 +61,7 @@ struct Lightened {
     Fill before, after;
     std::vector<std::string> merged;    // each pass that draws several layers: "cloudcover and highclouds, rays, cyl"
     std::vector<std::string> trimmed;   // each layer cut down, with how much of it went: "planet (20%)"
+    std::vector<std::string> flattened; // each run of still layers baked into one: "landscape, tone, ttwo and 6 more"
     std::vector<std::string> written;   // tags written (new ones too)
 };
 Lightened lighten(const std::string &sky, const Find &find, const Edit &edit);
