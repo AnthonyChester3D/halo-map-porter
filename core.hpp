@@ -6,6 +6,7 @@
 #include <functional>
 #include <map>
 #include <set>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -429,6 +430,14 @@ std::vector<std::string> script_stack_report(const std::vector<std::string> &tex
 
 // Runs a process, returns exit code, captures combined stdout/stderr.
 int run_process(const std::vector<std::string> &args, std::string &output);
+// A tool run another thread can stop (ProcessStop::stop ends it; one not started yet ends as it starts).
+struct ProcessStop {
+    std::mutex m;
+    bool stopped = false;
+    void *proc = nullptr;
+    void stop();
+};
+int run_process(const std::vector<std::string> &args, std::string &output, ProcessStop *stop);
 
 std::string u8(const fs::path &p);
 fs::path from_u8(const std::string &s);

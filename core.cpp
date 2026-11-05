@@ -144,7 +144,13 @@ static std::wstring quote_arg(const std::wstring &a) {
     return r;
 }
 
-int run_process(const std::vector<std::string> &args, std::string &output) {
+int run_process(const std::vector<std::string> &args, std::string &output) { return run_process(args, output, nullptr); }
+void ProcessStop::stop() {
+    std::lock_guard<std::mutex> g(m);
+    stopped = true;
+    if (proc) TerminateProcess((HANDLE)proc, 1);
+}
+int run_process(const std::vector<std::string> &args, std::string &output, ProcessStop *stop) {
     output.clear();
     {
         int code;
@@ -176,11 +182,20 @@ int run_process(const std::vector<std::string> &args, std::string &output) {
     CloseHandle(wr);
     starting.unlock();
     if (!ok) { CloseHandle(rd); output = "Could not start " + args[0]; return -1; }
+    if (stop) {   // (stopped already: ends at once)
+        std::lock_guard<std::mutex> g(stop->m);
+        stop->proc = pi.hProcess;
+        if (stop->stopped) TerminateProcess(pi.hProcess, 1);
+    }
     char chunk[4096];
     DWORD n;
     while (ReadFile(rd, chunk, sizeof(chunk), &n, nullptr) && n > 0) output.append(chunk, n);
     CloseHandle(rd);
     WaitForSingleObject(pi.hProcess, INFINITE);
+    if (stop) {
+        std::lock_guard<std::mutex> g(stop->m);
+        stop->proc = nullptr;
+    }
     DWORD code = 1;
     GetExitCodeProcess(pi.hProcess, &code);
     CloseHandle(pi.hProcess);
@@ -189,7 +204,12 @@ int run_process(const std::vector<std::string> &args, std::string &output) {
     return (int)code;
 }
 #else
-int run_process(const std::vector<std::string> &args, std::string &output) {
+int run_process(const std::vector<std::string> &args, std::string &output) { return run_process(args, output, nullptr); }
+void ProcessStop::stop() {
+    std::lock_guard<std::mutex> g(m);
+    stopped = true;   // (tests: a tool run here isn't stopped; it's waited for)
+}
+int run_process(const std::vector<std::string> &args, std::string &output, ProcessStop *) {
     output.clear();
     {
         int code;
@@ -2045,20 +2065,15 @@ static bool scenario_is_campaign(const Job &job) {
 // Config::campaign_halves: the prepared level built as two halves (its BSPs in the order a player reaches them, cut at
 // each place they switch: the first half its BSPs up to there, the second the rest), each built quickly (`cmd`: the
 // build's command) for its tag memory. A half keeps what stands in its BSPs and the encounters there, and the scripts
-// that don't name an encounter that went (an estimate: the real split would also carry the player over). The
-// scenario and scripts are put back after.
+// that don't name an encounter that went (an estimate: the real split would also carry the player over). Each half
+// is built in a folder of its own (its scenario and scripts read first), several at once; the conversion's tags stay
+// as they were.
 static std::string campaign_halves(Job &job, std::vector<std::string> cmd) {
     std::error_code ec;
     const std::string scen = job.scenario + ".scenario";
     fs::path sdir = job.owner(scen);
     if (sdir.empty()) return "The scenario couldn't be found.";
-    if (sdir != job.fixes && !job.to_fixes(scen, sdir)) return "The scenario couldn't be copied to measure it.";
-    const fs::path sp = job.fixes / from_u8(scen);
-    std::string original;
-    {
-        std::ifstream f(sp, std::ios::binary);
-        original.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
-    }
+    const fs::path sp = sdir / from_u8(scen);
     std::vector<std::string> bsp_tags;
     std::vector<std::pair<int, int>> edges;
     int start = 0;
@@ -2093,45 +2108,46 @@ static std::string campaign_halves(Job &job, std::vector<std::string> cmd) {
     // A quick build: no file limits, no compression, identical data stored once (as an over-full map is built).
     for (auto it = cmd.begin() + 1; it != cmd.end();) it = (*it == "-O" || *it == "-E") ? cmd.erase(it) : it + 1;
     cmd.insert(cmd.begin() + 1, {"-O", "-E", "-T", "128M", "-l", "0"});
-    auto measure = [&](std::string &err) {
-        std::string out;
-        int rc = run_process(cmd, out);
-        double mb = tag_space_used(out);
-        if (rc != 0 || mb <= 0) {
-            std::istringstream in(out);
-            std::string l, last;
-            while (std::getline(in, l)) if (!l.empty()) last = l;
-            err = last;
-            return -1.0;
+
+    // Each half in a folder of its own (its scenario in tags/, read first; its scripts in data/), so several build at once.
+    struct Half {
+        int k = 0, h = 0;   // (k 0: the whole level)
+        std::vector<std::string> cmd;
+        double mb = 0;
+        std::string err;
+        int encounters = 0, scripts_dropped = 0;
+    };
+    std::vector<Half> halves;
+    const fs::path root = job.work / "halves";
+    fs::remove_all(root, ec);
+    auto cmd_in = [&](const fs::path &dir, bool own_tags, bool own_data) {
+        std::vector<std::string> c = cmd;
+        for (size_t i = 0; i + 1 < c.size(); i++) {
+            if (c[i] == "-o") c[i + 1] = u8(dir / "out.map");
+            else if (c[i] == "-d" && own_data) c[i + 1] = u8(dir / "data");
         }
-        return mb;
+        if (own_tags) c.insert(std::find(c.begin(), c.end(), "-t"), {"-t", u8(dir / "tags")});
+        return c;
     };
-    auto put_back = [&] {
-        std::ofstream(sp, std::ios::binary | std::ios::trunc) << original;
-        if (scripts)
-            for (auto &f : a.files) std::ofstream(f.path, std::ios::binary | std::ios::trunc) << f.text;
-    };
-    char buf[400];
-    std::string report = "Halves (each built quickly for its tag memory, of the Xbox's 22 MB; the BSPs in the order a player reaches them: ";
-    for (size_t i = 0; i < order.size(); i++) report += (i ? ", " : "") + stem(order[i]);
-    report += "):\n";
-    job.log("Measuring the level as it is...");
-    std::string err;
-    double whole = measure(err);
-    snprintf(buf, sizeof buf, "- the level as one map: %.1f MB\n", whole);
-    report += whole > 0 ? std::string(buf) : "- the level as one map: couldn't be built (" + err + ")\n";
-    job.log("  " + std::string(whole > 0 ? buf : "couldn't be built: " + err));
-    for (int k = 1; k < n; k++) {
-        double mb[2] = {0, 0};
-        std::string line, errs[2];
-        int scripts_dropped[2] = {0, 0}, enc[2] = {0, 0};
+    {
+        Half whole;
+        fs::create_directories(root / "whole", ec);
+        whole.cmd = cmd_in(root / "whole", false, false);
+        halves.push_back(std::move(whole));
+    }
+    for (int k = 1; k < n; k++)
         for (int h = 0; h < 2; h++) {
+            Half x;
+            x.k = k;
+            x.h = h;
+            const fs::path dir = root / (std::to_string(k) + "_" + std::to_string(h));
             std::vector<int> keep(order.begin() + (h ? k : 0), h ? order.end() : order.begin() + k);
             std::set<int> kept(keep.begin(), keep.end());
             std::map<int, int> to;
             for (size_t i = 0; i < keep.size(); i++) to[keep[i]] = (int)i;
-            job.log(std::string("Measuring the ") + (h ? "second" : "first") + " half split before " + stem(order[(size_t)k]) + "...");
-            put_back();
+            const fs::path own = dir / "tags" / from_u8(scen);
+            fs::create_directories(own.parent_path(), ec);
+            fs::copy_file(sp, own, fs::copy_options::overwrite_existing, ec);
             campaign::Strip st;
             st.keep_bsps = keep;
             st.by_place = true;
@@ -2146,26 +2162,67 @@ static std::string campaign_halves(Job &job, std::vector<std::string> cmd) {
                 return where;
             };
             campaign::Stripped out;
-            if (!campaign::strip_scenario(sp, st, out)) { errs[h] = out.why; mb[h] = -1; continue; }
-            enc[h] = out.encounters;
+            if (!campaign::strip_scenario(own, st, out)) { x.mb = -1; x.err = out.why; halves.push_back(std::move(x)); continue; }
+            x.encounters = out.encounters;
             if (scripts)
-                for (auto &[path, text] : campaign::texts_without(a, out.gone_ai, scripts_dropped[h]))
-                    std::ofstream(path, std::ios::binary | std::ios::trunc) << campaign::renumber_bsps(text, to);
-            mb[h] = measure(errs[h]);
+                for (auto &[path, text] : campaign::texts_without(a, out.gone_ai, x.scripts_dropped)) {
+                    fs::path to_file = dir / "data" / path.lexically_relative(xdata);
+                    fs::create_directories(to_file.parent_path(), ec);
+                    std::ofstream(to_file, std::ios::binary) << campaign::renumber_bsps(text, to);
+                }
+            x.cmd = cmd_in(dir, true, scripts);
+            halves.push_back(std::move(x));
         }
+    // The builds, a few at once (each takes a core and a gigabyte or two of memory).
+    const unsigned cores = std::max(1u, std::thread::hardware_concurrency());
+    const size_t at_once = std::clamp<size_t>(cores / 2, 1, 4);
+    job.log("Building the level and its halves quickly, " + std::to_string(at_once) + " at a time (" +
+            std::to_string(halves.size()) + " builds)...");
+    std::atomic<size_t> next{0}, done{0};
+    std::mutex log_lock;
+    auto worker = [&] {
+        for (size_t i; (i = next++) < halves.size();) {
+            Half &x = halves[i];
+            if (x.mb < 0) continue;
+            std::string out;
+            int rc = run_process(x.cmd, out);
+            x.mb = tag_space_used(out);
+            if (rc != 0 || x.mb <= 0) {
+                std::istringstream in(out);
+                std::string l, last;
+                while (std::getline(in, l)) if (!l.empty()) last = l;
+                x.err = last;
+                x.mb = -1;
+            }
+            std::lock_guard<std::mutex> g(log_lock);
+            job.log("  (" + std::to_string(++done) + " of " + std::to_string(halves.size()) + " built)");
+        }
+    };
+    std::vector<std::thread> pool;
+    for (size_t i = 0; i < at_once; i++) pool.emplace_back(worker);
+    for (auto &t : pool) t.join();
+    fs::remove_all(root, ec);
+
+    char buf[400];
+    std::string report = "Halves (each built quickly for its tag memory, of the Xbox's 22 MB; the BSPs in the order a player reaches them: ";
+    for (size_t i = 0; i < order.size(); i++) report += (i ? ", " : "") + stem(order[i]);
+    report += "):\n";
+    if (halves[0].mb > 0) snprintf(buf, sizeof buf, "- the level as one map: %.1f MB\n", halves[0].mb);
+    report += halves[0].mb > 0 ? std::string(buf) : "- the level as one map: couldn't be built (" + halves[0].err + ")\n";
+    for (int k = 1; k < n; k++) {
+        const Half &f = halves[(size_t)(2 * k - 1)], &g = halves[(size_t)(2 * k)];
         std::string first, second;
         for (int i = 0; i < k; i++) first += (i ? ", " : "") + stem(order[(size_t)i]);
         for (int i = k; i < n; i++) second += (i > k ? ", " : "") + stem(order[(size_t)i]);
-        auto half = [&](int h, const std::string &bsps) {
-            if (mb[h] < 0) return "(" + bsps + ") couldn't be built: " + errs[h];
-            snprintf(buf, sizeof buf, "%.1f MB (%s; %d encounters and %d scripts left out)", mb[h], bsps.c_str(), enc[h], scripts_dropped[h]);
+        auto half = [&](const Half &x, const std::string &bsps) {
+            if (x.mb < 0) return "(" + bsps + ") couldn't be built: " + x.err;
+            snprintf(buf, sizeof buf, "%.1f MB (%s; %d encounters and %d scripts left out)", x.mb, bsps.c_str(), x.encounters, x.scripts_dropped);
             return std::string(buf);
         };
-        line = "- split before " + stem(order[(size_t)k]) + ": first half " + half(0, first) + "; second half " + half(1, second);
+        std::string line = "- split before " + stem(order[(size_t)k]) + ": first half " + half(f, first) + "; second half " + half(g, second);
         report += line + "\n";
         job.log("  " + line);
     }
-    put_back();
     report += "\n(Estimates: a half keeps what stands in its BSPs and the encounters there, and the scripts that don't need an "
               "encounter that went. A real split would also need the player carried over to the second half.)\n";
     return report;
@@ -2435,6 +2492,80 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
     };
 
     job.log(std::string(job.analysis ? "Measuring the map for " : "Building for ") + game_name(job.target) + "...");
+    // The fallbacks built early, beside the first build, when the map is likely to need them (a campaign map, or one
+    // whose last build did): with Invader's optimize option, without the lower-detail versions the app made (their
+    // models as they were, in a folder of their own read first), and both. A fallback below that's only "optimize" or
+    // "take the lower-detail versions out" takes its build from these; anything else the loop changes makes them stale
+    // (stopped then, and when the loop ends).
+    struct Early {
+        bool opt = false, nolod = false;
+        fs::path file;
+        std::thread th;
+        int rc = -1;
+        std::string out;
+        ProcessStop stop;
+    };
+    struct EarlyBuilds {
+        std::vector<std::unique_ptr<Early>> list;
+        fs::path dir;
+        void stop_all() {
+            for (auto &e : list) e->stop.stop();
+            std::error_code e2;
+            for (auto &e : list) {
+                if (e->th.joinable()) e->th.join();
+                fs::remove(e->file, e2);
+            }
+            list.clear();
+            if (!dir.empty()) fs::remove_all(dir, e2);
+        }
+        ~EarlyBuilds() { stop_all(); }
+    } early;
+    const bool had_lods = !job.lod_backups.empty();
+    bool early_valid = false, keep_early = false;
+    const fs::path build_hint = cfg.cache_dir / "builds" / (stem + ".txt");
+    if (job.target == Game::Xbox && !job.analysis && !cfg.level_shaders_only) {
+        std::string hint;
+        std::ifstream hf(build_hint);
+        const bool built_before = (bool)hf;
+        std::getline(hf, hint);
+        // (as its last build needed; never built: a campaign map, likely to)
+        if (built_before ? hint.find("optimize") != std::string::npos || hint.find("nolod") != std::string::npos : campaign) {
+            early.dir = job.work / "nolod_tags";
+            fs::remove_all(early.dir, ec);
+            bool nolod_ok = had_lods;
+            for (auto &[p, b] : job.lod_backups) {
+                fs::path rel;
+                for (auto &d : job.dirs()) {
+                    fs::path r2 = p.lexically_relative(d);
+                    if (!r2.empty() && *r2.begin() != "..") { rel = r2; break; }
+                }
+                if (rel.empty()) { nolod_ok = false; break; }
+                fs::create_directories((early.dir / rel).parent_path(), ec);
+                std::ofstream(early.dir / rel, std::ios::binary) << b;
+            }
+            for (int v = 1; v < 4; v++) {
+                const bool o = (v & 1) != 0, nl = (v & 2) != 0;
+                if ((o && optimized) || (nl && !nolod_ok)) continue;
+                auto e = std::make_unique<Early>();
+                e->opt = o || optimized;
+                e->nolod = nl;
+                e->file = job.work / ("early_" + std::to_string(v) + ".map");
+                const bool saved = optimized;
+                optimized = e->opt;
+                std::vector<std::string> c = make_cmd();
+                optimized = saved;
+                for (size_t i = 0; i + 1 < c.size(); i++) if (c[i] == "-o") c[i + 1] = u8(e->file);
+                if (nl) c.insert(std::find(c.begin(), c.end(), "-t"), {"-t", u8(early.dir)});
+                Early *ep = e.get();
+                e->th = std::thread([ep, c] { ep->rc = run_process(c, ep->out, &ep->stop); });
+                early.list.push_back(std::move(e));
+            }
+            early_valid = !early.list.empty();
+            if (early_valid)
+                job.log("  (also building " + std::to_string(early.list.size()) + " fallback version" + (early.list.size() > 1 ? "s" : "") +
+                        " at the same time, in case it doesn't fit: with Invader's optimize option and without the lower-detail versions)");
+        }
+    }
     std::string out;
     int shrink_rounds = 0, sound_rounds = 0, stock_rounds = 0;
     bool shrink_hopeless = false;
@@ -2442,7 +2573,34 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
     bool texture_hopeless = false;
     std::string texture_warning;
     for (int attempt = 0; attempt < 200; attempt++) {
-        int rc = run_process(cmd, out);
+        if (attempt > 0 && early_valid && !keep_early) {   // (the loop changed something else: they're stale)
+            early_valid = false;
+            early.stop_all();
+        }
+        keep_early = false;
+        int rc = -1;
+        bool took = false;
+        if (early_valid && attempt > 0) {
+            const bool want_nolod = had_lods && job.lod_backups.empty();
+            for (auto it = early.list.begin(); it != early.list.end(); ++it) {
+                Early &e = **it;
+                if (e.opt != optimized || e.nolod != want_nolod) continue;
+                if (e.th.joinable()) e.th.join();
+                if (e.rc == 0) {
+                    fs::remove(tmp_out, ec);
+                    fs::rename(e.file, tmp_out, ec);
+                    took = !ec;
+                } else took = true;
+                if (took) {
+                    rc = e.rc;
+                    out = e.out;
+                    job.log("  (that version was built already, beside the first)");
+                }
+                early.list.erase(it);
+                break;
+            }
+        }
+        if (!took) rc = run_process(cmd, out);
         if (rc == 0 && job.analysis) {
             std::ofstream(job.work / "build.log") << out;
             std::string err;
@@ -2554,6 +2712,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
             (std::atof(tb[1].str().c_str()) - std::atof(tb[2].str().c_str())) * 1048576.0 < job.lod_xbox_bytes * 0.9 &&
             undo_lods("is " + tb[1].str().substr(0, 5) + " MB, over the Xbox's " + tb[2].str().substr(0, 5) + " MB limit")) {
             cmd = make_cmd();
+            keep_early = true;
             continue;
         }
         // Over the limit: long stereo sounds at 44.1 kHz go to 22.05 kHz first (half each, and music is most of a
@@ -2648,6 +2807,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
             job.note("[optimize] the tag data needed " + tb[1].str().substr(0, 5) + " MB of the " + tb[2].str().substr(0, 5) +
                      " MB limit; rebuilding with Invader's optimize option, which stores identical data only once");
             cmd = make_cmd();
+            keep_early = true;
             continue;
         }
         // Still over the tag memory limit: the lower-detail versions the app made come out before anything of the
@@ -2655,6 +2815,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
         if (std::regex_search(out, tb, tag_space) && job.target == Game::Xbox &&
             undo_lods("needs " + tb[1].str().substr(0, 5) + " MB of the Xbox's " + tb[2].str().substr(0, 5) + " MB of tag memory")) {
             cmd = make_cmd();
+            keep_early = true;
             continue;
         }
         if (std::regex_search(out, tb, tag_space) && job.target == Game::Xbox) measure_for_window();
@@ -2778,6 +2939,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
             return r;
         }
     }
+    early.stop_all();   // (the ones not needed)
     if (!fs::exists(tmp_out, ec)) {   // (200 builds, each fixing something, and still failing)
         std::ofstream(job.work / "build.log") << out;
         Failure f;
@@ -2785,6 +2947,10 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
         r.error = "Build failed: still failing after 200 automatic fixes.\nError: " + f.msg + "\nTag: " + f.tag +
                   "\nFull log: " + u8(job.work / "build.log");
         return r;
+    }
+    if (job.target == Game::Xbox && !job.analysis) {   // (what this build needed: the next one starts those early)
+        fs::create_directories(build_hint.parent_path(), ec);
+        std::ofstream(build_hint) << (optimized ? "optimize " : "") << (had_lods && job.lod_backups.empty() ? "nolod" : "") << "\n";
     }
     for (auto &l : unwrap(out))
         if (l.rfind("WARNING", 0) == 0) r.warnings.push_back(l);
