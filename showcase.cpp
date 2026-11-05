@@ -561,13 +561,14 @@ bool clean_view(const World &w, const View &v, double most, const V3 *lo = nullp
     r = mul(r, 1 / len(r));
     V3 u = cross(r, f);
     const double tx = std::tan(rad(v.fov / 2)), ty = tx * 0.75, far = most > 0 ? most : 400;
+    int behind = 0;   // (a few: a thin one-sided detail, a railing seen from its back, as players see it too)
     for (int i = 0; i <= 12; i++)
         for (int j = 0; j <= 8; j++) {
             V3 d = add(f, add(mul(r, tx * (i / 6.0 - 1)), mul(u, ty * (j / 4.0 - 1))));
             d = mul(d, 1 / len(d));
             int tri = -1;
             double t = w.hit(v.eye, d, far, tri);
-            if (tri >= 0 && w.from_behind(tri, d)) return false;
+            if (tri >= 0 && w.from_behind(tri, d) && ++behind > 4) return false;
             if (most > 0 && t >= far - 1e-6) return false;
             if (lo && hi && t < far - 1e-6) {
                 V3 q = add(v.eye, mul(d, t));
