@@ -6337,7 +6337,7 @@ static AnimNeeds anim_needs(Job &job, const std::vector<std::string> &deps) {
         if (has_suffix(dep, ".biped")) {
             if (!t.load(own / from_u8(dep))) continue;
             std::string g = t.root().ref("animation graph");
-            if (!g.empty()) a.graphs.insert(lc(norm_rel(g + ".model_animations")));
+            if (!g.empty()) a.graphs.insert(lc(norm_rel(g)));   // (ref gives the path with its extension)
             auto st = t.root().block("seats");
             for (size_t i = 0; i < st.size(); i++) a.seats.insert(lc(st[i].str("label")));
         } else if (has_suffix(dep, ".vehicle")) {
@@ -14924,67 +14924,46 @@ int cheat_powerup_use(const std::string &script_text, int script_count) {
 // vehicles), so an unplaced one only takes tag memory. A weapons & vehicles pick leaves the vehicle or weapon it
 // replaced unplaced (its placements moved to the pick), so this runs again after the picks.
 static void drop_unplaced_palette(Job &job, const fs::path &xsrc) {
-    const Config &cfg = job.cfg;
-    std::string scen = job.scenario + ".scenario", out;
+    std::string scen = job.scenario + ".scenario";
     fs::path sdir = fs::exists(job.fixes / from_u8(scen)) ? job.fixes : xsrc;
-    if (!fs::exists(sdir / from_u8(scen))) return;
-    auto getv = [&](const fs::path &dir, const std::string &tag, const std::string &op, const std::string &key) {
-        std::string v;
-        if (run_process({u8(tool(cfg, "invader-edit")), "-t", u8(dir), tag, op, key}, v) != 0) return std::string();
-        while (!v.empty() && (v.back() == '\n' || v.back() == ' ')) v.pop_back();
-        return v;
-    };
-    auto dep = [&](const fs::path &dir, const std::string &tag, const std::string &key) {
-        std::string v = getv(dir, tag, "-G", key);
-        return v.empty() || v[0] == '.' || v.find('\n') != std::string::npos ? std::string() : norm_rel(v);
-    };
-    auto count = [&](const fs::path &dir, const std::string &tag, const std::string &key) {
-        return std::atoi(getv(dir, tag, "-C", key).c_str());
-    };
-    std::vector<std::string> dropped_palette;
-    struct Pal { const char *palette, *block; };
+    tagfile::EditTag ed;
+    if (!fs::exists(sdir / from_u8(scen)) || !ed.load(sdir / from_u8(scen))) return;
+    using tagfile::TagNode;
+    std::vector<std::string> dropped;
     // (An unplaced biped palette entry is often the map's own player, there for MCC: on Xbox, with the Xbox's own
     // player, it would only take up tag memory.)
-    for (Pal pl : {Pal{"weapon_palette", "weapons"}, Pal{"equipment_palette", "equipment"}, Pal{"vehicle_palette", "vehicles"},
-                   Pal{"biped_palette", "bipeds"}, Pal{"scenery_palette", "scenery"}}) {
-        int n = count(sdir, scen, pl.palette);
-        if (n <= 0) continue;
-        std::regex type_re("^" + std::string(pl.block) + R"(\[(\d+)\]\.type$)");
-        std::vector<std::pair<int, int>> placed;   // placement index, palette index
-        std::set<int> used;
-        for (auto &[k, v] : list_values(cfg, sdir, scen)) {
-            std::smatch m;
-            if (!std::regex_match(k, m, type_re) || v.empty() || !isdigit((unsigned char)v[0])) continue;
-            int ti = std::atoi(v.c_str());
-            placed.push_back({std::stoi(m[1]), ti});
-            if (ti >= 0 && ti < n) used.insert(ti);
+    for (auto [palette, placements] : {std::pair<const char *, const char *>{"weapon palette", "weapons"}, {"equipment palette", "equipment"},
+                                       {"vehicle palette", "vehicles"}, {"biped palette", "bipeds"}, {"scenery palette", "scenery"}}) {
+        std::vector<TagNode> *pal = tagfile::block(ed.root(), palette), *pl = tagfile::block(ed.root(), placements);
+        if (!pal || pal->empty()) continue;
+        std::vector<char> used(pal->size(), 0);
+        if (pl)
+            for (auto &e : *pl) {
+                double t = tagfile::get_num(e, "type");
+                if (t >= 0 && t < (double)pal->size()) used[(size_t)t] = 1;
+            }
+        std::vector<int> to(pal->size(), -1);
+        std::vector<TagNode> kept;
+        for (size_t i = 0; i < pal->size(); i++) {
+            if (used[i]) { to[i] = (int)kept.size(); kept.push_back((*pal)[i]); continue; }
+            if (std::string *nm = tagfile::ref_path((*pal)[i], "name"))
+                if (!nm->empty()) dropped.push_back(fs::path(from_u8(norm_rel(*nm))).stem().u8string());
         }
-        std::vector<int> unused;
-        for (int i = 0; i < n; i++) if (!used.count(i)) unused.push_back(i);
-        if (unused.empty()) continue;
-        std::vector<std::string> cmd{u8(tool(cfg, "invader-edit")), "-t", u8(sdir), scen};
-        for (auto &[k, ti] : placed) {
-            if (ti < 0 || ti >= n) continue;
-            int shift = (int)std::count_if(unused.begin(), unused.end(), [&](int u) { return u < ti; });
-            if (shift) cmd.insert(cmd.end(), {"-S", std::string(pl.block) + "[" + std::to_string(k) + "].type",
-                                              std::to_string(ti - shift)});
-        }
-        std::vector<std::string> names;
-        for (auto it = unused.rbegin(); it != unused.rend(); ++it) {
-            std::string nm = dep(sdir, scen, std::string(pl.palette) + "[" + std::to_string(*it) + "].name");
-            if (!nm.empty()) names.push_back(fs::path(from_u8(nm)).stem().u8string());
-            cmd.insert(cmd.end(), {"-E", std::string(pl.palette) + "[" + std::to_string(*it) + "]"});
-        }
-        if (run_process(cmd, out) == 0)
-            dropped_palette.insert(dropped_palette.end(), names.rbegin(), names.rend());
+        if (kept.size() == pal->size()) continue;
+        if (pl)
+            for (auto &e : *pl) {
+                double t = tagfile::get_num(e, "type");
+                if (t >= 0 && t < (double)to.size()) tagfile::set_num(e, "type", to[(size_t)t]);
+            }
+        *pal = std::move(kept);
     }
-    if (!dropped_palette.empty()) {
-        std::string list = dropped_palette[0];
-        for (size_t i = 1; i < dropped_palette.size() && i < 12; i++) list += ", " + dropped_palette[i];
-        if (dropped_palette.size() > 12) list += " and " + std::to_string(dropped_palette.size() - 12) + " more";
-        job.note("[trim] left out palette entries the map never places: " + list);
-    }
-
+    if (dropped.empty()) return;
+    fs::path dst = editable_owner(job, scen, true);
+    if (dst.empty() || !ed.save(dst / from_u8(scen))) return;
+    std::string list = dropped[0];
+    for (size_t i = 1; i < dropped.size() && i < 12; i++) list += ", " + dropped[i];
+    if (dropped.size() > 12) list += " and " + std::to_string(dropped.size() - 12) + " more";
+    job.note("[trim] left out palette entries the map never places: " + list);
 }
 
 void trim_unobtainable(Job &job, const fs::path &xsrc) {
