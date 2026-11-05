@@ -2162,15 +2162,27 @@ static std::string campaign_halves(Job &job, std::vector<std::string> cmd) {
                 }
                 return where;
             };
+            // (first, which encounters go: those standing only in the other half; then the scripts without them, and
+            // the scenario again keeping every object those scripts still name, wherever it stands: Invader won't
+            // compile a script naming an object that isn't placed. So a half is a little over, not under.)
             campaign::Stripped out;
             if (!campaign::strip_scenario(own, st, out)) { x.mb = -1; x.err = out.why; halves.push_back(std::move(x)); continue; }
+            std::vector<std::pair<fs::path, std::string>> texts;
+            if (scripts) {
+                texts = campaign::texts_without(a, out.gone_ai, x.scripts_dropped);
+                std::string all;
+                for (auto &t : texts) all += t.second + "\n";
+                st.names = campaign::atoms(all);
+                st.patterns = campaign::containing_patterns(all);
+                fs::copy_file(sp, own, fs::copy_options::overwrite_existing, ec);
+                if (!campaign::strip_scenario(own, st, out)) { x.mb = -1; x.err = out.why; halves.push_back(std::move(x)); continue; }
+            }
             x.encounters = out.encounters;
-            if (scripts)
-                for (auto &[path, text] : campaign::texts_without(a, out.gone_ai, x.scripts_dropped)) {
-                    fs::path to_file = dir / "data" / path.lexically_relative(xdata);
-                    fs::create_directories(to_file.parent_path(), ec);
-                    std::ofstream(to_file, std::ios::binary) << campaign::renumber_bsps(text, to);
-                }
+            for (auto &[path, text] : texts) {
+                fs::path to_file = dir / "data" / path.lexically_relative(xdata);
+                fs::create_directories(to_file.parent_path(), ec);
+                std::ofstream(to_file, std::ios::binary) << campaign::renumber_bsps(text, to);
+            }
             x.cmd = cmd_in(dir, true, scripts);
             halves.push_back(std::move(x));
         }
@@ -2404,11 +2416,8 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
         return cmd;
     };
     std::vector<std::string> cmd = make_cmd();
-    if (cfg.campaign_halves && job.target == Game::Xbox && !job.analysis) {   // (measured, not built)
-        r.campaign = campaign_halves(job, cmd);
-        r.ok = true;
-        return r;
-    }
+    // "Estimate halves": after the build, its fixes made (or when the whole level doesn't fit), the halves measured.
+    const bool halves = cfg.campaign_halves && job.target == Game::Xbox && !job.analysis;
     bool scripts_tried = false;
     int none_fixes = 0, missing_fixes = 0;
     // The map doesn't fit the Xbox with the lower-detail versions the app made: take them out again (they're for
@@ -2846,6 +2855,12 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
             cmd = make_cmd();
             continue;
         }
+        if (std::regex_search(out, tb, tag_space) && halves) {
+            early.stop_all();
+            r.campaign = campaign_halves(job, make_cmd());
+            r.ok = true;
+            return r;
+        }
         if (std::regex_search(out, tb, tag_space)) {
             r.error = std::string("The map needs more memory than ") + game_name(job.target) + " has for it: its level geometry " +
                       "(BSP) and other tag data need " + tb[1].str().substr(0, 5) + " MB" +
@@ -2968,6 +2983,11 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
         parse_failure(out, f);
         r.error = "Build failed: still failing after 200 automatic fixes.\nError: " + f.msg + "\nTag: " + f.tag +
                   "\nFull log: " + u8(job.work / "build.log");
+        return r;
+    }
+    if (halves) {
+        r.campaign = campaign_halves(job, make_cmd());
+        r.ok = true;
         return r;
     }
     if (job.target == Game::Xbox && !job.analysis) {   // (what this build needed: the next one starts those early)
