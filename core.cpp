@@ -2173,9 +2173,16 @@ static std::string campaign_halves(Job &job, std::vector<std::string> cmd) {
             x.cmd = cmd_in(dir, true, scripts);
             halves.push_back(std::move(x));
         }
-    // The builds, a few at once (each takes a core and a gigabyte or two of memory).
+    // The builds, as many at once as there are cores to spare and memory for (each takes a core and up to about 2 GB).
     const unsigned cores = std::max(1u, std::thread::hardware_concurrency());
-    const size_t at_once = std::clamp<size_t>(cores / 2, 1, 4);
+    size_t by_memory = 4;
+#ifdef _WIN32
+    {
+        MEMORYSTATUSEX ms{sizeof(ms)};
+        if (GlobalMemoryStatusEx(&ms)) by_memory = (size_t)(ms.ullAvailPhys / (2ull << 30));
+    }
+#endif
+    const size_t at_once = std::clamp<size_t>(std::min<size_t>(cores > 1 ? cores - 1 : 1, by_memory), 1, halves.size());
     job.log("Building the level and its halves quickly, " + std::to_string(at_once) + " at a time (" +
             std::to_string(halves.size()) + " builds)...");
     std::atomic<size_t> next{0}, done{0};
