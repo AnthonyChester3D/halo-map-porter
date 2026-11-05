@@ -109,6 +109,8 @@ enum {
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new83.exe is 1.83).
+#define HMP_VERSION L"1.83"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -326,7 +328,10 @@ static void clear_heartbeat() {
     SendMessageW(g_log, EM_REPLACESEL, FALSE, (LPARAM)L"");
     g_hb_at = -1;
 }
+// (set while the Map packs tab reads its pack on its own, opening the tab: the log keeps what it had)
+static bool g_log_quiet = false;
 static void append_log(const std::wstring &text) {
+    if (g_log_quiet) return;
     clear_heartbeat();
     std::wstring t;
     for (wchar_t c : text) { if (c == L'\n') t += L"\r\n"; else t += c; }
@@ -2563,9 +2568,16 @@ static void pk_use_menu_logo(int k, bool suggested) {
     if (m.faded) append_log(L"   The menu draws it see-through, so the stamp keeps its lines solid. 48 or 64 pixels shows it best.");
     if (suggested) append_log(L"   \"No logo\" leaves the pictures as they are; Browse picks a PNG instead.");
 }
-static void pk_load() {
+// `quiet`: read on opening the tab, not asked for: the log is left as it is (a conversion's, say), and a pack that
+// can't be read says so only when it's loaded on purpose.
+static void pk_load(bool quiet = false) {
     fs::path in(get_text(ID_PK_IN));
     if (in.empty()) return;
+    struct Quiet {
+        bool was;
+        explicit Quiet(bool q) : was(g_log_quiet) { g_log_quiet = g_log_quiet || q; }
+        ~Quiet() { g_log_quiet = was; }
+    } keep_log(quiet);
     HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
     mappack::Pack p;
     std::string err;
@@ -2577,7 +2589,7 @@ static void pk_load() {
         pk_fill();
         pk_load_logo(true);
         append_log(W("Map pack: " + err));
-        MessageBoxW(g_wnd, W(err).c_str(), L"Halo Map Porter", MB_ICONWARNING);
+        if (!quiet) MessageBoxW(g_wnd, W(err).c_str(), L"Halo Map Porter", MB_ICONWARNING);
         return;
     }
     g_pack = p;
@@ -2589,7 +2601,7 @@ static void pk_load() {
     pk_fill();
     int n = 0;
     for (auto &e : g_pack.maps) n += e.include;
-    SetWindowTextW(g_log, L"");
+    if (!quiet) SetWindowTextW(g_log, L"");
     append_log(L"Map pack: " + W(g_pack.maps_dir.u8string()));
     for (auto &line : g_pack.info) append_log(L"   " + W(line));
     append_log(L"   " + std::to_wstring(g_pack.maps.size()) + L" maps found, " + std::to_wstring(n) +
@@ -3222,7 +3234,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (((NMHDR *)lp)->idFrom == ID_TAB && ((NMHDR *)lp)->code == TCN_SELCHANGE) {
             int pg = TabCtrl_GetCurSel(g_tab);
             show_page(pg);
-            if (pg == 3 && !g_pack_loaded && !get_text(ID_PK_IN).empty() && fs::exists(fs::path(get_text(ID_PK_IN)))) pk_load();
+            if (pg == 3 && !g_pack_loaded && !get_text(ID_PK_IN).empty() && fs::exists(fs::path(get_text(ID_PK_IN)))) pk_load(true);
             if (pg == 4) campaign_page_shown();
             save_settings();
         }
@@ -3538,7 +3550,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     RECT r{0, 0, S(760), S(788)};
     DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
     AdjustWindowRect(&r, style, FALSE);
-    HWND h = CreateWindowExW(0, L"HaloMapPorter", L"Halo Map Porter", style, CW_USEDEFAULT, CW_USEDEFAULT,
+    HWND h = CreateWindowExW(0, L"HaloMapPorter", L"Halo Map Porter " HMP_VERSION, style, CW_USEDEFAULT, CW_USEDEFAULT,
                              r.right - r.left, r.bottom - r.top, nullptr, nullptr, inst, nullptr);
     ShowWindow(h, show);
     MSG m;
