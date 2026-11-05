@@ -7298,6 +7298,214 @@ static bool first_person_seen(Job &job, const std::string &model, const std::str
     return true;
 }
 
+// A model placed only as scenery that players never come near (a ship in the sky, a structure past the level's
+// edge): which of its triangles ever face where a player's eyes can be (seen: the share of those spots they face;
+// 0 never: its far side, underside and insides), and how near those spots get to it (`nearest`, from its bounding
+// sphere). The spots: above every BSP's floors (portals::eye_points; in the play area), the player starting points
+// and the cutscene camera points. Only when every object in the map that draws the model is scenery and placed:
+// anything that moves (a vehicle, a machine) or is made some other way could come near. False with `why` otherwise.
+struct Distant { double nearest = 0; size_t eyes = 0, placed = 0; };
+static bool distant_seen(Job &job, const std::string &model, const std::vector<std::string> &deps, const lod::LookUp &look,
+                         lod::Seen &out, Distant &d, std::string &why) {
+    out = lod::Seen();
+    d = Distant();
+    auto lc = [](std::string v) { for (auto &c : v) c = (char)tolower((unsigned char)c); return v; };
+    const std::string want = lc(model);
+    // The objects that draw it: scenery only.
+    static const char *const kObjects[] = {".scenery", ".biped", ".vehicle", ".weapon", ".equipment", ".garbage", ".projectile",
+                                           ".device_machine", ".device_control", ".device_light_fixture", ".placeholder", ".sound_scenery"};
+    std::set<std::string> users;
+    for (auto &dep : deps) {
+        std::string ext = fs::path(from_u8(dep)).extension().u8string();
+        if (std::find(std::begin(kObjects), std::end(kObjects), ext) == std::end(kObjects)) continue;
+        fs::path o = job.owner(dep);
+        tagfile::Tag t;
+        if (o.empty() || !t.load(o / from_u8(dep)) || lc(t.root().ref("model")) != want) continue;
+        if (ext != ".scenery") { why = "also drawn by " + fs::path(from_u8(dep)).filename().u8string(); return false; }
+        users.insert(lc(dep));
+    }
+    if (users.empty()) { why = "no scenery draws it"; return false; }
+    const std::string scen = job.scenario + ".scenario";
+    fs::path sdir = job.owner(scen);
+    tagfile::Tag st;
+    if (sdir.empty() || !st.load(sdir / from_u8(scen))) { why = "the scenario couldn't be read"; return false; }
+    tagfile::Elem sc = st.root();
+    // Where it's placed: position and turn (yaw, pitch, roll, as the engine puts an object: forward, left, up).
+    struct Place { double p[3], f[3], l[3], u[3]; };
+    std::vector<Place> places;
+    {
+        tagfile::Block items = sc.block("scenery"), pal = sc.block("scenery palette");
+        std::set<std::string> placed_users;
+        for (size_t i = 0; i < items.size(); i++) {
+            long long ty = items[i].integer("type");
+            if (ty < 0 || (size_t)ty >= pal.size()) continue;
+            std::string o = lc(pal[(size_t)ty].ref("name"));
+            if (!users.count(o)) continue;
+            placed_users.insert(o);
+            double yaw = items[i].num("rotation", 0), pitch = items[i].num("rotation", 1), roll = items[i].num("rotation", 2);
+            double cy = std::cos(yaw), sy = std::sin(yaw), cp = std::cos(pitch), sp = std::sin(pitch), cr = std::cos(roll), sr = std::sin(roll);
+            double f[3] = {cy * cp, sy * cp, sp}, l0[3] = {-sy, cy, 0}, u0[3] = {-sp * cy, -sp * sy, cp};
+            Place pl;
+            for (int k = 0; k < 3; k++) {
+                pl.p[k] = items[i].num("position", k);
+                pl.f[k] = f[k];
+                pl.l[k] = l0[k] * cr + u0[k] * sr;
+                pl.u[k] = u0[k] * cr - l0[k] * sr;
+            }
+            places.push_back(pl);
+        }
+        if (placed_users.size() < users.size()) { why = "scenery that draws it isn't placed in the level (scripts or effects make it)"; return false; }
+    }
+    // Its geometry: each region's first permutation, most detailed, as trim_top reads it (strips as triangles).
+    fs::path mo = job.owner(model);
+    tagfile::Tag mt;
+    if (mo.empty() || !mt.load(mo / from_u8(model))) { why = "its model couldn't be read"; return false; }
+    tagfile::Elem mr = mt.root();
+    tagfile::Block shaders = mr.block("shaders"), geos = mr.block("geometries"), regions = mr.block("regions");
+    std::set<int> tops;
+    for (size_t r = 0; r < regions.size(); r++) {
+        tagfile::Block perms = regions[r].block("permutations");
+        if (!perms.size()) continue;
+        long long g = perms[0].integer("super high");
+        if (g >= 0 && g < (long long)geos.size()) tops.insert((int)g);
+    }
+    struct Part { int g = 0, k = 0; bool both = false; std::vector<std::array<double, 3>> v; std::vector<uint32_t> tris; };
+    std::vector<Part> parts;
+    double lo[3] = {1e30, 1e30, 1e30}, hi[3] = {-1e30, -1e30, -1e30};
+    for (int g : tops) {
+        tagfile::Block gp = geos[(size_t)g].block("parts");
+        for (size_t k = 0; k < gp.size(); k++) {
+            Part pt;
+            pt.g = g;
+            pt.k = (int)k;
+            long long shi = gp[k].integer("shader index");
+            if (shi >= 0 && (size_t)shi < shaders.size()) {
+                std::string ref = shaders[(size_t)shi].ref("shader");
+                lod::ShaderLook sl = ref.empty() || !look ? lod::ShaderLook() : look(ref);
+                pt.both = sl.two_sided;
+            }
+            tagfile::Block vs = gp[k].block("uncompressed vertices");
+            for (size_t i = 0; i < vs.size(); i++) {
+                std::array<double, 3> v{vs[i].num("position", 0), vs[i].num("position", 1), vs[i].num("position", 2)};
+                for (int c = 0; c < 3; c++) { lo[c] = std::min(lo[c], v[c]); hi[c] = std::max(hi[c], v[c]); }
+                pt.v.push_back(v);
+            }
+            std::vector<uint32_t> s;
+            tagfile::Block strip = gp[k].block("triangles");
+            static const char *fi[3] = {"vertex0 index", "vertex1 index", "vertex2 index"};
+            for (size_t i = 0; i < strip.size(); i++)
+                for (int c = 0; c < 3; c++) {
+                    long long x = strip[i].integer(fi[c]);
+                    if (x != 65535) s.push_back((uint32_t)x);
+                }
+            for (size_t i = 2; i < s.size(); i++) {
+                uint32_t a = s[i - 2], b = s[i - 1], c = s[i];
+                if (a == b || b == c || a == c || a >= pt.v.size() || b >= pt.v.size() || c >= pt.v.size()) continue;
+                if ((i - 2) % 2 == 0) pt.tris.insert(pt.tris.end(), {a, b, c});
+                else pt.tris.insert(pt.tris.end(), {b, a, c});
+            }
+            parts.push_back(std::move(pt));
+        }
+    }
+    if (parts.empty() || lo[0] > hi[0]) { why = "its model has nothing to draw"; return false; }
+    double mc[3], radius = 0;
+    for (int c = 0; c < 3; c++) mc[c] = (lo[c] + hi[c]) / 2;
+    for (auto &pt : parts)
+        for (auto &v : pt.v) radius = std::max(radius, std::sqrt((v[0] - mc[0]) * (v[0] - mc[0]) + (v[1] - mc[1]) * (v[1] - mc[1]) + (v[2] - mc[2]) * (v[2] - mc[2])));
+    auto world = [](const Place &pl, const double *v, double *w) {
+        for (int k = 0; k < 3; k++) w[k] = pl.p[k] + pl.f[k] * v[0] + pl.l[k] * v[1] + pl.u[k] * v[2];
+    };
+    // Where players' eyes can be.
+    std::vector<std::array<double, 3>> eyes;
+    portals::PlayArea area = portals::play_area(sdir / from_u8(scen));
+    tagfile::Block bsps = sc.block("structure bsps");
+    for (size_t i = 0; i < bsps.size(); i++) {
+        std::string b = bsps[i].ref("structure bsp");
+        fs::path bo = b.empty() ? fs::path() : job.owner(b);
+        std::vector<portals::V3> pts;
+        if (!bo.empty() && portals::eye_points(bo / from_u8(b), area, 2500, pts))
+            for (auto &q : pts) eyes.push_back({q[0], q[1], q[2]});
+    }
+    std::map<std::string, std::array<double, 3>> camera_at;
+    for (const char *blk : {"player starting locations", "cutscene camera points"}) {
+        tagfile::Block pts = sc.block(blk);
+        for (size_t i = 0; i < pts.size(); i++) {
+            std::array<double, 3> q{pts[i].num("position", 0), pts[i].num("position", 1), pts[i].num("position", 2)};
+            if (q[0] != 0 || q[1] != 0 || q[2] != 0) eyes.push_back(q);
+            if (std::string(blk) == "cutscene camera points") camera_at[lc(pts[i].str("name"))] = q;
+        }
+    }
+    // The cutscenes' camera moves: camera_set glides from the point it's at to the next one, so the way between each
+    // two points the scripts set one after the other (in the order they're written) is sampled too.
+    if (camera_at.size() > 1) {
+        static const std::regex cam_re(R"(\(\s*camera_set\s+([^\s()]+))", std::regex::icase);
+        std::error_code ec;
+        std::string last;
+        for (auto it = fs::recursive_directory_iterator(job.work / "xbox_data", ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+            if (it->path().extension() != ".hsc") continue;
+            std::string text = read_all(it->path());
+            for (auto m = std::sregex_iterator(text.begin(), text.end(), cam_re); m != std::sregex_iterator(); ++m) {
+                std::string name = lc((*m)[1].str());
+                if (!camera_at.count(name)) continue;
+                if (!last.empty() && last != name) {
+                    const auto &a = camera_at[last], &b = camera_at[name];
+                    for (int k = 1; k < 8; k++)
+                        eyes.push_back({a[0] + (b[0] - a[0]) * k / 8, a[1] + (b[1] - a[1]) * k / 8, a[2] + (b[2] - a[2]) * k / 8});
+                }
+                last = name;
+            }
+        }
+    }
+    if (eyes.empty()) { why = "the level has nowhere players stand"; return false; }
+    // How near: from each spot to each placement's bounding sphere.
+    d.nearest = 1e30;
+    for (auto &pl : places) {
+        double c[3];
+        world(pl, mc, c);
+        for (auto &e : eyes)
+            d.nearest = std::min(d.nearest, std::sqrt((e[0] - c[0]) * (e[0] - c[0]) + (e[1] - c[1]) * (e[1] - c[1]) + (e[2] - c[2]) * (e[2] - c[2])) - radius);
+    }
+    d.eyes = eyes.size();
+    d.placed = places.size();
+    if (d.nearest < 15) { why = "players come within " + std::to_string((int)std::max(0.0, d.nearest)) + " units of it"; return false; }
+    // Which triangles face the spots (a few hundred of them, spread: from this far, the directions hardly change; a
+    // triangle nearly edge-on counts as facing).
+    std::vector<std::array<double, 3>> few;
+    size_t step = std::max<size_t>(1, eyes.size() / 800);
+    for (size_t i = 0; i < eyes.size(); i += step) few.push_back(eyes[i]);
+    const double total = (double)few.size() * (double)places.size();
+    for (auto &pt : parts) {
+        auto &geo = out.geometry[pt.g];
+        if (geo.size() <= (size_t)pt.k) geo.resize((size_t)pt.k + 1);
+        auto &share = geo[(size_t)pt.k];
+        share.assign(pt.tris.size() / 3, 0.f);
+        for (size_t t = 0; t + 2 < pt.tris.size(); t += 3) {
+            if (pt.both) { share[t / 3] = 1.f; continue; }
+            size_t facing = 0;
+            for (auto &pl : places) {
+                double a[3], b[3], c[3];
+                world(pl, pt.v[pt.tris[t]].data(), a);
+                world(pl, pt.v[pt.tris[t + 1]].data(), b);
+                world(pl, pt.v[pt.tris[t + 2]].data(), c);
+                double e1[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]}, e2[3] = {c[0] - a[0], c[1] - a[1], c[2] - a[2]};
+                double n[3] = {e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]};
+                double nl = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+                if (!(nl > 1e-12)) { facing += few.size(); continue; }   // (degenerate: kept)
+                for (auto &e : few) {
+                    double w[3] = {e[0] - a[0], e[1] - a[1], e[2] - a[2]};
+                    double wl = std::sqrt(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]);
+                    if ((n[0] * w[0] + n[1] * w[1] + n[2] * w[2]) >= -0.05 * nl * wl) facing++;
+                }
+            }
+            share[t / 3] = (float)(facing / total);
+        }
+    }
+    char about[160];
+    snprintf(about, sizeof about, "far from players: at least %.0f units from %zu spots where their eyes can be", d.nearest, eyes.size());
+    out.about = about;
+    return true;
+}
+
 // Levels of detail. First, the map's own heavy models (over their kind's budget) get a lighter most detailed version
 // (trimmed: Xbox tab option, on by default), first-person weapons and characters included. Then a model drawn in the
 // world (not first-person) of the map's own with no lower-detail versions gets them made (lod.hpp; Xbox tab option,
@@ -7393,6 +7601,7 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
     // LODs window's, or skip.txt). The window lists them all, changed or not, with what Bungie's of its kind and size
     // have.
     std::vector<std::string> own_models;
+    std::set<std::string> far_set;   // (scenery players never come near: trimmed for this level, distant_seen)
     std::map<std::string, lod::Choice> chosen;
     for (auto &dep : deps) {
         if (!has_suffix(dep, ".model") && !has_suffix(dep, ".gbxmodel")) continue;
@@ -7434,7 +7643,11 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
         const int mode = job.cfg.xbox_trim_models;
         const bool simplest = mode >= 1;   // (the shape-first pass: every Trim setting)
         bool harder = mode == 2 || mode == 5, by_density = false, by_choice = false, by_setting = false, by_first_person = false;
-        std::vector<std::string> cleaned;
+        std::vector<std::string> cleaned, far_models;
+        // (trimmed for where this level's players are: made every time, never kept in the LOD library, nor the
+        // lower-detail versions made from it)
+        lod::Settings far_settings = lod_settings;
+        far_settings.library.clear();
         std::vector<std::string> trimmed, floor;
         size_t saved = 0;
         // (Bungie's too, but only by your choice: made for the Xbox, the Trim setting leaves them as they are)
@@ -7495,6 +7708,26 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
                 std::string why;
                 measured = first_person_seen(job, dep, fp_animations[dep], lod_settings.look, seen, why);
                 if (!measured) note(dep, "not measured in first person: " + why);
+            } else if (!fp && !bungies && !mine && mode >= 1) {
+                // Scenery players never come near: what never faces them goes, and its shape may move as far as a
+                // pixel at the nearest they get (the Xbox's 640 x 480 at Halo's 70 degrees: 0.22% of the distance; three
+                // quarters of that, to be safe).
+                std::string why;
+                Distant dd;
+                if (distant_seen(job, dep, deps, lod_settings.look, seen, dd, why)) {
+                    measured = true;
+                    far_set.insert(dep);
+                    const double px = 0.0022 * 0.75 * dd.nearest, size = lod::model_size(own / from_u8(dep));
+                    if (size > 0) {
+                        clean.max_units = std::max(clean.max_units, px);
+                        clean.max_change = std::max(clean.max_change, px / size);
+                        if (ts.budget >= 0 || ts.density > 0) {
+                            ts.max_units = std::max(ts.max_units, px);
+                            ts.max_change = std::max(ts.max_change, px / size);
+                        }
+                    }
+                    far_models.push_back(name_of(dep) + " (" + std::to_string((int)dd.nearest) + " units)");
+                }
             }
             if (measured) ts.seen = clean.seen = &seen;
             // Shape first: as few triangles as keep its shape within the limit, however many it has; the trim below (3,
@@ -7509,7 +7742,7 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
                 before.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
                 in.close();
                 keep_original(ed / from_u8(dep), before);
-                lod::Trim c = lod::trim_top(ed / from_u8(dep), clean, lod_settings, dep);
+                lod::Trim c = lod::trim_top(ed / from_u8(dep), clean, far_set.count(dep) ? far_settings : lod_settings, dep);
                 if (c.changed) {
                     cleaned_from = c.before;
                     saved += c.xbox_bytes_saved;
@@ -7540,7 +7773,7 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
                 in.close();
                 keep_original(ed / from_u8(dep), before);
             }
-            lod::Trim r = lod::trim_top(ed / from_u8(dep), ts, lod_settings, dep);
+            lod::Trim r = lod::trim_top(ed / from_u8(dep), ts, far_set.count(dep) ? far_settings : lod_settings, dep);
             if (cleaned_from > 0) {   // (from the model as made)
                 if (!r.changed) {
                     if (!job.analysis) {
@@ -7595,6 +7828,9 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
                      (by_first_person ? "; first-person weapons lose what's never on screen first, and what's seen least goes further" : "") +
                      (mode >= 3 ? "; then on to Bungie's triangles where still over" : "") +
                      "; triangles as made > now): " + list(cleaned));
+        if (!far_models.empty())
+            job.note("[heavy] far from players (scenery nobody comes near, nearest they get): " + list(far_models) +
+                     "; what never faces where players' eyes can be goes, and the shape may move as far as a pixel there");
         if (!floor.empty())
             job.note("[heavy] left as they are (every triangle shows, or keeps a texture in place): " + list(floor, 4));
     }
@@ -7665,6 +7901,7 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
             }
             lod::Settings s = ls;
             s.min_triangles = 0;   // (decided above)
+            if (far_set.count(dep)) s.library.clear();   // (trimmed for this level: kept out of the LOD library)
             int targets[2] = {0, 0};
             if (ch.lods == 'm') {
                 targets[0] = ch.medium;
@@ -15196,7 +15433,7 @@ Result update_xbox_models(const Config &cfg, const fs::path &file, const Log &lo
 
 std::string xbox_prepare_key(const Config &c) {
     std::ostringstream k;
-    k << "HMP prepare 4\n";   // (4: trimming by shape; 3: bot waypoints; 2: automatic picks, the gravity rifle and spare needlers)
+    k << "HMP prepare 5\n";   // (5: far scenery trimmed for where players are; 4: trimming by shape; 3: bot waypoints; 2: automatic picks, the gravity rifle and spare needlers)
     auto path = [&](const char *n, const fs::path &p) { k << n << "=" << u8(p) << "\n"; };
     path("invader", c.invader_dir);
     path("ce", c.ce_dir);

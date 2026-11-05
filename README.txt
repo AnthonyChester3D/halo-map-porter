@@ -733,6 +733,17 @@ Levels of detail (LODs)
   reused. The log's [heavy] line names each model with its triangles as
   made > now, and how much tag memory that saved; in the LODs window, "As
   the map made it" swaps the original back in, to compare.
+  Scenery players never come near (a ship in the sky, a structure past
+  the level's edge: every object that draws the model is placed scenery,
+  and players' eyes never get within 15 units): the spots their eyes
+  can be (above every BSP's floors in the play area, the player starting
+  points, the cutscene camera points and the camera's moves between them
+  as the scripts set them) say which triangles ever face a player, and
+  the rest go; and the shape may move as far as three quarters of a
+  pixel at the nearest they get (the Xbox's 640 x 480). The [heavy] line
+  names them with that distance. These trims are for one level, so they
+  (and the lower-detail versions made from them) never go in the LOD
+  library.
   First-person weapons: a first-person model is drawn as the game draws
   it in first person, posed by every frame of its weapon's first-person
   animations (idle counted most, then firing; each overlay, like turning

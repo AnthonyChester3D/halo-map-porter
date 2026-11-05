@@ -1612,6 +1612,37 @@ bool sample_views(const fs::path &bsp, const PlayArea &area, int count, std::vec
                   });
 }
 
+bool eye_points(const fs::path &bsp_file, const PlayArea &area, int count, std::vector<V3> &out) {
+    out.clear();
+    tagfile::Tag t;
+    if (!t.load(bsp_file)) return false;
+    tagfile::Elem r = t.root();
+    Bsp b;
+    if (!load_bsp(r, b, nullptr)) return false;
+    std::vector<std::array<V3, 3>> tri;
+    if (!load_triangles(r, tri)) return false;
+    std::vector<int> floors;
+    std::vector<double> cum;
+    floor_triangles(b, tri, floors, cum, area);
+    if (floors.empty() && area.set) floor_triangles(b, tri, floors, cum);
+    if (floors.empty()) return false;
+    double total = cum.back();
+    uint64_t seed = 0x2545F4914F6CDD1Dull;
+    auto rnd = [&]() {
+        seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17;
+        return (double)(seed >> 11) / 9007199254740992.0;
+    };
+    for (int tries = 0; tries < count * 3 && (int)out.size() < count; tries++) {
+        size_t k = (size_t)(std::lower_bound(cum.begin(), cum.end(), rnd() * total) - cum.begin());
+        const auto &T = tri[(size_t)floors[std::min(k, floors.size() - 1)]];
+        double u = rnd(), v = rnd();
+        if (u + v > 1) { u = 1 - u; v = 1 - v; }
+        V3 eye = T[0] + (T[1] - T[0]) * u + (T[2] - T[0]) * v + V3{0, 0, 0.62};
+        if (b.leaf_at(eye) >= 0) out.push_back(eye);
+    }
+    return !out.empty();
+}
+
 Result add_portals(const fs::path &file, const Options &options) {
     using tagfile::TagNode;
     Result r;

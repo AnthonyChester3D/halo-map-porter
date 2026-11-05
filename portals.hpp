@@ -113,6 +113,9 @@ bool estimate(const std::filesystem::path &bsp, Arrangement which, const std::ve
 // eyes are, which way they look (level), and the level's surfaces the engine draws.
 struct SampleView { V3 eye{}; double yaw = 0; std::vector<int> drawn; };
 bool sample_views(const std::filesystem::path &bsp, const PlayArea &area, int count, std::vector<SampleView> &out);
+// Where a player's eyes can be: up to `count` spots 0.62 units above the level's floors (spread by their area; in the
+// play area when it has floors there), inside the level. False when it has no floors.
+bool eye_points(const std::filesystem::path &bsp, const PlayArea &area, int count, std::vector<V3> &out);
 
 // The clusters add_portals would make: each leaf's new cluster. `report`: what it did, or why it couldn't.
 bool plan(const std::filesystem::path &bsp, const Options &options, Leaves &leaves, std::vector<int> &cluster_of_leaf,
