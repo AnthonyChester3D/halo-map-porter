@@ -1,6 +1,7 @@
 // Halo Map Porter - Xbox map card editor window (Windows). See mapcard_win.hpp.
 #define UNICODE
 #define _UNICODE
+#include "fsutil.hpp"
 #include "mapcard_win.hpp"
 #include "dark.hpp"
 
@@ -286,7 +287,7 @@ static void set_image_from(const fs::path &file) {
     fs::path dst = E->dir / (L"source" + ext);
     // Keep a copy in the card, so moving or deleting the original doesn't lose the picture.
     fs::path tmp = E->dir / (L"incoming" + ext);
-    fs::copy_file(file, tmp, fs::copy_options::overwrite_existing, ec);
+    copy_over(file, tmp, ec);
     if (ec) {
         MessageBoxW(E->wnd, (L"Couldn't copy the image into the card: " + W(ec.message())).c_str(), L"Map card", MB_ICONWARNING);
         return;

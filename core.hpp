@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <array>
 #include <filesystem>
+#include "fsutil.hpp"
 #include <functional>
 #include <map>
 #include <set>

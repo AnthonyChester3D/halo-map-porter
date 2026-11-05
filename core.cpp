@@ -484,7 +484,7 @@ struct Job {
         std::error_code ec;
         fs::path dst = fixes / from_u8(tag);
         fs::create_directories(dst.parent_path(), ec);
-        fs::copy_file(from / from_u8(tag), dst, fs::copy_options::overwrite_existing, ec);
+        copy_over(from / from_u8(tag), dst, ec);
         return !ec;
     }
 
@@ -947,7 +947,7 @@ struct Job {
         if (copy.empty()) return false;
         std::error_code ec;
         fs::create_directories((fixes / from_u8(copy)).parent_path(), ec);
-        fs::copy_file(source / from_u8(model), fixes / from_u8(copy), fs::copy_options::overwrite_existing, ec);
+        copy_over(source / from_u8(model), fixes / from_u8(copy), ec);
         if (ec || !edit(tag, "model", copy)) return false;
         note("[fix]  " + tag + ": its animations don't fit the target game's " + model + " (different bones); it uses the "
              "map's own version of the model, copied to " + copy);
@@ -2148,7 +2148,7 @@ static std::string campaign_halves(Job &job, std::vector<std::string> cmd) {
             for (size_t i = 0; i < keep.size(); i++) to[keep[i]] = (int)i;
             const fs::path own = dir / "tags" / from_u8(scen);
             fs::create_directories(own.parent_path(), ec);
-            fs::copy_file(sp, own, fs::copy_options::overwrite_existing, ec);
+            copy_over(sp, own, ec);
             campaign::Strip st;
             st.keep_bsps = keep;
             st.by_place = true;
@@ -2174,7 +2174,7 @@ static std::string campaign_halves(Job &job, std::vector<std::string> cmd) {
                 for (auto &t : texts) all += t.second + "\n";
                 st.names = campaign::atoms(all);
                 st.patterns = campaign::containing_patterns(all);
-                fs::copy_file(sp, own, fs::copy_options::overwrite_existing, ec);
+                copy_over(sp, own, ec);
                 if (!campaign::strip_scenario(own, st, out)) { x.mb = -1; x.err = out.why; halves.push_back(std::move(x)); continue; }
             }
             x.encounters = out.encounters;
@@ -2333,8 +2333,8 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
         fs::path t = job.shaders_file, b = job.shaders_file;
         t += ".bots";
         b += ".bots.scenario_structure_bsp";
-        fs::copy_file(job.work / "bots.txt", t, fs::copy_options::overwrite_existing, ec);
-        fs::copy_file(job.work / "bots.scenario_structure_bsp", b, fs::copy_options::overwrite_existing, ec);
+        copy_over(job.work / "bots.txt", t, ec);
+        copy_over(job.work / "bots.scenario_structure_bsp", b, ec);
     }
     if (cfg.level_shaders_only) {   // (measured: nothing more to do)
         r.ok = !job.shaders_file.empty();
@@ -2462,10 +2462,10 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
             fs::path sc = job.choices_scenario, bak = job.work / "choices_backup.scenario", with = job.work / "choices_with.scenario";
             std::error_code ec;
             bool swapped = !sc.empty() && fs::exists(bak);
-            if (swapped) { fs::copy_file(sc, with, fs::copy_options::overwrite_existing, ec); fs::copy_file(bak, sc, fs::copy_options::overwrite_existing, ec); }
+            if (swapped) { copy_over(sc, with, ec); copy_over(bak, sc, ec); }
             if (swapped && run_process(mcmd, nout) == 0) before = tag_space_used(nout);
             if (run_process(oc, oout) == 0 && before > 0) a.optimize_saves_mb = std::max(0.0, before - tag_space_used(oout));
-            if (swapped) fs::copy_file(with, sc, fs::copy_options::overwrite_existing, ec);
+            if (swapped) copy_over(with, sc, ec);
         }
         return true;
     };
@@ -2511,7 +2511,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
         // Put the scenario back as the convert had it.
         std::error_code ec;
         fs::path bak = job.work / "choices_backup.scenario";
-        if (!job.choices_scenario.empty() && fs::exists(bak)) fs::copy_file(bak, job.choices_scenario, fs::copy_options::overwrite_existing, ec);
+        if (!job.choices_scenario.empty() && fs::exists(bak)) copy_over(bak, job.choices_scenario, ec);
         job.choices_scenario.clear();
         stock_choices.clear();
         fs::remove(mout, ec);
@@ -3006,7 +3006,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
     if (job.target == Game::Xbox && !stamp_xbox_checksum(tmp_out))
         r.warnings.push_back("WARNING: couldn't write the map's header checksum (the Xbox may keep using an old cached copy)");
 
-    fs::copy_file(tmp_out, output, fs::copy_options::overwrite_existing, ec);
+    copy_over(tmp_out, output, ec);
     if (ec) {
         r.error = "Built, but couldn't write " + u8(output) + ": " + ec.message() +
                   "\n(Is the game running with this map loaded?)";
@@ -3062,7 +3062,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
     fs::create_directories(reports, ec);
     r.report = reports / (stem + " - " + game_name(job.target) + ".txt");
     if (!job.bots_picture.empty() && fs::exists(job.bots_picture, ec))
-        fs::copy_file(job.bots_picture, reports / (stem + " - bots.bmp"), fs::copy_options::overwrite_existing, ec);
+        copy_over(job.bots_picture, reports / (stem + " - bots.bmp"), ec);
     if (job.update) {   // (the conversion's report, with what the update changed after it)
         std::ofstream rep(r.report, std::ios::app);
         std::time_t now = std::time(nullptr);
@@ -3164,7 +3164,7 @@ bool copy_tree(const fs::path &from, const fs::path &to, bool overwrite, std::er
     auto work = [&] {
         for (size_t i; !failed && (i = next++) < files.size();) {
             std::error_code e;
-            fs::copy_file(files[i].first, files[i].second, fs::copy_options::overwrite_existing, e);
+            copy_over(files[i].first, files[i].second, e);
             if (e) {
                 std::lock_guard<std::mutex> g(err_lock);
                 if (!failed) ec = e;
@@ -5598,7 +5598,7 @@ void reorder_multipurpose_maps(Job &job, const std::vector<std::string> &deps) {
             fs::path own = job.owner(bm);
             std::error_code ec;
             fs::create_directories((job.fixes / from_u8(target)).parent_path(), ec);
-            fs::copy_file(own / from_u8(bm), job.fixes / from_u8(target), fs::copy_options::overwrite_existing, ec);
+            copy_over(own / from_u8(bm), job.fixes / from_u8(target), ec);
             if (ec) continue;
             dir = job.fixes;
         } else {
@@ -11705,7 +11705,7 @@ static void merge_nav_arrows(Job &job, const fs::path &xsrc, const std::vector<s
             }
             fs::path tmp = job.work / "map_waypoints.bitmap";
             std::error_code ec;
-            fs::copy_file(xsrc / from_u8(mab), tmp, fs::copy_options::overwrite_existing, ec);
+            copy_over(xsrc / from_u8(mab), tmp, ec);
             int got = !ec && shrink ? shrink_hud_bitmap_tag(tmp, shrink) : 0;
             if (!ec && got == shrink && merge_icon_sheets(xadir / from_u8(xab), tmp, (uint32_t)have, xsrc / from_u8(merged), &pictures) &&
                 job.edit(xhg, "arrow_bitmap", merged)) {
@@ -11789,7 +11789,7 @@ static bool map_hud_digits(Job &job, const fs::path &xsrc, const std::string &md
         fs::path to = xsrc / from_u8(sheet);
         std::error_code ec;
         fs::create_directories(to.parent_path(), ec);
-        fs::copy_file(bdir / from_u8(bm), to, fs::copy_options::overwrite_existing, ec);
+        copy_over(bdir / from_u8(bm), to, ec);
         if (ec || shrink_hud_bitmap_tag(to, halvings) != halvings) {
             fs::remove(to, ec);
             return false;
@@ -11907,7 +11907,7 @@ void merge_map_globals(Job &job, const fs::path &xsrc) {
                                    ? 1 + (flagged ? 1 : 0) : (flagged || hg_flag ? 1 : 0);
                     fs::path tmp = job.work / "map_icons.bitmap";
                     std::error_code ec;
-                    fs::copy_file(xsrc / from_u8(mi), tmp, fs::copy_options::overwrite_existing, ec);
+                    copy_over(xsrc / from_u8(mi), tmp, ec);
                     int got = !ec && want ? shrink_hud_bitmap_tag(tmp, want) : 0;
                     std::string merged = xi.substr(0, xi.size() - 7) + "_with_map.bitmap";
                     std::vector<int> src;
@@ -12267,7 +12267,7 @@ static bool copy_user_scripts(const Config &cfg, const fs::path &dir) {
     std::error_code ec;
     if (files.empty()) return false;
     fs::create_directories(dir, ec);
-    for (auto &f : files) fs::copy_file(f, dir / f.filename(), fs::copy_options::overwrite_existing, ec);
+    for (auto &f : files) copy_over(f, dir / f.filename(), ec);
     return true;
 }
 
@@ -12478,7 +12478,7 @@ static void campaign_apply(Job &job) {
         for (int piece : {1, 0, 2}) {
             if ((piece == 1 && !a.opening.found) || (piece == 2 && !a.closing.found)) continue;
             fs::path copy = scratch / (std::to_string(piece) + ".scenario");
-            fs::copy_file(scen_original, copy, fs::copy_options::overwrite_existing, ec);
+            copy_over(scen_original, copy, ec);
             std::string line = make(piece, a.opening.found, a.closing.found, copy, false);
             more += "- " + line + "\n";
             job.log("  [campaign] " + line);
@@ -12526,7 +12526,7 @@ bool prepare_for_xbox(Job &job, std::string &err) {
         }
         for (auto &f : files) {
             fs::create_directories((xsrc / from_u8(f)).parent_path(), ec);
-            fs::copy_file(job.user_tags / from_u8(f), xsrc / from_u8(f), fs::copy_options::overwrite_existing, ec);
+            copy_over(job.user_tags / from_u8(f), xsrc / from_u8(f), ec);
         }
         job.log("  copied the " + std::to_string(files.size()) + " tags your map uses");
     } else {
@@ -12604,7 +12604,7 @@ bool prepare_for_xbox(Job &job, std::string &err) {
             if (!in_overlay(dep) || !fs::exists(xsrc / from_u8(dep))) continue;
             std::string pc = dep.substr(0, dep.size() - 7) + "_pc.bitmap";
             if (!fs::exists(xsrc / from_u8(pc)))
-                fs::copy_file(xsrc / from_u8(dep), xsrc / from_u8(pc), fs::copy_options::overwrite_existing, ec);
+                copy_over(xsrc / from_u8(dep), xsrc / from_u8(pc), ec);
             std::string rout;
             if (run_process({u8(tool(cfg, "invader-refactor")), "-t", u8(xsrc), "-M", "no-move", "-s", tag, "-T", dep, pc},
                             rout) == 0)
@@ -12640,7 +12640,7 @@ bool prepare_for_xbox(Job &job, std::string &err) {
                 if (in_overlay(bm) || !fs::exists(xsrc / from_u8(bm))) continue; // a stock Xbox sheet
                 if (!meter_copy.count(bm)) {
                     std::string m = bm.substr(0, bm.size() - 7) + "_meter.bitmap";
-                    fs::copy_file(xsrc / from_u8(bm), xsrc / from_u8(m), fs::copy_options::overwrite_existing, ec);
+                    copy_over(xsrc / from_u8(bm), xsrc / from_u8(m), ec);
                     if (!ec && xbox_meter_bitmap_tag(xsrc / from_u8(m)) > 0) {
                         meter_copy[bm] = m;
                     } else {
@@ -13781,7 +13781,7 @@ void bot_route_points(Job &job, const fs::path &xsrc) {
             f << b << kind[i] << "\n";
         }
         std::error_code ec;
-        fs::copy_file(bdir / from_u8(bsp), job.work / "bots.scenario_structure_bsp", fs::copy_options::overwrite_existing, ec);
+        copy_over(bdir / from_u8(bsp), job.work / "bots.scenario_structure_bsp", ec);
     }
     std::vector<botnodes::V3> with_mine = points;
     with_mine.insert(with_mine.begin() + (std::ptrdiff_t)insert_at, mine.begin(), mine.end());
@@ -14529,7 +14529,7 @@ void fix_kept_weapons(Job &job, const fs::path &xsrc) {
             if (chain.empty()) continue;
             std::error_code ec;
             for (auto &c : chain)
-                fs::copy_file(xsrc / from_u8(c), xsrc / from_u8(pc_name(c)), fs::copy_options::overwrite_existing, ec);
+                copy_over(xsrc / from_u8(c), xsrc / from_u8(pc_name(c)), ec);
             for (size_t i = 0; i + 1 < chain.size(); i++)
                 run_process({u8(tool(cfg, "invader-edit")), "-t", u8(xsrc), pc_name(chain[i]), "-S", "child_hud",
                              pc_name(chain[i + 1])}, out);
@@ -14990,7 +14990,7 @@ fs::path resource_maps_for(Job &job, const fs::path &input, Game in_game, const 
         std::error_code e;
         fs::create_hard_link(d / n, both / n, e);
         if (e) { e.clear(); fs::create_symlink(d / n, both / n, e); }
-        if (e) { e.clear(); fs::copy_file(d / n, both / n, fs::copy_options::overwrite_existing, e); }
+        if (e) { e.clear(); copy_over(d / n, both / n, e); }
         return !e;
     };
     bool ok = true;
@@ -16849,7 +16849,7 @@ bool measure_prepared(const Config &cfg_in, const fs::path &update, ContentAnaly
     Result r = run_build(job, u.scenario, dummy, u.share);
     std::error_code ec;
     fs::path bak = job.work / "choices_backup.scenario";
-    if (!job.choices_scenario.empty() && fs::exists(bak)) fs::copy_file(bak, job.choices_scenario, fs::copy_options::overwrite_existing, ec);
+    if (!job.choices_scenario.empty() && fs::exists(bak)) copy_over(bak, job.choices_scenario, ec);
     fs::remove_all(job.work / "measure", ec);
     // (the models were done again with the options now: what's kept for the next build from these tags says so, so
     // it takes them back to as the map made them, copies included)

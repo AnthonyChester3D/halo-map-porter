@@ -109,8 +109,8 @@ enum {
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new83.exe is 1.83).
-#define HMP_VERSION L"1.83"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new84.exe is 1.84).
+#define HMP_VERSION L"1.84"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -1035,7 +1035,7 @@ static void save_map_card() {
         std::error_code ec;
         fs::path part = out;
         part += L".part";
-        fs::copy_file(in, part, fs::copy_options::overwrite_existing, ec);
+        copy_over(in, part, ec);
         if (!ec && !MoveFileExW(part.c_str(), out.c_str(), MOVEFILE_REPLACE_EXISTING))
             ec = std::error_code((int)GetLastError(), std::system_category());
         Done *d;

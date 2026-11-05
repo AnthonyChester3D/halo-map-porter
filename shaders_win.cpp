@@ -1,4 +1,5 @@
 // Halo Map Porter - the Xbox tab's "Level shaders" window (Windows). See shaders_win.hpp.
+#include "fsutil.hpp"
 #include "statuslamp_win.hpp"
 #include "dark.hpp"
 #include "shaders_win.hpp"
@@ -199,12 +200,12 @@ void keep_locked(const std::string &key, const fs::path &file) {
     fs::create_directories(g_disk, ec);
     fs::path lsh = disk_name(key), kf = lsh;
     kf.replace_extension(".key");
-    if (!fs::copy_file(file, lsh, fs::copy_options::overwrite_existing, ec)) { g_cache[key] = file; return; }
+    if (!copy_over(file, lsh, ec)) { g_cache[key] = file; return; }
     for (const char *side : {".bots", ".bots.scenario_structure_bsp"}) {   // (the bots' waypoints' data beside it)
         fs::path from = file, to = lsh;
         from += side;
         to += side;
-        if (fs::exists(from, ec)) fs::copy_file(from, to, fs::copy_options::overwrite_existing, ec);
+        if (fs::exists(from, ec)) copy_over(from, to, ec);
         else fs::remove(to, ec);
     }
     std::ofstream(kf, std::ios::binary) << key;

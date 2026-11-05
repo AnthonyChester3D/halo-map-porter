@@ -1,4 +1,5 @@
 // Halo Map Porter - Xbox map cards (portable part). See mapcard.hpp.
+#include "fsutil.hpp"
 #include "mapcard.hpp"
 
 #include <algorithm>
@@ -864,7 +865,7 @@ bool import_mcc_mod_card(const fs::path &dir, const fs::path &map_file, const st
                               ext == ".tif" || ext == ".tiff")) {
         for (auto &e : fs::directory_iterator(dir, ec))   // the editor keeps its picture as source.<ext>
             if (e.path().stem() == "source") fs::remove(e.path(), ec);
-        fs::copy_file(best_pic, dir / ("source" + ext), fs::copy_options::overwrite_existing, ec);
+        copy_over(best_pic, dir / ("source" + ext), ec);
         if (!ec) { c.image = "source" + ext; c.zoom = 1; c.cx = c.cy = 0.5; }
     }
     if (!save_card(dir, c)) return false;

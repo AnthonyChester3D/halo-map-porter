@@ -1,4 +1,5 @@
 // Halo Map Porter - map packs (portable part). See mappack.hpp.
+#include "fsutil.hpp"
 #include "mappack.hpp"
 
 #include <algorithm>
@@ -797,7 +798,7 @@ bool write_pack(const Pack &p, const std::string &pack_name, const fs::path &map
             if (old.is_regular_file() && lower(old.path().extension().u8string()) == ".map" && old.path().filename() != dst.filename())
                 fs::remove(old.path(), ec);
         if (!fs::equivalent(e.map_file, dst, ec)) {
-            fs::copy_file(e.map_file, dst, fs::copy_options::overwrite_existing, ec);
+            copy_over(e.map_file, dst, ec);
             if (ec) { err = "Couldn't copy " + e.map_file.u8string() + ": " + ec.message(); return false; }
         }
         std::string txt = e.name;   // line 1 = name, then the description, broken the way the Xbox shows it
