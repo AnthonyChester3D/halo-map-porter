@@ -4237,7 +4237,7 @@ int xbox_meter_bitmap_tag(const fs::path &p) {
     std::vector<uint32_t> offs;
     for (uint32_t i = 0; i < nbd; i++) offs.push_back(be32(b, bd_off + 48 * i + 24));
     int converted = 0;
-    bool to_32bit = false;
+    bool to_grey = false;
     auto swap_rgba = [](unsigned char *q) { // q = R,G,B,A
         unsigned char shape = std::max(q[0], std::max(q[1], q[2])), grad = q[3];
         q[0] = q[1] = q[2] = grad;
@@ -4257,12 +4257,18 @@ int xbox_meter_bitmap_tag(const fs::path &p) {
         unsigned char *d = (unsigned char *)&data[0];
         if (swizzled || type != 0) {
             // leave as is
-        } else if (fmt == 11) {                                   // A8R8G8B8: B,G,R,A bytes
+        } else if (fmt == 11) {   // A8R8G8B8 (B,G,R,A bytes): after the swap it's grey, so A8Y8 (Y,A: half the memory, nothing lost)
+            std::string grey;
+            grey.reserve(data.size() / 2);
             for (size_t k = 0; k + 4 <= data.size(); k += 4) {
                 unsigned char q[4] = {d[k + 2], d[k + 1], d[k], d[k + 3]};
                 swap_rgba(q);
-                d[k] = q[2]; d[k + 1] = q[1]; d[k + 2] = q[0]; d[k + 3] = q[3];
+                grey += (char)q[0];
+                grey += (char)q[3];
             }
+            data = grey;
+            put_be16(b, e + 12, 3);
+            to_grey = true;
             converted++;
         } else if (fmt == 3) {                                    // A8Y8: Y,A bytes
             for (size_t k = 0; k + 2 <= data.size(); k += 2) std::swap(d[k], d[k + 1]);
@@ -4297,15 +4303,15 @@ int xbox_meter_bitmap_tag(const fs::path &p) {
                     for (int x = 0; x < mw; x++) {
                         unsigned char *q = &rgba[((size_t)y * bw * 4 + x) * 4];
                         swap_rgba(q);
-                        char px[4] = {(char)q[2], (char)q[1], (char)q[0], (char)q[3]};
-                        enc.append(px, 4);
+                        char px[2] = {(char)q[0], (char)q[3]};   // (grey after the swap: A8Y8)
+                        enc.append(px, 2);
                     }
             }
             if (ok) {
                 data = enc;
-                put_be16(b, e + 12, 11);
+                put_be16(b, e + 12, 3);
                 put_be16(b, e + 14, flags & ~2);   // no longer compressed
-                to_32bit = true;
+                to_grey = true;
                 converted++;
             }
         }
@@ -4314,7 +4320,7 @@ int xbox_meter_bitmap_tag(const fs::path &p) {
         out_pix += data;
     }
     if (!converted) return 0;
-    if (to_32bit) put_be16(b, S + 2, 4); // tag-level format: 32-bit color
+    if (to_grey) put_be16(b, S + 2, 5); // tag-level format: monochrome
     std::string out = b.substr(0, pp_off) + out_pix + b.substr(pp_off + pp);
     put_be32(out, S + 48, (uint32_t)out_pix.size());
     put_be32(out, 40, ~crc32_of(out.data() + 64, out.size() - 64)); // HEK tag checksum
@@ -6068,6 +6074,19 @@ void cap_texture_sizes(Job &job, const std::vector<std::string> &deps) {
         if (!has_suffix(dep, ".bitmap")) continue;
         fs::path own = job.owner(dep);
         bool ours = own == job.fixes || (own == job.source && job.source != job.user_tags);
+        if (!own.empty() && own == job.overlay && cfg.xbox_max_texture > 0) {
+            // Bungie's own effects textures kept uncompressed (the Assault Rifle's and Pistol's muzzle flashes, 16-bit,
+            // 168 KB each): DXT, a half (with alpha) or a quarter, and a glow or a flare loses nothing to it. (Stock
+            // otherwise stays as it is.)
+            std::string l = "/" + dep;
+            for (auto &c : l) c = (char)tolower((unsigned char)c);
+            if (l.find("/effects/") != std::string::npos && compress_color_bitmap_tag(own / from_u8(dep), false) > 0) {
+                fs::path ed = editable_owner(job, dep, true);
+                int c = ed.empty() ? 0 : compress_color_kept(cfg, ed / from_u8(dep));
+                if (c > 0) compressed += c;
+            }
+            continue;
+        }
         if (own.empty() || !ours) continue; // stock (or your tags folder): leave alone
         std::string l = "/" + dep;
         for (auto &c : l) c = (char)tolower((unsigned char)c);
