@@ -1736,13 +1736,9 @@ struct In {
 };
 }   // namespace
 
-bool save(const Analysis &a, const Preview &p, const fs::path &file) {
-    std::error_code ec;
-    fs::create_directories(file.parent_path(), ec);
-    Out o;
-    o.f.open(file, std::ios::binary | std::ios::trunc);
-    if (!o.f) return false;
-    o.f.write(kMagic, 8);
+namespace {
+// One level (a BSP's measurement) in the file.
+void write_record(Out &o, const Analysis &a, const Preview &p) {
     o.str(a.map_name);
     o.raw((uint32_t)a.shaders.size());
     for (auto &s : a.shaders) {
@@ -1784,16 +1780,10 @@ bool save(const Analysis &a, const Preview &p, const fs::path &file) {
     }
     o.vec(p.objects);
     o.raw(p.sky_model);
-    return (bool)o.f;
 }
-
-bool load(Analysis &a, Preview &p, const fs::path &file) {
+bool read_record(In &in, Analysis &a, Preview &p) {
     a = Analysis();
     p = Preview();
-    In in;
-    in.f.open(file, std::ios::binary);
-    char magic[8];
-    if (!in.f || !in.f.read(magic, 8) || memcmp(magic, kMagic, 8)) return false;
     in.str(a.map_name);
     uint32_t n = 0;
     in.raw(n);
@@ -1864,6 +1854,203 @@ bool load(Analysis &a, Preview &p, const fs::path &file) {
     }
     for (auto &ob : p.objects) if (ob.model >= (int32_t)p.models.size()) return false;
     return in.ok && a.drawn.size() == (size_t)a.views * a.shaders.size();
+}
+// After the first level: its BSP's name, then each other BSP's name and level.
+const char kFirstName[8] = {'H', 'M', 'P', 'L', 'B', 'S', 'P', 'N'}, kNext[8] = {'H', 'M', 'P', 'L', 'B', 'S', 'P', '1'};
+}   // namespace
+
+bool save(const Analysis &a, const Preview &p, const fs::path &file) {
+    std::error_code ec;
+    fs::create_directories(file.parent_path(), ec);
+    Out o;
+    o.f.open(file, std::ios::binary | std::ios::trunc);
+    if (!o.f) return false;
+    o.f.write(kMagic, 8);
+    write_record(o, a, p);
+    return (bool)o.f;
+}
+
+bool load(Analysis &a, Preview &p, const fs::path &file) {
+    In in;
+    in.f.open(file, std::ios::binary);
+    char magic[8];
+    if (!in.f || !in.f.read(magic, 8) || memcmp(magic, kMagic, 8)) { a = Analysis(); p = Preview(); return false; }
+    return read_record(in, a, p);
+}
+
+bool append_level(const std::string &bsp, const Analysis &a, const Preview &p, const fs::path &file, bool first) {
+    Out o;
+    o.f.open(file, std::ios::binary | std::ios::app);
+    if (!o.f) return false;
+    o.f.write(first ? kFirstName : kNext, 8);
+    o.str(bsp);
+    if (!first) write_record(o, a, p);
+    return (bool)o.f;
+}
+
+bool load_levels(const fs::path &file, const std::vector<char> &on, std::vector<Level> &out) {
+    out.clear();
+    In in;
+    in.f.open(file, std::ios::binary);
+    char magic[8];
+    if (!in.f || !in.f.read(magic, 8) || memcmp(magic, kMagic, 8)) return false;
+    Level first;
+    if (!read_record(in, first.a, first.p)) return false;
+    first.on = on.empty() || on[0];
+    out.push_back(std::move(first));
+    while (in.f.read(magic, 8)) {
+        bool name0 = !memcmp(magic, kFirstName, 8);
+        if (!name0 && memcmp(magic, kNext, 8)) break;
+        std::string name;
+        in.str(name);
+        if (!in.ok) break;
+        if (name0) { out[0].name = name; continue; }
+        Level l;
+        l.name = name;
+        if (!read_record(in, l.a, l.p)) break;
+        l.on = out.size() < on.size() && on[out.size()];
+        out.push_back(std::move(l));
+    }
+    // (the ones not shown: only what says which room a point is in)
+    for (auto &l : out)
+        if (!l.on) {
+            Preview keep;
+            keep.tree = std::move(l.p.tree);
+            keep.leaf_room = std::move(l.p.leaf_room);
+            keep.rooms = l.p.rooms;
+            l.p = std::move(keep);
+            l.a = Analysis();
+        }
+    return true;
+}
+
+void merge(const std::vector<Level> &levels, Analysis &a, Preview &p) {
+    a = Analysis();
+    p = Preview();
+    std::vector<const Level *> on;
+    for (auto &l : levels) if (l.on) on.push_back(&l);
+    if (on.empty()) return;
+    // The analysis: its shaders by tag; each one's views, the rendered ones first (as one level has them).
+    std::map<std::string, int> shader_at;
+    std::vector<std::vector<int>> remap(on.size());
+    std::vector<double> weight;
+    for (size_t k = 0; k < on.size(); k++)
+        for (auto &s : on[k]->a.shaders) {
+            auto it = shader_at.find(s.tag);
+            int at;
+            if (it == shader_at.end()) {
+                at = (int)a.shaders.size();
+                shader_at[s.tag] = at;
+                a.shaders.push_back(s);
+                a.shaders.back().triangles = 0;
+                a.shaders.back().drawn = a.shaders.back().shows = a.shaders.back().strength = a.shaders.back().coverage = 0;
+                a.shaders.back().suggested = false;
+                weight.push_back(0);
+            } else at = it->second;
+            remap[k].push_back(at);
+            Shader &u = a.shaders[(size_t)at];
+            double w = std::max(1, on[k]->a.views);
+            u.triangles += s.triangles;
+            u.drawn += s.drawn * w; u.shows += s.shows * w; u.strength += s.strength * w; u.coverage += s.coverage * w;
+            u.suggested = u.suggested || s.suggested;
+            weight[(size_t)at] += w;
+        }
+    for (size_t i = 0; i < a.shaders.size(); i++)
+        if (weight[i] > 0) {
+            Shader &u = a.shaders[i];
+            u.drawn /= weight[i]; u.shows /= weight[i]; u.strength /= weight[i]; u.coverage /= weight[i];
+        }
+    const size_t ns = a.shaders.size();
+    for (int pass = 0; pass < 2; pass++)   // (0: the rendered views, 1: the rest)
+        for (size_t k = 0; k < on.size(); k++) {
+            const Analysis &la = on[k]->a;
+            const size_t ls = la.shaders.size();
+            int from = pass ? la.rendered : 0, to = pass ? la.views : la.rendered;
+            for (int v = from; v < to; v++) {
+                std::vector<int> row(ns, 0);
+                for (size_t s = 0; s < ls; s++) row[(size_t)remap[k][s]] = la.drawn[(size_t)v * ls + s];
+                a.drawn.insert(a.drawn.end(), row.begin(), row.end());
+                a.other.push_back((size_t)v < la.other.size() ? la.other[(size_t)v] : 0);
+                if (!pass) {
+                    std::vector<float> sh(ns, 0.f);
+                    for (size_t s = 0; s < ls && (size_t)v * ls + s < la.shows.size(); s++) sh[(size_t)remap[k][s]] = la.shows[(size_t)v * ls + s];
+                    a.shows.insert(a.shows.end(), sh.begin(), sh.end());
+                }
+                if ((size_t)v < on[k]->p.views.size()) p.views.push_back(on[k]->p.views[(size_t)v]);
+                a.views++;
+                if (!pass) a.rendered++;
+            }
+        }
+    for (size_t k = 0; k < on.size(); k++) a.map_name += (k ? ", " : "") + on[k]->name;
+
+    // The picture: every shown level's surfaces, its rooms and portals after the others'.
+    const Preview &p0 = on[0]->p;
+    p.sky_fog = p0.sky_fog;
+    p.indoor_fog = p0.indoor_fog;
+    p.weather = p0.weather;
+    p.content = p0.content;
+    p.marks = p0.marks;
+    p.boxes = p0.boxes;
+    p.tree = p0.tree;           // (one level's tree: the first shown one's rooms come first)
+    p.leaf_room = p0.leaf_room;
+    std::vector<int32_t> tex_base(on.size());
+    std::map<std::string, int32_t> model_at;
+    std::vector<std::vector<int32_t>> model_remap(on.size());
+    for (size_t k = 0; k < on.size(); k++) {
+        const Preview &lp = on[k]->p;
+        const int32_t tb = (int32_t)p.textures.size(), mb = (int32_t)p.materials.size(), rb = p.rooms;
+        tex_base[k] = tb;
+        p.textures.insert(p.textures.end(), lp.textures.begin(), lp.textures.end());
+        for (auto m : lp.materials) {
+            if (m.shader >= 0) m.shader = remap[k][(size_t)m.shader];
+            for (int *t : {&m.base, &m.detail, &m.cube, &m.cutout}) if (*t >= 0) *t += tb;
+            p.materials.push_back(m);
+        }
+        p.material_tags.insert(p.material_tags.end(), lp.material_tags.begin(), lp.material_tags.end());
+        for (auto t : lp.triangles) {
+            if (t.material >= 0) t.material += mb;
+            if (t.lightmap >= 0) t.lightmap += tb;
+            p.triangles.push_back(t);
+        }
+        for (int16_t r : lp.room) p.room.push_back(r >= 0 ? (int16_t)(r + rb) : r);
+        for (auto po : lp.portals) {
+            if (po.front >= 0) po.front += rb;
+            if (po.back >= 0) po.back += rb;
+            p.portals.push_back(po);
+        }
+        p.room_sky.insert(p.room_sky.end(), lp.room_sky.begin(), lp.room_sky.end());
+        p.rooms += lp.rooms;
+        // its models, each once (by tag), with its textures
+        for (auto &m : lp.models) {
+            auto it = model_at.find(m.tag);
+            if (it == model_at.end()) {
+                Model c = m;
+                for (auto &pt : c.parts) if (pt.texture >= 0) pt.texture += tb;
+                it = model_at.emplace(m.tag, (int32_t)p.models.size()).first;
+                p.models.push_back(std::move(c));
+            }
+            model_remap[k].push_back(it->second);
+        }
+    }
+    if (p0.sky_model >= 0 && (size_t)p0.sky_model < model_remap[0].size()) p.sky_model = model_remap[0][(size_t)p0.sky_model];
+    // The objects: each from the shown level it's in (lit by that one); in none of the level's BSPs, the first
+    // shown one's; in a BSP not shown, left out.
+    auto in_level = [](const Level &l, const float q[3]) { return l.p.room_at({q[0], q[1], q[2]}) >= 0; };
+    for (size_t k = 0; k < on.size(); k++)
+        for (auto o : on[k]->p.objects) {
+            bool mine = in_level(*on[k], o.p), elsewhere = false;
+            if (!mine) {
+                if (k != 0) continue;
+                for (auto &l : levels) if (&l != on[0] && in_level(l, o.p)) { elsewhere = true; break; }
+                if (elsewhere) continue;
+            } else {
+                bool earlier = false;   // (in two shown levels: the first one's)
+                for (size_t j = 0; j < k; j++) if (in_level(*on[j], o.p)) earlier = true;
+                if (earlier) continue;
+            }
+            if (o.model >= 0) o.model = model_remap[k][(size_t)o.model];
+            p.objects.push_back(o);
+        }
 }
 
 bool drop_reflection(const fs::path &shader) {

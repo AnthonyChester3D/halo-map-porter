@@ -6539,9 +6539,13 @@ void xbox_reflections(Job &job) {
         }
         a.map_name = fs::path(from_u8(job.scenario)).filename().u8string() + (bsps.size() > 1 ? " - " + fs::path(from_u8(b)).stem().u8string() : "");
         lshade::suggest(a);
-        if (job.shaders_file.empty()) {   // (the window shows the first level)
+        // The Level window's file: the first level, then each other BSP's (it shows the ones you pick, together).
+        const std::string bsp_name = fs::path(from_u8(b)).stem().u8string();
+        if (job.shaders_file.empty()) {
             fs::path f = cfg.cache_dir / "levels" / (fs::path(from_u8(job.scenario)).filename().u8string() + ".lsh");
-            if (lshade::save(a, p, f)) job.shaders_file = f;
+            if (lshade::save(a, p, f) && (bsps.size() < 2 || lshade::append_level(bsp_name, a, p, f, true))) job.shaders_file = f;
+        } else if (bsps.size() > 1) {
+            lshade::append_level(bsp_name, a, p, job.shaders_file, false);
         }
         if (cfg.write_perf_tour && !cfg.level_shaders_only && job.perf_tour.empty())   // (the first level: the one a match loads)
             job.perf_tour = make_perf_tour(a, p, stag.root(), a.map_name);

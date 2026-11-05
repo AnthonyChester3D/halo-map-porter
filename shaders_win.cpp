@@ -39,7 +39,7 @@ enum {
     IDC_FOG_START, IDC_FOG_TO, IDC_OBJECTS, IDC_SHOWSKY,
     IDC_BOTS, IDC_BOTS_TEXT, IDC_BOTS_LIST, IDC_BOTS_DEL, IDC_BOTS_CLEAR, IDC_BOTS_NEXT, IDC_BOTS_THROUGH, IDC_BOTS_GOOD,
     IDC_BOTS_HIDE, IDC_LAD_LBL, IDC_LAD_LIST, IDC_LAD_ADD, IDC_LAD_FOOT, IDC_LAD_TOP, IDC_LAD_TURN, IDC_LAD_DEL,
-    IDC_LAD_DOWN, IDC_LAD_EXPORT, IDC_LAD_STACKED, IDC_BOTS_HINT, IDC_LAMP,
+    IDC_LAD_DOWN, IDC_LAD_EXPORT, IDC_LAD_STACKED, IDC_BOTS_HINT, IDC_LAMP, IDC_BSPS,
 };
 #define WM_LS_LOG (WM_APP + 60)
 #define WM_LS_DONE (WM_APP + 61)
@@ -47,6 +47,9 @@ enum {
 struct Data {
     lshade::Analysis a;
     lshade::Preview p;
+    // A campaign level's BSPs (the measurement has each): their names, and which are shown (merged into a and p).
+    std::vector<std::string> bsps;
+    std::vector<char> on;
 };
 
 struct State {
@@ -1433,17 +1436,34 @@ void start_measure() {
 }
 
 void bots_loaded_now();
-bool load_file(const fs::path &f) {
+// `on`: the BSPs shown (by position; empty: the first). A new measurement (not just other BSPs shown) checks the picks.
+bool load_file(const fs::path &f, const std::vector<char> &on = {}) {
     auto d = std::make_shared<Data>();
-    if (!lshade::load(d->a, d->p, f)) return false;
+    std::vector<lshade::Level> ls;
+    if (!lshade::load_levels(f, on, ls)) return false;
+    if (ls.size() == 1) {
+        d->a = std::move(ls[0].a);
+        d->p = std::move(ls[0].p);
+    } else {
+        lshade::merge(ls, d->a, d->p);
+    }
+    for (auto &l : ls) {
+        d->bsps.push_back(l.name);
+        d->on.push_back(l.on);
+    }
+    const bool same_file = St->file == f && St->data;
     St->data = d;
     St->file = f;
     St->bots_loaded = false;
+    ShowWindow(item(IDC_BSPS), d->bsps.size() > 1 ? SW_SHOW : SW_HIDE);
     if (St->gl) St->gl->set_scene(&d->p);   // (before anything draws: the old level is gone)
     // (picks made against an older measurement keep only the shaders still there)
-    std::set<std::string> tags;
-    for (auto &s : d->a.shaders) tags.insert(s.tag);
-    for (auto it = St->picks.drops.begin(); it != St->picks.drops.end();) it = tags.count(*it) ? std::next(it) : St->picks.drops.erase(it);
+    if (!same_file) {
+        std::set<std::string> tags;
+        for (auto &s : d->a.shaders) tags.insert(s.tag);
+        if (d->bsps.size() < 2)
+            for (auto it = St->picks.drops.begin(); it != St->picks.drops.end();) it = tags.count(*it) ? std::next(it) : St->picks.drops.erase(it);
+    }
     fill_list();
     if (St->bots_mode) bots_loaded_now();
     return true;
@@ -1727,7 +1747,9 @@ void create_controls() {
         IDC_MODE0);
     add(L"BUTTON", L"Drop the ones I tick", BS_AUTORADIOBUTTON, 756, 12, 160, 22, IDC_MODE1);
     St->lamp = statuslamp::create(St->wnd, S(12), S(44), S(56), S(16), IDC_LAMP);
-    add(L"STATIC", L"", 0, 76, 42, 1092, 20, IDC_STATUS);
+    add(L"STATIC", L"", 0, 76, 42, 1004, 20, IDC_STATUS);
+    add(L"BUTTON", L"BSPs...", BS_PUSHBUTTON | WS_TABSTOP, 1088, 38, 80, 24, IDC_BSPS);
+    ShowWindow(item(IDC_BSPS), SW_HIDE);
     St->list = add(WC_LISTVIEWW, L"", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP, 12, 68, 548, 646, IDC_LIST);
     ListView_SetExtendedListViewStyle(St->list, LVS_EX_FULLROWSELECT | LVS_EX_CHECKBOXES | LVS_EX_DOUBLEBUFFER);
     struct Col { const wchar_t *name; int w; } cols[] = {{L"Shader (ticked: reflection goes)", 184}, {L"Extra passes", 84},
@@ -1933,6 +1955,8 @@ void create_controls() {
     tip(IDC_CHANGES, L"The converted picture dimmed, with the reflections that go lit up: what the conversion takes away.");
     tip(IDC_HILITE, L"Tints the shader selected in the list pink, so you can find its surfaces.");
     tip(IDC_SHOWSKY, L"Draws the map's sky behind the level, as the game does (its layers blended, still; with the graphics card's picture only), to frame the showcase's shots against it.");
+    tip(IDC_BSPS, L"A campaign level's BSPs (its loading zones): tick the ones to show, together. The placed objects in a BSP "
+                  L"that isn't shown are left out; the shader list covers the ones shown.");
     tip(IDC_PORTALS, L"Outlines each portal in yellow (the openings the engine looks through from one room to the next), "
                      L"glowing orange where you can see through it, and tints each room (cluster) a colour of its own. The engine draws the room you're in, then only the rooms "
                      L"it can see through portals, so walls between rooms hide what's behind them.");
@@ -2208,6 +2232,32 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 if (k == 0 || k == 1) (id == IDC_RIDERS ? St->picks.riders : St->picks.props) = k;
             }
             return 0;
+        case IDC_BSPS: {   // a campaign level's BSPs: which are shown, together
+            if (!St->data || St->data->bsps.size() < 2) return 0;
+            const auto &d = *St->data;
+            HMENU m = CreatePopupMenu();
+            for (size_t i = 0; i < d.bsps.size(); i++)
+                AppendMenuW(m, MF_STRING | (d.on[i] ? MF_CHECKED : 0), 1 + i,
+                            W(d.bsps[i].empty() ? "BSP " + std::to_string(i + 1) : d.bsps[i]).c_str());
+            AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+            AppendMenuW(m, MF_STRING, 1000, L"Show all");
+            AppendMenuW(m, MF_STRING, 1001, L"Only the first");
+            RECT r;
+            GetWindowRect(item(IDC_BSPS), &r);
+            int cmd = (int)TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, r.left, r.bottom, 0, h, nullptr);
+            DestroyMenu(m);
+            if (cmd <= 0) return 0;
+            std::vector<char> on = d.on;
+            if (cmd == 1000) std::fill(on.begin(), on.end(), 1);
+            else if (cmd == 1001) { std::fill(on.begin(), on.end(), 0); on[0] = 1; }
+            else if ((size_t)cmd <= on.size()) on[(size_t)cmd - 1] = !on[(size_t)cmd - 1];
+            if (std::find(on.begin(), on.end(), 1) == on.end()) return 0;   // (one at least)
+            HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
+            load_file(St->file, on);
+            SetCursor(old);
+            render(false);
+            return 0;
+        }
         case IDC_PORTALS:
             St->portals = IsDlgButtonChecked(h, IDC_PORTALS) == BST_CHECKED;
             render(false);

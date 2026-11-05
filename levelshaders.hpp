@@ -241,7 +241,18 @@ int pick(const Preview &p, const Camera &c, int w, int h, double x, double y, st
 
 // The analysis and preview in a file (for the level shaders window), and back.
 bool save(const Analysis &a, const Preview &p, const std::filesystem::path &file);
-bool load(Analysis &a, Preview &p, const std::filesystem::path &file);
+bool load(Analysis &a, Preview &p, const std::filesystem::path &file);   // (the first level, when the file has more)
+// A campaign level's BSPs, each measured, in one file: save() writes the first, append_level(first = true) its BSP's
+// name, then append_level each other one's.
+bool append_level(const std::string &bsp, const Analysis &a, const Preview &p, const std::filesystem::path &file, bool first);
+// The file's levels (one per BSP; just the one when it has no names): those `on` says (by position; empty: the first)
+// read whole, the others only enough to tell which room a point is in (Level::on false).
+struct Level { std::string name; Analysis a; Preview p; bool on = false; };
+bool load_levels(const std::filesystem::path &file, const std::vector<char> &on, std::vector<Level> &out);
+// The shown levels as one: their shaders by tag (counts added, averages over their views), their surfaces, rooms and
+// portals one after another, their models once each, and each placed object from the shown level it's in (one in a
+// level not shown is left out). The fog, weather, marks and room lookup are the first shown one's.
+void merge(const std::vector<Level> &levels, Analysis &a, Preview &p);
 
 // Drops the reflection of a shader_environment tag (saved in place): both brightnesses 0, no cube map.
 bool drop_reflection(const std::filesystem::path &shader);

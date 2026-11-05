@@ -1304,6 +1304,11 @@ Level reflections, fog, scenery, weather and more: the "Level..." window (Xbox)
   - "Showcase flythrough...": the camera shots for Halo 1 Unlimited's
     showcase screensaver, played and made in the picture (see "Showcase
     flythroughs" below).
+  - "BSPs..." (a campaign level with more than one BSP): tick the BSPs
+    to show, together. Each placed object comes from the BSP it's in,
+    lit by it; objects in a BSP that isn't shown are left out, and the
+    shader list covers the ones shown. Measure the map again to get a
+    measurement made before this with every BSP in it.
   - "Portals": each portal outlined in yellow, glowing orange where
     you can see through it, and each room (cluster) tinted a colour of its
     own. The engine draws the room you're in, then only the rooms it can
