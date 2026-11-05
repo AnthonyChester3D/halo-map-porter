@@ -40,6 +40,11 @@ struct Fill {
 };
 // The sky as it is (`sky`: the .sky tag).
 Fill measure(const std::string &sky, const Find &find);
+// Its layers, in the order they're drawn: each part's shader, the layers per pixel it adds (its share of measure's,
+// passes counted), whether its texture moves (clouds sliding: it can't be baked with the others without losing that),
+// and how it blends (0 by its alpha, 1 added, 2 multiplied, 3 multiplied twice).
+struct Layer { std::string shader; double fill = 0; bool moving = false; int blend = 0, passes = 1; };
+std::vector<Layer> layers(const std::string &sky, const Find &find);
 
 struct Lightened {
     bool changed = false;

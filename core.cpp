@@ -2068,6 +2068,7 @@ static bool scenario_is_campaign(const Job &job) {
 // that don't name an encounter that went (an estimate: the real split would also carry the player over). Each half
 // is built in a folder of its own (its scenario and scripts read first), several at once; the conversion's tags stay
 // as they were.
+static void drop_unplaced_palette(Job &job, const fs::path &xsrc);
 static std::string campaign_halves(Job &job, std::vector<std::string> cmd) {
     std::error_code ec;
     const std::string scen = job.scenario + ".scenario";
@@ -6312,18 +6313,186 @@ void cap_texture_sizes(Job &job, const std::vector<std::string> &deps) {
 // All Xbox-only content passes that need the finished tag set.
 // The map's animations stored as keyframes, the way Bungie stored the Xbox's cinematics (animcomp.hpp): its own, and
 // the Xbox's it uses (copied to fixes). Also when measuring for the weapons & vehicles window: the map has them so.
+// What a character's animation graph needs in this map (xbox_animations): the engine picks a unit's animations by its
+// seat's label (the base seats, asleep to flaming, or the label of the vehicle seat it's in) and its weapon's label (a
+// weapon type's, in the seat's weapon classes: units.c, unit_set_or_test_seat_and_weapon_label). AI only ever hold the
+// weapon their actor variant gives them (actors.c); players and scripts (unit_add_equipment) any weapon in the map. So
+// seats of vehicles the map doesn't have, and weapon types of weapons it doesn't have, play nothing here; their
+// animations, when nothing else plays them, only take tag memory. Scripts play animations by name (custom_animation,
+// the scenario's AI animation references) and set seats by label (unit_set_seat): those stay.
+struct AnimNeeds {
+    bool ok = false;                    // (the scripts were read: else nothing is left out)
+    std::set<std::string> graphs;       // the characters' (bipeds') graphs
+    std::set<std::string> seats, weapons, names;   // labels and names, lowercase
+};
+static AnimNeeds anim_needs(Job &job, const std::vector<std::string> &deps) {
+    AnimNeeds a;
+    auto lc = [](std::string s) { for (auto &c : s) c = (char)tolower((unsigned char)c); return s; };
+    for (const char *b : {"asleep", "alert", "stand", "crouch", "flee", "flaming"}) a.seats.insert(b);
+    a.weapons.insert("");   // (unarmed: a weapon type with no label)
+    for (auto &dep : deps) {
+        fs::path own = job.owner(dep);
+        if (own.empty()) continue;
+        tagfile::Tag t;
+        if (has_suffix(dep, ".biped")) {
+            if (!t.load(own / from_u8(dep))) continue;
+            std::string g = t.root().ref("animation graph");
+            if (!g.empty()) a.graphs.insert(lc(norm_rel(g + ".model_animations")));
+            auto st = t.root().block("seats");
+            for (size_t i = 0; i < st.size(); i++) a.seats.insert(lc(st[i].str("label")));
+        } else if (has_suffix(dep, ".vehicle")) {
+            if (!t.load(own / from_u8(dep))) continue;
+            auto st = t.root().block("seats");
+            for (size_t i = 0; i < st.size(); i++) a.seats.insert(lc(st[i].str("label")));
+        } else if (has_suffix(dep, ".weapon")) {
+            if (t.load(own / from_u8(dep))) a.weapons.insert(lc(t.root().str("label")));
+        }
+    }
+    // The scripts' strings (animation names, seat labels) and the scenario's AI animation references.
+    std::error_code ec;
+    int files = 0;
+    for (auto it = fs::recursive_directory_iterator(job.work / "xbox_data", ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        if (it->path().extension() != ".hsc") continue;
+        std::ifstream f(it->path(), std::ios::binary);
+        std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        files++;
+        for (size_t i = 0; (i = text.find('"', i)) != std::string::npos;) {
+            size_t j = text.find('"', i + 1);
+            if (j == std::string::npos) break;
+            std::string w = lc(text.substr(i + 1, j - i - 1));
+            a.names.insert(w);
+            a.seats.insert(w);
+            i = j + 1;
+        }
+    }
+    std::string scen = job.scenario + ".scenario";
+    fs::path sdir = job.owner(scen);
+    tagfile::Tag st;
+    if (!sdir.empty() && st.load(sdir / from_u8(scen))) {
+        auto r = st.root().block("ai animation references");
+        for (size_t i = 0; i < r.size(); i++) a.names.insert(lc(r[i].str("animation name")));
+        // (a scenario with scripts but none read back: can't tell what they play)
+        a.ok = files > 0 || st.root().block("scripts").size() == 0;
+    }
+    return a;
+}
+// Leaves out of a character's graph the seats and weapon types it can't use here and the animations only they played
+// (anim_needs), the rest renumbered. Returns how many animations went; `bytes`: their data.
+static int trim_graph(tagfile::TagNode &root, const AnimNeeds &need, size_t &bytes) {
+    using tagfile::TagNode;
+    auto lc = [](std::string s) { for (auto &c : s) c = (char)tolower((unsigned char)c); return s; };
+    std::vector<TagNode> *anims = tagfile::block(root, "animations");
+    if (!anims || anims->empty()) return 0;
+    const size_t n = anims->size();
+    std::vector<char> keep(n, 0);
+    auto mark = [&](std::vector<TagNode> *b) {
+        if (!b) return;
+        for (auto &e : *b) {
+            double i = tagfile::get_num(e, "animation");
+            if (i >= 0 && i < (double)n) keep[(size_t)i] = 1;
+        }
+    };
+    auto each = [&](const char *field, const std::function<void(TagNode &)> &f) {
+        if (auto *b = tagfile::block(root, field)) for (auto &e : *b) f(e);
+    };
+    mark(tagfile::block(root, "objects"));
+    each("weapons", [&](TagNode &e) { mark(tagfile::block(e, "animations")); });
+    each("vehicles", [&](TagNode &e) { mark(tagfile::block(e, "animations")); mark(tagfile::block(e, "suspension animations")); });
+    each("devices", [&](TagNode &e) { mark(tagfile::block(e, "animations")); });
+    mark(tagfile::block(root, "unit damage"));
+    each("first person weapons", [&](TagNode &e) { mark(tagfile::block(e, "animations")); });
+    if (auto *units = tagfile::block(root, "units")) {
+        std::vector<TagNode> left;
+        for (auto &u : *units) {
+            if (!need.seats.count(lc(tagfile::get_str(u, "label")))) continue;
+            mark(tagfile::block(u, "animations"));
+            if (auto *classes = tagfile::block(u, "weapons")) {
+                std::vector<TagNode> kept_classes;
+                for (auto &wc : *classes) {
+                    std::vector<TagNode> *types = tagfile::block(wc, "weapon types");
+                    if (types && !types->empty()) {
+                        std::vector<TagNode> kept_types;
+                        for (auto &wt : *types)
+                            if (need.weapons.count(lc(tagfile::get_str(wt, "label")))) kept_types.push_back(wt);
+                        if (kept_types.empty()) continue;   // (no weapon of this class here)
+                        *types = std::move(kept_types);
+                        for (auto &wt : *types) mark(tagfile::block(wt, "animations"));
+                    }
+                    mark(tagfile::block(wc, "animations"));
+                    kept_classes.push_back(wc);
+                }
+                if (kept_classes.empty() && !classes->empty()) kept_classes.push_back(classes->front());   // (a seat needs one)
+                *classes = std::move(kept_classes);
+                for (auto &wc : *classes) mark(tagfile::block(wc, "animations"));
+            }
+            left.push_back(u);
+        }
+        if (!left.empty()) *units = std::move(left);
+        else for (auto &u : *units) mark(tagfile::block(u, "animations"));   // (none left: as it was)
+    }
+    for (size_t i = 0; i < n; i++)
+        if (need.names.count(lc(tagfile::get_str((*anims)[i], "name")))) keep[i] = 1;
+    for (bool more = true; more;) {   // (an animation's permutations follow it: "next animation")
+        more = false;
+        for (size_t i = 0; i < n; i++) {
+            if (!keep[i]) continue;
+            double x = tagfile::get_num((*anims)[i], "next animation");
+            if (x >= 0 && x < (double)n && !keep[(size_t)x]) { keep[(size_t)x] = 1; more = true; }
+        }
+    }
+    std::vector<int> to(n, -1);
+    std::vector<TagNode> kept;
+    int gone = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (keep[i]) { to[i] = (int)kept.size(); kept.push_back((*anims)[i]); continue; }
+        gone++;
+        for (const char *d : {"frame data", "default data", "frame info"})
+            if (std::string *b = tagfile::data((*anims)[i], d)) bytes += b->size();
+    }
+    if (!gone) return 0;
+    auto remap = [&](TagNode &e, const char *f) {
+        double i = tagfile::get_num(e, f);
+        if (i >= 0 && i < (double)n) tagfile::set_num(e, f, to[(size_t)i] < 0 ? 65535 : to[(size_t)i]);
+    };
+    auto remap_all = [&](std::vector<TagNode> *b) { if (b) for (auto &e : *b) remap(e, "animation"); };
+    *anims = std::move(kept);
+    for (auto &a : *anims) { remap(a, "next animation"); remap(a, "main animation index"); }
+    remap_all(tagfile::block(root, "objects"));
+    each("weapons", [&](TagNode &e) { remap_all(tagfile::block(e, "animations")); });
+    each("vehicles", [&](TagNode &e) { remap_all(tagfile::block(e, "animations")); remap_all(tagfile::block(e, "suspension animations")); });
+    each("devices", [&](TagNode &e) { remap_all(tagfile::block(e, "animations")); });
+    remap_all(tagfile::block(root, "unit damage"));
+    each("first person weapons", [&](TagNode &e) { remap_all(tagfile::block(e, "animations")); });
+    each("units", [&](TagNode &u) {
+        remap_all(tagfile::block(u, "animations"));
+        if (auto *classes = tagfile::block(u, "weapons"))
+            for (auto &wc : *classes) {
+                remap_all(tagfile::block(wc, "animations"));
+                if (auto *types = tagfile::block(wc, "weapon types")) for (auto &wt : *types) remap_all(tagfile::block(wt, "animations"));
+            }
+    });
+    return gone;
+}
+
 static void xbox_animations(Job &job, const std::vector<std::string> &deps) {
     const int level = job.cfg.xbox_compress_animations;
     int graphs = 0, anims = 0, stock = 0, restored = 0;
     size_t before = 0, after = 0;
     double worst = 0;
+    const AnimNeeds need = anim_needs(job, deps);
+    int trimmed_graphs = 0, trimmed = 0;
+    size_t trimmed_bytes = 0;
     for (auto &dep : deps) {
         if (!has_suffix(dep, ".model_animations")) continue;
         fs::path own = job.owner(dep);
         tagfile::EditTag ed;
         if (own.empty() || !ed.load(own / from_u8(dep))) continue;
+        std::string dep_lc = dep;
+        for (auto &c : dep_lc) c = (char)tolower((unsigned char)c);
+        int gone = need.ok && need.graphs.count(dep_lc) ? trim_graph(ed.root(), need, trimmed_bytes) : 0;
+        if (gone) { trimmed_graphs++; trimmed += gone; }
         animcomp::GraphResult r = animcomp::compress_graph(ed.root(), level);
-        if (!r.compressed && !r.overlays_restored) continue;
+        if (!r.compressed && !r.overlays_restored && !gone) continue;
         fs::path dst = editable_owner(job, dep, true);
         if (dst.empty() || !ed.save(dst / from_u8(dep))) continue;
         restored += r.overlays_restored;
@@ -6334,6 +6503,13 @@ static void xbox_animations(Job &job, const std::vector<std::string> &deps) {
         after += r.after;
         worst = std::max(worst, r.worst);
         if (own == job.overlay) stock++;
+    }
+    if (trimmed) {
+        char kb[32];
+        snprintf(kb, sizeof kb, "%.1f MB", trimmed_bytes / 1048576.0);
+        job.note("[anim] left out " + std::to_string(trimmed) + " animations of " + std::to_string(trimmed_graphs) +
+                 " characters' animation graphs that only vehicle seats or weapons this map doesn't have use (" + kb +
+                 " as made; AI only hold the weapon their actor variant gives them, and what the scripts play by name stays)");
     }
     if (restored)
         job.note("[anim] gave " + std::to_string(restored) + " compressed overlay animations their frames back: the Xbox " +
@@ -8670,6 +8846,25 @@ void xbox_sky(Job &job) {
         job.note("[sky] " + fs::path(from_u8(s)).stem().u8string() + ": " + layers_text(r.before.layers) + " layers drawn per pixel, now " +
                  layers_text(r.after.layers) + " (" + layers_text(r.before.worst) + " and " + layers_text(r.after.worst) +
                  " looking up), looking the same (Bungie's multiplayer skies draw 0.8 to 1.4): " + what);
+    }
+    // Each heavy sky's layers as drawn now (the ones over a tenth of a screen each), for deciding what could go.
+    done.clear();
+    for (size_t i = 0; i < skies.size(); i++) {
+        std::string s = skies[i].ref("sky");
+        if (s.empty() || !done.insert(s).second) continue;
+        sky::Fill f = sky::measure(s, find);
+        if (!f.ok || f.layers < 2.0) continue;
+        std::string list;
+        int small = 0;
+        for (auto &l : sky::layers(s, find)) {
+            if (l.fill < 0.1) { small++; continue; }
+            char b[160];
+            snprintf(b, sizeof b, "%s%s %.2f%s", list.empty() ? "" : ", ", fs::path(from_u8(l.shader)).stem().u8string().c_str(), l.fill,
+                     l.moving ? " (moves)" : "");
+            list += b;
+        }
+        if (small) list += ", and " + std::to_string(small) + " smaller";
+        job.log("  [sky] " + fs::path(from_u8(s)).stem().u8string() + "'s layers, in the order drawn (screens each covers): " + list);
     }
 }
 
@@ -12557,6 +12752,7 @@ bool prepare_for_xbox(Job &job, std::string &err) {
         trim_unobtainable(job, xsrc);
         trim_machines(job, xsrc);
         apply_replacements(job, xsrc);
+        drop_unplaced_palette(job, xsrc);   // (what the picks replaced)
         tidy_weapon_list(job);
         fix_seat_labels(job, xsrc);
     }
@@ -14719,7 +14915,11 @@ int cheat_powerup_use(const std::string &script_text, int script_count) {
     return 0;
 }
 
-void trim_unobtainable(Job &job, const fs::path &xsrc) {
+// Palette entries (weapons, equipment, vehicles, bipeds, scenery) nothing is placed from, in any map: only a placement
+// brings one into the game (scripts and AI name placed objects; squads and starting locations name actor types, not
+// vehicles), so an unplaced one only takes tag memory. A weapons & vehicles pick leaves the vehicle or weapon it
+// replaced unplaced (its placements moved to the pick), so this runs again after the picks.
+static void drop_unplaced_palette(Job &job, const fs::path &xsrc) {
     const Config &cfg = job.cfg;
     std::string scen = job.scenario + ".scenario", out;
     fs::path sdir = fs::exists(job.fixes / from_u8(scen)) ? job.fixes : xsrc;
@@ -14737,21 +14937,14 @@ void trim_unobtainable(Job &job, const fs::path &xsrc) {
     auto count = [&](const fs::path &dir, const std::string &tag, const std::string &key) {
         return std::atoi(getv(dir, tag, "-C", key).c_str());
     };
-    if (getv(sdir, scen, "-G", "type") != "multiplayer") return;
-    auto range = [](const std::string &block, int n) {
-        return block + "[" + (n == 1 ? std::string("0") : "0-" + std::to_string(n - 1)) + "]";
-    };
-
-    // 1. Palette entries nothing is placed from.
     std::vector<std::string> dropped_palette;
-    const bool has_ai = count(sdir, scen, "encounters") > 0; // AI starting locations refer to vehicle palette slots
     struct Pal { const char *palette, *block; };
     // (An unplaced biped palette entry is often the map's own player, there for MCC: on Xbox, with the Xbox's own
     // player, it would only take up tag memory.)
     for (Pal pl : {Pal{"weapon_palette", "weapons"}, Pal{"equipment_palette", "equipment"}, Pal{"vehicle_palette", "vehicles"},
                    Pal{"biped_palette", "bipeds"}, Pal{"scenery_palette", "scenery"}}) {
         int n = count(sdir, scen, pl.palette);
-        if (n <= 0 || (has_ai && std::string(pl.palette) == "vehicle_palette")) continue;
+        if (n <= 0) continue;
         std::regex type_re("^" + std::string(pl.block) + R"(\[(\d+)\]\.type$)");
         std::vector<std::pair<int, int>> placed;   // placement index, palette index
         std::set<int> used;
@@ -14787,6 +14980,34 @@ void trim_unobtainable(Job &job, const fs::path &xsrc) {
         if (dropped_palette.size() > 12) list += " and " + std::to_string(dropped_palette.size() - 12) + " more";
         job.note("[trim] left out palette entries the map never places: " + list);
     }
+
+}
+
+void trim_unobtainable(Job &job, const fs::path &xsrc) {
+    const Config &cfg = job.cfg;
+    std::string scen = job.scenario + ".scenario", out;
+    fs::path sdir = fs::exists(job.fixes / from_u8(scen)) ? job.fixes : xsrc;
+    if (!fs::exists(sdir / from_u8(scen))) return;
+    auto getv = [&](const fs::path &dir, const std::string &tag, const std::string &op, const std::string &key) {
+        std::string v;
+        if (run_process({u8(tool(cfg, "invader-edit")), "-t", u8(dir), tag, op, key}, v) != 0) return std::string();
+        while (!v.empty() && (v.back() == '\n' || v.back() == ' ')) v.pop_back();
+        return v;
+    };
+    auto dep = [&](const fs::path &dir, const std::string &tag, const std::string &key) {
+        std::string v = getv(dir, tag, "-G", key);
+        return v.empty() || v[0] == '.' || v.find('\n') != std::string::npos ? std::string() : norm_rel(v);
+    };
+    auto count = [&](const fs::path &dir, const std::string &tag, const std::string &key) {
+        return std::atoi(getv(dir, tag, "-C", key).c_str());
+    };
+    if (getv(sdir, scen, "-G", "type") != "multiplayer") return;
+    auto range = [](const std::string &block, int n) {
+        return block + "[" + (n == 1 ? std::string("0") : "0-" + std::to_string(n - 1)) + "]";
+    };
+
+    // 1. Palette entries nothing is placed from: drop_unplaced_palette (run again after the picks are applied).
+    drop_unplaced_palette(job, xsrc);
 
     // 2. Globals.
     const std::string g = "globals/globals.globals";

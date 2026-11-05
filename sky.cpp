@@ -1608,6 +1608,32 @@ Fill measure(const std::string &sky_tag, const Find &find) {
     return fill_of(m, cx);
 }
 
+std::vector<Layer> layers(const std::string &sky_tag, const Find &find) {
+    std::vector<Layer> out;
+    tagfile::Tag st;
+    fs::path sf = find(sky_tag);
+    if (sf.empty() || !st.load(sf)) return out;
+    std::string model = st.root().ref("model");
+    fs::path mf = model.empty() ? fs::path() : find(model);
+    Model m;
+    if (mf.empty() || !read_model(mf, m)) return out;
+    Context cx(find);
+    bool inward = inward_winding(m.parts);
+    for (auto &p : m.parts) {
+        Layer l;
+        if (p.shader >= 0 && p.shader < (int)m.shader_refs.size()) {
+            const ShaderI &s = cx.shader(m.shader_refs[(size_t)p.shader]);
+            l.shader = s.tag;
+            l.blend = s.blend;
+            l.passes = s.passes;
+            for (auto &mp : s.maps) if (mp.moving) l.moving = true;
+            l.fill = part_fill(p.v, p.tris, s.two_sided(), inward) * s.passes;
+        }
+        out.push_back(l);
+    }
+    return out;
+}
+
 Lightened lighten(const std::string &sky_tag, const Find &find, const Edit &edit) {
     Lightened out;
     tagfile::Tag st;
