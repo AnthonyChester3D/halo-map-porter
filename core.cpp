@@ -2105,9 +2105,10 @@ static std::string campaign_halves(Job &job, std::vector<std::string> cmd) {
     std::string why;
     const fs::path xdata = job.work / "xbox_data";
     const bool scripts = campaign::load(xdata, a, why);
-    // A quick build: no file limits, no compression, identical data stored once (as an over-full map is built).
+    // The build as Convert makes it, with identical data stored once (as an over-full map is built) and no file size
+    // limit. Over the tag memory, Invader's error says how much it needed.
     for (auto it = cmd.begin() + 1; it != cmd.end();) it = (*it == "-O" || *it == "-E") ? cmd.erase(it) : it + 1;
-    cmd.insert(cmd.begin() + 1, {"-O", "-E", "-T", "128M", "-l", "0"});
+    cmd.insert(cmd.end() - 3, {"-O", "-E"});
 
     // Each half in a folder of its own (its scenario in tags/, read first; its scripts in data/), so several build at once.
     struct Half {
@@ -2187,18 +2188,31 @@ static std::string campaign_halves(Job &job, std::vector<std::string> cmd) {
             std::to_string(halves.size()) + " builds)...");
     std::atomic<size_t> next{0}, done{0};
     std::mutex log_lock;
+    const fs::path logs = job.work / "halves_logs";   // (each build's output, for a look when one fails)
+    fs::remove_all(logs, ec);
+    fs::create_directories(logs, ec);
     auto worker = [&] {
+        static const std::regex over(R"(Maximum tag space exceeded \(([\d.]+) MiB)");
         for (size_t i; (i = next++) < halves.size();) {
             Half &x = halves[i];
             if (x.mb < 0) continue;
             std::string out;
             int rc = run_process(x.cmd, out);
-            x.mb = tag_space_used(out);
-            if (rc != 0 || x.mb <= 0) {
+            std::ofstream(logs / (x.k ? std::to_string(x.k) + "_" + std::to_string(x.h) + ".log" : std::string("whole.log")), std::ios::binary)
+                << out << "\n(exit code " << rc << ")\n";
+            std::smatch m;
+            x.mb = rc == 0 ? tag_space_used(out) : std::regex_search(out, m, over) ? std::atof(m[1].str().c_str()) : 0;
+            if (x.mb <= 0) {   // (the first error, else the last line)
                 std::istringstream in(out);
-                std::string l, last;
-                while (std::getline(in, l)) if (!l.empty()) last = l;
-                x.err = last;
+                std::string l, last, first_error;
+                while (std::getline(in, l)) {
+                    if (l.empty()) continue;
+                    last = l;
+                    if (first_error.empty() && (l.find("ERROR") != std::string::npos || l.find("rror:") != std::string::npos ||
+                                                l.rfind("Failed", 0) == 0))
+                        first_error = l;
+                }
+                x.err = (first_error.empty() ? last : first_error) + " (exit code " + std::to_string(rc) + ")";
                 x.mb = -1;
             }
             std::lock_guard<std::mutex> g(log_lock);
@@ -2214,7 +2228,7 @@ static std::string campaign_halves(Job &job, std::vector<std::string> cmd) {
     std::string report = "Halves (each built quickly for its tag memory, of the Xbox's 22 MB; the BSPs in the order a player reaches them: ";
     for (size_t i = 0; i < order.size(); i++) report += (i ? ", " : "") + stem(order[i]);
     report += "):\n";
-    if (halves[0].mb > 0) snprintf(buf, sizeof buf, "- the level as one map: %.1f MB\n", halves[0].mb);
+    if (halves[0].mb > 0) snprintf(buf, sizeof buf, "- the level as one map: %.1f MB%s\n", halves[0].mb, halves[0].mb > 22 ? ", over" : "");
     report += halves[0].mb > 0 ? std::string(buf) : "- the level as one map: couldn't be built (" + halves[0].err + ")\n";
     for (int k = 1; k < n; k++) {
         const Half &f = halves[(size_t)(2 * k - 1)], &g = halves[(size_t)(2 * k)];
@@ -2223,7 +2237,8 @@ static std::string campaign_halves(Job &job, std::vector<std::string> cmd) {
         for (int i = k; i < n; i++) second += (i > k ? ", " : "") + stem(order[(size_t)i]);
         auto half = [&](const Half &x, const std::string &bsps) {
             if (x.mb < 0) return "(" + bsps + ") couldn't be built: " + x.err;
-            snprintf(buf, sizeof buf, "%.1f MB (%s; %d encounters and %d scripts left out)", x.mb, bsps.c_str(), x.encounters, x.scripts_dropped);
+            snprintf(buf, sizeof buf, "%.1f MB%s (%s; %d encounters and %d scripts left out)", x.mb, x.mb > 22 ? ", over" : "", bsps.c_str(),
+                     x.encounters, x.scripts_dropped);
             return std::string(buf);
         };
         std::string line = "- split before " + stem(order[(size_t)k]) + ": first half " + half(f, first) + "; second half " + half(g, second);

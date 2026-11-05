@@ -221,6 +221,36 @@ struct World {
         }
         return !hit;
     }
+    // How far a ray goes from `a` along `dir` (unit) before a surface or an object, up to `most`; `tri`: the surface it
+    // stopped at (-1: an object's box, or nothing).
+    double hit(V3 a, V3 dir, double most, int &tri) const {
+        V3 b = add(a, mul(dir, most));
+        double best = 1;
+        tri = -1;
+        for (auto &bx : p.boxes) {
+            double t = box_hit(bx, a, b);
+            if (t >= 0) best = std::min(best, t);
+        }
+        int steps = std::max(1, (int)std::ceil(most / cell));
+        for (int s = 0; s < steps; s++) {
+            double f0 = (double)s / steps, f1 = (double)(s + 1) / steps;
+            if (best <= f0) break;
+            near(add(a, mul(sub(b, a), f0)), add(a, mul(sub(b, a), f1)), 0.01, [&](int i) {
+                double t = cross_at(i, a, b);
+                if (t >= 0 && t < best) { best = t; tri = i; }
+            });
+            if (best <= f1) break;
+        }
+        return best * most;
+    }
+    // A surface seen from behind: the engine doesn't draw that side, so the picture shows what's past it (the void
+    // under a level, a room from above through its ceiling). Its facing: its corners' normals.
+    bool from_behind(int tri, V3 dir) const {
+        const auto &t = p.triangles[(size_t)tri];
+        V3 n{0, 0, 0};
+        for (auto &v : t.v) n = add(n, {v.n[0], v.n[1], v.n[2]});
+        return dot(n, dir) > 0;
+    }
     // How far a ray goes from `a` along `dir` (unit) before a surface or an object, up to `most`.
     double reach(V3 a, V3 dir, double most) const {
         V3 b = add(a, mul(dir, most));
@@ -520,21 +550,82 @@ std::vector<V3> camera_spots(const World &w, V3 ground, const std::function<bool
     return out;
 }
 
-// Looking straight down: every part of the picture (a grid of directions over a widescreen or 4:3 view, 70 degrees
-// across) meets the level within `most` units, so none of it is the sky or the void past the level's edge.
-bool all_level_below(const World &w, const View &v, double most) {
+// What the picture shows is the level as made: across it (a grid of directions over a widescreen or 4:3 view), no
+// surface seen from behind (that side isn't drawn: what's past it shows, the void under the level or a room through its
+// ceiling). `most` > 0: every part of it meets the level within `most` units (no sky, nothing past the level's edge);
+// with `lo`/`hi`, where it meets it is across the box where players are (grown by `grow`), not the unfinished land
+// past it.
+bool clean_view(const World &w, const View &v, double most, const V3 *lo = nullptr, const V3 *hi = nullptr, double grow = 0) {
     V3 f = dir_of(v.yaw, v.pitch), r = cross(f, {0, 0, 1});
     if (len(r) < 1e-6) r = {1, 0, 0};
     r = mul(r, 1 / len(r));
     V3 u = cross(r, f);
-    const double tx = std::tan(rad(v.fov / 2)), ty = tx * 0.75;
-    for (int i = 0; i <= 8; i++)
-        for (int j = 0; j <= 6; j++) {
-            V3 d = add(f, add(mul(r, tx * (i / 4.0 - 1)), mul(u, ty * (j / 3.0 - 1))));
+    const double tx = std::tan(rad(v.fov / 2)), ty = tx * 0.75, far = most > 0 ? most : 400;
+    for (int i = 0; i <= 12; i++)
+        for (int j = 0; j <= 8; j++) {
+            V3 d = add(f, add(mul(r, tx * (i / 6.0 - 1)), mul(u, ty * (j / 4.0 - 1))));
             d = mul(d, 1 / len(d));
-            if (w.reach(v.eye, d, most) >= most - 1e-6) return false;
+            int tri = -1;
+            double t = w.hit(v.eye, d, far, tri);
+            if (tri >= 0 && w.from_behind(tri, d)) return false;
+            if (most > 0 && t >= far - 1e-6) return false;
+            if (lo && hi && t < far - 1e-6) {
+                V3 q = add(v.eye, mul(d, t));
+                if (q[0] < (*lo)[0] - grow || q[0] > (*hi)[0] + grow || q[1] < (*lo)[1] - grow || q[1] > (*hi)[1] + grow) return false;
+            }
         }
     return true;
+}
+// The whole shot's pictures are (clean_view), every half second.
+bool clean_shot(const World &w, const Shot &s, double most = 0, const V3 *lo = nullptr, const V3 *hi = nullptr, double grow = 0) {
+    for (double t = 0; t <= s.seconds + 1e-9; t += 0.5)
+        if (!clean_view(w, at(s, t), most, lo, hi, grow)) return false;
+    return clean_view(w, at(s, s.seconds), most, lo, hi, grow);
+}
+
+// A path shot with the fewest via keys that keep its shape: those where it turns or its look changes (no more than
+// `tol` units from where the camera went, or `tol` x 8 degrees from where it looked, anywhere along it). The camera
+// then flows round its turns instead of stepping through dozens of keys.
+Shot fewer_vias(const Shot &s, double tol) {
+    if (s.pace == Pace::keyed || s.via.size() < 3) return s;
+    const std::vector<Key> &v = s.via;
+    // (its look unwound: no jump at 360)
+    std::vector<double> yaw(v.size());
+    yaw[0] = v[0].yaw;
+    for (size_t i = 1; i < v.size(); i++) {
+        double d = std::fmod(v[i].yaw - yaw[i - 1], 360.0);
+        if (d > 180) d -= 360;
+        if (d < -180) d += 360;
+        yaw[i] = yaw[i - 1] + d;
+    }
+    std::vector<double> along(v.size(), 0);
+    for (size_t i = 1; i < v.size(); i++) along[i] = along[i - 1] + len(sub(v[i].p, v[i - 1].p));
+    std::vector<char> keep(v.size(), 0);
+    keep.front() = keep.back() = 1;
+    std::function<void(size_t, size_t)> split = [&](size_t a, size_t b) {
+        if (b <= a + 1) return;
+        double worst = 0;
+        size_t at_k = a;
+        for (size_t k = a + 1; k < b; k++) {
+            double u = along[b] > along[a] ? (along[k] - along[a]) / (along[b] - along[a]) : (double)(k - a) / (b - a);
+            V3 q = lerp(v[a].p, v[b].p, u);
+            double e = len(sub(v[k].p, q));
+            e = std::max(e, std::fabs(yaw[k] - (yaw[a] + (yaw[b] - yaw[a]) * u)) / 8.0);
+            e = std::max(e, std::fabs(v[k].pitch - (v[a].pitch + (v[b].pitch - v[a].pitch) * u)) / 8.0);
+            if (e > worst) { worst = e; at_k = k; }
+        }
+        if (worst <= tol) return;
+        keep[at_k] = 1;
+        split(a, at_k);
+        split(at_k, b);
+    };
+    split(0, v.size() - 1);
+    Shot out = s;
+    out.via.clear();
+    for (size_t i = 0; i < v.size(); i++)
+        if (keep[i]) out.via.push_back(v[i]);
+    retime(out);
+    return out;
 }
 }   // namespace
 
@@ -1121,7 +1212,7 @@ Showcase generate(const lshade::Preview &p, std::string *report) {
             k.pitch = -3;
             return k;
         });
-        if (flyable(w, s, 0.9, in_play, 0.35) < 0 || !sees_out(w, s)) continue;
+        if (flyable(w, s, 0.9, in_play, 0.35) < 0 || !sees_out(w, s) || !clean_shot(w, s)) continue;
         glides.push_back(s);
         used.push_back(mid);
     }
@@ -1152,7 +1243,7 @@ Showcase generate(const lshade::Preview &p, std::string *report) {
                     for (int a0 = 0; a0 < 360 && !made; a0 += 30) {
                         Shot s = orbit_shot(c, r, h, a0, overviews.size() % 2 ? -40 : 40, 10, "looking down on " + tg.second);
                         s.orbit.on = false;   // (keys of its own: not an orbit to change)
-                        if (flyable(w, s, 0.85) < 0) continue;
+                        if (flyable(w, s, 0.85) < 0 || !clean_shot(w, s)) continue;
                         overviews.push_back(s);
                         done.push_back(c);
                         made = true;
@@ -1178,7 +1269,7 @@ Showcase generate(const lshade::Preview &p, std::string *report) {
                 q.pitch = -18 * ease(u);
                 return q;
             });
-            if (flyable(w, s) < 0 || !sees_out(w, s, 8)) continue;
+            if (flyable(w, s) < 0 || !sees_out(w, s, 8) || !clean_shot(w, s)) continue;
             reveals.push_back(s);
             used.push_back(base);
         }
@@ -1231,19 +1322,28 @@ Showcase generate(const lshade::Preview &p, std::string *report) {
             size_t goal = legs.back().second;
             for (auto &[l, g] : legs)
                 if (l >= route_length(corners) - 1e-6) { goal = g; break; }
-            Shot s = route_shot(w, corners, speed, 1.2, add(grounds[goal], {0, 0, 0.5}), label);
-            if (flyable(w, s, 0.9, in_play, 0.3) < 0) return false;
+            Shot full = route_shot(w, corners, speed, 1.2, add(grounds[goal], {0, 0, 0.5}), label);
             // (looking out ahead, not at a wall it's passing: at least 3 units clear in front nearly all the way, and
             // never a wall filling the picture)
-            int n = 0, clear_ahead = 0;
-            for (double t = 0; t <= s.seconds + 1e-9; t += 0.5, n++) {
-                View v = at(s, t);
-                double r = w.reach(v.eye, dir_of(v.yaw, v.pitch), 6);
-                if (r < 1.2) { n = -1; break; }
-                if (r >= 3) clear_ahead++;
+            auto good = [&](const Shot &s) {
+                if (flyable(w, s, 0.9, in_play, 0.3) < 0) return false;
+                int n = 0, clear_ahead = 0;
+                for (double t = 0; t <= s.seconds + 1e-9; t += 0.5, n++) {
+                    View v = at(s, t);
+                    double r = w.reach(v.eye, dir_of(v.yaw, v.pitch), 6);
+                    if (r < 1.2) return false;
+                    if (r >= 3) clear_ahead++;
+                }
+                return clear_ahead >= n * 0.85;
+            };
+            if (!good(full)) return false;
+            // (then with as few via keys as keep it clear: one where it turns, the camera flowing round between)
+            Shot best = full;
+            for (double tol : {2.0, 1.2, 0.7, 0.4}) {
+                Shot s = fewer_vias(full, tol);
+                if (s.via.size() < best.via.size() && good(s)) { best = s; break; }
             }
-            if (n < 0 || clear_ahead < n * 0.85) return false;
-            runs.push_back(s);
+            runs.push_back(best);
             return true;
         };
         auto ground = [](const lshade::Mark &m) { return V3{m.p[0], m.p[1], m.p[2]}; };
@@ -1402,7 +1502,7 @@ Showcase generate(const lshade::Preview &p, std::string *report) {
         }
         double ang = 0.5 * std::atan2(2 * sxy, sxx - syy);
         V3 ax{std::cos(ang), std::sin(ang), 0}, pr{-std::sin(ang), std::cos(ang), 0};
-        const double run_len = std::clamp(across * 0.45, 10.0, 40.0);
+        const double run_len = std::clamp(across * 0.45, 10.0, 40.0), edge = std::clamp(across * 0.08, 3.0, 10.0);
         // (first where the ground it looks down on is about as far below as it's high, not the bottom of a pit; then
         // anywhere)
         for (int pass = 0; pass < 2 && flyovers.empty(); pass++)
@@ -1423,9 +1523,11 @@ Showcase generate(const lshade::Preview &p, std::string *report) {
                         bool all = true;   // (out in the open, nothing over it: above the level, not inside a hall)
                         double below = 0;
                         int n = 0;
-                        for (double t = 0; t <= s.seconds + 1e-9 && all; t += 1.0, n++) {
+                        for (double t = 0; t <= s.seconds + 1e-9 && all; t += 0.5, n++) {
                             View v = at(s, t);
-                            all = w.reach(v.eye, {0, 0, 1}, 60) >= 60 - 1e-6 && all_level_below(w, v, H * 3 + 60);
+                            // (the whole picture the level, seen from the side that's drawn, and where players are:
+                            // not the land past the level's edge, the outside of its walls or into its rooms)
+                            all = w.reach(v.eye, {0, 0, 1}, 60) >= 60 - 1e-6 && clean_view(w, v, H * 3 + 60, &plo, &phi, edge);
                             below += w.reach(v.eye, {0, 0, -1}, H * 3 + 60);
                         }
                         if (all && (pass == 1 || below / std::max(1, n) <= H * 1.6)) flyovers.push_back(s);
