@@ -180,6 +180,12 @@ struct Config {
     // An Xbox map still over its file limit after every shrink (textures and sounds as far as they go for it): built for
     // this bigger limit instead, as shrunk (a modded Xbox's 115 MB). 0: it fails.
     double xbox_overflow_mb = 0;
+    // Campaign levels (campaign.hpp): the cutscenes split off into maps of their own (bits: 1 the opening, 2 the
+    // closing), and which piece this conversion makes (0 the level, 1 its opening cutscene, 2 its closing one). The
+    // pieces go in folders beside each other, each naming the next by its folder (map_name "+./folder"): the level's,
+    // and the closing cutscene's. Each piece logs what was found ([campaign] lines; Result::campaign).
+    int campaign_split = 0, campaign_piece = 0;
+    std::string campaign_level_folder, campaign_closing_folder;
 };
 
 // A model to show in the weapons & vehicles window: its most detailed version (each region's first permutation),
@@ -311,6 +317,7 @@ struct Result {
     fs::path report;
     fs::path link;                     // Perfect Conversion: the link file written (empty: the pair didn't match)
     fs::path pair_check;               // Perfect Conversion: the comparison's report
+    std::string campaign;              // a campaign level: its cutscenes, for the Campaign tab (campaign.hpp)
 };
 
 // What a built map offers, for the Halo Universal XBE's map browser (build 20): the info.txt lines "Gametypes:" and

@@ -15,6 +15,7 @@
 #include "sky.hpp"
 #include "tagedit.hpp"
 #include "tagfile.hpp"
+#include "campaign.hpp"
 #include "pairs.hpp"
 #include "h1ulink.hpp"
 
@@ -421,6 +422,7 @@ struct Job {
     std::map<std::string, int> hud_canvas;
     bool hud_canvas_known = false;
     fs::path shaders_file;                     // the level shaders file (levelshaders.hpp), for the window
+    std::string campaign_report;               // a campaign level's cutscenes (campaign_apply), for Result::campaign
     std::string shaders_line;                  // the report's line on the level's shader passes
 
     Job(const Config &c, const Log &l, Game t) : cfg(c), log(l), target(t) {}
@@ -2088,6 +2090,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
         }
     }
     r.shaders = job.shaders_file;
+    r.campaign = job.campaign_report;
     if (!job.shaders_file.empty() && fs::exists(job.work / "bots.txt", ec)) {   // (for the Level window's bot waypoints)
         fs::path t = job.shaders_file, b = job.shaders_file;
         t += ".bots";
@@ -11950,6 +11953,172 @@ static void pc_user_scripts(Job &job, const std::string &scenario) {
     job.extra = {"-d", u8(sdata), "-S", "data"};
 }
 
+// Campaign levels (campaign.hpp): its opening and closing cutscenes found in its scripts (the Xbox build's, in the work
+// folder's xbox_data) and reported; with Config::campaign_split, this conversion's piece made: the level without
+// them, or one of them on its own. The scenario is cut down to what the piece uses (campaign::strip_scenario).
+static void campaign_apply(Job &job) {
+    const Config &cfg = job.cfg;
+    const fs::path xdata = job.work / "xbox_data";
+    std::error_code ec;
+    if (!fs::exists(xdata, ec) || !scenario_is_campaign(job)) return;
+    campaign::Analysis a;
+    std::string why;
+    if (!campaign::load(xdata, a, why)) return;
+    job.campaign_report = a.report;
+    {
+        std::istringstream in(a.report);
+        std::string l;
+        while (std::getline(in, l)) job.log("  [campaign] " + l);
+    }
+    // "Find the cutscenes" (prepared only, nothing split): each piece made on a copy of the scenario, to say what it
+    // would keep and leave out; nothing changes.
+    const bool dry = cfg.xbox_prepare_only && cfg.campaign_split == 0;
+    const bool opening_on = (cfg.campaign_split & 1) && a.opening.found, closing_on = (cfg.campaign_split & 2) && a.closing.found;
+    const int this_piece = cfg.campaign_piece;
+    if (!dry && ((this_piece == 0 && !opening_on && !closing_on) || (this_piece == 1 && !a.opening.found) || (this_piece == 2 && !a.closing.found))) {
+        if (this_piece != 0) job.note("[campaign] no " + std::string(this_piece == 1 ? "opening" : "closing") + " cutscene to split off: the whole level was built");
+        return;
+    }
+    if (dry && !a.opening.found && !a.closing.found) return;
+    const std::string scen = job.scenario + ".scenario";
+    fs::path sdir = job.owner(scen);
+    if (sdir.empty()) return;
+    const fs::path scen_original = sdir / from_u8(scen);
+    size_t nbsp = 0;
+    std::vector<std::string> bsp_tags;
+    std::vector<int> start_bsps, trigger_bsps;
+    std::map<std::string, std::array<double, 3>> camera_at;
+    {
+        tagfile::Tag t;
+        if (!t.load(scen_original)) { job.note("[campaign] the scenario couldn't be read"); return; }
+        tagfile::Elem r = t.root();
+        tagfile::Block b = r.block("structure bsps");
+        nbsp = b.size();
+        for (size_t i = 0; i < b.size(); i++) bsp_tags.push_back(b[i].ref("structure bsp"));
+        tagfile::Block ps = r.block("player starting locations");
+        for (size_t i = 0; i < ps.size(); i++) start_bsps.push_back((int)ps[i].integer("bsp index"));
+        tagfile::Block sw = r.block("bsp switch trigger volumes");
+        for (size_t i = 0; i < sw.size(); i++) { trigger_bsps.push_back((int)sw[i].integer("source")); trigger_bsps.push_back((int)sw[i].integer("destination")); }
+        tagfile::Block cp = r.block("cutscene camera points");
+        for (size_t i = 0; i < cp.size(); i++) {
+            std::string n = cp[i].str("name");
+            for (auto &c : n) c = (char)tolower((unsigned char)c);
+            camera_at[n] = {cp[i].num("position", 0), cp[i].num("position", 1), cp[i].num("position", 2)};
+        }
+    }
+    auto script_dir = xdata / from_u8(job.scenario).parent_path() / "scripts";
+    // One piece made: its scripts (`write`: into the build's data folder), and `scen_file` cut down. A line for people.
+    auto make = [&](int piece, bool opening, bool closing, const fs::path &scen_file, bool write) -> std::string {
+    campaign::Strip st;
+    std::map<int, int> to;
+    auto keep_list = [&](const std::set<int> &keep) {
+        st.keep_bsps.assign(keep.begin(), keep.end());
+        for (size_t i = 0; i < st.keep_bsps.size(); i++) to[st.keep_bsps[i]] = (int)i;
+    };
+    std::string what;
+    if (piece == 0) {
+        // The level, without the pieces: the scripts as a skip (and the closing piece's map_name) leave them.
+        std::set<std::string> removed, kept;
+        auto texts = campaign::level_texts(a, opening, closing, "+./" + cfg.campaign_closing_folder, removed, kept);
+        std::string all_before, all_after;
+        for (auto &f : a.files) all_before += f.text + "\n";
+        for (auto &t : texts) all_after += t.second + "\n";
+        std::set<int> used = campaign::bsps_used(all_after), gone = campaign::bsps_used(all_before), keep;
+        used.insert(0);
+        for (int b : start_bsps) used.insert(b);
+        for (int b : trigger_bsps) used.insert(b);
+        for (size_t i = 0; i < nbsp; i++)
+            if (used.count((int)i) || !gone.count((int)i)) keep.insert((int)i);   // (what only the pieces switch to goes)
+        keep_list(keep);
+        if (write)
+            for (auto &t : texts) {
+                std::ofstream f(t.first, std::ios::binary | std::ios::trunc);
+                f << campaign::renumber_bsps(t.second, to);
+            }
+        st.names = kept;
+        st.drop = removed;
+        st.patterns = campaign::containing_patterns(all_after);
+        what = std::string("the level without its ") + (opening && closing ? "opening and closing cutscenes" : opening ? "opening cutscene" : "closing cutscene");
+    } else {
+        // A cutscene on its own: its scripts, and a startup script playing it, then the next map.
+        int start = 0;
+        if (piece == 2) {   // (it plays where the level was: the BSP its first camera point is in)
+            for (auto &cam : campaign::camera_points_set(a.closing.body)) {
+                auto it = camera_at.find(cam);
+                if (it == camera_at.end()) continue;
+                for (size_t i = 0; i < nbsp && !start; i++) {
+                    fs::path bo = bsp_tags[i].empty() ? fs::path() : job.owner(bsp_tags[i]);
+                    std::vector<char> in;
+                    if (!bo.empty() && portals::inside_level(bo / from_u8(bsp_tags[i]), {{it->second[0], it->second[1], it->second[2]}}, in) &&
+                        !in.empty() && in[0])
+                        start = (int)i;
+                }
+                break;
+            }
+        }
+        std::string text = campaign::piece_text(a, piece == 1, piece == 1 ? "+./" + cfg.campaign_level_folder : "", start);
+        // (only the BSPs it shows: the first of them is where the map starts, as the level's cutscene had the player
+        // wherever the level started while the camera was elsewhere)
+        std::set<int> keep = campaign::bsps_used(text);
+        if (keep.empty()) keep.insert(start);
+        keep_list(keep);
+        text = campaign::renumber_bsps(text, to);
+        if (write) {
+            for (auto &f : a.files) fs::remove(f.path, ec);
+            fs::create_directories(script_dir, ec);
+            std::ofstream(script_dir / "campaign_piece.hsc", std::ios::binary | std::ios::trunc) << text;
+        }
+        st.piece = true;
+        st.names = campaign::atoms(text);
+        st.patterns = campaign::containing_patterns(text);
+        what = piece == 1 ? "its opening cutscene on its own (" + a.opening.about + ")" : "its closing cutscene on its own (" + a.closing.about + ")";
+    }
+    // Where the placements stand: in a BSP kept (bit 0), or in one that goes (bit 1).
+    st.inside = [&](const std::vector<std::array<double, 3>> &pts) {
+        std::vector<int> where(pts.size(), 0);
+        std::vector<portals::V3> q(pts.begin(), pts.end());
+        for (size_t b = 0; b < nbsp; b++) {
+            fs::path bo = bsp_tags[b].empty() ? fs::path() : job.owner(bsp_tags[b]);
+            std::vector<char> in;
+            if (bo.empty() || !portals::inside_level(bo / from_u8(bsp_tags[b]), q, in)) continue;
+            const bool kept = to.count((int)b) > 0;
+            for (size_t i = 0; i < in.size(); i++) if (in[i]) where[i] |= kept ? 1 : 2;
+        }
+        return where;
+    };
+    campaign::Stripped out;
+    if (!campaign::strip_scenario(scen_file, st, out)) return "the scenario couldn't be cut down: " + out.why;
+    std::string bsps;
+    for (size_t i = 0; i < st.keep_bsps.size(); i++) bsps += (i ? ", " : "") + fs::path(from_u8(bsp_tags[(size_t)st.keep_bsps[i]])).stem().u8string();
+    return what + ": BSPs " + bsps + (out.bsps ? " (" + std::to_string(out.bsps) + " left out)" : "") + "; " +
+           std::to_string(out.placements) + " placed objects, " + std::to_string(out.palette) + " palette entries, " +
+           std::to_string(out.encounters) + " encounters, " + std::to_string(out.conversations) + " conversations and " +
+           std::to_string(out.actors) + " actors left out";
+    };
+    if (dry) {
+        // What each piece would be (scratch copies of the scenario).
+        const fs::path scratch = job.work / "campaign_dry";
+        fs::create_directories(scratch, ec);
+        std::string more = "\nIf split (what each map would keep; tag memory: convert the pieces, each one's log says):\n";
+        for (int piece : {1, 0, 2}) {
+            if ((piece == 1 && !a.opening.found) || (piece == 2 && !a.closing.found)) continue;
+            fs::path copy = scratch / (std::to_string(piece) + ".scenario");
+            fs::copy_file(scen_original, copy, fs::copy_options::overwrite_existing, ec);
+            std::string line = make(piece, a.opening.found, a.closing.found, copy, false);
+            more += "- " + line + "\n";
+            job.log("  [campaign] " + line);
+        }
+        fs::remove_all(scratch, ec);
+        job.campaign_report += more;
+        return;
+    }
+    if (sdir != job.fixes && !job.to_fixes(scen, sdir)) { job.note("[campaign] the scenario couldn't be copied to change it"); return; }
+    std::string line = make(this_piece, opening_on, closing_on, job.fixes / from_u8(scen), true);
+    job.note("[campaign] made " + line +
+             (this_piece == 1 ? "; then it loads the level (\"+./" + cfg.campaign_level_folder + "\")" :
+              this_piece == 0 && closing_on ? "; at its end it loads its closing cutscene (\"+./" + cfg.campaign_closing_folder + "\")" : ""));
+}
+
 bool prepare_for_xbox(Job &job, std::string &err) {
     const Config &cfg = job.cfg;
     fs::path xsrc = job.work / "xbox_src";
@@ -12179,6 +12348,7 @@ bool prepare_for_xbox(Job &job, std::string &err) {
 
     // Scripts: PC renamed player_effect_set_max_rumble to ..._vibrate; Xbox only knows rumble.
     xbox_scripts(job, xsrc);
+    campaign_apply(job);   // (a campaign level: its cutscenes, split off when asked)
     if (!job.analysis) note_script_tricks(job, xsrc);
 
     job.source = xsrc;
@@ -15468,7 +15638,8 @@ Result update_xbox_models(const Config &cfg, const fs::path &file, const Log &lo
 
 std::string xbox_prepare_key(const Config &c) {
     std::ostringstream k;
-    k << "HMP prepare 5\n";   // (5: far scenery trimmed for where players are; 4: trimming by shape; 3: bot waypoints; 2: automatic picks, the gravity rifle and spare needlers)
+    k << "HMP prepare 5\n";
+    k << "campaign=" << c.campaign_split << " " << c.campaign_piece << " " << c.campaign_level_folder << "|" << c.campaign_closing_folder << "\n";   // (5: far scenery trimmed for where players are; 4: trimming by shape; 3: bot waypoints; 2: automatic picks, the gravity rifle and spare needlers)
     auto path = [&](const char *n, const fs::path &p) { k << n << "=" << u8(p) << "\n"; };
     path("invader", c.invader_dir);
     path("ce", c.ce_dir);

@@ -102,15 +102,18 @@ enum {
     ID_BATCH, ID_BATCH_HINT,
     // how many maps' extracted tags are kept; clearing the working files
     ID_S_KEEP_LBL, ID_S_KEEP, ID_S_CLEAR, ID_S_THEME_LBL, ID_S_THEME,
+    // the Campaign tab: a campaign level's cutscenes, split off into maps of their own
+    ID_CA_HINT, ID_CA_MAP, ID_CA_FIND, ID_CA_OPEN, ID_CA_CLOSE, ID_CA_CONVERT, ID_CA_REPORT,
 };
 
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
+#define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
 static int g_dpi = 96;
-static std::vector<int> g_pages[5];   // Convert, Build, Xbox, Map packs, Settings
+static std::vector<int> g_pages[6];   // Convert, Build, Xbox, Map packs, Campaign, Settings
 static std::atomic<bool> g_busy{false};
 static bool g_out_manual = false;
 static std::wstring g_last_output, g_last_report, g_last_lods;
@@ -197,6 +200,8 @@ static void save_settings() {
     ini_set(L"x_makelod", checked(ID_X_MAKELOD) ? L"1" : L"0");
     ini_set(L"x_bots", checked(ID_X_BOTS) ? L"1" : L"0");
     ini_set(L"x_trim", std::to_wstring(std::max(0, sel(ID_X_TRIM))));
+    ini_set(L"ca_open", checked(ID_CA_OPEN) ? L"1" : L"0");
+    ini_set(L"ca_close", checked(ID_CA_CLOSE) ? L"1" : L"0");
     ini_set(L"x_anim", std::to_wstring(std::max(0, sel(ID_X_ANIM))));
     ini_set(L"x_portals", std::to_wstring(std::max(0, sel(ID_X_PORTALS))));
     ini_set(L"x_tex2", std::to_wstring(sel(ID_X_TEX)));
@@ -540,7 +545,7 @@ static void apply_mode_visibility(int p) {
 }
 
 static void show_page(int p) {
-    for (int i = 0; i < 5; i++)
+    for (int i = 0; i < 6; i++)
         for (int id : g_pages[i]) ShowWindow(GetDlgItem(g_wnd, id), i == p ? SW_SHOW : SW_HIDE);
     apply_mode_visibility(p);
 }
@@ -1765,6 +1770,150 @@ static void start_convert(bool again = false) {
     }).detach();
 }
 
+// ---- the Campaign tab: a campaign level's opening and closing cutscenes, split off into maps of their own
+// (campaign.hpp). The Convert tab's map, converted for the Xbox into map folders: the level in the Convert tab's
+// folder, its opening cutscene in "<folder> - Opening" beside it, its closing one in "<folder> - Ending". Each piece
+// loads the next with map_name (Halo 1 Unlimited finds a folder beside it by name).
+static void create_campaign_page() {
+    const int P = 4;
+    int y = 50;
+    add(P, L"STATIC",
+        L"A campaign level's opening and closing cutscenes can be maps of their own: each piece then needs only what it "
+        L"uses of the Xbox's memory (a level over its 22 MB of tag memory may fit without them). The opening plays, "
+        L"then loads the level; the level's end loads its closing cutscene, which ends as the level did. The map is the "
+        L"Convert tab's, with its Xbox options; the pieces go in map folders beside the level's.",
+        0, 26, y, 708, 64, ID_CA_HINT);
+    y += 72;
+    add(P, L"STATIC", L"", SS_PATHELLIPSIS, 26, y, 560, 20, ID_CA_MAP);
+    button(P, L"Find the cutscenes", 594, y - 4, 140, ID_CA_FIND);
+    y += 30;
+    check(P, L"Split off the opening cutscene (the part a player can skip), as a map that plays before the level", 26, y, 708, ID_CA_OPEN);
+    y += 26;
+    check(P, L"Split off the closing cutscene (the level's last stretch, through the end), as a map that plays after it", 26, y, 708, ID_CA_CLOSE);
+    y += 32;
+    button(P, L"Convert the pieces", 26, y, 160, ID_CA_CONVERT, true);
+    y += 36;
+    add(P, L"EDIT", L"", WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 26, y, 708, 466 - y, ID_CA_REPORT, WS_EX_CLIENTEDGE);
+}
+static void campaign_page_shown() {
+    fs::path in(get_text(ID_IN));
+    set_text(ID_CA_MAP, in.empty() ? L"(pick a map on the Convert tab)" : L"Map: " + in.wstring());
+}
+static void campaign_report(const std::string &text) {
+    std::wstring t;
+    for (wchar_t c : W(text)) { if (c == L'\n') t += L"\r\n"; else t += c; }
+    set_text(ID_CA_REPORT, t);
+}
+// The pieces' maps: [0] the level (the Convert tab's output), [1] the opening's, [2] the closing's.
+static std::array<fs::path, 3> campaign_outputs(const fs::path &out) {
+    const fs::path folder = out.parent_path(), root = folder.parent_path();
+    const std::wstring name = folder.filename().wstring(), stem = out.stem().wstring();
+    return {out, root / (name + L" - Opening") / (stem + L"_opening.map"), root / (name + L" - Ending") / (stem + L"_ending.map")};
+}
+static bool campaign_ready(fs::path &in, fs::path &out, Game &from) {
+    in = fs::path(get_text(ID_IN));
+    out = fs::path(get_text(ID_OUT));
+    from = combo_game(ID_FROM);
+    if (!fs::exists(in)) { MessageBoxW(g_wnd, L"Pick the campaign map on the Convert tab first.", L"Halo Map Porter", MB_ICONINFORMATION); return false; }
+    if (combo_game(ID_TO) != Game::Xbox || !folder_mode()) {
+        MessageBoxW(g_wnd, L"The pieces are Xbox map folders: on the Convert tab, convert to the Xbox, with map folders (Xbox tab).",
+                    L"Halo Map Porter", MB_ICONINFORMATION);
+        return false;
+    }
+    if (out.empty() || !out.has_parent_path()) { MessageBoxW(g_wnd, L"Choose where the converted map goes on the Convert tab.", L"Halo Map Porter", MB_ICONINFORMATION); return false; }
+    return true;
+}
+static Config campaign_config(const fs::path &in) {
+    Config cfg = make_config();
+    apply_xbox_options(cfg);
+    apply_map_picks(cfg, in);
+    apply_shader_picks(cfg, in);
+    apply_user_scripts(cfg, in);
+    return cfg;
+}
+static void start_campaign_find() {
+    fs::path in, out;
+    Game from;
+    if (!campaign_ready(in, out, from)) return;
+    save_settings();
+    Config cfg = campaign_config(in);
+    cfg.campaign_split = 0;
+    cfg.xbox_prepare_only = true;
+    set_busy(true);
+    SetWindowTextW(g_log, L"");
+    campaign_report("Finding the cutscenes (the map is prepared for the Xbox first: this takes as long as an Unpack)...");
+    append_log(L"Finding " + in.filename().wstring() + L"'s cutscenes...");
+    std::thread([=] {
+        fs::path dummy = cfg.cache_dir / "campaign" / (in.stem().u8string() + ".map");
+        Result r = convert_map(cfg, in, from, Game::Xbox, dummy, false, post_log, nullptr);
+        auto *text = new std::string(r.ok ? (r.campaign.empty() ? std::string("Not a campaign level (its scenario is a multiplayer one), or it has no scripts.")
+                                                                 : r.campaign)
+                                          : "Couldn't prepare the map: " + r.error);
+        PostMessageW(g_wnd, WM_APP_CAMPAIGN, 0, (LPARAM)text);
+        finish(r, "Prepared the map", Keys{"", "", "", true}, false, true);
+    }).detach();
+}
+static void start_campaign_convert() {
+    fs::path in, out;
+    Game from;
+    if (!campaign_ready(in, out, from)) return;
+    const bool opening = checked(ID_CA_OPEN), closing = checked(ID_CA_CLOSE);
+    if (!opening && !closing) { MessageBoxW(g_wnd, L"Tick the cutscenes to split off (or convert the whole level on the Convert tab).", L"Halo Map Porter", MB_ICONINFORMATION); return; }
+    if (!check_card_folder(conv_card())) return;
+    std::wstring card_note;
+    if (!write_card(conv_card_dir(), conv_card_name(), out, card_note)) return;
+    save_settings();
+    Config cfg = campaign_config(in);
+    const auto outs = campaign_outputs(out);
+    cfg.campaign_split = (opening ? 1 : 0) | (closing ? 2 : 0);
+    cfg.campaign_level_folder = N(out.parent_path().filename().wstring());
+    cfg.campaign_closing_folder = N(outs[2].parent_path().filename().wstring());
+    const std::string title = mapcard::load_card(conv_card_dir(), N(conv_card_name())).name;
+    const bool share = checked(ID_SHARE);
+    set_busy(true);
+    SetWindowTextW(g_log, L"");
+    append_log(L"Converting " + in.filename().wstring() + L" as pieces: " + (opening ? L"its opening cutscene, " : L"") + L"the level" +
+               (closing ? L", its closing cutscene" : L""));
+    if (!card_note.empty()) append_log(card_note);
+    std::thread([=] {
+        // the pieces first (each its own map folder, with an info.txt naming it), then the level
+        std::string failed;
+        for (int piece : {1, 2}) {
+            if ((piece == 1 && !opening) || (piece == 2 && !closing)) continue;
+            Config c = cfg;
+            c.campaign_piece = piece;
+            const fs::path o = outs[(size_t)piece];
+            std::error_code ec;
+            fs::create_directories(o.parent_path(), ec);
+            post_log("");
+            post_log(std::string("==== ") + (piece == 1 ? "The opening cutscene" : "The closing cutscene") + " -> " + N(o.wstring()));
+            Result r = convert_map(c, in, from, Game::Xbox, o, share, post_log, nullptr);
+            if (!r.ok) { failed += std::string(piece == 1 ? "the opening" : "the closing") + ": " + r.error + "\n"; continue; }
+            mapcard::Card card;
+            card.name = (title.empty() ? N(out.parent_path().filename().wstring()) : title) + (piece == 1 ? " (opening)" : " (ending)");
+            card.desc = piece == 1 ? "The level's opening cutscene: plays, then loads the level." : "The level's closing cutscene.";
+            std::string err;
+            if (!mapcard::write_info_txt(card, o.parent_path(), err)) post_log("Map card: " + err);
+        }
+        post_log("");
+        post_log("==== The level -> " + N(out.wstring()));
+        Config c = cfg;
+        c.campaign_piece = 0;
+        Result r = convert_map(c, in, from, Game::Xbox, out, share, post_log, nullptr);
+        if (r.ok) {
+            std::string t = card_traits(c, conv_card_dir(), N(conv_card_name()), out, out.parent_path());
+            if (!t.empty()) post_log(t);
+            remember_conversion(in, out);
+        }
+        if (!failed.empty()) {
+            r.ok = false;
+            r.error = "Pieces that didn't build:\n" + failed + (r.error.empty() ? "" : "the level: " + r.error);
+        }
+        PostMessageW(g_wnd, WM_APP_CAMPAIGN, 0, (LPARAM) new std::string(r.campaign));
+        finish(r, "Converted the level and its cutscenes", Keys{"", "", "", true});
+    }).detach();
+}
+
 // ---- the batch window (batch_win.hpp): earlier conversions to the Xbox, converted again one after another
 
 // Every map converted for the Xbox, "input\toutput" lines (newest last), for the batch window.
@@ -2708,8 +2857,8 @@ static void create_controls() {
     g_tab = CreateWindowExW(0, WC_TABCONTROLW, L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, S(10), S(10), S(740), S(474),
                             g_wnd, (HMENU)ID_TAB, GetModuleHandleW(nullptr), nullptr);
     SendMessageW(g_tab, WM_SETFONT, (WPARAM)g_font, TRUE);
-    const wchar_t *tabs[] = {L"  Convert a map  ", L"  Build from my tags  ", L"  Xbox  ", L"  Map packs  ", L"  Settings  "};
-    for (int i = 0; i < 5; i++) {
+    const wchar_t *tabs[] = {L"  Convert a map  ", L"  Build from my tags  ", L"  Xbox  ", L"  Map packs  ", L"  Campaign  ", L"  Settings  "};
+    for (int i = 0; i < 6; i++) {
         TCITEMW ti{};
         ti.mask = TCIF_TEXT;
         ti.pszText = (LPWSTR)tabs[i];
@@ -2861,56 +3010,59 @@ static void create_controls() {
     // Map packs page
     create_pack_page();
 
+    // Campaign page
+    create_campaign_page();
+
     // Settings page
     y = 50;
-    label(4, L"Custom Edition folder:", 26, y, 160, ID_S_CE_LBL);
-    edit(4, 190, y, 440, ID_S_CE);
-    button(4, L"Browse...", 638, y - 1, 96, ID_S_CE_BROWSE);
+    label(5, L"Custom Edition folder:", 26, y, 160, ID_S_CE_LBL);
+    edit(5, 190, y, 440, ID_S_CE);
+    button(5, L"Browse...", 638, y - 1, 96, ID_S_CE_BROWSE);
     y += 36;
-    label(4, L"MCC maps folder:", 26, y, 160, ID_S_MCC_LBL);
-    edit(4, 190, y, 440, ID_S_MCC);
-    button(4, L"Browse...", 638, y - 1, 96, ID_S_MCC_BROWSE);
+    label(5, L"MCC maps folder:", 26, y, 160, ID_S_MCC_LBL);
+    edit(5, 190, y, 440, ID_S_MCC);
+    button(5, L"Browse...", 638, y - 1, 96, ID_S_MCC_BROWSE);
     y += 36;
-    label(4, L"H1A-EK folder (optional):", 26, y, 160, ID_S_EK_LBL);
-    edit(4, 190, y, 440, ID_S_EK);
-    button(4, L"Browse...", 638, y - 1, 96, ID_S_EK_BROWSE);
+    label(5, L"H1A-EK folder (optional):", 26, y, 160, ID_S_EK_LBL);
+    edit(5, 190, y, 440, ID_S_EK);
+    button(5, L"Browse...", 638, y - 1, 96, ID_S_EK_BROWSE);
     y += 36;
-    label(4, L"Xbox tags folder:", 26, y, 160, ID_S_XT_LBL);
-    edit(4, 190, y, 440, ID_S_XT);
-    button(4, L"Browse...", 638, y - 1, 96, ID_S_XT_BROWSE);
+    label(5, L"Xbox tags folder:", 26, y, 160, ID_S_XT_LBL);
+    edit(5, 190, y, 440, ID_S_XT);
+    button(5, L"Browse...", 638, y - 1, 96, ID_S_XT_BROWSE);
     y += 36;
-    label(4, L"Xbox maps (if no tags):", 26, y, 160, ID_S_XM_LBL);
-    edit(4, 190, y, 440, ID_S_XM);
-    button(4, L"Browse...", 638, y - 1, 96, ID_S_XM_BROWSE);
+    label(5, L"Xbox maps (if no tags):", 26, y, 160, ID_S_XM_LBL);
+    edit(5, 190, y, 440, ID_S_XM);
+    button(5, L"Browse...", 638, y - 1, 96, ID_S_XM_BROWSE);
     y += 36;
-    label(4, L"Invader folder:", 26, y, 160, ID_S_INV_LBL);
-    edit(4, 190, y, 440, ID_S_INV);
-    button(4, L"Browse...", 638, y - 1, 96, ID_S_INV_BROWSE);
+    label(5, L"Invader folder:", 26, y, 160, ID_S_INV_LBL);
+    edit(5, 190, y, 440, ID_S_INV);
+    button(5, L"Browse...", 638, y - 1, 96, ID_S_INV_BROWSE);
     y += 34;
-    button(4, L"Download Invader", 190, y, 140, ID_S_INV_DL);
-    add(4, L"STATIC", L"", 0, 342, y + 5, 230, 20, ID_S_INV_STATUS);
-    label(4, L"Theme:", 580, y + 4, 44, ID_S_THEME_LBL);   // (Light, Dark, as Windows is: from the next start)
-    list_combo(4, 626, y, 108, ID_S_THEME, {L"Light", L"Dark", L"As Windows"});
+    button(5, L"Download Invader", 190, y, 140, ID_S_INV_DL);
+    add(5, L"STATIC", L"", 0, 342, y + 5, 230, 20, ID_S_INV_STATUS);
+    label(5, L"Theme:", 580, y + 4, 44, ID_S_THEME_LBL);   // (Light, Dark, as Windows is: from the next start)
+    list_combo(5, 626, y, 108, ID_S_THEME, {L"Light", L"Dark", L"As Windows"});
     y += 34;
-    add(4, L"STATIC",
+    add(5, L"STATIC",
         L"Xbox tags folder: an Xbox tagset such as haloxbox-revised (recommended). Xbox maps: your own Xbox stock "
         L"maps, used only if no Xbox tags folder is set. See README.txt for details.",
         0, 26, y, 708, 36, ID_S_HINT);
     y += 46;
-    label(4, L"LOD library folder:", 26, y, 160, ID_S_LOD_LBL);
-    edit(4, 190, y, 440, ID_S_LOD);
-    button(4, L"Browse...", 638, y - 1, 96, ID_S_LOD_BROWSE);
+    label(5, L"LOD library folder:", 26, y, 160, ID_S_LOD_LBL);
+    edit(5, 190, y, 440, ID_S_LOD);
+    button(5, L"Browse...", 638, y - 1, 96, ID_S_LOD_BROWSE);
     y += 30;
-    add(4, L"STATIC", L"The lower-detail versions the app makes are kept here, so the same model in another map reuses them, "
+    add(5, L"STATIC", L"The lower-detail versions the app makes are kept here, so the same model in another map reuses them, "
         L"with your choices for models from the LODs window (choices.txt).", 0, 190, y, 544, 36, ID_S_LOD_HINT);
     y += 44;
-    check(4, L"Write a camera tour for Halo 1 Unlimited's perf log with each Xbox build", 26, y, 420, ID_S_TOUR);
-    label(4, L"Maps kept unpacked:", 452, y - 1, 124, ID_S_KEEP_LBL);
-    add(4, L"EDIT", L"", WS_TABSTOP | ES_NUMBER | ES_CENTER, 578, y - 1, 40, 24, ID_S_KEEP, WS_EX_CLIENTEDGE);
-    button(4, L"Clear temp files", 624, y - 2, 110, ID_S_CLEAR);
+    check(5, L"Write a camera tour for Halo 1 Unlimited's perf log with each Xbox build", 26, y, 420, ID_S_TOUR);
+    label(5, L"Maps kept unpacked:", 452, y - 1, 124, ID_S_KEEP_LBL);
+    add(5, L"EDIT", L"", WS_TABSTOP | ES_NUMBER | ES_CENTER, 578, y - 1, 40, 24, ID_S_KEEP, WS_EX_CLIENTEDGE);
+    button(5, L"Clear temp files", 624, y - 2, 110, ID_S_CLEAR);
     y += 28;
-    button(4, L"Read perf logs...", 26, y, 150, ID_S_PERF);
-    add(4, L"STATIC", L"Halo 1 Unlimited's logs: what limits a map's frame rate on the Xbox (the game, drawing or the "
+    button(5, L"Read perf logs...", 26, y, 150, ID_S_PERF);
+    add(5, L"STATIC", L"Halo 1 Unlimited's logs: what limits a map's frame rate on the Xbox (the game, drawing or the "
         L"graphics chip), the biggest costs and what to try. Pick several to compare.",
         0, 190, y, 536, 34, ID_S_PERF_HINT);
 
@@ -2951,6 +3103,8 @@ static void create_controls() {
     SendDlgItemMessageW(g_wnd, ID_X_MAPLIST, CB_SETCURSEL, std::clamp(_wtoi(ini_get(L"x_maplist", L"0").c_str()), 0, 2), 0);
     SendDlgItemMessageW(g_wnd, ID_X_LIMIT, CB_SETCURSEL, ini_get(L"x_limit", L"0") == L"1" ? 1 : 0, 0);
     set_check(ID_X_STOCK, ini_get(L"x_stock", L"1") == L"1");
+    set_check(ID_CA_OPEN, ini_get(L"ca_open", L"1") == L"1");
+    set_check(ID_CA_CLOSE, ini_get(L"ca_close", L"1") == L"1");
     set_check(ID_X_ALLVEH, ini_get(L"x_allveh", L"1") == L"1");
     set_check(ID_X_LODSTOCK, ini_get(L"x_lodstock", L"0") == L"1");
     set_check(ID_X_MAKELOD, ini_get(L"x_makelod", L"1") == L"1");
@@ -3015,8 +3169,8 @@ static void create_controls() {
 
     Config c = make_config();
     if (!invader_ok(c)) {
-        TabCtrl_SetCurSel(g_tab, 4);
-        show_page(4);
+        TabCtrl_SetCurSel(g_tab, 5);
+        show_page(5);
         append_log(L"Welcome! First, set up Invader (the map compiler) on the Settings tab: click \"Download Invader\".");
     } else {
         show_page(0);
@@ -3037,6 +3191,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             int pg = TabCtrl_GetCurSel(g_tab);
             show_page(pg);
             if (pg == 3 && !g_pack_loaded && !get_text(ID_PK_IN).empty() && fs::exists(fs::path(get_text(ID_PK_IN)))) pk_load();
+            if (pg == 4) campaign_page_shown();
             save_settings();
         }
         return 0;
@@ -3196,6 +3351,8 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (code == EN_KILLFOCUS) update_invader_status();
             break;
         case ID_CONVERT: if (!g_busy) start_convert(); break;
+        case ID_CA_FIND: if (!g_busy) start_campaign_find(); break;
+        case ID_CA_CONVERT: if (!g_busy) start_campaign_convert(); break;
         case ID_UNPACK: if (!g_busy) start_unpack(); break;
         case ID_BATCH: if (!g_busy) open_batch(); break;
         case ID_BUILD: if (!g_busy) start_build(); break;
@@ -3253,6 +3410,12 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         break;
+    case WM_APP_CAMPAIGN: {
+        auto *s = (std::string *)lp;
+        if (!s->empty()) campaign_report(*s);
+        delete s;
+        return 0;
+    }
     case WM_APP_LOG: {
         auto *s = (std::wstring *)lp;
         if (wp == 1) { set_text(ID_S_INV, *s); save_settings(); update_invader_status(); }

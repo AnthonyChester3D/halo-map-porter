@@ -2296,6 +2296,54 @@ Menu order: a pack's maps appear together, in the pack's order.txt order.
 The maps\order.txt on the Xbox can place a whole pack (a line with the
 pack's name, e.g. CEX), one of its maps (CEX\Abyss) or hide them (-CEX).
 
+CAMPAIGN LEVELS (the Campaign tab)
+----------------------------------
+A campaign map builds against the Xbox's campaign limit (278 MB), not the
+multiplayer 47 MB. Its tags still have to fit the 22 MB of tag memory,
+and a level's cutscenes can take a good share of that: their characters,
+animations, scenery and BSPs. The Campaign tab splits a level's opening
+and closing cutscenes into maps of their own, so each piece needs only
+what it uses. The map is the Convert tab's, with the Xbox tab's options,
+converted to Xbox map folders:
+  - the level, in the Convert tab's folder;
+  - its opening cutscene, in "<folder> - Opening" beside it: it plays,
+    then loads the level (still skippable: a skip goes straight on);
+  - its closing cutscene, in "<folder> - Ending": the level's end loads
+    it, and it ends as the level did (map_name to the next level, or
+    game_won).
+Each piece loads the next with map_name "+./<folder>": Halo 1 Unlimited
+finds the folder map beside the current one (or, failing that, any folder
+map of that name). A campaign's own map_name to its next level
+("lumoria_b") finds the folder map whose folder or .map has that name.
+"Find the cutscenes" prepares the map (as Unpack does) and says what it
+found, and what each piece would keep and leave out.
+What counts:
+  - The opening: a startup script's skippable part, the
+    (if (cinematic_skip_start) ...) Bungie's levels start with. The level
+    without it is the level as a skip leaves it.
+  - The closing: a script's last stretch, from after its last sleep_until
+    before its cinematic_start through the map_name or game_won ending the
+    level. The level ends by loading it instead.
+What each piece keeps:
+  - its scripts: the stretch, and the globals and scripts it calls or
+    wakes (and theirs); a cutscene's ai_erase lines go (a map just loaded
+    has no AI to erase);
+  - only the BSPs it shows, renumbered from 0 (the first is where its map
+    starts: the level's cutscene had the player wherever the level began
+    while the camera was elsewhere). The closing cutscene switches first to
+    the BSP its first camera point is in;
+  - the objects its scripts name, the scenery standing in its BSPs, the
+    encounters and conversations it names, the objects those
+    conversations use, and the actors its encounters need.
+The level leaves out the scripts only the pieces ran, the objects,
+encounters and conversations only they named, the actors nothing uses
+any more, and the BSPs only they switched to (renumbered, with its BSP
+switch triggers). Each piece's log has a [campaign] line saying what it
+kept and left out; each one's tag memory is in its own report.
+On the Xbox: until its menus list campaign folder maps, put the first
+piece in place of a stock level's map to play it; the rest are folder maps
+it loads. Network co-op hasn't been tried with split levels.
+
 READING THE LOG AND REPORT
 --------------------------
 The log lists every automatic change:
