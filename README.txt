@@ -2343,6 +2343,23 @@ kept and left out; each one's tag memory is in its own report.
 On the Xbox: until its menus list campaign folder maps, put the first
 piece in place of a stock level's map to play it; the rest are folder maps
 it loads. Network co-op hasn't been tried with split levels.
+Shared files (Halo 1 Unlimited v1.94 or later): with "Store the textures
+and sounds the pieces share once" ticked, after the pieces are converted
+the textures and sounds two or more of them use go in <folder>.shared, in
+the folder holding the pieces' folders, and each piece is laid out again
+without them (Lumoria A's three pieces: 347 MB -> 211 MB). Copy the
+.shared file to the Xbox with them, into the folder holding the pieces'
+folders (maps\ itself, when they're in maps\<folder>). "And draw on
+stock.shared" also takes what's in the 13 stock multiplayer maps from
+stock.shared (laid out from the Xbox maps folder in Settings, as Halo 1
+Unlimited's installer lays it out), written beside it: copy it too until
+the installer builds it. Every piece there is included, even one
+not converted this time; converting again reads a piece already drawing
+on the old file through it. Each piece keeps its identity in map sharing
+(the size and checksum of its build without shared files). Every
+texture, sound, BSP and the tag data is read back through the new files
+and compared before anything is written. The format is Halo 1
+Unlimited's docs/shared_maps.md (version 2).
 
 READING THE LOG AND REPORT
 --------------------------

@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstring>
 #include <mutex>
 #include <set>
 #include <fstream>
@@ -34,6 +35,7 @@
 #include "batch_win.hpp"
 #include "scripts_win.hpp"
 #include "shaders_win.hpp"
+#include "sharedfile.hpp"
 #include "showcase.hpp"
 
 using namespace porter;
@@ -104,13 +106,14 @@ enum {
     ID_S_KEEP_LBL, ID_S_KEEP, ID_S_CLEAR, ID_S_THEME_LBL, ID_S_THEME,
     // the Campaign tab: a campaign level's cutscenes, split off into maps of their own
     ID_CA_HINT, ID_CA_MAP, ID_CA_FIND, ID_CA_OPEN, ID_CA_CLOSE, ID_CA_CONVERT, ID_CA_REPORT, ID_CA_HALVES,
+    ID_CA_SHARED, ID_CA_STOCK,
 };
 
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new90.exe is 1.90).
-#define HMP_VERSION L"1.90"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new91.exe is 1.91).
+#define HMP_VERSION L"1.91"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -204,6 +207,8 @@ static void save_settings() {
     ini_set(L"x_trim", std::to_wstring(std::max(0, sel(ID_X_TRIM))));
     ini_set(L"ca_open", checked(ID_CA_OPEN) ? L"1" : L"0");
     ini_set(L"ca_close", checked(ID_CA_CLOSE) ? L"1" : L"0");
+    ini_set(L"ca_shared", checked(ID_CA_SHARED) ? L"1" : L"0");
+    ini_set(L"ca_stock", checked(ID_CA_STOCK) ? L"1" : L"0");
     ini_set(L"x_anim", std::to_wstring(std::max(0, sel(ID_X_ANIM))));
     ini_set(L"x_portals", std::to_wstring(std::max(0, sel(ID_X_PORTALS))));
     ini_set(L"x_tex2", std::to_wstring(sel(ID_X_TEX)));
@@ -1799,6 +1804,10 @@ static void create_campaign_page() {
     check(P, L"Split off the opening cutscene (the part a player can skip), as a map that plays before the level", 26, y, 708, ID_CA_OPEN);
     y += 26;
     check(P, L"Split off the closing cutscene (the level's last stretch, through the end), as a map that plays after it", 26, y, 708, ID_CA_CLOSE);
+    y += 26;
+    check(P, L"Store the textures and sounds the pieces share once, in <level>.shared beside their folders (Halo 1 Unlimited v1.94)", 26, y, 708, ID_CA_SHARED);
+    y += 26;
+    check(P, L"And draw on stock.shared: what's in the stock multiplayer maps (needs the Xbox maps folder in Settings)", 46, y, 688, ID_CA_STOCK);
     y += 32;
     button(P, L"Convert the pieces", 26, y, 160, ID_CA_CONVERT, true);
     button(P, L"Estimate halves", 196, y, 140, ID_CA_HALVES);
@@ -1905,7 +1914,7 @@ static void start_campaign_convert() {
     cfg.campaign_level_folder = N(out.parent_path().filename().wstring());
     cfg.campaign_closing_folder = N(outs[2].parent_path().filename().wstring());
     const std::string title = mapcard::load_card(conv_card_dir(), N(conv_card_name())).name;
-    const bool share = checked(ID_SHARE);
+    const bool share = checked(ID_SHARE), store_shared = checked(ID_CA_SHARED), use_stock = checked(ID_CA_STOCK);
     set_busy(true);
     SetWindowTextW(g_log, L"");
     append_log(L"Converting " + in.filename().wstring() + L" as pieces: " + (opening ? L"its opening cutscene, " : L"") + L"the level" +
@@ -1946,7 +1955,28 @@ static void start_campaign_convert() {
             r.ok = false;
             r.error = "Pieces that didn't build:\n" + failed + (r.error.empty() ? "" : "the level: " + r.error);
         }
-        PostMessageW(g_wnd, WM_APP_CAMPAIGN, 0, (LPARAM) new std::string(r.campaign));
+        // What the pieces have in common stored once (sharedfile.hpp), in <level folder>.shared beside their folders:
+        // every piece there, converted now or before (one drawing on it is read through it, and draws on the new one).
+        std::string campaign = r.campaign;
+        if (store_shared && r.ok) {
+            std::vector<fs::path> pieces;
+            std::error_code ec;
+            for (size_t k : {1, 0, 2})
+                if (fs::exists(outs[k], ec)) pieces.push_back(outs[k]);
+            std::string name;
+            for (char ch : N(out.parent_path().filename().wstring()))
+                name += (ch < 32 || ch > 126 || std::strchr("\\/:*?\"<>|", ch)) ? '_' : ch;
+            if (name.size() > 30) name.resize(30);
+            if (name.empty() || name == "stock") name = "campaign";
+            const fs::path shared = out.parent_path().parent_path() / W(name + ".shared");
+            post_log("");
+            post_log("==== Storing what the pieces share once -> " + N(shared.wstring()));
+            sharedfile::Result s = sharedfile::make(shared, pieces, use_stock ? cfg.xbox_maps_dir : fs::path(), post_log);
+            const std::string text = s.ok ? s.report : "Not stored once: " + s.error + "\n";
+            post_log(text);
+            campaign += (campaign.empty() ? "" : "\n") + std::string("Shared files:\n") + text;
+        }
+        PostMessageW(g_wnd, WM_APP_CAMPAIGN, 0, (LPARAM) new std::string(campaign));
         finish(r, "Converted the level and its cutscenes", Keys{"", "", "", true});
     }).detach();
 }
@@ -3149,6 +3179,8 @@ static void create_controls() {
     set_check(ID_X_STOCK, ini_get(L"x_stock", L"1") == L"1");
     set_check(ID_CA_OPEN, ini_get(L"ca_open", L"1") == L"1");
     set_check(ID_CA_CLOSE, ini_get(L"ca_close", L"1") == L"1");
+    set_check(ID_CA_SHARED, ini_get(L"ca_shared", L"0") == L"1");
+    set_check(ID_CA_STOCK, ini_get(L"ca_stock", L"0") == L"1");
     set_check(ID_X_ALLVEH, ini_get(L"x_allveh", L"1") == L"1");
     set_check(ID_X_LODSTOCK, ini_get(L"x_lodstock", L"0") == L"1");
     set_check(ID_X_MAKELOD, ini_get(L"x_makelod", L"1") == L"1");
