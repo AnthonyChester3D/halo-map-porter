@@ -77,7 +77,7 @@ enum {
     ID_PK_LOGO_NONE, ID_PK_LOGO_MENU, ID_PK_SIZE_LBL, ID_PK_SIZE, ID_PK_CORNER_LBL, ID_PK_CORNER, ID_PK_HINT, ID_PK_LIST, ID_PK_PIC,
     ID_PK_MNAME_LBL, ID_PK_MNAME, ID_PK_DESC, ID_PK_OUT_LBL, ID_PK_OUT, ID_PK_OUT_BROWSE, ID_PK_CREATE,
     // the Halo Universal XBE's map list settings (build 20)
-    ID_PK_MAPLIST,
+    ID_PK_MAPLIST, ID_PK_SHARED, ID_PK_STOCK,
     // stock models' unused levels of detail; storing animations as keyframes
     ID_X_LODSTOCK, ID_X_ANIM_LBL, ID_X_ANIM,
     // making lower-detail versions, and the LOD library's folder (each *_BROWSE directly follows its edit box)
@@ -112,8 +112,8 @@ enum {
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new91.exe is 1.91).
-#define HMP_VERSION L"1.91"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new92.exe is 1.92).
+#define HMP_VERSION L"1.92"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -223,6 +223,8 @@ static void save_settings() {
     ini_set(L"x_perfect", checked(ID_X_PERFECT) ? L"1" : L"0");
     ini_set(L"pk_size", std::to_wstring(std::max(0, sel(ID_PK_SIZE))));
     ini_set(L"pk_corner", std::to_wstring(std::max(0, sel(ID_PK_CORNER))));
+    ini_set(L"pk_shared", checked(ID_PK_SHARED) ? L"1" : L"0");
+    ini_set(L"pk_stock", checked(ID_PK_STOCK) ? L"1" : L"0");
 }
 
 static Config make_config() {
@@ -1971,7 +1973,7 @@ static void start_campaign_convert() {
             const fs::path shared = out.parent_path().parent_path() / W(name + ".shared");
             post_log("");
             post_log("==== Storing what the pieces share once -> " + N(shared.wstring()));
-            sharedfile::Result s = sharedfile::make(shared, pieces, use_stock ? cfg.xbox_maps_dir : fs::path(), post_log);
+            sharedfile::Result s = sharedfile::make(shared, pieces, use_stock ? cfg.xbox_maps_dir : fs::path(), fs::path(), post_log);
             const std::string text = s.ok ? s.report : "Not stored once: " + s.error + "\n";
             post_log(text);
             campaign += (campaign.empty() ? "" : "\n") + std::string("Shared files:\n") + text;
@@ -2717,7 +2719,8 @@ static void pk_create() {
     mappack::Pack pack = g_pack;
     std::string series = g_series;
     Config cfg = make_config();
-    std::thread([pack, name, out, series, root, cfg]() mutable {
+    const bool store_shared = checked(ID_PK_SHARED), use_stock = checked(ID_PK_STOCK);
+    std::thread([pack, name, out, series, root, cfg, store_shared, use_stock]() mutable {
         std::string err;
         // the map browser's lines (Halo Universal XBE build 20): each map's gametypes and a player guess
         int n = 0;
@@ -2733,8 +2736,32 @@ static void pk_create() {
         }
         if (n) post_log("Read each map's gametypes and spawn points for the map list's sorts (" + std::to_string(n) + " maps).");
         bool ok = mappack::write_pack(pack, name, out, series, post_log, err);
+        // What the pack's maps have in common stored once (sharedfile.hpp), in <pack>\<pack>.shared: every map folder
+        // there, written now or before (the XBE plays them all; one drawing on it already is read through it).
+        // stock.shared goes in the folder holding the pack's, the Xbox's maps folder.
+        std::wstring needs = L"a Halo Universal XBE with map packs", stock_too;
+        if (ok && store_shared) {
+            std::vector<fs::path> maps;
+            std::error_code ec;
+            for (auto &d : fs::directory_iterator(root, ec)) {
+                if (!d.is_directory(ec)) continue;
+                std::vector<fs::path> found;
+                for (auto &f : fs::directory_iterator(d.path(), ec))
+                    if (f.is_regular_file(ec) && _wcsicmp(f.path().extension().c_str(), L".map") == 0) found.push_back(f.path());
+                std::sort(found.begin(), found.end());
+                if (!found.empty()) maps.push_back(found.front());
+            }
+            std::sort(maps.begin(), maps.end());
+            const fs::path shared = root / W(name + ".shared");
+            post_log("");
+            post_log("==== Storing what the pack's maps share once -> " + N(shared.wstring()));
+            sharedfile::Result s = sharedfile::make(shared, maps, use_stock ? cfg.xbox_maps_dir : fs::path(), out, post_log);
+            post_log(s.ok ? s.report : "Not stored once (the maps are as they were written): " + s.error);
+            if (s.ok) needs += L" and Halo 1 Unlimited v1.94";
+            if (s.ok && s.used_stock) stock_too = L", and stock.shared beside it";
+        }
         auto *d = new Done{ok, ok ? L"DONE: Map pack written -> " + root.wstring() + L"\\  (copy the " + W(name) +
-                                        L" folder into the Xbox's maps folder; it needs a Halo Universal XBE with map packs)"
+                                        L" folder into the Xbox's maps folder" + stock_too + L"; it needs " + needs + L")"
                                   : W("FAILED: " + err),
                            ok ? (root / L"order.txt").wstring() : L"", L""};
         PostMessageW(g_wnd, WM_APP_DONE, 0, (LPARAM)d);
@@ -2784,6 +2811,9 @@ static void create_pack_page() {
     button(P, L"Browse...", 450, y - 1, 76, ID_PK_OUT_BROWSE);
     button(P, L"Map list...", 532, y - 1, 114, ID_PK_MAPLIST);
     button(P, L"Create pack", 652, y - 1, 82, ID_PK_CREATE, true);
+    y += 30;
+    check(P, L"Store what the maps share once, in <pack>.shared (Halo 1 Unlimited v1.94)", 26, y, 520, ID_PK_SHARED);
+    check(P, L"And draw on stock.shared", 562, y, 172, ID_PK_STOCK);
 
     set_text(ID_PK_IN, ini_get(L"pk_in"));
     set_text(ID_PK_OUT, ini_get(L"pk_out"));
@@ -2791,6 +2821,8 @@ static void create_pack_page() {
     g_pk_logo_for = ini_get(L"pk_logo_for");
     SendDlgItemMessageW(g_wnd, ID_PK_SIZE, CB_SETCURSEL, std::clamp(_wtoi(ini_get(L"pk_size", L"1").c_str()), 0, 3), 0);
     SendDlgItemMessageW(g_wnd, ID_PK_CORNER, CB_SETCURSEL, std::clamp(_wtoi(ini_get(L"pk_corner", L"0").c_str()), 0, 3), 0);
+    set_check(ID_PK_SHARED, ini_get(L"pk_shared", L"1") == L"1");
+    set_check(ID_PK_STOCK, ini_get(L"pk_stock", L"1") == L"1");
     pk_load_logo(true);
     pk_select(-1);
     pk_hint();

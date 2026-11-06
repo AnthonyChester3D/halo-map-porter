@@ -510,9 +510,10 @@ std::vector<fs::path> stock_multiplayer_maps(const fs::path &folder) {
     return out;
 }
 
-Result make(const fs::path &shared, const std::vector<fs::path> &paths, const fs::path &stock_maps,
+Result make(const fs::path &shared, const std::vector<fs::path> &paths, const fs::path &stock_maps, const fs::path &stock_folder,
             const std::function<void(const std::string &)> &log) {
     Result r;
+    const fs::path stock_dir = stock_folder.empty() ? shared.parent_path() : stock_folder;
     try {
         const std::string name = shared.stem().u8string();
         bool name_ok = !name.empty() && name.size() <= 30 && name != "stock";
@@ -547,7 +548,10 @@ Result make(const fs::path &shared, const std::vector<fs::path> &paths, const fs
         std::map<fs::path, std::unique_ptr<Source>> sources;
         auto source = [&](const Map &m, const std::string &n, uint32_t sum, uint32_t length, const Source *&out) -> bool {
             std::vector<fs::path> where{m.path.parent_path() / (n + ".shared"), m.path.parent_path().parent_path() / (n + ".shared")};
-            if (n == "stock" && !stock_maps.empty()) where.push_back(stock_maps / "stock.shared");
+            if (n == "stock") {
+                where.push_back(stock_dir / "stock.shared");
+                if (!stock_maps.empty()) where.push_back(stock_maps / "stock.shared");
+            }
             for (auto &w : where) {
                 std::error_code ec;
                 if (!fs::exists(w, ec)) continue;
@@ -693,7 +697,6 @@ Result make(const fs::path &shared, const std::vector<fs::path> &paths, const fs
         log("Writing...");
         struct Out { fs::path path; const std::string *file; };
         std::vector<Out> outs;
-        const fs::path folder = shared.parent_path();
         auto same = [&](const fs::path &p, const std::string &file) {   // (an identical shared file already there)
             std::ifstream f(p, std::ios::binary);
             std::string h(kHeader, '\0');
@@ -702,7 +705,7 @@ Result make(const fs::path &shared, const std::vector<fs::path> &paths, const fs
         };
         auto temp = [](const fs::path &p) { fs::path t = p; t += ".new"; return t; };
         if (has_pack && !same(shared, pack_file)) outs.push_back({shared, &pack_file});
-        if (stock_used && !same(folder / "stock.shared", stock_file)) outs.push_back({folder / "stock.shared", &stock_file});
+        if (stock_used && !same(stock_dir / "stock.shared", stock_file)) outs.push_back({stock_dir / "stock.shared", &stock_file});
         for (auto &m : maps)
             if (m->rewrite) outs.push_back({m->path, &m->file});
         for (auto &o : outs)
@@ -723,27 +726,33 @@ Result make(const fs::path &shared, const std::vector<fs::path> &paths, const fs
         for (auto &s : sources)
             if (s.first.filename() != "stock.shared") before += s.second->disk;   // (the pack's file they drew on before)
         std::string &rep = r.report;
+        // (a multiplayer map goes in a multiplayer cache file: 47 MiB unpacked)
+        auto too_big = [](const Map &m, size_t unpacked) {
+            return (get32(m.data, 0x60) & 0xFFFF) == 1 && unpacked > 47u * 1048576
+                       ? "; still over the 47 MB a multiplayer cache file holds" : "";
+        };
         for (auto &m : maps) {
             before += m->disk_size;
             if (!m->rewrite) {
                 after += m->disk_size;
                 rep += shown(m->path) + ": " + mb(m->disk_size) + ", left as it is (nothing in it is in another map" +
-                       (use_stock ? " or in stock.shared" : "") + ")\n";
+                       (use_stock ? " or in stock.shared" : "") + too_big(*m, m->data.size()) + ")\n";
                 continue;
             }
             after += m->file.size();
             rep += shown(m->path) + ": " + mb(m->disk_size) + " -> " + mb(m->file.size()) + " (" + mb(m->out.size()) + " unpacked";
             if (m->to_pack) rep += "; " + mb(m->to_pack) + " of its textures and sounds in " + name + ".shared";
             if (m->to_stock) rep += "; " + mb(m->to_stock) + " in stock.shared";
-            rep += ")\n";
+            rep += std::string(too_big(*m, m->out.size())) + ")\n";
         }
         if (has_pack) {
             after += pack_file.size();
-            rep += name + ".shared: " + mb(pack_file.size()) + " (" + mb(pack.data.size()) + " unpacked), beside the maps' folders\n";
+            rep += name + ".shared: " + mb(pack_file.size()) + " (" + mb(pack.data.size()) + " unpacked), in " + shared.parent_path().u8string() + "\n";
         }
         if (stock_used)
-            rep += "stock.shared: " + mb(stock_file.size()) + " (" + mb(stock.file.data.size()) + " unpacked), beside the maps' folders: every "
-                   "player has it once Halo 1 Unlimited's installer builds it, so it isn't counted\n";
+            rep += "stock.shared: " + mb(stock_file.size()) + " (" + mb(stock.file.data.size()) + " unpacked), in " + stock_dir.u8string() +
+                   " (every player will have it once Halo 1 Unlimited's installer builds it, so it isn't counted)\n";
+        r.used_stock = stock_used > 0;
         rep += "In all: " + mb(before) + " -> " + mb(after) + ". Every texture, sound, BSP and the tag data were read back through the new files and match.\n";
         r.ok = true;
     } catch (const std::exception &e) {

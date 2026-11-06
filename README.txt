@@ -2282,15 +2282,29 @@ one go, with the names, descriptions and pictures the pack's menu shows.
        <Pack>\<Map>\preview.bin    its picture, straight from the pack
        <Pack>\order.txt            the pack's menu order
        <Pack>\series.bin           the logo (if you picked one)
+       <Pack>\<Pack>.shared        what two or more of its maps use
+       stock.shared                what's in the stock multiplayer maps
      Copy the <Pack> folder into maps on the Xbox, next to your other map
-     folders.
+     folders (and stock.shared into maps itself).
+
+Shared files (Halo 1 Unlimited v1.94 or later; ticked to start with): "Store
+what the maps share once" puts the textures and sounds two or more of the
+pack's maps use in <Pack>.shared and lays each map out again without them.
+"And draw on stock.shared" also takes what's in the 13 stock multiplayer
+maps from stock.shared (laid out from the Xbox maps folder in Settings, the
+same file Halo 1 Unlimited's installer will build), written in the folder
+you save into. Every map folder in <Pack> is included, even one written
+before. The log says if a multiplayer map is still over the 47 MB a
+multiplayer cache file holds unpacked (sharing often gets one under it:
+Booglooch 71 -> 40 MB). Untick it for a pack an older Halo 1 Unlimited
+plays.
 
 The logo isn't baked into the pictures: the XBE draws series.bin on each
 picture as it loads, so swapping that one file changes the logo for the
 whole pack. The preview here is the exact result the Xbox shows.
 Packs need a Halo Universal XBE with map packs (test build 14 or later).
-The pack's own maps play as they are: nothing is converted. The pack's
-other files (its ui.map, XBE, videos) aren't needed.
+The pack's own maps play as they are: nothing is converted (shared files
+only move their textures and sounds). The pack's other files (its ui.map, XBE, videos) aren't needed.
 
 Menu order: a pack's maps appear together, in the pack's order.txt order.
 The maps\order.txt on the Xbox can place a whole pack (a line with the

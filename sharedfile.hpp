@@ -23,14 +23,15 @@ struct Result {
     bool ok = false;
     std::string error;
     std::string report;   // for people: each map's size before and after, the shared files', in all
+    bool used_stock = false;   // a map draws on stock.shared (written, or already there)
 };
 // `maps`: finished Xbox maps, rewritten in place (maps already drawing on shared files are read through them, so
 // running this again after one is rebuilt works). The pack's file is written to `shared` (its stem is the name the
 // maps give it: 1 to 30 characters); only data two or more of the maps use goes in it. `stock_maps`: the Xbox's own
-// maps folder; when it has the 13 stock multiplayer maps, data in them is drawn from stock.shared (written beside the
-// pack's file) instead. Every map is read back through the new files and compared with what it was before anything
-// is written.
-Result make(const fs::path &shared, const std::vector<fs::path> &maps, const fs::path &stock_maps,
+// maps folder; when it has the 13 stock multiplayer maps, data in them is drawn from stock.shared instead, written in
+// `stock_folder` (the folder that will be the Xbox's maps folder; empty: beside the pack's file). Every map is read
+// back through the new files and compared with what it was before anything is written.
+Result make(const fs::path &shared, const std::vector<fs::path> &maps, const fs::path &stock_maps, const fs::path &stock_folder,
             const std::function<void(const std::string &)> &log);
 
 // The 13 stock multiplayer maps in `folder` (empty if any is missing).
