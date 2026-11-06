@@ -6712,17 +6712,50 @@ static void xbox_collision(Job &job, const std::vector<std::string> &deps) {
                             if (sn.name == n.name && !sn.bsps.empty()) { shared++; break; }
                 if (shared > best_shared) { best_shared = shared; best = &st; }
             }
-            if (best && best_shared * 2 >= with_bsps && !use.models.empty()) {
+            // The fits on each of the models it's used with (empty: a model couldn't be read).
+            auto fit_with = [&](const Stock &st) {
                 std::vector<coll::StockFit> fits;
                 for (auto &m : use.models) {
                     fs::path mo = job.owner(m);
                     tagfile::Tag mt;
                     coll::Rig rig;
-                    if (mo.empty() || !mt.load(mo / from_u8(m)) || !coll::read_rig(mt.root(), rig)) { fits.clear(); break; }
+                    if (mo.empty() || !mt.load(mo / from_u8(m)) || !coll::read_rig(mt.root(), rig)) return std::vector<coll::StockFit>();
                     if (character)
                         for (auto &n : rig.names) n = node_name(n);
-                    fits.push_back(coll::fit_stock(named, rig, best->nodes, best->rig));
+                    fits.push_back(coll::fit_stock(named, rig, st.nodes, st.rig));
                 }
+                return fits;
+            };
+            std::vector<coll::StockFit> chosen;
+            if (character && !use.models.empty()) {
+                // Every Halo character's bones have the same names, so the names don't say which of Bungie's it is:
+                // the one its path names (a "marine_armored" is a Marine), else the one whose boxes sit on the most of
+                // its bones. And only a character whose collision is heavier than boxes (a mesh round each bone):
+                // one already made of boxes, as Bungie's are, stays as it is.
+                size_t own_surfaces = 0;
+                for (auto &n : nodes)
+                    for (auto &b : n.bsps) own_surfaces += b.surfaces.size();
+                best = nullptr;
+                if (own_surfaces > 400) {
+                    std::string path = cm;
+                    for (auto &c : path) c = (char)tolower((unsigned char)c);
+                    std::vector<const Stock *> cand;
+                    for (auto &st : pool)
+                        if (path.find(st.name) != std::string::npos) cand.push_back(&st);
+                    if (cand.empty())
+                        for (auto &st : pool) cand.push_back(&st);
+                    size_t best_taken = 0;
+                    for (const Stock *st : cand) {
+                        std::vector<coll::StockFit> f = fit_with(*st);
+                        if (f.empty()) continue;
+                        size_t taken = f[0].taken.size();
+                        for (auto &x : f) taken = std::min(taken, x.taken.size());
+                        if (taken > best_taken) { best_taken = taken; best = st; chosen = std::move(f); }
+                    }
+                }
+            }
+            if (best && (character ? !chosen.empty() : best_shared * 2 >= with_bsps) && !use.models.empty()) {
+                std::vector<coll::StockFit> fits = character ? chosen : fit_with(*best);
                 size_t before = 0, after = 0;
                 int parts = 0;
                 std::vector<size_t> take;
