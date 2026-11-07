@@ -1359,7 +1359,11 @@ Level reflections, fog, scenery, weather and more: the "Level..." window (Xbox)
   - Riders: keep the AI of units the scripts sit on other objects (the
     default), or leave them without AI (see "Riders" below).
   - Props: keep the collision of small props whose collision is very
-    detailed (the default), or leave it out (see "Detailed props" below).
+    detailed (the default), make it simpler (made again as Bungie made
+    theirs, convex pieces within about 6 cm of the shape; one that can't be
+    is kept as made), or leave it out (see "Detailed props" below). A
+    model whose shapes are variants (a rock's) counts its most detailed
+    variant, the one solid on a placed object, not their sum.
   Hover over the choices and checkboxes for what each does. Choices are
   saved per map and used every time you convert it for the Xbox.
   Measurements are kept between runs of the app until the map file
@@ -2465,8 +2469,8 @@ The log lists every automatic change:
           scenery" above).
   [weather] The level's rain or snow was made lighter or turned off (see
           "Weather" above).
-  [props] Small props with very detailed collision lost it (see "Detailed
-          props" above).
+  [props] Small props with very detailed collision were made simpler, or
+          lost it (see "Detailed props" above).
   [showcase] The map folder's showcase.txt was written, or kept (see
           "Showcase flythroughs" above).
   [tour]  A camera tour for Halo 1 Unlimited's perf log was written (see

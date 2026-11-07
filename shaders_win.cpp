@@ -1328,7 +1328,12 @@ void fill_content() {
          L"No AI for the " + std::to_wstring(c.riders) + L" riding other objects", St->picks.riders);
     std::string names(c.prop_names);
     fill(IDC_PROPS, c.detailed_props > 0, L"No small props with very detailed collision", L"Keep their collision (as made)",
-         L"No collision: " + W(names), St->picks.props);
+         L"No collision: " + W(names), St->picks.props == 1);
+    if (c.detailed_props > 0) {   // (the third: their collision made again simpler, in the middle)
+        HWND h = item(IDC_PROPS);
+        SendMessageW(h, CB_INSERTSTRING, 1, (LPARAM)(L"Simpler collision: " + W(names)).c_str());
+        SendMessageW(h, CB_SETCURSEL, St->picks.props == 2 ? 1 : St->picks.props == 1 ? 2 : 0, 0);
+    }
     // (the lights: three choices)
     HWND h = item(IDC_LIGHTS);
     SendMessageW(h, CB_RESETCONTENT, 0, 0);
@@ -2056,7 +2061,8 @@ void create_controls() {
     const wchar_t *props_tip = L"Small scenery (1 unit or less) whose collision model is very detailed (300 surfaces or more; "
                                L"Deathtrap's pilot chairs have 416, a warthog's whole chassis 47). Each tick a player's movement is "
                                L"tested against the collision models it's near: standing by one of Deathtrap's chairs cost 5-6 ms a "
-                               L"tick. Without collision, players and shots pass through them.";
+                               L"tick. Simpler collision: made again as Bungie made theirs, convex pieces within a few cm of the shape, under 300 "
+                               L"surfaces. Without collision, players and shots pass through them.";
     tip(IDC_PROPS, props_tip);
     tip(IDC_PROPS_LBL, props_tip);
     const wchar_t *lights_tip = L"Dynamic lights on the objects the map places, always on: Deathtrap's three warthogs each carry a "
@@ -2230,7 +2236,8 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case IDC_RIDERS: case IDC_PROPS:
             if (HIWORD(wp) == CBN_SELCHANGE && St->data) {
                 int k = (int)SendMessageW(item(id), CB_GETCURSEL, 0, 0);
-                if (k == 0 || k == 1) (id == IDC_RIDERS ? St->picks.riders : St->picks.props) = k;
+                if (id == IDC_PROPS) { if (k >= 0 && k <= 2) St->picks.props = k == 1 ? 2 : k == 2 ? 1 : 0; }
+                else if (k == 0 || k == 1) St->picks.riders = k;
             }
             return 0;
         case IDC_BSPS: {   // a campaign level's BSPs: which are shown, together

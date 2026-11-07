@@ -112,8 +112,8 @@ enum {
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new95.exe is 1.95).
-#define HMP_VERSION L"1.95"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new96.exe is 1.96).
+#define HMP_VERSION L"1.96"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -1494,7 +1494,7 @@ static shadersui::Picks load_shader_picks(const fs::path &input) {
         } else if (k == "tinypx") picks.tiny_px = std::max(0.0, atof(v.c_str()));
         else if (k == "weather") picks.weather = std::clamp(atoi(v.c_str()), 0, 3);
         else if (k == "riders") picks.riders = atoi(v.c_str()) ? 1 : 0;
-        else if (k == "props") picks.props = atoi(v.c_str()) ? 1 : 0;
+        else if (k == "props") picks.props = std::max(0, std::min(2, atoi(v.c_str())));
         else if (k == "sky") picks.sky = atoi(v.c_str()) ? 1 : 0;
         else if (k == "effects") picks.effects = std::clamp(atoi(v.c_str()), 0, 2);
         else if (k == "lights") picks.lights = std::clamp(atoi(v.c_str()), 0, 2);
@@ -1603,7 +1603,7 @@ static void apply_shader_picks(Config &cfg, const fs::path &input) {
     cfg.xbox_bot_removed = picks.bots_removed;
     cfg.xbox_weather = picks.weather;
     cfg.xbox_rider_ai_off = picks.riders == 1;
-    cfg.xbox_detailed_props_off = picks.props == 1;
+    cfg.xbox_detailed_props = picks.props;
     cfg.xbox_sky = picks.sky;
     cfg.xbox_effects = picks.effects;
     cfg.xbox_object_lights = picks.lights;
@@ -1746,7 +1746,7 @@ static void open_shaders() {
                    (picks.weather == 1 ? L"lighter" : picks.weather == 2 ? L"half the drops" : picks.weather == 3 ? L"off" : L"as made") +
                    L"; sky " + (picks.sky ? L"as made" : L"in fewer layers") + L"; effects " +
                    (picks.effects == 1 ? L"as made" : picks.effects == 2 ? L"lighter" : L"no busier than Bungie's") +
-                   (picks.riders ? L"; riders without AI" : L"") + (picks.props ? L"; detailed props without collision" : L"") +
+                   (picks.riders ? L"; riders without AI" : L"") + (picks.props == 1 ? L"; detailed props without collision" : picks.props == 2 ? L"; detailed props' collision simpler" : L"") +
                    (picks.showcase.empty() ? L"; showcase flythrough made from the level" : L"; showcase flythrough your own") +
                    (picks.bots.empty() ? L"" : L"; " + std::to_wstring(picks.bots.size()) + L" bot waypoint" + (picks.bots.size() == 1 ? L"" : L"s") + L" of yours") + L".");
     }

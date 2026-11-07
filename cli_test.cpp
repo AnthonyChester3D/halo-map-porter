@@ -220,7 +220,7 @@ int main(int argc, char **argv) {
     if (getenv("XFX")) cfg.xbox_effects = atoi(getenv("XFX"));                    // 1 as made, 2 lighter
     cfg.xbox_rider_ai_off = getenv("XRIDERS") != nullptr;                          // riders without AI
     if (getenv("XSCRIPTS")) cfg.user_scripts = getenv("XSCRIPTS");                 // the scripts window's edits (a folder)
-    cfg.xbox_detailed_props_off = getenv("XPROPS") != nullptr;                     // detailed props without collision
+    cfg.xbox_detailed_props = getenv("XPROPS") ? atoi(getenv("XPROPS")) : 0;                     // detailed props without collision
     if (getenv("XLIGHTS")) cfg.xbox_object_lights = atoi(getenv("XLIGHTS"));     // lights on the map's objects: 1 no specular, 2 off
     cfg.write_perf_tour = getenv("XTOUR") != nullptr;                              // a perf log camera tour beside the map
     cfg.xbox_perfect = getenv("XPERFECT") != nullptr;                              // Perfect Conversion (linked with CE)

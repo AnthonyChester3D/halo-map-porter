@@ -1917,18 +1917,19 @@ long sphere_work(const Bsp &b) {
     return ops;
 }
 
-Lightened lighten(const Bsp &in, long budget, Bsp &out) {
+Lightened lighten(const Bsp &in, long budget, Bsp &out, size_t max_surfaces) {
     Lightened r;
     r.surfaces_before = r.surfaces_after = in.surfaces.size();
     r.work_before = r.work_after = sphere_work(in);
-    if (r.work_before <= budget) { r.why = "light enough"; return r; }
+    const bool by_surfaces = max_surfaces != (size_t)-1;
+    if (r.work_before <= budget && in.surfaces.size() <= max_surfaces) { r.why = "light enough"; return r; }
     for (auto &sf : in.surfaces)
         if (sf.flags & (kTwoSided | kBreakable)) { r.why = "it has two-sided or breakable surfaces"; return r; }
     auto accept = [&](const Bsp &b) { return self_consistency(b, 1500) >= 0.995; };
     // the same surfaces in a leaner BSP may be enough
     {
         Bsp b;
-        if (build(polygons(in), b) && accept(b)) {
+        if (build(polygons(in), b) && accept(b) && b.surfaces.size() <= max_surfaces) {
             long w = sphere_work(b);
             if (w <= budget) {
                 out = b;
@@ -1960,9 +1961,11 @@ Lightened lighten(const Bsp &in, long budget, Bsp &out) {
         t.ok = convex_pieces(polys, grid, t.pp, t.b, nullptr) && accept(t.b);
         if (!t.ok) continue;
         t.work = sphere_work(t.b);
-        if (t.work <= budget) { best = std::move(t); break; }
+        if (t.work <= budget && t.b.surfaces.size() <= max_surfaces) { best = std::move(t); break; }
+        if (by_surfaces) continue;
         if (!lightest.ok || t.work < lightest.work) lightest = std::move(t);
     }
+    if (!best.ok && by_surfaces) { r.why = "it couldn't be made that simple without changing its shape too much"; return r; }
     if (!best.ok) {
         // not light enough at the most it may change: the lightest, if much lighter
         if (!lightest.ok) { r.why = "it couldn't be made again as a closed shape"; return r; }

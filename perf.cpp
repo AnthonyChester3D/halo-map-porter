@@ -195,11 +195,15 @@ bool weather_lighten(std::vector<WeatherType> &types, int mode) {
 int collision_surfaces(const std::filesystem::path &collision_model) {
     tagfile::Tag t;
     if (!t.load(collision_model)) return 0;
+    // (a node's BSPs are its permutations' shapes, one of them solid on a placed object, as a rock's variants: the
+    // most detailed one counts, not their sum)
     int n = 0;
     tagfile::Block nodes = t.root().block("nodes");
     for (size_t i = 0; i < nodes.size(); i++) {
         tagfile::Block bsps = nodes[i].block("bsps");
-        for (size_t k = 0; k < bsps.size(); k++) n += (int)bsps[k].block("surfaces").size();
+        int most = 0;
+        for (size_t k = 0; k < bsps.size(); k++) most = std::max(most, (int)bsps[k].block("surfaces").size());
+        n += most;
     }
     return n;
 }

@@ -32,7 +32,7 @@ struct Picks {
     double tiny_px = 0;
     int weather = 0;   // (Config::xbox_weather)
     int riders = 0;    // 1: no AI for units riding other objects (Config::xbox_rider_ai_off)
-    int props = 0;     // 1: no collision for small props with very detailed collision (Config::xbox_detailed_props_off)
+    int props = 0;     // small props with very detailed collision: 1 without it, 2 made simpler (Config::xbox_detailed_props)
     int sky = 0;       // 0: the map's own skies drawn in fewer layers, looking the same; 1 as made (Config::xbox_sky)
     int effects = 0;   // 0: the map's own effects no busier than Bungie's; 1 as made; 2 lighter (Config::xbox_effects)
     int lights = 0;    // dynamic lights on the map's objects: 0 as made, 1 no specular, 2 off (Config::xbox_object_lights)

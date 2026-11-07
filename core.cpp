@@ -9167,8 +9167,53 @@ void xbox_weather(Job &job) {
 // players and shots pass through it. A player's movement is tested against every surface of the collision models
 // it's near, each tick: standing by one of Deathtrap's pilot chairs (416 surfaces for a 1-unit object; a warthog's
 // chassis has 47) cost an Xbox 5-6 ms a tick, half the frame's game time.
+// Or (2) its collision made again as Bungie made theirs, convex pieces within a few cm, under kDetailedPropSurfaces
+// surfaces: still solid, and cheap to stand by. One that can't be (two-sided or breakable surfaces, or its shape too
+// fine) is left as made.
+static bool simpler_prop_collision(Job &job, const std::string &coll, int &before, int &after, std::string &why) {
+    fs::path own = job.owner(coll), ed_dir = editable_owner(job, coll, true);
+    tagfile::Tag t;
+    tagfile::EditTag ed;
+    if (own.empty() || ed_dir.empty() || !t.load(own / from_u8(coll)) || !ed.load(ed_dir / from_u8(coll))) { why = "unreadable"; return false; }
+    std::vector<coll::NodeBsps> nodes = coll::read_nodes(t.root());
+    std::vector<tagfile::TagNode> *enodes = tagfile::block(ed.root(), "nodes");
+    if (!enodes || enodes->size() != nodes.size()) { why = "unreadable"; return false; }
+    size_t total = 0;   // (as perf::collision_surfaces counts: each node's most detailed permutation)
+    for (auto &n : nodes) {
+        size_t most = 0;
+        for (auto &b : n.bsps) most = std::max(most, b.surfaces.size());
+        total += most;
+    }
+    if (!total) { why = "no surfaces"; return false; }
+    before = (int)total;
+    after = 0;
+    std::vector<size_t> node_after(nodes.size(), 0);
+    const size_t target = perf::kDetailedPropSurfaces - 1;
+    for (size_t i = 0; i < nodes.size(); i++)
+        for (size_t j = 0; j < nodes[i].bsps.size(); j++) {
+            const coll::Bsp &b = nodes[i].bsps[j];
+            // (each BSP its share of the limit)
+            const size_t share = std::max<size_t>(12, target * b.surfaces.size() / total);
+            coll::Bsp o;
+            coll::Lightened r = coll::lighten(b, LONG_MAX, o, share);
+            if (!r.changed && r.why != "light enough") { why = r.why; return false; }
+            // (a prop is small: its shape kept within about 6 cm, or it isn't done)
+            if (r.changed && r.moved_most > 0.02) { why = "it couldn't be made that simple without changing its shape too much"; return false; }
+            if (r.changed) {
+                std::vector<tagfile::TagNode> *eb = tagfile::block((*enodes)[i], "bsps");
+                if (!eb || j >= eb->size()) { why = "unreadable"; return false; }
+                coll::write_bsp((*eb)[j], o);
+            }
+            node_after[i] = std::max(node_after[i], r.changed ? o.surfaces.size() : b.surfaces.size());
+        }
+    for (size_t x : node_after) after += (int)x;
+    if (!ed.save(ed_dir / from_u8(coll))) { why = "couldn't be saved"; return false; }
+    return true;
+}
+
 void xbox_props(Job &job) {
-    if (!job.cfg.xbox_detailed_props_off || job.analysis) return;
+    const int mode = job.cfg.xbox_detailed_props;
+    if (!mode || job.analysis) return;
     std::string scen = job.scenario + ".scenario";
     fs::path sdir = job.owner(scen);
     tagfile::Tag st;
@@ -9176,7 +9221,8 @@ void xbox_props(Job &job) {
     tagfile::Block placed = st.root().block("scenery"), pal = st.root().block("scenery palette");
     std::map<long long, int> count;
     for (size_t i = 0; i < placed.size(); i++) count[placed[i].integer("type")]++;
-    std::vector<std::string> done;
+    std::vector<std::string> done, made, kept;
+    std::set<std::string> simplified;
     for (auto &[k, n] : count) {
         if (k < 0 || (size_t)k >= pal.size()) continue;
         std::string ref = pal[(size_t)k].ref("name");
@@ -9188,6 +9234,17 @@ void xbox_props(Job &job) {
         fs::path cown = job.owner(coll);
         int surfaces = cown.empty() ? 0 : perf::collision_surfaces(cown / from_u8(coll));
         if (surfaces < perf::kDetailedPropSurfaces) continue;
+        if (mode == 2) {
+            if (!simplified.insert(coll).second) continue;   // (props sharing one collision model: once)
+            int before = 0, after = 0;
+            std::string why;
+            if (simpler_prop_collision(job, coll, before, after, why))
+                made.push_back(fs::path(from_u8(ref)).stem().u8string() + " x" + std::to_string(n) + " (" + std::to_string(before) +
+                               " surfaces now " + std::to_string(after) + ")");
+            else
+                kept.push_back(fs::path(from_u8(ref)).stem().u8string() + " (" + std::to_string(surfaces) + " surfaces; " + why + ")");
+            continue;
+        }
         fs::path ed = editable_owner(job, ref, true);
         tagfile::EditTag et;
         if (ed.empty() || !et.load(ed / from_u8(ref))) continue;
@@ -9204,6 +9261,15 @@ void xbox_props(Job &job) {
         job.note("[props] left out the collision of small props whose collision is very detailed (players and shots "
                  "pass through them; a player near one cost the Xbox several ms a tick): " + list);
     }
+    auto join = [](const std::vector<std::string> &v) {
+        std::string t;
+        for (auto &x : v) t += (t.empty() ? "" : ", ") + x;
+        return t;
+    };
+    if (!made.empty())
+        job.note("[props] made the very detailed collision of small props simpler, as Bungie made theirs (convex pieces "
+                 "within a few cm, still solid; a player near one cost the Xbox several ms a tick): " + join(made));
+    if (!kept.empty()) job.note("[props] small props' detailed collision left as made: " + join(kept));
 }
 
 // The LODs window's models (job.lod_changes): how many are on the map, their switch distances and size, and each
@@ -15533,7 +15599,7 @@ static Config perfect_config(Config c) {
     c.xbox_add_portals = false;
     c.xbox_replan_portals = false;
     c.xbox_rider_ai_off = false;
-    c.xbox_detailed_props_off = false;
+    c.xbox_detailed_props = 0;
     return c;
 }
 
@@ -16351,7 +16417,7 @@ std::string xbox_prepare_key(const Config &c) {
     for (auto &w : c.xbox_bot_removed) k << "removed=" << w[0] << " " << w[1] << " " << w[2] << "\n";
     k << "fog=" << c.xbox_fog << " " << c.xbox_fog_scale << " " << c.xbox_fog_distance << " " << c.xbox_fog_start << "\n";
     k << "fx=" << c.xbox_effects << " sky=" << c.xbox_sky << " weather=" << c.xbox_weather << " riders=" << c.xbox_rider_ai_off
-      << " props=" << c.xbox_detailed_props_off << " lights=" << c.xbox_object_lights << "\n";
+      << " props=" << c.xbox_detailed_props << " lights=" << c.xbox_object_lights << "\n";
     k << "refl=" << c.xbox_drop_reflections << c.xbox_reflection_picks_set << "\n";
     for (auto &t : c.xbox_reflection_picks) k << "drop=" << t << "\n";
     k << "tex=" << c.xbox_max_texture << " lm=" << c.xbox_max_lightmap << (c.xbox_lightmap_dxt1 ? " lmdxt1" : "") << (c.xbox_perfect ? " perfect" : "") << " lvl=" << c.xbox_level_texture_mb

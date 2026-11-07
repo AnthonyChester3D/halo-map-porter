@@ -123,7 +123,7 @@ struct Config {
     bool xbox_rider_ai_off = false;
     // Small scenery with very detailed collision (perf::kDetailedProp...): its collision left out (players and shots
     // pass through it).
-    bool xbox_detailed_props_off = false;
+    int xbox_detailed_props = 0;   // small props with very detailed collision: 0 as made, 1 without it, 2 made simpler
     // Dynamic lights on the objects the map places (always on, like Deathtrap's warthogs' headlights): each one in
     // view has the Xbox draw the level and objects around it again, twice (diffuse and specular). 0 as made; 1 no
     // specular (the light stays, without its shine: about 70% of its passes' cost); 2 off (a lens flare stays).

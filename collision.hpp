@@ -92,7 +92,8 @@ struct Lightened {
     double lost = 0;                    // 99% of the old surfaces within this of the new (details filled over show here)
     std::string why;                    // why not, when not changed
 };
-Lightened lighten(const Bsp &in, long budget, Bsp &out);
+// `max_surfaces`: also made again until it has at most this many surfaces (small props: see perf.hpp).
+Lightened lighten(const Bsp &in, long budget, Bsp &out, size_t max_surfaces = (size_t)-1);
 
 // ---- Bungie's own collision where it fits: most custom vehicles (and their wrecks) are iterations of a stock one.
 
