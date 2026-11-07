@@ -112,8 +112,8 @@ enum {
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new92.exe is 1.92).
-#define HMP_VERSION L"1.92"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new93.exe is 1.93).
+#define HMP_VERSION L"1.93"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -1807,9 +1807,9 @@ static void create_campaign_page() {
     y += 26;
     check(P, L"Split off the closing cutscene (the level's last stretch, through the end), as a map that plays after it", 26, y, 708, ID_CA_CLOSE);
     y += 26;
-    check(P, L"Store the textures and sounds the pieces share once, in <level>.shared beside their folders (Halo 1 Unlimited v1.94)", 26, y, 708, ID_CA_SHARED);
+    check(P, L"Store the textures and sounds the pieces share once, in <level>-<version>.shared beside their folders (Halo 1 Unlimited v1.97)", 26, y, 708, ID_CA_SHARED);
     y += 26;
-    check(P, L"And draw on stock.shared: what's in the stock multiplayer maps (needs the Xbox maps folder in Settings)", 46, y, 688, ID_CA_STOCK);
+    check(P, L"And draw on stock.shared: what's in the stock maps and campaign (needs the Xbox maps folder in Settings)", 46, y, 688, ID_CA_STOCK);
     y += 32;
     button(P, L"Convert the pieces", 26, y, 160, ID_CA_CONVERT, true);
     button(P, L"Estimate halves", 196, y, 140, ID_CA_HALVES);
@@ -1957,23 +1957,20 @@ static void start_campaign_convert() {
             r.ok = false;
             r.error = "Pieces that didn't build:\n" + failed + (r.error.empty() ? "" : "the level: " + r.error);
         }
-        // What the pieces have in common stored once (sharedfile.hpp), in <level folder>.shared beside their folders:
-        // every piece there, converted now or before (one drawing on it is read through it, and draws on the new one).
+        // What the pieces have in common stored once (sharedfile.hpp), in <level folder>-<version>.shared beside their
+        // folders: every piece there, converted now or before (one drawing on it is read through it, and draws on the new
+        // one).
         std::string campaign = r.campaign;
         if (store_shared && r.ok) {
             std::vector<fs::path> pieces;
             std::error_code ec;
             for (size_t k : {1, 0, 2})
                 if (fs::exists(outs[k], ec)) pieces.push_back(outs[k]);
-            std::string name;
-            for (char ch : N(out.parent_path().filename().wstring()))
-                name += (ch < 32 || ch > 126 || std::strchr("\\/:*?\"<>|", ch)) ? '_' : ch;
-            if (name.size() > 30) name.resize(30);
-            if (name.empty() || name == "stock") name = "campaign";
-            const fs::path shared = out.parent_path().parent_path() / W(name + ".shared");
+            const fs::path folder = out.parent_path().parent_path();
             post_log("");
-            post_log("==== Storing what the pieces share once -> " + N(shared.wstring()));
-            sharedfile::Result s = sharedfile::make(shared, pieces, use_stock ? cfg.xbox_maps_dir : fs::path(), fs::path(), post_log);
+            post_log("==== Storing what the pieces share once, in " + N(folder.wstring()));
+            sharedfile::Result s = sharedfile::make(folder, N(out.parent_path().filename().wstring()), pieces,
+                                                    use_stock ? cfg.xbox_maps_dir : fs::path(), fs::path(), post_log);
             const std::string text = s.ok ? s.report : "Not stored once: " + s.error + "\n";
             post_log(text);
             campaign += (campaign.empty() ? "" : "\n") + std::string("Shared files:\n") + text;
@@ -2736,7 +2733,7 @@ static void pk_create() {
         }
         if (n) post_log("Read each map's gametypes and spawn points for the map list's sorts (" + std::to_string(n) + " maps).");
         bool ok = mappack::write_pack(pack, name, out, series, post_log, err);
-        // What the pack's maps have in common stored once (sharedfile.hpp), in <pack>\<pack>.shared: every map folder
+        // What the pack's maps have in common stored once (sharedfile.hpp), in <pack>\<pack>-<version>.shared: every map folder
         // there, written now or before (the XBE plays them all; one drawing on it already is read through it).
         // stock.shared goes in the folder holding the pack's, the Xbox's maps folder.
         std::wstring needs = L"a Halo Universal XBE with map packs", stock_too;
@@ -2752,12 +2749,11 @@ static void pk_create() {
                 if (!found.empty()) maps.push_back(found.front());
             }
             std::sort(maps.begin(), maps.end());
-            const fs::path shared = root / W(name + ".shared");
             post_log("");
-            post_log("==== Storing what the pack's maps share once -> " + N(shared.wstring()));
-            sharedfile::Result s = sharedfile::make(shared, maps, use_stock ? cfg.xbox_maps_dir : fs::path(), out, post_log);
+            post_log("==== Storing what the pack's maps share once, in " + N(root.wstring()));
+            sharedfile::Result s = sharedfile::make(root, name, maps, use_stock ? cfg.xbox_maps_dir : fs::path(), out, post_log);
             post_log(s.ok ? s.report : "Not stored once (the maps are as they were written): " + s.error);
-            if (s.ok) needs += L" and Halo 1 Unlimited v1.94";
+            if (s.ok) needs += L" and Halo 1 Unlimited v1.97";
             if (s.ok && s.used_stock) stock_too = L", and stock.shared beside it";
         }
         auto *d = new Done{ok, ok ? L"DONE: Map pack written -> " + root.wstring() + L"\\  (copy the " + W(name) +
@@ -2812,7 +2808,7 @@ static void create_pack_page() {
     button(P, L"Map list...", 532, y - 1, 114, ID_PK_MAPLIST);
     button(P, L"Create pack", 652, y - 1, 82, ID_PK_CREATE, true);
     y += 30;
-    check(P, L"Store what the maps share once, in <pack>.shared (Halo 1 Unlimited v1.94)", 26, y, 520, ID_PK_SHARED);
+    check(P, L"Store what the maps share once, in <pack>-<version>.shared (Halo 1 Unlimited v1.97)", 26, y, 520, ID_PK_SHARED);
     check(P, L"And draw on stock.shared", 562, y, 172, ID_PK_STOCK);
 
     set_text(ID_PK_IN, ini_get(L"pk_in"));

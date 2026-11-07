@@ -2,6 +2,7 @@
 #include "sharedfile.hpp"
 #include "inflate.hpp"
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
@@ -9,12 +10,21 @@
 #include <fstream>
 #include <map>
 #include <memory>
+#include <set>
 #include <thread>
 #include <unordered_map>
 
 namespace sharedfile {
 namespace {
 const size_t kHeader = 0x800, kUnit = 512, kSector = 2048;
+// A map's moved data goes in whole 2048-byte sectors, as Halo 1 Unlimited's shared_pass.py drops it (what stays keeps its
+// place in its sector).
+const size_t kDrop = 2048;
+// stock.shared as every Halo 1 Unlimited installer builds it from the retail maps (v1.97): its version.
+const uint32_t kStockSum = 0xA7FE2F70u, kStockLength = 238745600u;
+// The one before (v1.94-1.96: the multiplayer maps alone), whose blocks are where they are in this one.
+const uint32_t kOldStockSum = 0xC028F8BFu, kOldStockLength = 78260224u;
+const uint64_t kMultiplayerCache = 47ull * 1048576;   // (a map drawing on a packed shared file must fit one unpacked)
 const uint32_t kTagBase = 0x803A6000u, kRef = 0x700, kRefSize = 0x60;
 const uint32_t kPack = 0x80000000u, kStock = 0xC0000000u, kOffset = 0x3FFFFFFFu, kMaxShared = 0x11600000u;
 const uint32_t kBitmap = 0x6269746Du, kSound = 0x736E6421u;
@@ -120,8 +130,8 @@ std::string pack_shared(const std::string &data) {
     return file;
 }
 
-uint64_t hash_bytes(const char *p, size_t n) {
-    uint64_t h = 0x9E3779B97F4A7C15ull ^ (uint64_t)n;
+uint64_t hash_bytes(const char *p, size_t n, uint64_t seed = 0x9E3779B97F4A7C15ull) {
+    uint64_t h = seed ^ (uint64_t)n;
     size_t i = 0;
     for (; i + 8 <= n; i += 8) {
         uint64_t w;
@@ -246,7 +256,9 @@ struct Table {
     }
     int add(const char *b, uint32_t n, uint32_t rem) {
         int i = find(b, n, rem);
-        if (i >= 0) return i;
+        return i >= 0 ? i : add_new(b, n, rem);
+    }
+    int add_new(const char *b, uint32_t n, uint32_t rem) {   // (known not to be there)
         e.push_back({b, n, rem});
         by[key(b, n, rem)].push_back((int)e.size() - 1);
         return (int)e.size() - 1;
@@ -290,6 +302,8 @@ struct Map {
     uint64_t to_pack = 0, to_stock = 0;
     bool rewrite = false, pack_ref = false, stock_ref = false;
     std::string error;
+    std::string skipped;   // why it's left as it is (it can't be read)
+    std::string ref_name;  // the pack's file it drew on
 };
 
 // Where each block goes: 0 stays, 1 the pack's file, 2 stock.shared.
@@ -303,7 +317,7 @@ struct Plan {
 bool relayout(Map &m, const Plan &plan, const std::string &pack_name, const Source &pack, const Source &stock) {
     const std::string &d = m.data;
     const Parsed &p = m.p;
-    const size_t len = d.size(), units = (len - kHeader + kUnit - 1) / kUnit;
+    const size_t len = d.size(), units = (len - kHeader + kDrop - 1) / kDrop;
     std::vector<uint8_t> drop(units, 0);
     std::vector<std::pair<uint64_t, uint64_t>> moved;
     for (size_t j = 0; j < p.blocks.size(); j++)
@@ -315,27 +329,27 @@ bool relayout(Map &m, const Plan &plan, const std::string &pack_name, const Sour
         else merged.push_back(r);
     }
     for (auto &r : merged)
-        for (uint64_t u = (r.first - kHeader + kUnit - 1) / kUnit; u < (r.second - kHeader) / kUnit && u < units; u++) drop[u] = 1;
+        for (uint64_t u = (r.first - kHeader + kDrop - 1) / kDrop; u < (r.second - kHeader) / kDrop && u < units; u++) drop[u] = 1;
     // what stays keeps its units: the tag data, the BSPs, the blocks that stay
     std::vector<std::pair<uint64_t, uint64_t>> kept;
     kept.push_back({p.td_off, (uint64_t)p.td_off + p.td_size});
-    for (size_t f : p.bsp_fields) kept.push_back({get32(d, f), (uint64_t)get32(d, f) + get32(d, f + 4)});
+    for (size_t f : p.bsp_fields) kept.push_back({get32(d, f), (uint64_t)get32(d, f) + std::max<uint32_t>(get32(d, f + 4), 1)});
     for (size_t j = 0; j < p.blocks.size(); j++)
         if (p.blocks[j].own && !plan.go[j]) kept.push_back({p.blocks[j].value, (uint64_t)p.blocks[j].value + p.blocks[j].size});
     for (auto &r : kept) {
         uint64_t a = std::max<uint64_t>(r.first, kHeader), b = std::min<uint64_t>(r.second, len);
         if (b > a)
-            for (uint64_t u = (a - kHeader) / kUnit; u <= (b - 1 - kHeader) / kUnit; u++) drop[u] = 0;
+            for (uint64_t u = (a - kHeader) / kDrop; u <= (b - 1 - kHeader) / kDrop; u++) drop[u] = 0;
     }
     std::vector<uint32_t> before(units + 1, 0);
     for (size_t u = 0; u < units; u++) before[u + 1] = before[u] + drop[u];
     bool bad = false;
     auto move = [&](uint64_t o) -> uint32_t {
         if (o < kHeader) return (uint32_t)o;
-        const uint64_t u = (o - kHeader) / kUnit;
-        if (u >= units) return (uint32_t)(o - (uint64_t)before[units] * kUnit);
+        const uint64_t u = (o - kHeader) / kDrop;
+        if (u >= units) return (uint32_t)(o - (uint64_t)before[units] * kDrop);
         if (drop[u]) bad = true;
-        return (uint32_t)(o - (uint64_t)before[u] * kUnit);
+        return (uint32_t)(o - (uint64_t)before[u] * kDrop);
     };
     // the bytes: what moved zeroed (it compresses away), what stays put back over it where they share bytes
     std::string w = d;
@@ -346,10 +360,10 @@ bool relayout(Map &m, const Plan &plan, const std::string &pack_name, const Sour
     }
     std::string &out = m.out;
     out.clear();
-    out.reserve(len - (size_t)before[units] * kUnit + 1024);
+    out.reserve(len - (size_t)before[units] * kDrop + 1024);
     out.append(w, 0, kHeader);
     for (size_t u = 0; u < units; u++)
-        if (!drop[u]) out.append(w, kHeader + u * kUnit, std::min(kUnit, len - kHeader - u * kUnit));
+        if (!drop[u]) out.append(w, kHeader + u * kDrop, std::min(kDrop, len - kHeader - u * kDrop));
     std::string().swap(w);
     // blocks that stay in it but weren't in it, after the rest (each once)
     std::map<int, uint32_t> inserted;
@@ -366,11 +380,10 @@ bool relayout(Map &m, const Plan &plan, const std::string &pack_name, const Sour
             value[j] = it->second;
         }
     }
-    out.append((kUnit - out.size() % kUnit) % kUnit, '\0');
     for (size_t j = 0; j < p.blocks.size(); j++) put32(out, move(p.blocks[j].field), value[j]);
     for (size_t f : p.bsp_fields) put32(out, move(f), move(get32(d, f)));
     put32(out, 0x10, move(p.td_off));
-    if (bad) { m.error = "something that stays in it shares a 512-byte sector with what moved"; return false; }
+    if (bad) { m.error = "something that stays in it lies in a sector of what moved"; return false; }
     put32(out, 8, (uint32_t)out.size());
     std::string ref(kRefSize, '\0');
     if (m.pack_ref || m.stock_ref) {
@@ -444,55 +457,108 @@ bool check(Map &m, const Source &pack, const Source &stock) {
     return true;
 }
 
-// stock.shared as Halo 1 Unlimited lays it out (docs/shared_maps.md, "stock.shared's layout"): the stock multiplayer
-// maps in the order of their file names (lower case), each map's blocks in tag index order, each block's first copy
-// placed after the last.
+// stock.shared as Halo 1 Unlimited's installer lays it out (docs/shared_maps.md, "stock.shared's layout", v1.97): the 13
+// stock multiplayer maps in the order of their names, every block; then the 10 campaign levels in theirs, only the
+// blocks three levels or more use (counted once a level); each map's blocks in tag index order, each block's first copy
+// (the same bytes at the same remainder modulo 512) placed after the last. BSPs and ui.map aren't in it.
 const char *const kStockMaps[] = {"beavercreek", "bloodgulch", "boardingaction", "carousel", "chillout", "damnation", "hangemhigh",
-                                  "longest", "prisoner", "putput", "ratrace", "sidewinder", "wizard"};
+                                  "longest", "prisoner", "putput", "ratrace", "sidewinder", "wizard",
+                                  "a10", "a30", "a50", "b30", "b40", "c10", "c20", "c40", "d20", "d40"};
+const size_t kStockMultiplayer = 13, kStockLevelsBy = 3;
 struct StockLayout {
     Source file;
-    Table t;
+    Table t;              // its blocks (their bytes in `file`)
     std::vector<uint32_t> at;   // each entry's offset
 };
+bool load_map(const fs::path &p, std::string &data, Parsed &parsed, std::string &why) {
+    std::string disk;
+    bool c;
+    if (!read_file(p, disk)) { why = "couldn't be read"; return false; }
+    if (!unpack(disk, data, c, why)) return false;
+    return parse(data, parsed, [](uint32_t, uint32_t) { return (const char *)nullptr; }, why);
+}
 bool lay_out_stock(const std::vector<fs::path> &paths, StockLayout &s, std::string &why) {
-    std::vector<std::string> datas(paths.size());
-    std::vector<std::string> errors(paths.size());
-    std::vector<std::thread> th;
-    for (size_t i = 0; i < paths.size(); i++)
-        th.emplace_back([&, i] {
-            std::string disk;
-            bool c;
-            if (!read_file(paths[i], disk)) errors[i] = "couldn't be read";
-            else if (!unpack(disk, datas[i], c, errors[i])) datas[i].clear();
-        });
-    for (auto &t : th) t.join();
-    for (size_t i = 0; i < paths.size(); i++)
-        if (!errors[i].empty()) { why = name_of(paths[i]) + ": " + errors[i]; return false; }
     std::string &data = s.file.data;
+    data.reserve(kMaxShared + kSector);   // (the entries point into it: it never moves)
     data.assign(kHeader, '\0');
-    for (size_t i = 0; i < paths.size(); i++) {
+    auto put = [&](const Block &b) -> bool {
+        if (s.t.find(b.bytes, b.size, b.rem) >= 0) return true;
+        if (data.size() + kUnit + b.size > kMaxShared) { why = "it would be over 278 MB"; return false; }
+        const uint32_t at = place(data, b.bytes, b.size, b.rem);
+        s.t.add_new(data.data() + at, b.size, b.rem);
+        s.at.push_back(at);
+        return true;
+    };
+    // the multiplayer maps: every block
+    {
+        std::vector<std::string> datas(kStockMultiplayer), errors(kStockMultiplayer);
+        std::vector<Parsed> parsed(kStockMultiplayer);
+        std::vector<std::thread> th;
+        for (size_t i = 0; i < kStockMultiplayer; i++)
+            th.emplace_back([&, i] { load_map(paths[i], datas[i], parsed[i], errors[i]); });
+        for (auto &t : th) t.join();
+        for (size_t i = 0; i < kStockMultiplayer; i++) {
+            if (!errors[i].empty()) { why = name_of(paths[i]) + ": " + errors[i]; return false; }
+            for (auto &b : parsed[i].blocks)
+                if (b.own && !put(b)) return false;
+        }
+    }
+    // the levels: which blocks three levels or more use (each level's blocks counted once, by two independent hashes,
+    // so the levels needn't all be in memory at once), then those placed, a level at a time
+    struct Key {
+        uint64_t a, b;
+        bool operator==(const Key &o) const { return a == o.a && b == o.b; }
+    };
+    struct KeyHash { size_t operator()(const Key &k) const { return (size_t)(k.a ^ (k.b * 0x9E3779B97F4A7C15ull)); } };
+    auto key_of = [](const Block &b) {
+        return Key{hash_bytes(b.bytes, b.size) ^ ((uint64_t)b.rem << 52), hash_bytes(b.bytes, b.size, 0xD6E8FEB86659FD93ull) ^ b.size};
+    };
+    const size_t levels = paths.size() - kStockMultiplayer;
+    std::vector<std::vector<Key>> keys(levels);
+    std::vector<std::string> errors(levels);
+    {
+        std::atomic<size_t> next{0};
+        std::vector<std::thread> th;
+        const size_t workers = std::min<size_t>(levels, std::max(2u, std::min(4u, std::thread::hardware_concurrency())));
+        for (size_t w = 0; w < workers; w++)
+            th.emplace_back([&] {
+                for (size_t i; (i = next++) < levels;) {
+                    std::string d;
+                    Parsed p;
+                    if (!load_map(paths[kStockMultiplayer + i], d, p, errors[i])) continue;
+                    for (auto &b : p.blocks)
+                        if (b.own) keys[i].push_back(key_of(b));
+                    std::sort(keys[i].begin(), keys[i].end(), [](const Key &x, const Key &y) { return x.a != y.a ? x.a < y.a : x.b < y.b; });
+                    keys[i].erase(std::unique(keys[i].begin(), keys[i].end()), keys[i].end());
+                }
+            });
+        for (auto &t : th) t.join();
+    }
+    std::unordered_map<Key, uint32_t, KeyHash> used;
+    for (size_t i = 0; i < levels; i++) {
+        if (!errors[i].empty()) { why = name_of(paths[kStockMultiplayer + i]) + ": " + errors[i]; return false; }
+        for (auto &k : keys[i]) used[k]++;
+        std::vector<Key>().swap(keys[i]);
+    }
+    for (size_t i = 0; i < levels; i++) {
+        std::string d;
         Parsed p;
-        if (!parse(datas[i], p, [](uint32_t, uint32_t) { return (const char *)nullptr; }, why)) { why = name_of(paths[i]) + ": " + why; return false; }
+        if (!load_map(paths[kStockMultiplayer + i], d, p, why)) { why = name_of(paths[kStockMultiplayer + i]) + ": " + why; return false; }
         for (auto &b : p.blocks) {
             if (!b.own) continue;
-            const size_t before = s.t.e.size();
-            const int e = s.t.add(b.bytes, b.size, b.rem);
-            if (s.t.e.size() > before) s.at.push_back(place(data, b.bytes, b.size, b.rem));
-            (void)e;
+            auto it = used.find(key_of(b));
+            if (it != used.end() && it->second >= kStockLevelsBy && !put(b)) return false;
         }
     }
     data.append((kSector - data.size() % kSector) % kSector, '\0');
-    if (data.size() > kMaxShared) { why = "it would be over 278 MB"; return false; }
     shared_header(data, "stock");
     s.file.sum = get32(data, 0x64);
     s.file.length = (uint32_t)data.size();
-    // (the entries' bytes, from the maps, to the file's own copy)
-    for (size_t k = 0; k < s.t.e.size(); k++) s.t.e[k].bytes = data.data() + s.at[k];
     return true;
 }
 }   // namespace
 
-std::vector<fs::path> stock_multiplayer_maps(const fs::path &folder) {
+std::vector<fs::path> stock_maps_in(const fs::path &folder) {
     std::vector<fs::path> out;
     std::error_code ec;
     if (folder.empty() || !fs::is_directory(folder, ec)) return out;
@@ -510,20 +576,38 @@ std::vector<fs::path> stock_multiplayer_maps(const fs::path &folder) {
     return out;
 }
 
-Result make(const fs::path &shared, const std::vector<fs::path> &paths, const fs::path &stock_maps, const fs::path &stock_folder,
-            const std::function<void(const std::string &)> &log) {
+Result make(const fs::path &folder, const std::string &base_name, const std::vector<fs::path> &paths, const fs::path &stock_maps,
+            const fs::path &stock_folder, const std::function<void(const std::string &)> &log) {
     Result r;
-    const fs::path stock_dir = stock_folder.empty() ? shared.parent_path() : stock_folder;
+    const fs::path stock_dir = stock_folder.empty() ? folder : stock_folder;
     try {
-        const std::string name = shared.stem().u8string();
-        bool name_ok = !name.empty() && name.size() <= 30 && name != "stock";
-        for (unsigned char c : name)
-            if (c < 32 || c > 126 || strchr("\\/:*?\"<>|", c)) name_ok = false;
-        if (!name_ok) {
-            r.error = "The shared file's name (" + name + ") must be 1 to 30 letters, digits and the like (none of \\ / : * ? \" < > |), and not \"stock\".";
-            return r;
+        // the pack's file is named for its version: <pack>-<8 hex of its checksum>, 30 characters at most
+        std::string base;
+        for (unsigned char c : base_name) base += (c < 32 || c > 126 || strchr("\\/:*?\"<>|", c)) ? '_' : (char)c;
+        while (!base.empty() && (base.back() == ' ' || base.back() == '.')) base.pop_back();
+        if (base.size() > 21) base.resize(21);
+        if (base.empty()) base = "pack";
+        // ---- stock.shared, laid out first (maps built against the one before draw on its blocks where they still are)
+        StockLayout stock;
+        bool use_stock = false;
+        if (!stock_maps.empty()) {
+            const std::vector<fs::path> stock_paths = stock_maps_in(stock_maps);
+            std::string why;
+            if (stock_paths.empty())
+                log("  stock.shared isn't used: the Xbox maps folder needs the 13 stock multiplayer maps and the 10 campaign levels.");
+            else {
+                log("Laying out stock.shared from the Xbox's 13 multiplayer maps and 10 campaign levels...");
+                if (!lay_out_stock(stock_paths, stock, why)) log("  stock.shared isn't used: " + why);
+                else if (stock.file.sum != kStockSum || stock.file.length != kStockLength) {
+                    char t[256];
+                    snprintf(t, sizeof t, "  stock.shared isn't used: from these maps it comes out %08x (%u bytes), not the installer's %08x (%u bytes): "
+                             "the Xbox maps folder's maps aren't the retail ones.", stock.file.sum, stock.file.length, kStockSum, kStockLength);
+                    log(t);
+                } else use_stock = true;
+            }
+            if (!use_stock) stock = StockLayout();
         }
-        // ---- the maps, and the shared files they already draw on
+        // ---- the maps, and the shared files they already draw on (one that can't be read is left as it is)
         log("Reading the maps...");
         std::vector<std::unique_ptr<Map>> maps;
         for (auto &p : paths) {
@@ -535,20 +619,24 @@ Result make(const fs::path &shared, const std::vector<fs::path> &paths, const fs
             for (auto &mp : maps)
                 th.emplace_back([&m = *mp] {
                     std::string disk;
-                    if (!read_file(m.path, disk)) { m.error = "couldn't be read"; return; }
+                    if (!read_file(m.path, disk)) { m.skipped = "it couldn't be read"; return; }
                     m.disk_size = disk.size();
                     m.ident_size = (uint32_t)disk.size();
                     m.ident_sum = get32(disk, 0x64);
-                    if (!unpack(disk, m.data, m.compressed, m.error)) m.data.clear();
+                    std::string why;
+                    if (!unpack(disk, m.data, m.compressed, why)) { m.data.clear(); m.skipped = why; }
                 });
             for (auto &t : th) t.join();
         }
-        for (auto &m : maps)
-            if (!m->error.empty()) { r.error = shown(m->path) + ": " + m->error; return r; }
         std::map<fs::path, std::unique_ptr<Source>> sources;
         auto source = [&](const Map &m, const std::string &n, uint32_t sum, uint32_t length, const Source *&out) -> bool {
             std::vector<fs::path> where{m.path.parent_path() / (n + ".shared"), m.path.parent_path().parent_path() / (n + ".shared")};
             if (n == "stock") {
+                // (built against the stock.shared before this one: its blocks are where they were in this one)
+                if (use_stock && ((sum == stock.file.sum && length == stock.file.length) || (sum == kOldStockSum && length == kOldStockLength))) {
+                    out = &stock.file;
+                    return true;
+                }
                 where.push_back(stock_dir / "stock.shared");
                 if (!stock_maps.empty()) where.push_back(stock_maps / "stock.shared");
             }
@@ -567,48 +655,47 @@ Result make(const fs::path &shared, const std::vector<fs::path> &paths, const fs
                 }
                 if (s->sum == sum && s->length == length && s->data.size() == length) { out = s.get(); return true; }
             }
-            r.error = shown(m.path) + " draws on " + n + ".shared, and the one it was built with isn't beside it or in the folder above "
-                      "(convert it again, or put that file back).";
             return false;
         };
         for (auto &mp : maps) {
             Map &m = *mp;
+            if (!m.skipped.empty()) continue;
             const Source *pack_src = nullptr, *stock_src = nullptr;
             if (m.data.compare(kRef, 4, "drhs") == 0) {
                 const uint32_t version = get32(m.data, kRef + 4);
-                if (version != 1 && version != 2) { r.error = shown(m.path) + " draws on shared files of a later format."; return r; }
+                if (version != 1 && version != 2) { m.skipped = "it draws on shared files of a later format"; continue; }
                 m.had_ref = true;
                 m.ident_size = get32(m.data, kRef + 0x30);
                 m.ident_sum = get32(m.data, kRef + 0x34);
-                const std::string pn = cstr(m.data, kRef + 8, 32), sn = version == 2 ? cstr(m.data, kRef + 0x38, 32) : "";
-                if (!pn.empty() && !source(m, pn, get32(m.data, kRef + 0x28), get32(m.data, kRef + 0x2C), pack_src)) return r;
-                if (!sn.empty() && !source(m, sn, get32(m.data, kRef + 0x58), get32(m.data, kRef + 0x5C), stock_src)) return r;
+                m.ref_name = cstr(m.data, kRef + 8, 32);
+                const std::string sn = version == 2 ? cstr(m.data, kRef + 0x38, 32) : "";
+                if (!m.ref_name.empty() && !source(m, m.ref_name, get32(m.data, kRef + 0x28), get32(m.data, kRef + 0x2C), pack_src)) {
+                    m.skipped = "it draws on " + m.ref_name + ".shared, and the one it was built with isn't beside it or in the folder above";
+                    continue;
+                }
+                if (!sn.empty() && !source(m, sn, get32(m.data, kRef + 0x58), get32(m.data, kRef + 0x5C), stock_src)) {
+                    m.skipped = "it draws on a stock.shared that isn't here";
+                    continue;
+                }
             }
-            std::string why;
             auto resolve = [&](uint32_t v, uint32_t n) -> const char * {
                 const Source *s = (v & kStock) == kStock ? stock_src : pack_src;
                 const uint64_t o = v & kOffset;
                 return s && o + n <= s->data.size() ? s->data.data() + o : nullptr;
             };
-            if (!parse(m.data, m.p, resolve, why)) { r.error = shown(m.path) + ": " + why; return r; }
-        }
-        // ---- stock.shared
-        StockLayout stock;
-        bool use_stock = false;
-        const std::vector<fs::path> stock_paths = stock_multiplayer_maps(stock_maps);
-        if (!stock_paths.empty()) {
-            log("Laying out stock.shared from the Xbox's 13 stock multiplayer maps...");
             std::string why;
-            if (!lay_out_stock(stock_paths, stock, why)) log("  stock.shared isn't used: " + why);
-            else use_stock = true;
-        } else if (!stock_maps.empty()) {
-            log("  stock.shared isn't used: the Xbox maps folder doesn't have the 13 stock multiplayer maps.");
+            if (!parse(m.data, m.p, resolve, why)) m.skipped = why;
         }
-        // ---- what goes where
+        for (auto &m : maps)
+            if (!m->skipped.empty()) {
+                log("  " + shown(m->path) + " is left as it is: " + m->skipped + ".");
+                std::string().swap(m->data);
+            }
+        // ---- what goes where: stock.shared's data there, data two or more maps use in the pack's file, the rest stays
         Table t;
         for (size_t i = 0; i < maps.size(); i++)
             for (auto &b : maps[i]->p.blocks) {
-                if (!b.bytes) continue;
+                if (!maps[i]->skipped.empty() || !b.bytes) continue;
                 b.entry = t.add(b.bytes, b.size, b.rem);
                 Entry &e = t.e[(size_t)b.entry];
                 if (e.last_map != (int)i) { e.last_map = (int)i; e.maps++; }
@@ -616,9 +703,10 @@ Result make(const fs::path &shared, const std::vector<fs::path> &paths, const fs
         Source pack;
         pack.data.assign(kHeader, '\0');
         std::vector<Plan> plans(maps.size());
-        uint64_t stock_used = 0;
+        bool stock_used = false;
         for (size_t i = 0; i < maps.size(); i++) {
             Map &m = *maps[i];
+            if (!m.skipped.empty()) continue;
             Plan &plan = plans[i];
             plan.go.assign(m.p.blocks.size(), 0);
             plan.at.assign(m.p.blocks.size(), 0);
@@ -644,29 +732,28 @@ Result make(const fs::path &shared, const std::vector<fs::path> &paths, const fs
                 }
             }
             m.rewrite = m.pack_ref || m.stock_ref || m.had_ref;
-            if (m.stock_ref) stock_used++;
+            stock_used = stock_used || m.stock_ref;
         }
         const bool has_pack = pack.data.size() > kHeader;
+        std::string name;
         if (has_pack) {
             pack.data.append((kSector - pack.data.size() % kSector) % kSector, '\0');
             if (pack.data.size() > kMaxShared) {
-                r.error = name + ".shared would be " + mb(pack.data.size()) + " unpacked: a shared file can be at most 278 MB.";
+                r.error = "The pack's shared file would be " + mb(pack.data.size()) + " unpacked: a shared file can be at most 278 MB. Nothing was written.";
                 return r;
             }
-            shared_header(pack.data, name);
+            shared_header(pack.data, "");
+            char hex[16];
+            snprintf(hex, sizeof hex, "-%08x", get32(pack.data, 0x64));
+            name = base + hex;
+            shared_header(pack.data, name);   // (the name isn't in the checksum: the header isn't)
             pack.sum = get32(pack.data, 0x64);
             pack.length = (uint32_t)pack.data.size();
         }
         bool any = false;
         for (auto &m : maps) any = any || m->rewrite;
-        if (!any) {
-            r.ok = true;
-            r.report = "Nothing in these maps is in two of them" + std::string(use_stock ? " or in stock.shared" : "") + ": they're left as they are.\n";
-            return r;
-        }
         // ---- each map laid out again, packed and read back (at once)
-        log("Laying the maps out again without what moved, packing and checking them...");
-        std::string pack_file, stock_file;
+        if (any) log("Laying the maps out again without what moved, packing and checking them...");
         {
             std::vector<std::thread> th;
             for (size_t i = 0; i < maps.size(); i++) {
@@ -678,36 +765,42 @@ Result make(const fs::path &shared, const std::vector<fs::path> &paths, const fs
                     check(m, pack, stock.file);
                 });
             }
-            if (has_pack) th.emplace_back([&] { pack_file = pack_shared(pack.data); });
-            if (stock_used) th.emplace_back([&] { stock_file = pack_shared(stock.file.data); });
             for (auto &x : th) x.join();
         }
         for (auto &m : maps)
             if (!m->error.empty()) { r.error = shown(m->path) + ": " + m->error + ". Nothing was written."; return r; }
-        auto check_shared = [&](const std::string &file, const std::string &data) {
+        // The pack's file stored unpacked (read where it is) when a map drawing on it is over 47 MB unpacked: a packed one
+        // takes one of the two big cache files, and a level change needs both. stock.shared always is.
+        bool pack_unpacked = false;
+        for (auto &m : maps)
+            if (m->pack_ref && m->out.size() > kMultiplayerCache) pack_unpacked = true;
+        std::string pack_file;
+        if (has_pack) {
+            pack_file = pack_unpacked ? pack.data : pack_shared(pack.data);
             std::string back, why;
             bool c;
-            return unpack(file, back, c, why) && back == data;
-        };
-        if ((has_pack && !check_shared(pack_file, pack.data)) || (stock_used && !check_shared(stock_file, stock.file.data))) {
-            r.error = "A shared file didn't pack right (unpacked, it isn't what was packed). Nothing was written.";
-            return r;
+            if (!unpack(pack_file, back, c, why) || back != pack.data) {
+                r.error = "The pack's shared file didn't pack right (unpacked, it isn't what was packed). Nothing was written.";
+                return r;
+            }
         }
         // ---- written: each file beside the one it replaces, then put in its place
-        log("Writing...");
         struct Out { fs::path path; const std::string *file; };
         std::vector<Out> outs;
-        auto same = [&](const fs::path &p, const std::string &file) {   // (an identical shared file already there)
+        auto same = [&](const fs::path &p, const std::string &file) {   // (that very file already there)
+            std::error_code ec;
+            if (fs::file_size(p, ec) != file.size() || ec) return false;
             std::ifstream f(p, std::ios::binary);
             std::string h(kHeader, '\0');
-            return f && f.read(&h[0], (std::streamsize)kHeader) && h.compare(0, 4, "daeh") == 0 &&
-                   get32(h, 0x64) == get32(file, 0x64) && get32(h, 8) == get32(file, 8);
+            return f && f.read(&h[0], (std::streamsize)kHeader) && h.compare(0, kHeader, file, 0, kHeader) == 0;
         };
         auto temp = [](const fs::path &p) { fs::path t = p; t += ".new"; return t; };
-        if (has_pack && !same(shared, pack_file)) outs.push_back({shared, &pack_file});
-        if (stock_used && !same(stock_dir / "stock.shared", stock_file)) outs.push_back({stock_dir / "stock.shared", &stock_file});
+        const fs::path pack_path = folder / (name + ".shared"), stock_path = stock_dir / "stock.shared";
+        if (has_pack && !same(pack_path, pack_file)) outs.push_back({pack_path, &pack_file});
+        if (stock_used && !same(stock_path, stock.file.data)) outs.push_back({stock_path, &stock.file.data});
         for (auto &m : maps)
             if (m->rewrite) outs.push_back({m->path, &m->file});
+        if (!outs.empty()) log("Writing...");
         for (auto &o : outs)
             if (!write_file(temp(o.path), *o.file)) {
                 std::error_code ec;
@@ -721,39 +814,71 @@ Result make(const fs::path &shared, const std::vector<fs::path> &paths, const fs
             fs::rename(temp(o.path), o.path, ec);
             if (ec) { r.error = "Couldn't put " + o.path.u8string() + " in place (" + ec.message() + "): its new copy is " + temp(o.path).u8string() + "."; return r; }
         }
+        // ---- the pack's earlier versions in its folder (<pack>-<8 hex>.shared, or <pack>.shared) that no map draws on now
+        std::string removed;
+        {
+            std::set<std::string> needed;
+            for (auto &m : maps)
+                if (!m->skipped.empty() && !m->ref_name.empty()) needed.insert(m->ref_name + ".shared");
+            if (has_pack) needed.insert(name + ".shared");
+            auto earlier = [&](const std::string &f) {
+                if (f == base + ".shared") return true;
+                if (f.size() != base.size() + 16 || f.compare(0, base.size() + 1, base + "-") != 0 || f.compare(base.size() + 9, 7, ".shared") != 0) return false;
+                for (size_t k = base.size() + 1; k < base.size() + 9; k++)
+                    if (!isxdigit((unsigned char)f[k]) || isupper((unsigned char)f[k])) return false;
+                return true;
+            };
+            std::error_code ec;
+            std::vector<fs::path> gone;
+            for (auto &e : fs::directory_iterator(folder, ec)) {
+                const std::string f = e.path().filename().u8string();
+                if (earlier(f) && !needed.count(f) && e.is_regular_file(ec)) gone.push_back(e.path());
+            }
+            for (auto &g : gone) {
+                fs::remove(g, ec);
+                if (!ec) removed += (removed.empty() ? "" : ", ") + name_of(g);
+            }
+        }
         // ---- the report
         uint64_t before = 0, after = 0;
         for (auto &s : sources)
             if (s.first.filename() != "stock.shared") before += s.second->disk;   // (the pack's file they drew on before)
         std::string &rep = r.report;
-        // (a multiplayer map goes in a multiplayer cache file: 47 MiB unpacked)
-        auto too_big = [](const Map &m, size_t unpacked) {
-            return (get32(m.data, 0x60) & 0xFFFF) == 1 && unpacked > 47u * 1048576
+        auto too_big = [](const Map &m, size_t unpacked) {   // (a multiplayer map goes in a multiplayer cache file)
+            return (get32(m.data, 0x60) & 0xFFFF) == 1 && unpacked > kMultiplayerCache
                        ? "; still over the 47 MB a multiplayer cache file holds" : "";
         };
         for (auto &m : maps) {
             before += m->disk_size;
-            if (!m->rewrite) {
+            if (!m->skipped.empty()) {
+                after += m->disk_size;
+                rep += shown(m->path) + ": left as it is: " + m->skipped + "\n";
+            } else if (!m->rewrite) {
                 after += m->disk_size;
                 rep += shown(m->path) + ": " + mb(m->disk_size) + ", left as it is (nothing in it is in another map" +
                        (use_stock ? " or in stock.shared" : "") + too_big(*m, m->data.size()) + ")\n";
-                continue;
+            } else {
+                after += m->file.size();
+                rep += shown(m->path) + ": " + mb(m->disk_size) + " -> " + mb(m->file.size()) + " (" + mb(m->out.size()) + " unpacked";
+                if (m->to_pack) rep += "; " + mb(m->to_pack) + " of its textures and sounds in " + name + ".shared";
+                if (m->to_stock) rep += "; " + mb(m->to_stock) + " in stock.shared";
+                rep += std::string(too_big(*m, m->out.size())) + ")\n";
             }
-            after += m->file.size();
-            rep += shown(m->path) + ": " + mb(m->disk_size) + " -> " + mb(m->file.size()) + " (" + mb(m->out.size()) + " unpacked";
-            if (m->to_pack) rep += "; " + mb(m->to_pack) + " of its textures and sounds in " + name + ".shared";
-            if (m->to_stock) rep += "; " + mb(m->to_stock) + " in stock.shared";
-            rep += std::string(too_big(*m, m->out.size())) + ")\n";
         }
         if (has_pack) {
             after += pack_file.size();
-            rep += name + ".shared: " + mb(pack_file.size()) + " (" + mb(pack.data.size()) + " unpacked), in " + shared.parent_path().u8string() + "\n";
+            rep += name + ".shared: " + mb(pack_file.size()) + (pack_unpacked ? " stored unpacked, so the game reads it where it is (a map "
+                   "drawing on it is over 47 MB unpacked)" : " (" + mb(pack.data.size()) + " unpacked)") + ", in " + folder.u8string() + "\n";
+            r.pack_file = name + ".shared";
         }
         if (stock_used)
-            rep += "stock.shared: " + mb(stock_file.size()) + " (" + mb(stock.file.data.size()) + " unpacked), in " + stock_dir.u8string() +
-                   " (every player will have it once Halo 1 Unlimited's installer builds it, so it isn't counted)\n";
-        r.used_stock = stock_used > 0;
-        rep += "In all: " + mb(before) + " -> " + mb(after) + ". Every texture, sound, BSP and the tag data were read back through the new files and match.\n";
+            rep += "stock.shared: " + mb(stock.file.data.size()) + ", in " + stock_dir.u8string() + ": the same file Halo 1 Unlimited's "
+                   "installer builds on every Xbox (checksum a7fe2f70), so it isn't counted or sent\n";
+        if (!removed.empty()) rep += "Removed the pack's earlier shared file" + std::string(removed.find(',') != std::string::npos ? "s" : "") +
+                                     " (no map draws on " + (removed.find(',') != std::string::npos ? "them" : "it") + " now): " + removed + "\n";
+        r.used_stock = stock_used;
+        if (!any) rep += "Nothing in these maps is in two of them" + std::string(use_stock ? " or in stock.shared" : "") + ".\n";
+        else rep += "In all: " + mb(before) + " -> " + mb(after) + ". Every texture, sound, BSP and the tag data were read back through the new files and match.\n";
         r.ok = true;
     } catch (const std::exception &e) {
         r.error = std::string("Making the shared files failed: ") + e.what() + " (not enough memory?). Nothing was written.";

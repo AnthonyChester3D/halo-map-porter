@@ -2282,21 +2282,29 @@ one go, with the names, descriptions and pictures the pack's menu shows.
        <Pack>\<Map>\preview.bin    its picture, straight from the pack
        <Pack>\order.txt            the pack's menu order
        <Pack>\series.bin           the logo (if you picked one)
-       <Pack>\<Pack>.shared        what two or more of its maps use
-       stock.shared                what's in the stock multiplayer maps
+       <Pack>\<Pack>-<version>.shared   what two or more of its maps use
+       stock.shared                the stock maps' and campaign's data
      Copy the <Pack> folder into maps on the Xbox, next to your other map
-     folders (and stock.shared into maps itself).
+     folders (stock.shared, in maps itself, only for an Xbox whose
+     installer hasn't built it).
 
-Shared files (Halo 1 Unlimited v1.94 or later; ticked to start with): "Store
+Shared files (Halo 1 Unlimited v1.97 or later; ticked to start with): "Store
 what the maps share once" puts the textures and sounds two or more of the
-pack's maps use in <Pack>.shared and lays each map out again without them.
-"And draw on stock.shared" also takes what's in the 13 stock multiplayer
-maps from stock.shared (laid out from the Xbox maps folder in Settings, the
-same file Halo 1 Unlimited's installer will build), written in the folder
-you save into. Every map folder in <Pack> is included, even one written
-before. The log says if a multiplayer map is still over the 47 MB a
-multiplayer cache file holds unpacked (sharing often gets one under it:
-Booglooch 71 -> 40 MB). Untick it for a pack an older Halo 1 Unlimited
+pack's maps use in <Pack>-<version>.shared (the version: 8 hex digits of
+its checksum, so two versions of a pack can sit side by side) and lays
+each map out again without them. "And draw on stock.shared" takes what's
+in stock.shared from there instead: every texture and sound of the 13
+stock multiplayer maps and what three or more campaign levels use, laid
+out from the Xbox maps folder in Settings (it needs all 23 of those maps)
+exactly as Halo 1 Unlimited's installer lays it out on every Xbox
+(checksum a7fe2f70; if your maps give anything else it isn't used). It's
+written in the folder you save into, stored unpacked (228 MB): the game
+reads it where it is. Every map folder in <Pack> is included, even one
+written before; a map that can't be read is left as it is; the pack's
+earlier shared files no map draws on any more are removed. Everything is
+read back through the new files and compared before anything is written.
+The log says if a multiplayer map is still over the 47 MB a multiplayer
+cache file holds unpacked. Untick it for a pack an older Halo 1 Unlimited
 plays.
 
 The logo isn't baked into the pictures: the XBE draws series.bin on each
@@ -2357,23 +2365,25 @@ kept and left out; each one's tag memory is in its own report.
 On the Xbox: until its menus list campaign folder maps, put the first
 piece in place of a stock level's map to play it; the rest are folder maps
 it loads. Network co-op hasn't been tried with split levels.
-Shared files (Halo 1 Unlimited v1.94 or later): with "Store the textures
+Shared files (Halo 1 Unlimited v1.97 or later): with "Store the textures
 and sounds the pieces share once" ticked, after the pieces are converted
-the textures and sounds two or more of them use go in <folder>.shared, in
-the folder holding the pieces' folders, and each piece is laid out again
-without them (Lumoria A's three pieces: 347 MB -> 211 MB). Copy the
-.shared file to the Xbox with them, into the folder holding the pieces'
-folders (maps\ itself, when they're in maps\<folder>). "And draw on
-stock.shared" also takes what's in the 13 stock multiplayer maps from
-stock.shared (laid out from the Xbox maps folder in Settings, as Halo 1
-Unlimited's installer lays it out), written beside it: copy it too until
-the installer builds it. Every piece there is included, even one
-not converted this time; converting again reads a piece already drawing
-on the old file through it. Each piece keeps its identity in map sharing
-(the size and checksum of its build without shared files). Every
-texture, sound, BSP and the tag data is read back through the new files
-and compared before anything is written. The format is Halo 1
-Unlimited's docs/shared_maps.md (version 2).
+the textures and sounds two or more of them use go in
+<folder>-<version>.shared, in the folder holding the pieces' folders, and
+each piece is laid out again without them. "And draw on stock.shared"
+takes what's in stock.shared (the stock multiplayer maps' textures and
+sounds and what three or more campaign levels use, laid out from the Xbox
+maps folder in Settings, the same file the installer builds) from there
+instead, written beside it. Lumoria A's three pieces: 347 MB -> 133 MB.
+A level is too big for its pack file to be copied into a cache file, so
+the pack file is stored unpacked then (the game reads it where it is).
+Copy the .shared file to the Xbox with the pieces, into the folder
+holding their folders (maps\ itself, when they're in maps\<folder>);
+every Xbox builds its own stock.shared with the installer. Every piece
+there is included, even one not converted this time; converting again
+reads a piece already drawing on the old file through it. Each piece
+keeps its identity in map sharing (the size and checksum of its build
+without shared files). The format is Halo 1 Unlimited's
+docs/shared_maps.md (version 2, game v1.97).
 
 READING THE LOG AND REPORT
 --------------------------
