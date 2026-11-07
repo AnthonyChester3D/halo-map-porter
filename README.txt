@@ -2298,6 +2298,7 @@ stock multiplayer maps and what three or more campaign levels use, laid
 out from the Xbox maps folder in Settings (it needs all 23 of those maps)
 exactly as Halo 1 Unlimited's installer lays it out on every Xbox
 (checksum a7fe2f70; if your maps give anything else it isn't used). It's
+laid out once (a minute or two) and kept in the app's data folder, then
 written in the folder you save into, stored unpacked (228 MB): the game
 reads it where it is. Every map folder in <Pack> is included, even one
 written before; a map that can't be read is left as it is; the pack's
@@ -2387,6 +2388,12 @@ docs/shared_maps.md (version 2, game v1.97).
 
 READING THE LOG AND REPORT
 --------------------------
+The log is also saved while a job runs, with each step's time: logs\
+<date>_<time>.txt in the app's data folder (%LOCALAPPDATA%\HaloMapPorter;
+the first lines say what it converted; the last 80 are kept), and beside
+it <the same>.tools.txt listing every tool the job ran and its time in
+ms, for looking into a slow conversion afterwards.
+
 The log lists every automatic change:
 
   [fix]   A broken reference in a tag was reset so the map can build.

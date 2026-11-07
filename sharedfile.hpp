@@ -35,8 +35,9 @@ struct Result {
 // data in it is drawn from there instead, written unpacked in `stock_folder` (the folder that will be the Xbox's maps
 // folder; empty: `folder`). The pack's earlier files in `folder` that no map draws on any more are removed. Every map is
 // read back through the new files and compared with what it was before anything is written.
+// `cache`: a folder to keep stock.shared in once laid out (empty: laid out every time).
 Result make(const fs::path &folder, const std::string &pack_name, const std::vector<fs::path> &maps, const fs::path &stock_maps,
-            const fs::path &stock_folder, const std::function<void(const std::string &)> &log);
+            const fs::path &stock_folder, const fs::path &cache, const std::function<void(const std::string &)> &log);
 
 // The 13 stock multiplayer maps then the 10 campaign levels in `folder` (empty if any is missing).
 std::vector<fs::path> stock_maps_in(const fs::path &folder);

@@ -439,6 +439,8 @@ struct ProcessStop {
     void stop();
 };
 int run_process(const std::vector<std::string> &args, std::string &output, ProcessStop *stop);
+// Every tool run from now on appends a line to `file` (ms, the tool and its first arguments); empty: none.
+void set_tool_log(const std::filesystem::path &file);
 
 std::string u8(const fs::path &p);
 fs::path from_u8(const std::string &s);

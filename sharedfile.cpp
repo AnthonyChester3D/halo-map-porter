@@ -556,6 +556,53 @@ bool lay_out_stock(const std::vector<fs::path> &paths, StockLayout &s, std::stri
     s.file.length = (uint32_t)data.size();
     return true;
 }
+// stock.shared kept once laid out (its layout is fixed): <cache>\stock.shared as written for the Xbox, and beside it
+// stock.shared.blocks, each block's offset and size, so the next run reads it back (a second or two) instead of laying it
+// out from the 23 maps again (a minute, 3 GB read).
+bool read_cached_stock(const fs::path &cache, StockLayout &s) {
+    if (cache.empty()) return false;
+    std::string blocks;
+    std::string &data = s.file.data;
+    data.reserve(kMaxShared + kSector);   // (the entries point into it: it never moves)
+    if (!read_file(cache / "stock.shared.blocks", blocks) || !read_file(cache / "stock.shared", data)) { data.clear(); return false; }
+    if (data.size() != kStockLength || data.compare(0, 4, "daeh") != 0 || get32(data, 8) != kStockLength || get32(data, 0x64) != kStockSum ||
+        blocks.size() < 8 || blocks.compare(0, 4, "HMPS") != 0 || get32(blocks, 4) != (blocks.size() - 8) / 8 ||
+        crc32_of(data.data() + kHeader, data.size() - kHeader) != kStockSum) {
+        data.clear();
+        return false;
+    }
+    const size_t n = (blocks.size() - 8) / 8;
+    s.at.reserve(n);
+    s.t.e.reserve(n);
+    for (size_t i = 0; i < n; i++) {
+        const uint32_t at = get32(blocks, 8 + i * 8), size = get32(blocks, 12 + i * 8);
+        if (at < kHeader || (uint64_t)at + size > data.size() || !size) { data.clear(); s = StockLayout(); return false; }
+        s.at.push_back(at);
+        s.t.add_new(data.data() + at, size, at % kUnit);
+    }
+    s.file.sum = kStockSum;
+    s.file.length = kStockLength;
+    return true;
+}
+void write_cached_stock(const fs::path &cache, const StockLayout &s) {
+    if (cache.empty()) return;
+    std::error_code ec;
+    fs::create_directories(cache, ec);
+    std::string blocks = "HMPS";
+    blocks.append(4, '\0');
+    put32(blocks, 4, (uint32_t)s.at.size());
+    for (size_t i = 0; i < s.at.size(); i++) {
+        blocks.append(8, '\0');
+        put32(blocks, 8 + i * 8, s.at[i]);
+        put32(blocks, 12 + i * 8, s.t.e[i].size);
+    }
+    fs::path tmp = cache / "stock.shared.new";
+    if (write_file(tmp, s.file.data) && write_file(cache / "stock.shared.blocks", blocks)) {
+        fs::remove(cache / "stock.shared", ec);
+        fs::rename(tmp, cache / "stock.shared", ec);
+    }
+    if (ec) fs::remove(cache / "stock.shared.blocks", ec);
+}
 }   // namespace
 
 std::vector<fs::path> stock_maps_in(const fs::path &folder) {
@@ -577,7 +624,7 @@ std::vector<fs::path> stock_maps_in(const fs::path &folder) {
 }
 
 Result make(const fs::path &folder, const std::string &base_name, const std::vector<fs::path> &paths, const fs::path &stock_maps,
-            const fs::path &stock_folder, const std::function<void(const std::string &)> &log) {
+            const fs::path &stock_folder, const fs::path &cache, const std::function<void(const std::string &)> &log) {
     Result r;
     const fs::path stock_dir = stock_folder.empty() ? folder : stock_folder;
     try {
@@ -591,19 +638,27 @@ Result make(const fs::path &folder, const std::string &base_name, const std::vec
         StockLayout stock;
         bool use_stock = false;
         if (!stock_maps.empty()) {
-            const std::vector<fs::path> stock_paths = stock_maps_in(stock_maps);
-            std::string why;
-            if (stock_paths.empty())
-                log("  stock.shared isn't used: the Xbox maps folder needs the 13 stock multiplayer maps and the 10 campaign levels.");
+            std::error_code ec;
+            if (fs::exists(cache / "stock.shared.blocks", ec)) log("Reading stock.shared laid out before...");
+            if (read_cached_stock(cache, stock)) use_stock = true;
             else {
-                log("Laying out stock.shared from the Xbox's 13 multiplayer maps and 10 campaign levels...");
-                if (!lay_out_stock(stock_paths, stock, why)) log("  stock.shared isn't used: " + why);
-                else if (stock.file.sum != kStockSum || stock.file.length != kStockLength) {
-                    char t[256];
-                    snprintf(t, sizeof t, "  stock.shared isn't used: from these maps it comes out %08x (%u bytes), not the installer's %08x (%u bytes): "
-                             "the Xbox maps folder's maps aren't the retail ones.", stock.file.sum, stock.file.length, kStockSum, kStockLength);
-                    log(t);
-                } else use_stock = true;
+                const std::vector<fs::path> stock_paths = stock_maps_in(stock_maps);
+                std::string why;
+                if (stock_paths.empty())
+                    log("  stock.shared isn't used: the Xbox maps folder needs the 13 stock multiplayer maps and the 10 campaign levels.");
+                else {
+                    log("Laying out stock.shared from the Xbox's 13 multiplayer maps and 10 campaign levels (once: it's kept)...");
+                    if (!lay_out_stock(stock_paths, stock, why)) log("  stock.shared isn't used: " + why);
+                    else if (stock.file.sum != kStockSum || stock.file.length != kStockLength) {
+                        char t[256];
+                        snprintf(t, sizeof t, "  stock.shared isn't used: from these maps it comes out %08x (%u bytes), not the installer's %08x (%u bytes): "
+                                 "the Xbox maps folder's maps aren't the retail ones.", stock.file.sum, stock.file.length, kStockSum, kStockLength);
+                        log(t);
+                    } else {
+                        use_stock = true;
+                        write_cached_stock(cache, stock);
+                    }
+                }
             }
             if (!use_stock) stock = StockLayout();
         }

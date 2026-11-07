@@ -112,8 +112,8 @@ enum {
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new93.exe is 1.93).
-#define HMP_VERSION L"1.93"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new94.exe is 1.94).
+#define HMP_VERSION L"1.94"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -337,12 +337,44 @@ static void clear_heartbeat() {
 }
 // (set while the Map packs tab reads its pack on its own, opening the tab: the log keeps what it had)
 static bool g_log_quiet = false;
+// The output log is also saved while a job runs: logs\<date>_<time>.txt in the app's data folder (the first lines say
+// what it converted), with each step's time, and beside it <the same>.tools.txt with every tool run and its time, so a
+// slow conversion can be looked into afterwards.
+static FILE *g_log_file = nullptr;
+static void open_log_file() {
+    std::error_code ec;
+    const fs::path dir = appdata_dir(CSIDL_LOCAL_APPDATA) / "logs";
+    fs::create_directories(dir, ec);
+    wchar_t stamp[32];
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    swprintf(stamp, 32, L"%04d-%02d-%02d_%02d%02d%02d", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+    if (g_log_file) fclose(g_log_file);
+    g_log_file = _wfopen((dir / (std::wstring(stamp) + L".txt")).c_str(), L"wb");
+    set_tool_log(dir / (std::wstring(stamp) + L".tools.txt"));
+    // (the last 40 kept)
+    std::vector<fs::path> old;
+    for (auto &e : fs::directory_iterator(dir, ec))
+        if (e.is_regular_file(ec)) old.push_back(e.path());
+    std::sort(old.begin(), old.end());
+    for (size_t i = 0; i + 80 < old.size(); i++) fs::remove(old[i], ec);
+}
+static void close_log_file() {
+    if (g_log_file) fclose(g_log_file);
+    g_log_file = nullptr;
+    set_tool_log({});
+}
 static void append_log(const std::wstring &text) {
     if (g_log_quiet) return;
     clear_heartbeat();
     std::wstring t;
     for (wchar_t c : text) { if (c == L'\n') t += L"\r\n"; else t += c; }
     t += L"\r\n";
+    if (g_log_file) {
+        const std::string u = N(t);
+        fwrite(u.data(), 1, u.size(), g_log_file);
+        fflush(g_log_file);
+    }
     int len = GetWindowTextLengthW(g_log);
     SendMessageW(g_log, EM_SETSEL, len, len);
     SendMessageW(g_log, EM_REPLACESEL, FALSE, (LPARAM)t.c_str());
@@ -692,7 +724,7 @@ static void update_invader_status() {
 static HWND g_lamp = nullptr;   // (working, done or failed, at a glance: statuslamp_win.hpp)
 static void set_busy(bool b) {
     g_busy = b;
-    if (b) { statuslamp::set(g_lamp, statuslamp::kWorking); g_job_start = GetTickCount64(); g_step_start = 0; }
+    if (b) { statuslamp::set(g_lamp, statuslamp::kWorking); g_job_start = GetTickCount64(); g_step_start = 0; open_log_file(); }
     if (b) {
         g_last_log = GetTickCount64();
         SetTimer(g_wnd, kHeartbeat, 1000, nullptr);
@@ -1970,7 +2002,8 @@ static void start_campaign_convert() {
             post_log("");
             post_log("==== Storing what the pieces share once, in " + N(folder.wstring()));
             sharedfile::Result s = sharedfile::make(folder, N(out.parent_path().filename().wstring()), pieces,
-                                                    use_stock ? cfg.xbox_maps_dir : fs::path(), fs::path(), post_log);
+                                                    use_stock ? cfg.xbox_maps_dir : fs::path(), fs::path(),
+                                                    cfg.cache_dir / "shared", post_log);
             const std::string text = s.ok ? s.report : "Not stored once: " + s.error + "\n";
             post_log(text);
             campaign += (campaign.empty() ? "" : "\n") + std::string("Shared files:\n") + text;
@@ -2751,7 +2784,7 @@ static void pk_create() {
             std::sort(maps.begin(), maps.end());
             post_log("");
             post_log("==== Storing what the pack's maps share once, in " + N(root.wstring()));
-            sharedfile::Result s = sharedfile::make(root, name, maps, use_stock ? cfg.xbox_maps_dir : fs::path(), out, post_log);
+            sharedfile::Result s = sharedfile::make(root, name, maps, use_stock ? cfg.xbox_maps_dir : fs::path(), out, cfg.cache_dir / "shared", post_log);
             post_log(s.ok ? s.report : "Not stored once (the maps are as they were written): " + s.error);
             if (s.ok) needs += L" and Halo 1 Unlimited v1.97";
             if (s.ok && s.used_stock) stock_too = L", and stock.shared beside it";
@@ -3540,6 +3573,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         append_log(L"");
         append_log(d->msg);
         set_busy(false);
+        close_log_file();
         statuslamp::set(g_lamp, d->ok ? statuslamp::kDone : statuslamp::kFailed);
         if (d->ok && !d->output.empty()) {
             g_last_output = d->output;

@@ -150,11 +150,26 @@ void ProcessStop::stop() {
     stopped = true;
     if (proc) TerminateProcess((HANDLE)proc, 1);
 }
+static std::mutex g_tool_log_m;
+static fs::path g_tool_log;
+void set_tool_log(const fs::path &file) {
+    std::lock_guard<std::mutex> g(g_tool_log_m);
+    g_tool_log = file;
+}
+static void note_tool(const std::vector<std::string> &args, double ms, bool in_proc) {
+    std::lock_guard<std::mutex> g(g_tool_log_m);
+    if (g_tool_log.empty()) return;
+    std::string what = fs::path(args[0]).filename().string();
+    for (size_t i = 1; i < args.size() && i < 8; i++) what += " " + args[i];
+    if (FILE *f = _wfopen(g_tool_log.c_str(), L"ab")) { fprintf(f, "%.0f\t%s%s\n", ms, in_proc ? "(in-process) " : "", what.c_str()); fclose(f); }
+}
 int run_process(const std::vector<std::string> &args, std::string &output, ProcessStop *stop) {
     output.clear();
+    const auto t0 = std::chrono::steady_clock::now();
+    auto ms = [&] { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(); };
     {
         int code;
-        if (in_process(args, output, code)) return code;
+        if (in_process(args, output, code)) { note_tool(args, ms(), true); return code; }
     }
     std::wstring cmd;
     for (auto &a : args) { if (!cmd.empty()) cmd += L' '; cmd += quote_arg(widen(a)); }
@@ -201,9 +216,11 @@ int run_process(const std::vector<std::string> &args, std::string &output, Proce
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
     output.erase(std::remove(output.begin(), output.end(), '\r'), output.end());
+    note_tool(args, ms(), false);
     return (int)code;
 }
 #else
+void set_tool_log(const fs::path &) {}
 int run_process(const std::vector<std::string> &args, std::string &output) { return run_process(args, output, nullptr); }
 void ProcessStop::stop() {
     std::lock_guard<std::mutex> g(m);
