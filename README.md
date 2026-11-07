@@ -73,6 +73,20 @@ The full manual, with setup, every option and troubleshooting, is [README.txt](R
   your own dumped Xbox stock maps.
 - The MCC mod tools (H1A-EK), only for the "Build from my tags" tab.
 
+## Speed tip
+
+A conversion writes and reads thousands of tag files, several times over, and Windows Defender scans every one of
+them. Excluding the app's data folder (`%LOCALAPPDATA%\HaloMapPorter`) and your output folder makes conversions
+noticeably faster: Windows Security > Virus & threat protection > Manage settings > Exclusions, or in an
+administrator PowerShell:
+
+```powershell
+Add-MpPreference -ExclusionPath "$env:LOCALAPPDATA\HaloMapPorter"
+Add-MpPreference -ExclusionPath "D:\path\to\your\output\folder"
+```
+
+Defender then doesn't scan anything in those folders, so keep downloads elsewhere until you've opened them once.
+
 ## Building
 
 ```sh

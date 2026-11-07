@@ -57,7 +57,7 @@ enum {
     ID_B_CE_BROWSE, ID_B_XBOX, ID_B_XBOX_NOTE, ID_BUILD, ID_BUILD_HINT, ID_B_WATER_HINT, ID_B_SHARE,
     // settings page
     ID_S_CE_LBL, ID_S_CE, ID_S_CE_BROWSE, ID_S_MCC_LBL, ID_S_MCC, ID_S_MCC_BROWSE, ID_S_EK_LBL, ID_S_EK,
-    ID_S_EK_BROWSE, ID_S_INV_LBL, ID_S_INV, ID_S_INV_BROWSE, ID_S_INV_DL, ID_S_INV_STATUS, ID_S_HINT,
+    ID_S_EK_BROWSE, ID_S_INV_LBL, ID_S_INV, ID_S_INV_BROWSE, ID_S_INV_DL, ID_S_INV_STATUS, ID_S_HINT, ID_S_SPEED_HINT,
     // added for Xbox (each *_BROWSE directly follows its edit box)
     ID_B_XBOX_OUT, ID_B_XBOX_BROWSE, ID_S_XT_LBL, ID_S_XT, ID_S_XT_BROWSE, ID_S_XM_LBL, ID_S_XM, ID_S_XM_BROWSE, ID_B_XBOX_NAME_LBL, ID_B_XBOX_NAME, ID_XONLY, ID_XSHRINK, ID_B_XONLY, ID_B_XSHRINK,
     // Xbox tab
@@ -112,8 +112,8 @@ enum {
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new94.exe is 1.94).
-#define HMP_VERSION L"1.94"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new95.exe is 1.95).
+#define HMP_VERSION L"1.95"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -3153,23 +3153,23 @@ static void create_controls() {
     label(5, L"Custom Edition folder:", 26, y, 160, ID_S_CE_LBL);
     edit(5, 190, y, 440, ID_S_CE);
     button(5, L"Browse...", 638, y - 1, 96, ID_S_CE_BROWSE);
-    y += 36;
+    y += 32;
     label(5, L"MCC maps folder:", 26, y, 160, ID_S_MCC_LBL);
     edit(5, 190, y, 440, ID_S_MCC);
     button(5, L"Browse...", 638, y - 1, 96, ID_S_MCC_BROWSE);
-    y += 36;
+    y += 32;
     label(5, L"H1A-EK folder (optional):", 26, y, 160, ID_S_EK_LBL);
     edit(5, 190, y, 440, ID_S_EK);
     button(5, L"Browse...", 638, y - 1, 96, ID_S_EK_BROWSE);
-    y += 36;
+    y += 32;
     label(5, L"Xbox tags folder:", 26, y, 160, ID_S_XT_LBL);
     edit(5, 190, y, 440, ID_S_XT);
     button(5, L"Browse...", 638, y - 1, 96, ID_S_XT_BROWSE);
-    y += 36;
+    y += 32;
     label(5, L"Xbox maps (if no tags):", 26, y, 160, ID_S_XM_LBL);
     edit(5, 190, y, 440, ID_S_XM);
     button(5, L"Browse...", 638, y - 1, 96, ID_S_XM_BROWSE);
-    y += 36;
+    y += 32;
     label(5, L"Invader folder:", 26, y, 160, ID_S_INV_LBL);
     edit(5, 190, y, 440, ID_S_INV);
     button(5, L"Browse...", 638, y - 1, 96, ID_S_INV_BROWSE);
@@ -3183,14 +3183,14 @@ static void create_controls() {
         L"Xbox tags folder: an Xbox tagset such as haloxbox-revised (recommended). Xbox maps: your own Xbox stock "
         L"maps, used only if no Xbox tags folder is set. See README.txt for details.",
         0, 26, y, 708, 36, ID_S_HINT);
-    y += 46;
+    y += 40;
     label(5, L"LOD library folder:", 26, y, 160, ID_S_LOD_LBL);
     edit(5, 190, y, 440, ID_S_LOD);
     button(5, L"Browse...", 638, y - 1, 96, ID_S_LOD_BROWSE);
     y += 30;
     add(5, L"STATIC", L"The lower-detail versions the app makes are kept here, so the same model in another map reuses them, "
         L"with your choices for models from the LODs window (choices.txt).", 0, 190, y, 544, 36, ID_S_LOD_HINT);
-    y += 44;
+    y += 40;
     check(5, L"Write a camera tour for Halo 1 Unlimited's perf log with each Xbox build", 26, y, 420, ID_S_TOUR);
     label(5, L"Maps kept unpacked:", 452, y - 1, 124, ID_S_KEEP_LBL);
     add(5, L"EDIT", L"", WS_TABSTOP | ES_NUMBER | ES_CENTER, 578, y - 1, 40, 24, ID_S_KEEP, WS_EX_CLIENTEDGE);
@@ -3200,6 +3200,10 @@ static void create_controls() {
     add(5, L"STATIC", L"Halo 1 Unlimited's logs: what limits a map's frame rate on the Xbox (the game, drawing or the "
         L"graphics chip), the biggest costs and what to try. Pick several to compare.",
         0, 190, y, 536, 34, ID_S_PERF_HINT);
+    y += 32;
+    add(5, L"STATIC", L"Speed tip: Defender scans every one of the thousands of tag files a conversion writes and reads. Exclude "
+        L"%LOCALAPPDATA%\\HaloMapPorter and your output folder (Windows Security > Virus && threat protection > Exclusions).",
+        0, 26, y, 708, 30, ID_S_SPEED_HINT);
 
     // Shared area
     g_lamp = statuslamp::create(g_wnd, S(10), S(494), S(740), S(8), ID_LAMP);
