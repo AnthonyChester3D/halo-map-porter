@@ -18,6 +18,7 @@
 #include "campaign.hpp"
 #include "pairs.hpp"
 #include "h1ulink.hpp"
+#include "maptrim.hpp"
 
 #include <functional>
 #include <future>
@@ -460,6 +461,7 @@ struct Job {
     bool hud_canvas_known = false;
     fs::path shaders_file;                     // the level shaders file (levelshaders.hpp), for the window
     std::string campaign_report;               // a campaign level's cutscenes (campaign_apply), for Result::campaign
+    bool no_piece = false;                     // the cutscene piece asked for isn't in the level (nothing to build)
     std::string shaders_line;                  // the report's line on the level's shader passes
 
     Job(const Config &c, const Log &l, Game t) : cfg(c), log(l), target(t) {}
@@ -2317,6 +2319,12 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
         job.watch("the start");
         if (job.target == Game::Xbox) {
             if (!prepare_for_xbox(job, err)) { r.error = err; return r; }
+            if (job.no_piece) {
+                r.no_piece = true;
+                r.campaign = job.campaign_report;
+                r.error = std::string("the level has no ") + (cfg.campaign_piece == 1 ? "opening" : "closing") + " cutscene to split off";
+                return r;
+            }
         } else {
             if (!prepare_models_for_pc(job, err)) { r.error = err; return r; }
         }
@@ -2434,6 +2442,54 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
         return cmd;
     };
     std::vector<std::string> cmd = make_cmd();
+    // Invader writes the script node table at the engine's full size whatever the scripts use: trim it in the built map
+    // (maptrim.hpp). When Invader found the map over the tag memory by no more than a trim can save, it's built again
+    // with that much more room, trimmed, and kept if it then fits (`out` otherwise says how much it still needs).
+    auto trim_scripts = [&](int &rc, std::string &out) {
+        static const std::regex over(R"(Maximum tag space exceeded \(([\d.]+) MiB > 22\.0+ MiB\))");
+        std::smatch m;
+        uint64_t space = 0;
+        const std::string first = out;
+        if (rc != 0) {
+            if (!std::regex_search(out, m, over) || std::atof(m[1].str().c_str()) * 1048576.0 > maptrim::kXboxTagSpace + maptrim::kMaxSaving)
+                return;
+            space = maptrim::kXboxTagSpace + maptrim::kMaxSaving;
+            std::vector<std::string> c = cmd;
+            c.insert(std::find(c.begin(), c.end(), "-o"), {"-T", std::to_string(space)});
+            job.log("  (" + m[1].str().substr(0, 5) + " MB of the Xbox's 22 MB of tag memory: building it again with room for the "
+                    "script node table, to see whether it fits with the table trimmed)");
+            if (run_process(c, out) != 0) { out = first; return; }
+        }
+        const maptrim::Result t = maptrim::trim_scripts(tmp_out, space);
+        char buf[200];
+        if (!t.ok && space && t.tag_data) {   // (still over: say by how much, for the steps after)
+            snprintf(buf, sizeof buf, "Maximum tag space exceeded (%.4f MiB > 22.0000 MiB)", (t.tag_data + (double)t.largest_bsp) / 1048576.0);
+            out = std::regex_replace(first, over, std::string(buf), std::regex_constants::format_first_only);
+            job.log(std::string("  ...it doesn't: ") + buf + ", with the table trimmed");
+            std::error_code ec;
+            fs::remove(tmp_out, ec);   // (built for more tag memory than the Xbox has)
+            return;
+        }
+        if (!t.ok) {
+            job.log("  (the script node table wasn't trimmed: " + t.error + ")");
+            if (space) {
+                out = first;
+                std::error_code ec;
+                fs::remove(tmp_out, ec);
+            }
+            return;
+        }
+        if (t.saved) {
+            snprintf(buf, sizeof buf, "  Script node table trimmed to %u nodes (%u in use, of the engine's 19001): %.0f KB less tag memory",
+                     t.kept, t.nodes, t.saved / 1024.0);
+            job.log(buf);
+        }
+        if (space) {
+            snprintf(buf, sizeof buf, "  ...and it fits: %.2f MB of tag memory of 22", (t.tag_data + (double)t.largest_bsp) / 1048576.0);
+            job.log(buf);
+            rc = 0;
+        }
+    };
     // "Estimate halves": after the build, its fixes made (or when the whole level doesn't fit), the halves measured.
     const bool halves = cfg.campaign_halves && job.target == Game::Xbox && !job.analysis;
     bool scripts_tried = false;
@@ -2650,6 +2706,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
             }
         }
         if (!took) rc = run_process(cmd, out);
+        if (job.target == Game::Xbox && !job.analysis && cfg.xbox_trim_scripts) trim_scripts(rc, out);
         if (rc == 0 && job.analysis) {
             std::ofstream(job.work / "build.log") << out;
             std::string err;
@@ -12725,7 +12782,8 @@ static void campaign_apply(Job &job) {
     const bool opening_on = (cfg.campaign_split & 1) && a.opening.found, closing_on = (cfg.campaign_split & 2) && a.closing.found;
     const int this_piece = cfg.campaign_piece;
     if (!dry && ((this_piece == 0 && !opening_on && !closing_on) || (this_piece == 1 && !a.opening.found) || (this_piece == 2 && !a.closing.found))) {
-        if (this_piece != 0) job.note("[campaign] no " + std::string(this_piece == 1 ? "opening" : "closing") + " cutscene to split off: the whole level was built");
+        // (a cutscene piece the level hasn't: nothing to build; the Campaign tab goes on without it)
+        if (this_piece != 0) job.no_piece = true;
         return;
     }
     if (dry && !a.opening.found && !a.closing.found) return;

@@ -124,6 +124,9 @@ struct Config {
     // Small scenery with very detailed collision (perf::kDetailedProp...): its collision left out (players and shots
     // pass through it).
     int xbox_detailed_props = 0;   // small props with very detailed collision: 0 as made, 1 without it, 2 made simpler
+    // The scenario's script node table trimmed to the nodes the scripts use once built (maptrim.hpp; Halo 1 Unlimited
+    // reads a table that size): up to 371 KB of tag memory back.
+    bool xbox_trim_scripts = true;
     // Dynamic lights on the objects the map places (always on, like Deathtrap's warthogs' headlights): each one in
     // view has the Xbox draw the level and objects around it again, twice (diffuse and specular). 0 as made; 1 no
     // specular (the light stays, without its shine: about 70% of its passes' cost); 2 off (a lens flare stays).
@@ -323,6 +326,7 @@ struct Result {
     fs::path link;                     // Perfect Conversion: the link file written (empty: the pair didn't match)
     fs::path pair_check;               // Perfect Conversion: the comparison's report
     std::string campaign;              // a campaign level: its cutscenes, for the Campaign tab (campaign.hpp)
+    bool no_piece = false;             // a cutscene piece (Config::campaign_piece) the level hasn't: nothing built
 };
 
 // What a built map offers, for the Halo Universal XBE's map browser (build 20): the info.txt lines "Gametypes:" and

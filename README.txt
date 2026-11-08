@@ -288,6 +288,15 @@ Lower targets leave more room for what you see at once (effects, other
 players' weapons), at the cost of softer textures on maps that are over.
 On Halo Universal (no lending), "18 MB - Safe" is the closer match.
 
+Script node table: Invader always writes the scenario's script node table
+at the engine's full size (19,001 nodes, 371 KB of tag memory), however few
+the scripts use. After each Xbox build the app trims it to the nodes in use
+(and 256 to spare) and moves the tag data after it down, then walks the map
+again to check every pointer moved as it should before keeping it (Halo 1
+Unlimited reads the smaller table). A map Invader finds over the tag memory by
+no more than that is built again with room for the whole table, trimmed, and
+kept if it then fits.
+
 Texture sizes (Xbox tab): the Xbox loads textures as things come into
 view. A map that needs much more texture memory than stock maps stutters
 (or briefly loses HUD graphics) wherever you can see most of it at once.

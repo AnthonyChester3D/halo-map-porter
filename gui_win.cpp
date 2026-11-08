@@ -112,8 +112,8 @@ enum {
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new96.exe is 1.96).
-#define HMP_VERSION L"1.96"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new97.exe is 1.97).
+#define HMP_VERSION L"1.97"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -1968,6 +1968,14 @@ static void start_campaign_convert() {
             post_log("");
             post_log(std::string("==== ") + (piece == 1 ? "The opening cutscene" : "The closing cutscene") + " -> " + N(o.wstring()));
             Result r = convert_map(c, in, from, Game::Xbox, o, share, post_log, nullptr);
+            if (r.no_piece) {   // (none in the level: it starts, or ends, without one)
+                post_log(std::string("  ") + (piece == 1 ? "No opening" : "No closing") + " cutscene found in the level's scripts, so there's no piece to make: "
+                         "the level " + (piece == 1 ? "starts the campaign" : "ends") + " itself.");
+                std::error_code ec;
+                if (fs::exists(o, ec)) fs::remove(o, ec);   // (one from an earlier conversion would still be loaded)
+                fs::remove(o.parent_path(), ec);              // (its folder, when that leaves it empty)
+                continue;
+            }
             if (!r.ok) { failed += std::string(piece == 1 ? "the opening" : "the closing") + ": " + r.error + "\n"; continue; }
             mapcard::Card card;
             card.name = (title.empty() ? N(out.parent_path().filename().wstring()) : title) + (piece == 1 ? " (opening)" : " (ending)");
