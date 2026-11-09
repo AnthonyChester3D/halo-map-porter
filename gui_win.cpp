@@ -112,8 +112,8 @@ enum {
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new97.exe is 1.97).
-#define HMP_VERSION L"1.97"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new98.exe is 1.98).
+#define HMP_VERSION L"1.98"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -1839,7 +1839,7 @@ static void create_campaign_page() {
     y += 26;
     check(P, L"Split off the closing cutscene (the level's last stretch, through the end), as a map that plays after it", 26, y, 708, ID_CA_CLOSE);
     y += 26;
-    check(P, L"Store the textures and sounds the pieces share once, in <level>-<version>.shared beside their folders (Halo 1 Unlimited v1.97)", 26, y, 708, ID_CA_SHARED);
+    check(P, L"Store the textures and sounds the pieces share once, in <level>-<version>.shared beside their folders (Halo 1 Unlimited v1.102)", 26, y, 708, ID_CA_SHARED);
     y += 26;
     check(P, L"And draw on stock.shared: what's in the stock maps and campaign (needs the Xbox maps folder in Settings)", 46, y, 688, ID_CA_STOCK);
     y += 32;
@@ -2794,7 +2794,7 @@ static void pk_create() {
             post_log("==== Storing what the pack's maps share once, in " + N(root.wstring()));
             sharedfile::Result s = sharedfile::make(root, name, maps, use_stock ? cfg.xbox_maps_dir : fs::path(), out, cfg.cache_dir / "shared", post_log);
             post_log(s.ok ? s.report : "Not stored once (the maps are as they were written): " + s.error);
-            if (s.ok) needs += L" and Halo 1 Unlimited v1.97";
+            if (s.ok) needs += L" and Halo 1 Unlimited v1.102";
             if (s.ok && s.used_stock) stock_too = L", and stock.shared beside it";
         }
         auto *d = new Done{ok, ok ? L"DONE: Map pack written -> " + root.wstring() + L"\\  (copy the " + W(name) +
@@ -2849,7 +2849,7 @@ static void create_pack_page() {
     button(P, L"Map list...", 532, y - 1, 114, ID_PK_MAPLIST);
     button(P, L"Create pack", 652, y - 1, 82, ID_PK_CREATE, true);
     y += 30;
-    check(P, L"Store what the maps share once, in <pack>-<version>.shared (Halo 1 Unlimited v1.97)", 26, y, 520, ID_PK_SHARED);
+    check(P, L"Store what the maps share once, in <pack>-<version>.shared (Halo 1 Unlimited v1.102)", 26, y, 520, ID_PK_SHARED);
     check(P, L"And draw on stock.shared", 562, y, 172, ID_PK_STOCK);
 
     set_text(ID_PK_IN, ini_get(L"pk_in"));

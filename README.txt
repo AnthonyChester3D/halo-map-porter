@@ -2312,7 +2312,7 @@ one go, with the names, descriptions and pictures the pack's menu shows.
      folders (stock.shared, in maps itself, only for an Xbox whose
      installer hasn't built it).
 
-Shared files (Halo 1 Unlimited v1.97 or later; ticked to start with): "Store
+Shared files (Halo 1 Unlimited v1.102 or later; ticked to start with): "Store
 what the maps share once" puts the textures and sounds two or more of the
 pack's maps use in <Pack>-<version>.shared (the version: 8 hex digits of
 its checksum, so two versions of a pack can sit side by side) and lays
@@ -2390,7 +2390,7 @@ kept and left out; each one's tag memory is in its own report.
 On the Xbox: until its menus list campaign folder maps, put the first
 piece in place of a stock level's map to play it; the rest are folder maps
 it loads. Network co-op hasn't been tried with split levels.
-Shared files (Halo 1 Unlimited v1.97 or later): with "Store the textures
+Shared files (Halo 1 Unlimited v1.102 or later): with "Store the textures
 and sounds the pieces share once" ticked, after the pieces are converted
 the textures and sounds two or more of them use go in
 <folder>-<version>.shared, in the folder holding the pieces' folders, and
@@ -2408,7 +2408,7 @@ there is included, even one not converted this time; converting again
 reads a piece already drawing on the old file through it. Each piece
 keeps its identity in map sharing (the size and checksum of its build
 without shared files). The format is Halo 1 Unlimited's
-docs/shared_maps.md (version 2, game v1.97).
+docs/shared_maps.md (version 3, game v1.102).
 
 READING THE LOG AND REPORT
 --------------------------

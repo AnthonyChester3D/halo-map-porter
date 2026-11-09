@@ -1,4 +1,4 @@
-// Halo Map Porter - shared files (Halo 1 Unlimited's docs/shared_maps.md, format version 2, game build v1.97): the
+// Halo Map Porter - shared files (Halo 1 Unlimited's docs/shared_maps.md, format version 3, game build v1.102): the
 // texture and sound data Xbox maps have in common stored once, in shared files, and left out of each map.
 //
 // A shared file is a cache file like a map's with no tags (its header names it; its checksum, a CRC32 of everything
@@ -10,7 +10,11 @@
 // file, 0xC0000000 | offset in stock.shared; the map's header names both at 0x700, with its identity in map sharing
 // (the standalone build's size on disk and header checksum). What moved is left out of the map: it's laid out again
 // without it, in whole 2048-byte sectors (a sector something that stays needs is kept), and every offset to what stays
-// (the tag data's, the BSPs', the textures' and sounds') moved down.
+// (the tag data's, the BSPs', the textures' and sounds') moved down; the map padded to a whole sector. A pack's maps are
+// laid out in the order of their identities (size, then the CRC32s of their first and last 64 KB), whatever their names,
+// and its file starts with a list after its header: each map's identity and its small map's length and CRC32, then each
+// block's SHA-256, offset and size (its checksum leaves the list out). The same maps make the same files, byte for byte
+// unpacked, as the installer's.
 #pragma once
 #include <filesystem>
 #include <functional>

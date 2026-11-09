@@ -1,4 +1,4 @@
-// Halo Map Porter - shared files (sharedfile.hpp; Halo 1 Unlimited's docs/shared_maps.md, format version 2).
+// Halo Map Porter - shared files (sharedfile.hpp; Halo 1 Unlimited's docs/shared_maps.md, format version 3).
 #include "sharedfile.hpp"
 #include "inflate.hpp"
 #include <algorithm>
@@ -12,6 +12,7 @@
 #include <memory>
 #include <set>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 
 namespace sharedfile {
@@ -25,7 +26,8 @@ const uint32_t kStockSum = 0xA7FE2F70u, kStockLength = 238745600u;
 // The one before (v1.94-1.96: the multiplayer maps alone), whose blocks are where they are in this one.
 const uint32_t kOldStockSum = 0xC028F8BFu, kOldStockLength = 78260224u;
 const uint64_t kMultiplayerCache = 47ull * 1048576;   // (a map drawing on a packed shared file must fit one unpacked)
-const uint32_t kTagBase = 0x803A6000u, kRef = 0x700, kRefSize = 0x60;
+const uint32_t kTagBase = 0x803A6000u, kRef = 0x700, kRefSize = 0x68;
+const size_t kEdge = 65536;   // (a map's identity: its size and the CRC32s of this much at its start and its end)
 const uint32_t kPack = 0x80000000u, kStock = 0xC0000000u, kOffset = 0x3FFFFFFFu, kMaxShared = 0x11600000u;
 const uint32_t kBitmap = 0x6269746Du, kSound = 0x736E6421u;
 const size_t npos = (size_t)-1;
@@ -48,6 +50,45 @@ uint32_t get32(const std::string &b, size_t o) {
     if (o + 4 > b.size()) return 0;
     const unsigned char *p = (const unsigned char *)b.data() + o;
     return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24;
+}
+// SHA-256 (FIPS 180-4), for the pack's list.
+void sha256(const char *data, size_t n, unsigned char out[32]) {
+    static const uint32_t k[64] = {
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01,
+        0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+        0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+        0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116, 0x1e376c08,
+        0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
+    uint32_t h[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+    auto rot = [](uint32_t x, int r) { return (x >> r) | (x << (32 - r)); };
+    auto block = [&](const unsigned char *b) {
+        uint32_t w[64];
+        for (int i = 0; i < 16; i++) w[i] = (uint32_t)b[4 * i] << 24 | b[4 * i + 1] << 16 | b[4 * i + 2] << 8 | b[4 * i + 3];
+        for (int i = 16; i < 64; i++)
+            w[i] = w[i - 16] + (rot(w[i - 15], 7) ^ rot(w[i - 15], 18) ^ (w[i - 15] >> 3)) + w[i - 7] +
+                   (rot(w[i - 2], 17) ^ rot(w[i - 2], 19) ^ (w[i - 2] >> 10));
+        uint32_t a = h[0], b2 = h[1], c = h[2], d = h[3], e = h[4], f = h[5], g = h[6], hh = h[7];
+        for (int i = 0; i < 64; i++) {
+            const uint32_t t1 = hh + (rot(e, 6) ^ rot(e, 11) ^ rot(e, 25)) + ((e & f) ^ (~e & g)) + k[i] + w[i];
+            const uint32_t t2 = (rot(a, 2) ^ rot(a, 13) ^ rot(a, 22)) + ((a & b2) ^ (a & c) ^ (b2 & c));
+            hh = g; g = f; f = e; e = d + t1; d = c; c = b2; b2 = a; a = t1 + t2;
+        }
+        h[0] += a; h[1] += b2; h[2] += c; h[3] += d; h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
+    };
+    size_t i = 0;
+    for (; i + 64 <= n; i += 64) block((const unsigned char *)data + i);
+    unsigned char last[128] = {0};
+    const size_t r = n - i;
+    memcpy(last, data + i, r);
+    last[r] = 0x80;
+    const size_t blocks = r + 9 > 64 ? 2 : 1;
+    const uint64_t bits = (uint64_t)n * 8;
+    for (int j = 0; j < 8; j++) last[blocks * 64 - 1 - j] = (unsigned char)(bits >> (8 * j));
+    for (size_t j = 0; j < blocks; j++) block(last + 64 * j);
+    for (int j = 0; j < 8; j++)
+        for (int q = 0; q < 4; q++) out[4 * j + q] = (unsigned char)(h[j] >> (24 - 8 * q));
 }
 void put32(std::string &b, size_t o, uint32_t v) {
     for (int k = 0; k < 4; k++) b[o + (size_t)k] = (char)(v >> (8 * k));
@@ -104,23 +145,12 @@ bool unpack(const std::string &disk, std::string &data, bool &compressed, std::s
     return true;
 }
 
-// Packed as a map is (one zlib stream after the header), padded to whole 4096 bytes as Invader pads them (the padding
-// at 0xC), the header's checksum a CRC32 of the rest as Halo Map Porter stamps it (stamp_xbox_checksum).
-std::string pack_map(std::string &data, bool compressed) {
-    std::string file;
-    if (compressed) {
-        file = data.substr(0, kHeader) + inflate::zlib_compress((const uint8_t *)data.data() + kHeader, data.size() - kHeader);
-        const uint32_t pad = (uint32_t)((4096 - file.size() % 4096) % 4096);
-        file.append(pad, '\0');
-        put32(file, 0xC, pad);
-    } else {
-        file = data;
-        put32(file, 0xC, 0);
-    }
-    uint32_t crc = crc32_of(file.data() + kHeader, file.size() - kHeader);
-    if (crc == 0xFFFFFFFFu) crc = 0xFFFFFFFEu;
-    put32(file, 0x64, crc);
-    data.replace(0, kHeader, file, 0, kHeader);   // (the same header, unpacked)
+// Packed as a map is (one zlib stream after the header), in whole 2048-byte sectors; its header as it is (as the
+// installer's pass makes them: the same maps make the same small maps, byte for byte unpacked).
+std::string pack_map(const std::string &data, bool compressed) {
+    if (!compressed) return data;
+    std::string file = data.substr(0, kHeader) + inflate::zlib_compress((const uint8_t *)data.data() + kHeader, data.size() - kHeader);
+    file.append((kSector - file.size() % kSector) % kSector, '\0');
     return file;
 }
 // A shared file packed: whole 2048-byte sectors (docs/shared_maps.md).
@@ -265,15 +295,17 @@ struct Table {
     }
 };
 
-// A shared file's header (docs/shared_maps.md), its data laid out after it.
-void shared_header(std::string &data, const std::string &name) {
+// A shared file's header (docs/shared_maps.md), its data laid out after it (a pack's after its list, `list` bytes: the
+// checksum leaves the list out, as the list names each small map's CRC and each small map names this checksum).
+void shared_header(std::string &data, const std::string &name, uint32_t list = 0) {
     std::string h(kHeader, '\0');
     h.replace(0, 4, "daeh");
     put32(h, 4, 5);
     put32(h, 8, (uint32_t)data.size());
     h.replace(0x20, name.size(), name);
+    put32(h, 0x18, list);
     h.replace(0x40, 6, "shared");
-    put32(h, 0x64, crc32_of(data.data() + kHeader, data.size() - kHeader));
+    put32(h, 0x64, crc32_of(data.data() + kHeader + list, data.size() - kHeader - list));
     h.replace(0x7FC, 4, "toof");
     data.replace(0, kHeader, h);
 }
@@ -294,7 +326,8 @@ struct Map {
     fs::path path;
     uint64_t disk_size = 0;
     bool compressed = true, had_ref = false;
-    uint32_t ident_size = 0, ident_sum = 0;
+    uint32_t ident_size = 0, ident_sum = 0;   // the original's size on disk and its header's checksum
+    uint32_t ident_head = 0, ident_tail = 0;  // the CRC32s of its first and last 64 KB (its identity, with its size)
     std::string data;   // unpacked
     Parsed p;
     // what becomes of it
@@ -384,6 +417,7 @@ bool relayout(Map &m, const Plan &plan, const std::string &pack_name, const Sour
     for (size_t f : p.bsp_fields) put32(out, move(f), move(get32(d, f)));
     put32(out, 0x10, move(p.td_off));
     if (bad) { m.error = "something that stays in it lies in a sector of what moved"; return false; }
+    out.append((kSector - out.size() % kSector) % kSector, '\0');   // (whole sectors: the game copies a map to its cache in them)
     put32(out, 8, (uint32_t)out.size());
     std::string ref(kRefSize, '\0');
     if (m.pack_ref || m.stock_ref) {
@@ -401,6 +435,8 @@ bool relayout(Map &m, const Plan &plan, const std::string &pack_name, const Sour
             put32(ref, 0x58, stock.sum);
             put32(ref, 0x5C, stock.length);
         }
+        put32(ref, 0x60, m.ident_head);
+        put32(ref, 0x64, m.ident_tail);
     }
     out.replace(kRef, kRefSize, ref);
     return true;
@@ -678,6 +714,9 @@ Result make(const fs::path &folder, const std::string &base_name, const std::vec
                     m.disk_size = disk.size();
                     m.ident_size = (uint32_t)disk.size();
                     m.ident_sum = get32(disk, 0x64);
+                    const size_t edge = std::min(kEdge, disk.size());
+                    m.ident_head = crc32_of(disk.data(), edge);
+                    m.ident_tail = crc32_of(disk.data() + disk.size() - edge, edge);
                     std::string why;
                     if (!unpack(disk, m.data, m.compressed, why)) { m.data.clear(); m.skipped = why; }
                 });
@@ -722,6 +761,8 @@ Result make(const fs::path &folder, const std::string &base_name, const std::vec
                 m.had_ref = true;
                 m.ident_size = get32(m.data, kRef + 0x30);
                 m.ident_sum = get32(m.data, kRef + 0x34);
+                m.ident_head = get32(m.data, kRef + 0x60);   // (0 from an earlier format: not known)
+                m.ident_tail = get32(m.data, kRef + 0x64);
                 m.ref_name = cstr(m.data, kRef + 8, 32);
                 const std::string sn = version == 2 ? cstr(m.data, kRef + 0x38, 32) : "";
                 if (!m.ref_name.empty() && !source(m, m.ref_name, get32(m.data, kRef + 0x28), get32(m.data, kRef + 0x2C), pack_src)) {
@@ -746,22 +787,38 @@ Result make(const fs::path &folder, const std::string &base_name, const std::vec
                 log("  " + shown(m->path) + " is left as it is: " + m->skipped + ".");
                 std::string().swap(m->data);
             }
-        // ---- what goes where: stock.shared's data there, data two or more maps use in the pack's file, the rest stays
-        Table t;
+        // ---- what goes where: stock.shared's data there, data two or more maps use in the pack's file, the rest stays.
+        // The maps in the order of their identities (size, then the CRC32s of their first and last 64 KB), whatever
+        // their names: the same maps make the same files, whoever makes them.
+        std::vector<size_t> order;
         for (size_t i = 0; i < maps.size(); i++)
+            if (maps[i]->skipped.empty()) order.push_back(i);
+        std::sort(order.begin(), order.end(), [&](size_t x, size_t y) {
+            const Map &a = *maps[x], &b = *maps[y];
+            return std::tie(a.ident_size, a.ident_head, a.ident_tail, x) < std::tie(b.ident_size, b.ident_head, b.ident_tail, y);
+        });
+        Table t;
+        for (size_t i : order)
             for (auto &b : maps[i]->p.blocks) {
-                if (!maps[i]->skipped.empty() || !b.bytes) continue;
+                if (!b.bytes) continue;
                 b.entry = t.add(b.bytes, b.size, b.rem);
                 Entry &e = t.e[(size_t)b.entry];
                 if (e.last_map != (int)i) { e.last_map = (int)i; e.maps++; }
             }
+        // The pack's file: its header, its list (16 bytes, 20 a map, 40 a block, to a whole sector), then its blocks.
+        size_t blocks = 0;
+        for (const Entry &e : t.e)
+            if (e.maps >= 2 && !(use_stock && stock.t.find(e.bytes, e.size, e.rem) >= 0)) blocks++;
+        const bool has_pack = blocks > 0;
+        const size_t list_bytes = 16 + 20 * order.size() + 40 * blocks;
+        const uint32_t list_room = has_pack ? (uint32_t)((list_bytes + kSector - 1) / kSector * kSector) : 0;
         Source pack;
-        pack.data.assign(kHeader, '\0');
+        pack.data.assign(kHeader + list_room, '\0');
         std::vector<Plan> plans(maps.size());
-        bool stock_used = false;
-        for (size_t i = 0; i < maps.size(); i++) {
+        std::vector<uint32_t> pack_blocks;   // (each of the pack's blocks' entry, in the order they're in its file)
+        bool moves = false;
+        for (size_t i : order) {
             Map &m = *maps[i];
-            if (!m.skipped.empty()) continue;
             Plan &plan = plans[i];
             plan.go.assign(m.p.blocks.size(), 0);
             plan.at.assign(m.p.blocks.size(), 0);
@@ -773,23 +830,30 @@ Result make(const fs::path &folder, const std::string &base_name, const std::vec
                 if (s >= 0) {
                     plan.go[j] = 2;
                     plan.at[j] = stock.at[(size_t)s];
-                    m.stock_ref = true;
                     m.to_stock += b.size;
                 } else if (e.maps >= 2) {
                     if (!e.in_pack) {
                         e.at = place(pack.data, b.bytes, b.size, b.rem);
                         e.in_pack = true;
+                        pack_blocks.push_back((uint32_t)b.entry);
                     }
                     plan.go[j] = 1;
                     plan.at[j] = e.at;
-                    m.pack_ref = true;
                     m.to_pack += b.size;
                 }
             }
-            m.rewrite = m.pack_ref || m.stock_ref || m.had_ref;
+            moves = moves || m.to_pack || m.to_stock || m.had_ref;
+        }
+        // Once anything moves, every map is made again, naming the pack's file and stock.shared (as the installer's
+        // pass makes them): each one is in the pack's list.
+        bool stock_used = false;
+        for (size_t i : order) {
+            Map &m = *maps[i];
+            m.rewrite = moves;
+            m.pack_ref = moves && has_pack;
+            m.stock_ref = moves && use_stock;
             stock_used = stock_used || m.stock_ref;
         }
-        const bool has_pack = pack.data.size() > kHeader;
         std::string name;
         if (has_pack) {
             pack.data.append((kSector - pack.data.size() % kSector) % kSector, '\0');
@@ -797,11 +861,11 @@ Result make(const fs::path &folder, const std::string &base_name, const std::vec
                 r.error = "The pack's shared file would be " + mb(pack.data.size()) + " unpacked: a shared file can be at most 278 MB. Nothing was written.";
                 return r;
             }
-            shared_header(pack.data, "");
+            shared_header(pack.data, "", list_room);
             char hex[16];
             snprintf(hex, sizeof hex, "-%08x", get32(pack.data, 0x64));
             name = base + hex;
-            shared_header(pack.data, name);   // (the name isn't in the checksum: the header isn't)
+            shared_header(pack.data, name, list_room);   // (the name isn't in the checksum: the header isn't)
             pack.sum = get32(pack.data, 0x64);
             pack.length = (uint32_t)pack.data.size();
         }
@@ -824,6 +888,34 @@ Result make(const fs::path &folder, const std::string &base_name, const std::vec
         }
         for (auto &m : maps)
             if (!m->error.empty()) { r.error = shown(m->path) + ": " + m->error + ". Nothing was written."; return r; }
+        // The pack's list: "OXPL", version 1, its maps, its blocks; then each map (in their order): its identity, its small
+        // map's length and CRC32 unpacked; then each block (in file order): its SHA-256, offset and size.
+        if (has_pack) {
+            std::string list;
+            auto add32 = [&](uint32_t v) { list.append(4, '\0'); put32(list, list.size() - 4, v); };
+            list = "OXPL";
+            add32(1);
+            add32((uint32_t)order.size());
+            add32((uint32_t)pack_blocks.size());
+            for (size_t i : order) {
+                const Map &m = *maps[i];
+                add32(m.ident_size);
+                add32(m.ident_head);
+                add32(m.ident_tail);
+                add32((uint32_t)m.out.size());
+                add32(crc32_of(m.out.data(), m.out.size()));
+            }
+            for (uint32_t k : pack_blocks) {
+                const Entry &e = t.e[k];
+                unsigned char h[32];
+                sha256(pack.data.data() + e.at, e.size, h);
+                list.append((const char *)h, 32);
+                add32(e.at);
+                add32(e.size);
+            }
+            if (list.size() > list_room) { r.error = "The pack's list didn't fit its room (a bug). Nothing was written."; return r; }
+            pack.data.replace(kHeader, list.size(), list);
+        }
         // The pack's file stored unpacked (read where it is) when a map drawing on it is over 47 MB unpacked: a packed one
         // takes one of the two big cache files, and a level change needs both. stock.shared always is.
         bool pack_unpacked = false;
