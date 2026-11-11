@@ -2,6 +2,8 @@
 #include "maptrim.hpp"
 #include "inflate.hpp"
 #include <algorithm>
+#include <chrono>
+#include <thread>
 #include <cstdio>
 #include <fstream>
 #include <iterator>
@@ -307,8 +309,16 @@ Result trim_scripts(const fs::path &map, uint64_t tag_space, uint32_t spare) {
         if (!o) { r.error = "couldn't write the map"; return r; }
     }
     std::error_code ec;
-    fs::rename(tmp, map, ec);
-    if (ec) { fs::remove(tmp, ec); r.error = "couldn't replace the map"; return r; }
+    for (int tries = 0; tries < 20; tries++) {   // (something reading the new map, a virus scan, holds it a moment)
+        fs::rename(tmp, map, ec);
+        if (!ec) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    }
+    if (ec) {
+        r.error = "couldn't replace the map (" + ec.message() + ")";
+        fs::remove(tmp, ec);
+        return r;
+    }
     r.ok = true;
     return r;
 }

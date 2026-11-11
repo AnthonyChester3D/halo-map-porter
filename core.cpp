@@ -203,11 +203,33 @@ int run_process(const std::vector<std::string> &args, std::string &output, Proce
         stop->proc = pi.hProcess;
         if (stop->stopped) TerminateProcess(pi.hProcess, 1);
     }
+    // A tool that works on one tag at a time gets 15 minutes: one that hasn't finished by then has hung, and is
+    // stopped so the map fails with a reason (and the rest of a batch goes on) instead of waiting forever.
+    std::string name = fs::path(args[0]).stem().string();
+    std::transform(name.begin(), name.end(), name.begin(), ::tolower);
+    const bool limited = name == "invader-sound" || name == "invader-edit" || name == "invader-bitmap" || name == "invader-info";
+    std::atomic<bool> timed_out{false};
+    HANDLE ended = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    std::thread watch;
+    if (limited && ended)
+        watch = std::thread([&] {
+            HANDLE h[2] = {pi.hProcess, ended};
+            if (WaitForMultipleObjects(2, h, FALSE, 15 * 60 * 1000) == WAIT_TIMEOUT) {
+                timed_out = true;
+                TerminateProcess(pi.hProcess, 1);
+            }
+        });
     char chunk[4096];
     DWORD n;
     while (ReadFile(rd, chunk, sizeof(chunk), &n, nullptr) && n > 0) output.append(chunk, n);
     CloseHandle(rd);
     WaitForSingleObject(pi.hProcess, INFINITE);
+    if (ended) {
+        SetEvent(ended);
+        if (watch.joinable()) watch.join();
+        CloseHandle(ended);
+    }
+    if (timed_out) output += "\n" + name + " hadn't finished after 15 minutes, so it was stopped (it had hung)";
     if (stop) {
         std::lock_guard<std::mutex> g(stop->m);
         stop->proc = nullptr;
@@ -512,7 +534,10 @@ struct Job {
         if (own.empty()) return false;
         if (own != fixes && !to_fixes(tag, own)) return false;
         std::string out;
-        return run_process({u8(tool(cfg, "invader-edit")), "-t", u8(fixes), tag, "-S", key, value}, out) == 0;
+        if (run_process({u8(tool(cfg, "invader-edit")), "-t", u8(fixes), tag, "-S", key, value}, out) == 0) return true;
+        // (a field Invader keeps read-only, such as a model part's shader_index: allowed with -n)
+        return out.find("read-only") != std::string::npos &&
+               run_process({u8(tool(cfg, "invader-edit")), "-n", "-t", u8(fixes), tag, "-S", key, value}, out) == 0;
     }
 
     bool swap_to_source(const std::string &tag, const std::string &why) {
@@ -1134,6 +1159,23 @@ struct Job {
             note("[fix]  " + tag + ": marked as a sprite sheet but has no sprites; now a 2D texture (as MCC draws it)");
             return true;
         }
+        // An item collection whose weights add up to nothing (each under 1: the game rounds them down): each now 1, so
+        // what it holds is picked as evenly as before.
+        if (msg.find("Total weight sum is 0") != std::string::npos) {
+            fs::path own = owner(tag);
+            std::string out;
+            if (!own.empty() && (own == fixes || to_fixes(tag, own)) &&
+                run_process({u8(tool(cfg, "invader-edit")), "-t", u8(fixes), tag, "-C", "permutations"}, out) == 0) {
+                const int n = std::atoi(out.c_str());
+                std::vector<std::string> cmd{u8(tool(cfg, "invader-edit")), "-t", u8(fixes), tag};
+                for (int i = 0; i < n; i++) cmd.insert(cmd.end(), {"-S", "permutations[" + std::to_string(i) + "].weight", "1"});
+                if (n > 0 && run_process(cmd, out) == 0) {
+                    note("[fix]  " + tag + ": its weights added up to 0 (each under 1, which the game rounds down), which can crash "
+                         "the game; each of its " + std::to_string(n) + " is now 1");
+                    return true;
+                }
+            }
+        }
         static const std::regex bad_index(R"((\w+)::(\w+) references an invalid index of \S+ \((\d+) >= (\d+)\))");
         if (std::regex_search(msg, m, bad_index)) {
             if (m[1] == "EffectParticle" || m[1] == "EffectPart")
@@ -1422,6 +1464,7 @@ static void tidy_weapon_list(Job &job);
 static bool fix_script_none(Job &job, const std::string &err, std::string &what);
 static bool fix_script_shadow(Job &job, const std::string &err, std::string &what);
 static bool fix_script_navpoint(Job &job, const std::string &err, std::string &what);
+static bool fix_script_missing_tag(Job &job, const std::string &err, std::string &what);
 static std::string script_error_line(Job &job, const std::string &err);
 static std::set<std::string> add_stock_choices_for_analysis(Job &job);
 static bool analyze_built_map(Job &job, const fs::path &map, const std::set<std::string> &added, ContentAnalysis &a,
@@ -3004,14 +3047,22 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
             }
         }
         if (!parse_failure(out, f)) {
-            r.error = "Build failed:\n" + out.substr(out.size() > 3000 ? out.size() - 3000 : 0);
+            static const std::regex missing(R"(Failed to find ([^\r\n]+))");
+            std::smatch mm;
+            if (std::regex_search(out, mm, missing))
+                r.error = "Build failed: the map uses the tag " + mm[1].str() + ", which isn't among the tags taken out of it "
+                          "(a map with tags of the same name can't be taken apart: use an unprotected copy).\nFull log: " +
+                          u8(job.work / "build.log");
+            else
+                r.error = "Build failed:\n" + out.substr(out.size() > 3000 ? out.size() - 3000 : 0);
             return r;
         }
         if (!f.script_error.empty()) {
             // MCC's "none" team (no team): the original engine can't parse it.
             std::string what;
             if (!job.extra.empty() && none_fixes < 40 &&
-                (fix_script_none(job, f.script_error, what) || fix_script_shadow(job, f.script_error, what))) {
+                (fix_script_none(job, f.script_error, what) || fix_script_shadow(job, f.script_error, what) ||
+                 fix_script_missing_tag(job, f.script_error, what))) {
                 none_fixes++;
                 job.note("[scripts] " + what);
                 continue;
@@ -3032,7 +3083,8 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
         if (!f.hsc_error.empty()) {
             // A name in the map's scripts that the built map doesn't have (a nav point arrow its HUD lacks...).
             std::string what;
-            if (!job.extra.empty() && none_fixes < 40 && fix_script_navpoint(job, f.hsc_error, what)) {
+            if (!job.extra.empty() && none_fixes < 40 &&
+                (fix_script_navpoint(job, f.hsc_error, what) || fix_script_missing_tag(job, f.hsc_error, what))) {
                 none_fixes++;
                 job.note("[scripts] " + what);
                 continue;
@@ -9765,6 +9817,46 @@ static bool fix_script_shadow(Job &job, const std::string &err, std::string &wha
     return true;
 }
 
+// A tag the map's scripts name that the map itself doesn't have (removed after its scripts were compiled: the game
+// finds nothing there and does nothing with it): every place the scripts name it now says "none", as the game reads it.
+static bool fix_script_missing_tag(Job &job, const std::string &err, std::string &what) {
+    static const std::regex tok(R"re(can't find (\w+) tag "([^"]+)")re");
+    std::smatch m;
+    if (!std::regex_search(err, m, tok)) return false;
+    auto norm = [](std::string t) {
+        t = hsc::lower(t);
+        std::replace(t.begin(), t.end(), '/', '\\');
+        return t;
+    };
+    const std::string name = norm(m[2].str());
+    fs::path file;
+    int line = 0, col = 0;
+    if (!script_error_place(job, err, file, line, col)) return false;
+    std::ifstream in(file, std::ios::binary);
+    std::string s((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+    std::vector<hsc::Node> top;
+    size_t i = 0;
+    if (!hsc::parse(s, i, top, false)) return false;
+    std::vector<std::pair<size_t, size_t>> spots;
+    std::function<void(const std::vector<hsc::Node> &)> walk = [&](const std::vector<hsc::Node> &ns) {
+        for (auto &n : ns) {
+            if (n.list) { walk(n.kids); continue; }
+            std::string t = n.atom;
+            if (n.str && t.size() >= 2) t = t.substr(1, t.size() - 2);
+            if (norm(t) == name) spots.push_back({n.b, n.e - n.b});
+        }
+    };
+    walk(top);
+    if (spots.empty()) return false;
+    std::sort(spots.rbegin(), spots.rend());
+    for (auto &sp : spots) s.replace(sp.first, sp.second, "none");
+    std::ofstream(file, std::ios::binary) << s;
+    what = "the map's scripts name the " + m[1].str() + " " + m[2].str() + ", which the map doesn't have (it does nothing in the "
+           "game): " + std::to_string(spots.size()) + " place" + (spots.size() == 1 ? "" : "s") + " now say none, as the game reads it";
+    return true;
+}
+
 // A nav point type (a waypoint arrow of the HUD globals, e.g. Coldsnap's "orange_landingpad") that the built map's
 // HUD globals doesn't have. merge_map_globals adds the map's own arrows to the Xbox's HUD globals; this is for
 // what that can't cover (no room for more arrows, or the map's HUD globals is missing). The calls naming it use
@@ -16127,30 +16219,38 @@ static Result convert_map_impl(const Config &cfg, const fs::path &input, Game in
     std::string key = "HaloMapPorter extracted 1\n" + std::string(game_name(in_game)) + "\n" + file_identity(input) + "\n" +
                       file_identity(tool(cfg, "invader-extract")) + "\n";
     for (auto &f : job.resource_files) key += file_identity(f) + "\n";
+    // Protected maps have their tag names scrambled, so there's nothing usable to extract. (Asked at the same time
+    // as the extraction runs: reading the map for it takes seconds of its own.)
+    std::string info_tool = u8(tool(cfg, "invader-info")), info_in = u8(input);
+    auto info = std::async(std::launch::async, [info_tool, info_in] {
+        std::string path, issues;
+        run_process({info_tool, "-T", "scenario_path", info_in}, path);
+        // (or its tags given the same names: many share a path with a tag of their kind, which a map built from
+        // tags never has, and which can't be extracted apart)
+        run_process({info_tool, "-T", "protection_issues", info_in}, issues);
+        size_t same = 0;
+        for (size_t at = 0; (at = issues.find("shares a path and fourCC", at)) != std::string::npos; at++) same++;
+        return same >= 10 ? std::string("<protected>") : path;
+    });
     std::string out;
     fs::path extracted = find_extracted(job, key, out);
+    auto is_protected = [&] {
+        if (info.get().find("<protected>") == std::string::npos) return false;
+        r.error = "This map is protected: its author scrambled its tag names so it can't be taken apart, and the "
+                  "app needs those to rebuild it for another game. Use an unprotected copy of the map (for example "
+                  "the MCC release, or ask the author).";
+        return true;
+    };
     if (!extracted.empty()) {
         log("Reusing the tags extracted from " + input.filename().u8string() + " before (the map hasn't changed)");
+        if (is_protected()) return r;
     } else {
-        // Protected maps have their tag names scrambled, so there's nothing usable to extract. (Asked at the same time
-        // as the extraction runs: reading the map for it takes seconds of its own.)
-        std::string info_tool = u8(tool(cfg, "invader-info")), info_in = u8(input);
-        auto info = std::async(std::launch::async, [info_tool, info_in] {
-            std::string path;
-            run_process({info_tool, "-T", "scenario_path", info_in}, path);
-            return path;
-        });
         log("Extracting tags from " + input.filename().u8string() + "...");
         std::vector<std::string> cmd{u8(tool(cfg, "invader-extract"))};
         if (!res_dir.empty()) cmd.insert(cmd.end(), {"-m", u8(res_dir)});
         cmd.push_back(u8(input));
         extracted = extract_kept(job, key, cmd, out);
-        if (info.get().find("<protected>") != std::string::npos) {
-            r.error = "This map is protected: its author scrambled its tag names so it can't be taken apart, and the "
-                      "app needs those to rebuild it for another game. Use an unprotected copy of the map (for example "
-                      "the MCC release, or ask the author).";
-            return r;
-        }
+        if (is_protected()) return r;
         if (extracted.empty()) {
             r.error = "Couldn't extract tags from the map:\n" + out.substr(out.size() > 2000 ? out.size() - 2000 : 0);
             if (in_game == Game::CE && res_dir.empty())
