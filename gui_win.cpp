@@ -84,7 +84,7 @@ enum {
     ID_X_MAKELOD, ID_X_TRIM_LBL, ID_X_TRIM, ID_S_LOD_LBL, ID_S_LOD, ID_S_LOD_BROWSE, ID_S_LOD_HINT, ID_S_TOUR,
     // portals for levels made without them
     ID_X_PORTALS,
-    ID_X_BOTS,
+    ID_X_BOTS, ID_X_STOCK_SHARED,
     // the level shaders window
     ID_X_SHADERS,
     ID_X_LODS,
@@ -112,8 +112,8 @@ enum {
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new100.exe is 1.100).
-#define HMP_VERSION L"1.100"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new101.exe is 1.101).
+#define HMP_VERSION L"1.101"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -204,6 +204,7 @@ static void save_settings() {
     ini_set(L"x_lodstock", checked(ID_X_LODSTOCK) ? L"1" : L"0");
     ini_set(L"x_makelod", checked(ID_X_MAKELOD) ? L"1" : L"0");
     ini_set(L"x_bots", checked(ID_X_BOTS) ? L"1" : L"0");
+    ini_set(L"x_stock_shared", checked(ID_X_STOCK_SHARED) ? L"1" : L"0");
     ini_set(L"x_trim", std::to_wstring(std::max(0, sel(ID_X_TRIM))));
     ini_set(L"ca_open", checked(ID_CA_OPEN) ? L"1" : L"0");
     ini_set(L"ca_close", checked(ID_CA_CLOSE) ? L"1" : L"0");
@@ -1754,6 +1755,26 @@ static void open_shaders() {
 
 static void remember_conversion(const fs::path &in, const fs::path &out);
 
+// The Xbox tab's "drawing on stock.shared": a converted map with what stock.shared has (every texture and sound of the
+// stock multiplayer maps and what three or more campaign levels use) left out, rewritten where it is (sharedfile.hpp;
+// a map on its own has nothing to share with others, so no pack file). stock.shared isn't written beside it: it's the
+// file Halo 1 Unlimited's installer builds on every Xbox (the one laid out from the Xbox maps folder is kept with the
+// app's cache).
+static void draw_on_stock(const Config &cfg, const fs::path &map, const Log &log) {
+    if (cfg.xbox_maps_dir.empty() || sharedfile::stock_maps_in(cfg.xbox_maps_dir).empty()) {
+        log("Not drawn on stock.shared: the Xbox maps folder in Settings needs the 13 stock multiplayer maps and the 10 "
+            "campaign levels to lay it out from.");
+        return;
+    }
+    static std::mutex one_at_a_time;   // (a batch's maps: stock.shared is laid out and kept once)
+    std::lock_guard<std::mutex> g(one_at_a_time);
+    log("");
+    log("==== Leaving out what stock.shared has");
+    const fs::path cache = cfg.cache_dir / "shared";
+    sharedfile::Result s = sharedfile::make(map.parent_path(), N(map.stem().wstring()), {map}, cfg.xbox_maps_dir, cache, cache, log);
+    log(s.ok ? s.report : "Not drawn on stock.shared: " + s.error);
+}
+
 // `again`: the LODs window's "Convert again" (the same map and output, so no questions about replacing it).
 static void start_convert(bool again = false) {
     if (card_only()) { save_map_card(); return; }
@@ -1788,7 +1809,7 @@ static void start_convert(bool again = false) {
         apply_shader_picks(cfg, in);
     }
     apply_user_scripts(cfg, in);   // (the scripts window's edits: for every game)
-    bool share = checked(ID_SHARE);
+    bool share = checked(ID_SHARE), stock_shared = checked(ID_X_STOCK_SHARED);
     set_busy(true);
     SetWindowTextW(g_log, L"");
     append_log(L"Converting " + in.filename().wstring() + L": " + W(game_name(from)) + L" -> " + W(game_name(to)));
@@ -1814,6 +1835,7 @@ static void start_convert(bool again = false) {
         if (r.ok && !card_dir.empty())
             if (std::string t = card_traits(cfg, card_dir, card_name, out, out.parent_path()); !t.empty()) post_log(t);
         if (r.ok && to == Game::Xbox) remember_conversion(in, out);
+        if (r.ok && to == Game::Xbox && stock_shared) draw_on_stock(cfg, out, post_log);
         finish(r, std::string("Converted to ") + game_name(to), keys);
     }).detach();
 }
@@ -2195,7 +2217,7 @@ static void open_batch() {
         apply_xbox_options(base);
         // (a map still over the standard Xbox's 47 MB after every shrink: built for the big-map limit, as shrunk)
         if (base.xbox_max_mb <= 0) base.xbox_overflow_mb = 115;   // (make_config's too)
-        bool share = checked(ID_SHARE);
+        bool share = checked(ID_SHARE), stock_shared = checked(ID_X_STOCK_SHARED);
         for (int i : which) {
             const auto &it = items[(size_t)i];
             Job1 j;
@@ -2226,7 +2248,7 @@ static void open_batch() {
         append_log(L"Batch: converting " + std::to_wstring(jobs->size()) + L" maps for the Xbox" +
                    (base.xbox_perfect ? L" (Perfect Conversion)" : L"") +
                    (at_once > 1 ? L", " + std::to_wstring(at_once) + L" at once (each line starts with its map)" : L"") + L".");
-        std::thread([jobs, share, at_once] {
+        std::thread([jobs, share, stock_shared, at_once] {
             std::atomic<int> ok{0}, linked{0}, failed{0}, done{0};
             std::atomic<size_t> next{0};
             std::mutex last_lock;   // (the map finished last: the one the Xbox tab's windows build from)
@@ -2261,6 +2283,7 @@ static void open_batch() {
                     if (!j.card_dir.empty())
                         if (std::string t = card_traits(j.cfg, j.card_dir, j.card_name, j.out, j.out.parent_path()); !t.empty()) log(t);
                     remember_conversion(j.in, j.out);
+                    if (stock_shared) draw_on_stock(j.cfg, j.out, log);
                     if (!r.link.empty()) { linked++; st = L"Done, linked"; }
                     else if (j.cfg.xbox_perfect && !r.pair_check.empty()) st = L"Done, not linked: see its pair check";
                     else st = L"Done";
@@ -3149,6 +3172,9 @@ static void create_controls() {
     y += 26;
     check(2, L"Add waypoints for Halo 1 Unlimited's bots where they can't find their way (item spawn points that spawn nothing)",
           26, y, 708, ID_X_BOTS);
+    y += 26;
+    check(2, L"Save the map drawing on stock.shared: what the stock maps and campaign have is left out of it (needs the Xbox "
+             L"maps folder in Settings)", 26, y, 708, ID_X_STOCK_SHARED);
 
     // Map packs page
     create_pack_page();
@@ -3258,6 +3284,7 @@ static void create_controls() {
     set_check(ID_X_LODSTOCK, ini_get(L"x_lodstock", L"0") == L"1");
     set_check(ID_X_MAKELOD, ini_get(L"x_makelod", L"1") == L"1");
     set_check(ID_X_BOTS, ini_get(L"x_bots", L"1") == L"1");
+    set_check(ID_X_STOCK_SHARED, ini_get(L"x_stock_shared", L"0") == L"1");
     SendDlgItemMessageW(g_wnd, ID_X_TRIM, CB_SETCURSEL, std::clamp(_wtoi(ini_get(L"x_trim", L"1").c_str()), 0, 5), 0);
     SendDlgItemMessageW(g_wnd, ID_X_ANIM, CB_SETCURSEL, std::clamp(_wtoi(ini_get(L"x_anim", L"1").c_str()), 0, 2), 0);
     SendDlgItemMessageW(g_wnd, ID_X_PORTALS, CB_SETCURSEL, std::clamp(_wtoi(ini_get(L"x_portals", L"1").c_str()), 0, 2), 0);
@@ -3395,7 +3422,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case ID_X_PERFECT:
             if (code == BN_CLICKED) { update_perfect(); save_settings(); }
             break;
-        case ID_X_LODSTOCK: case ID_X_MAKELOD: case ID_X_BOTS: case ID_X_SHRINK_STOCK:
+        case ID_X_LODSTOCK: case ID_X_MAKELOD: case ID_X_BOTS: case ID_X_STOCK_SHARED: case ID_X_SHRINK_STOCK:
             if (code == BN_CLICKED) save_settings();
             break;
         case ID_X_PORTALS: case ID_X_TRIM: case ID_X_ANIM:

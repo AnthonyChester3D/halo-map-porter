@@ -2312,6 +2312,13 @@ one go, with the names, descriptions and pictures the pack's menu shows.
      folders (stock.shared, in maps itself, only for an Xbox whose
      installer hasn't built it).
 
+Drawing on stock.shared one map at a time (Xbox tab, "Save the map drawing
+on stock.shared"): each map converted for the Xbox, on its own or in a
+batch, is laid out again with what stock.shared has left out of it, the
+same as a map pack does. stock.shared isn't written beside it (Halo 1
+Unlimited's installer builds it on every Xbox); it needs the Xbox maps
+folder in Settings, as for map packs.
+
 Shared files (Halo 1 Unlimited v1.102 or later; ticked to start with): "Store
 what the maps share once" puts the textures and sounds two or more of the
 pack's maps use in <Pack>-<version>.shared (the version: 8 hex digits of
