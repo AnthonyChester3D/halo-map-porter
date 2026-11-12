@@ -395,6 +395,8 @@ static bool parse_failure(const std::string &log_text, Failure &f) {
 // ---------------------------------------------------------------- job
 
 namespace {
+static int fit_xbox_bitmap_sizes(const fs::path &p);
+static int terminate_string_list(const fs::path &p);
 
 int convert_bc7_bitmap_tag(const fs::path &p, bool write);
 int convert_bc7_kept(const Config &cfg, const fs::path &p);
@@ -1086,6 +1088,41 @@ struct Job {
                 return true;
             }
         }
+        // The other way round: an overlay not marked "not a sprite" on a bitmap that isn't a sprite sheet: the mark put on.
+        static const std::regex is_sprite(R"(Overlay #(\d+) of crosshair #(\d+) is not marked as not a sprite, but)");
+        if (std::regex_search(msg, m, is_sprite)) {
+            std::string key = "crosshairs[" + m[2].str() + "].crosshair_overlays[" + m[1].str() + "].flags.not_a_sprite";
+            if (edit(tag, key, "1")) {
+                note("[fix]  " + tag + ": crosshair #" + m[2].str() + "'s overlay #" + m[1].str() +
+                     " uses a bitmap that isn't a sprite sheet; marked 'not a sprite' so it draws the bitmap");
+                return true;
+            }
+        }
+        // A texture bigger than the Xbox draws (a 1024 cube map): made smaller until it fits.
+        if (msg.find("does not support these bitmaps") != std::string::npos) {
+            fs::path own = owner(tag);
+            if (!own.empty() && (own == fixes || to_fixes(tag, own))) {
+                const int n = fit_xbox_bitmap_sizes(fixes / from_u8(tag));
+                if (n > 0) {
+                    note("[fix]  " + tag + ": " + std::to_string(n) + " of its textures " + (n == 1 ? "was" : "were") +
+                         " bigger than the Xbox draws (2048 texels a side, 512 for a cube map); made smaller to fit");
+                    return true;
+                }
+            }
+        }
+        // A string list's string with no terminating zero: one added.
+        static const std::regex no_null(R"(String #(\d+) is not null terminated)");
+        if (std::regex_search(msg, m, no_null)) {
+            fs::path own = owner(tag);
+            if (!own.empty() && (own == fixes || to_fixes(tag, own))) {
+                const int n = terminate_string_list(fixes / from_u8(tag));
+                if (n > 0) {
+                    note("[fix]  " + tag + ": " + std::to_string(n) + " of its strings had no ending zero (what ends a string); "
+                         "one added to each");
+                    return true;
+                }
+            }
+        }
         // A weapon with more zoom levels than its zoom overlay crosshair's sequence has pictures (Halo 3's sniper rifle:
         // one scope picture for both zooms; MCC draws the last one again): that picture repeated in the bitmap, as a
         // sequence of its own added at the end (nothing else that uses the bitmap changes), and the overlay uses it.
@@ -1465,6 +1502,7 @@ static bool fix_script_none(Job &job, const std::string &err, std::string &what)
 static bool fix_script_shadow(Job &job, const std::string &err, std::string &what);
 static bool fix_script_navpoint(Job &job, const std::string &err, std::string &what);
 static bool fix_script_missing_tag(Job &job, const std::string &err, std::string &what);
+static bool fix_script_unterminated(Job &job, const std::string &err, std::string &what);
 static std::string script_error_line(Job &job, const std::string &err);
 static std::set<std::string> add_stock_choices_for_analysis(Job &job);
 static bool analyze_built_map(Job &job, const fs::path &map, const std::set<std::string> &added, ContentAnalysis &a,
@@ -3062,7 +3100,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
             std::string what;
             if (!job.extra.empty() && none_fixes < 40 &&
                 (fix_script_none(job, f.script_error, what) || fix_script_shadow(job, f.script_error, what) ||
-                 fix_script_missing_tag(job, f.script_error, what))) {
+                 fix_script_missing_tag(job, f.script_error, what) || fix_script_unterminated(job, f.script_error, what))) {
                 none_fixes++;
                 job.note("[scripts] " + what);
                 continue;
@@ -4972,6 +5010,118 @@ struct BitmapParts {
         return o;
     }
 };
+
+// A string list (unicode_string_list or string_list) whose strings don't all end in a zero character: a zero added
+// to each that doesn't. Layout: 64-byte header, the strings block (12), each string's data field (20), their bytes.
+// Returns how many strings got one (0: none, or a file not laid out so).
+static int terminate_string_list(const fs::path &p) {
+    std::string b;
+    {
+        std::ifstream f(p, std::ios::binary);
+        b.assign((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    }
+    if (b.size() < 76) return 0;
+    const size_t ch = b.compare(36, 4, "ustr") == 0 ? 2 : b.compare(36, 4, "str#") == 0 ? 1 : 0;
+    if (!ch) return 0;
+    const uint32_t n = be32(b, 64);
+    size_t o = 76 + 20 * (size_t)n;
+    if (o > b.size()) return 0;
+    std::string out = b.substr(0, o), data;
+    int added = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        const size_t e = 76 + 20 * (size_t)i;
+        const uint32_t sz = be32(b, e);
+        if (o + sz > b.size()) return 0;
+        std::string str = b.substr(o, sz);
+        o += sz;
+        bool ends = str.size() >= ch && str.size() % ch == 0;
+        for (size_t k = 0; ends && k < ch; k++) ends = str[str.size() - 1 - k] == 0;
+        if (!ends && str.size() % ch == 0) {
+            str.append(ch, '\0');
+            put_be32(out, e, (uint32_t)str.size());
+            added++;
+        }
+        data += str;
+    }
+    if (o != b.size() || !added) return 0;
+    out += data;
+    put_be32(out, 40, ~crc32_of(out.data() + 64, out.size() - 64));
+    std::ofstream(p, std::ios::binary) << out;
+    return added;
+}
+
+// A bitmap with a texture bigger than the Xbox draws (2D 2048, cube map 512 texels a side): each one halved until it
+// fits, by dropping its biggest copy when it has smaller ones, else by halving its pixels (each of a cube map's six
+// faces: in the tag, each size's six faces in turn). Returns how many textures were made smaller (0: none could be).
+static int fit_xbox_bitmap_sizes(const fs::path &p) {
+    BitmapParts bp;
+    if (!bp.read(p) || !bp.nbd) return 0;
+    std::string nb = bp.b, out_pix;
+    const std::string pix = bp.b.substr(bp.pp_off, bp.pp);
+    std::vector<uint32_t> offs;
+    for (uint32_t i = 0; i < bp.nbd; i++) offs.push_back(be32(bp.b, bp.bd_off + 48 * (size_t)i + 24));
+    int fitted = 0;
+    for (uint32_t i = 0; i < bp.nbd; i++) {
+        const size_t e = bp.bd_off + 48 * (size_t)i;
+        const uint32_t off = offs[i];
+        uint32_t end = (uint32_t)pix.size();
+        for (auto x : offs)
+            if (x > off && x < end) end = x;
+        if (off > pix.size()) return 0;
+        std::string data = pix.substr(off, end - off);
+        int w = be16(nb, e + 4), h = be16(nb, e + 6), type = be16(nb, e + 10), fmt = be16(nb, e + 12), mips = be16(nb, e + 20);
+        const int w0 = w, h0 = h, most = type == 2 ? 512 : type == 0 || type == 3 ? 2048 : 0;
+        if (!most) {
+            if (w > 256 || h > 256) return 0;   // (a 3D texture over the Xbox's 256: not made smaller)
+        }
+        while (most && (w > most || h > most)) {
+            if (type != 2) {
+                if (!halve_texture(data, w, h, fmt, mips, 1)) return 0;
+                continue;
+            }
+            const size_t face = mip_bytes(w, h, fmt);
+            if (!face || w < 2 || h < 2) return 0;
+            std::string nd;
+            if (mips >= 1 && data.size() > 6 * face) {
+                nd = data.substr(6 * face);
+                mips--;
+            } else {
+                int nf = fmt;
+                for (int f = 0; f < 6; f++) {
+                    std::string half;
+                    int ff = fmt;
+                    if (data.size() < (f + 1) * face || !halve_pixels(data.substr(f * face, face), w, h, ff, half)) return 0;
+                    if (f && ff != nf) return 0;
+                    nf = ff;
+                    nd += half;
+                }
+                fmt = nf;
+                mips = 0;
+            }
+            data = nd;
+            w = std::max(1, w / 2);
+            h = std::max(1, h / 2);
+        }
+        if (w != w0 || h != h0) {
+            fitted++;
+            put_be16(nb, e + 16, (uint16_t)((int16_t)be16(nb, e + 16) * w / w0));   // registration point, in pixels
+            put_be16(nb, e + 18, (uint16_t)((int16_t)be16(nb, e + 18) * h / h0));
+            put_be16(nb, e + 4, (uint16_t)w);
+            put_be16(nb, e + 6, (uint16_t)h);
+            put_be16(nb, e + 12, (uint16_t)fmt);
+            put_be16(nb, e + 20, (uint16_t)mips);
+        }
+        put_be32(nb, e + 24, (uint32_t)out_pix.size());
+        put_be32(nb, e + 28, (uint32_t)data.size());
+        out_pix += data;
+    }
+    if (!fitted) return 0;
+    std::string out = nb.substr(0, bp.pp_off) + out_pix + nb.substr(bp.pp_off + bp.pp);
+    put_be32(out, 64 + 48, (uint32_t)out_pix.size());
+    put_be32(out, 40, ~crc32_of(out.data() + 64, out.size() - 64));
+    std::ofstream(p, std::ios::binary) << out;
+    return fitted;
+}
 
 // A HUD bitmap keeping only what the HUD can show of it. `drop_mips`: its smaller copies go (an element that always
 // draws it at a texel to a pixel or bigger never reads them). `max_w`/`max_h` > 0: each texture is cut to at most that
@@ -9814,6 +9964,63 @@ static bool fix_script_shadow(Job &job, const std::string &err, std::string &wha
     std::ofstream(file, std::ios::binary) << s;
     what = "the map's script \"" + name + "\" has the name of a game function its own lines call: renamed it \"" +
            renamed + "\"";
+    return true;
+}
+
+// A block the scripts open and never close ("unterminated block"): what was taken out of the map left a call with
+// its argument missing, written as "(object_destroy" with the statements after it as its own. The call inside the
+// unclosed block that took its closing parenthesis (it runs to the block's last one) is taken out, opening and name,
+// so the statements are the block's again.
+static bool fix_script_unterminated(Job &job, const std::string &err, std::string &what) {
+    if (err.find("unterminated block") == std::string::npos) return false;
+    fs::path file;
+    int line = 0, col = 0;
+    if (!script_error_place(job, err, file, line, col)) return false;
+    std::ifstream in(file, std::ios::binary);
+    std::string s((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+    // Every parenthesis outside strings and comments, matched.
+    std::vector<size_t> open_at;
+    std::map<size_t, size_t> close_of;   // an opening's place -> its closing's
+    for (size_t i = 0; i < s.size(); i++) {
+        const char c = s[i];
+        if (c == '"') {
+            size_t e = s.find('"', i + 1);
+            if (e == std::string::npos) return false;
+            i = e;
+        } else if (c == ';') {
+            if (i + 1 < s.size() && s[i + 1] == '*') {
+                size_t e = s.find("*;", i + 2);
+                if (e == std::string::npos) return false;
+                i = e + 1;
+            } else {
+                size_t e = s.find('\n', i);
+                i = e == std::string::npos ? s.size() : e;
+            }
+        } else if (c == '(') open_at.push_back(i);
+        else if (c == ')') {
+            if (open_at.empty()) return false;
+            close_of[open_at.back()] = i;
+            open_at.pop_back();
+        }
+    }
+    if (open_at.size() != 1) return false;   // (one block short of its closing)
+    const size_t block = open_at[0], last = s.rfind(')');
+    size_t victim = std::string::npos;
+    for (auto &oc : close_of)
+        if (oc.first > block && oc.second == last) { victim = oc.first; break; }
+    if (victim == std::string::npos) return false;
+    // Only a call whose name ends its line (its "arguments" are the statements below it).
+    size_t name_end = victim + 1;
+    while (name_end < s.size() && !isspace((unsigned char)s[name_end]) && s[name_end] != '(' && s[name_end] != ')') name_end++;
+    size_t eol = name_end;
+    while (eol < s.size() && (s[eol] == ' ' || s[eol] == '\t' || s[eol] == '\r')) eol++;
+    if (name_end == victim + 1 || eol >= s.size() || s[eol] != '\n') return false;
+    const std::string name = s.substr(victim + 1, name_end - victim - 1);
+    s.erase(victim, name_end - victim);
+    std::ofstream(file, std::ios::binary) << s;
+    what = "a (" + name + " call in the map's scripts had lost its argument (left by what was taken out of the map), so the "
+           "statements after it read as its own; it was taken out";
     return true;
 }
 
