@@ -119,7 +119,7 @@ bool import_card(const fs::path &card_dir, const fs::path &map_file, bool in_map
 // yet or still holds nothing but `default_name`. `what` gets a line for the log. True when it made the card.
 bool import_mcc_mod_card(const fs::path &card_dir, const fs::path &map_file, const std::string &default_name,
                          std::string &what);
-// A map from a downloaded maps catalog: a .csv in the map's folder or one of the two above it, with the columns "Map
+// A map from a downloaded maps catalog: a .csv in the map's folder or one of the six above it, with the columns "Map
 // Name", "Author", "Release Date" and "Extracted .map File(s)" (also "Archive Filename" and "Preview Image"). The row
 // naming this map file gives the card its name and a "By <author>, <year>" description, while the card still holds
 // nothing but `default_name`; its screenshot (the row's "Preview Image", or the map's own name with a picture's
@@ -127,4 +127,7 @@ bool import_mcc_mod_card(const fs::path &card_dir, const fs::path &map_file, con
 // the card changed.
 bool import_catalog_card(const fs::path &card_dir, const fs::path &map_file, const std::string &default_name,
                          std::string &what);
+// That catalog's "Processed Status" for the map's row set to `status` (the field written over, the rest of the file
+// as it was). False when there's no catalog row for the map, or no such column; `err` says why when it couldn't write.
+bool catalog_set_status(const fs::path &map_file, const std::string &status, std::string &err);
 }

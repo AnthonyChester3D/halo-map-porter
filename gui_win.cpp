@@ -114,8 +114,8 @@ enum {
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new104.exe is 1.104).
-#define HMP_VERSION L"1.104"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new105.exe is 1.105).
+#define HMP_VERSION L"1.105"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -1841,6 +1841,19 @@ static void drop_folder_if_protected(const Result &r, const fs::path &folder, bo
     fs::remove_all(folder, ec);
 }
 
+// A downloaded maps catalog near the map (mapcard::import_catalog_card): its "Processed Status" for the map set to
+// how its conversion went (Converted, Protected, or Failed: and the reason's first line).
+static void mark_in_catalog(const fs::path &in, const Result &r, const Log &log) {
+    std::string st = "Converted";
+    if (!r.ok) {
+        std::string why = r.error.substr(0, r.error.find('\n'));
+        if (why.rfind("This map is protected", 0) == 0) st = "Protected";
+        else st = "Failed: " + (why.size() > 120 ? why.substr(0, 117) + "..." : why);
+    }
+    std::string err;
+    if (!mapcard::catalog_set_status(in, st, err) && !err.empty()) log("Maps catalog: " + err);
+}
+
 // The Xbox tab's "drawing on stock.shared": a converted map with what stock.shared has (every texture and sound of the
 // stock multiplayer maps and what three or more campaign levels use) left out, rewritten where it is (sharedfile.hpp;
 // a map on its own has nothing to share with others, so no pack file). stock.shared isn't written beside it: it's the
@@ -1919,6 +1932,7 @@ static void start_convert(bool again = false) {
         const bool existed = fs::exists(out.parent_path(), ec);
         Result r = !prepared.empty() ? build_prepared(cfg, prepared, post_log) : convert_map(cfg, in, from, to, out, share, post_log, m.get());
         drop_folder_if_protected(r, out.parent_path(), existed);
+        if (prepared.empty() && to == Game::Xbox) mark_in_catalog(in, r, post_log);
         keep_measurement(r, key, m);
         if (!lkey.empty()) shadersui::remember(lkey, r.shaders);
         if (r.ok && !card_dir.empty())
@@ -2376,6 +2390,7 @@ static void open_batch() {
                         r.error = std::string("The app hit an error converting it: ") + e.what();
                     }
                     drop_folder_if_protected(r, j.out.parent_path(), existed);
+                    mark_in_catalog(j.in, r, log);
                 }
                 done++;
                 std::wstring st, size = L"\x01";

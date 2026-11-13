@@ -9,6 +9,10 @@
 #include <cstring>
 #include <fstream>
 #include <sstream>
+#include <chrono>
+#include <thread>
+#include <map>
+#include <mutex>
 
 #include "stb_dxt.h"   // implementations live in core.cpp
 #include "bcdec.h"
@@ -875,63 +879,149 @@ bool import_mcc_mod_card(const fs::path &dir, const fs::path &map_file, const st
     return true;
 }
 
-// One CSV file's rows (RFC 4180: quoted fields, "" inside them; the first row is the header).
-static std::vector<std::vector<std::string>> read_csv(const fs::path &p) {
-    std::vector<std::vector<std::string>> rows;
-    std::ifstream f(p, std::ios::binary);
-    std::string t((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-    if (t.compare(0, 3, "\xEF\xBB\xBF") == 0) t.erase(0, 3);
-    std::vector<std::string> row;
-    std::string field;
-    bool quoted = false, any = false;
-    for (size_t i = 0; i < t.size(); i++) {
-        const char c = t[i];
-        if (quoted) {
-            if (c == '"' && i + 1 < t.size() && t[i + 1] == '"') { field += '"'; i++; }
-            else if (c == '"') quoted = false;
-            else field += c;
-        } else if (c == '"') { quoted = true; any = true; }
-        else if (c == ',') { row.push_back(field); field.clear(); any = true; }
-        else if (c == '\n' || c == '\r') {
-            if (c == '\r' && i + 1 < t.size() && t[i + 1] == '\n') i++;
-            if (any || !field.empty()) { row.push_back(field); rows.push_back(row); }
-            row.clear(); field.clear(); any = false;
-        } else { field += c; any = true; }
+// A downloaded maps catalog: a CSV file (RFC 4180: quoted fields, "" inside them; the first row is the header), each
+// field's text and where it is in the file (so one can be written over and the rest left byte for byte).
+namespace {
+struct CsvField { std::string text; size_t b = 0, e = 0; };
+struct Catalog {
+    fs::path file;
+    std::string bytes;
+    std::vector<std::vector<CsvField>> rows;
+    fs::file_time_type when{};
+    int col(const char *n) const {
+        for (size_t k = 0; !rows.empty() && k < rows[0].size(); k++)
+            if (lower8(rows[0][k].text) == lower8(n)) return (int)k;
+        return -1;
     }
-    if (any || !field.empty()) { row.push_back(field); rows.push_back(row); }
-    return rows;
+    std::string at(size_t r, int k) const { return k >= 0 && r < rows.size() && k < (int)rows[r].size() ? rows[r][(size_t)k].text : ""; }
+};
+void parse_csv(Catalog &c) {
+    const std::string &t = c.bytes;
+    c.rows.clear();
+    size_t i = t.compare(0, 3, "\xEF\xBB\xBF") == 0 ? 3 : 0;
+    std::vector<CsvField> row;
+    while (i < t.size()) {
+        CsvField f;
+        f.b = i;
+        if (t[i] == '"') {
+            for (i++; i < t.size(); i++) {
+                if (t[i] == '"' && i + 1 < t.size() && t[i + 1] == '"') { f.text += '"'; i++; }
+                else if (t[i] == '"') { i++; break; }
+                else f.text += t[i];
+            }
+            while (i < t.size() && t[i] != ',' && t[i] != '\n' && t[i] != '\r') i++;
+        } else {
+            while (i < t.size() && t[i] != ',' && t[i] != '\n' && t[i] != '\r') f.text += t[i++];
+        }
+        f.e = i;
+        row.push_back(f);
+        if (i < t.size() && t[i] == ',') { i++; if (i == t.size()) row.push_back(CsvField{"", i, i}); continue; }
+        if (i < t.size() && t[i] == '\r') i++;
+        if (i < t.size() && t[i] == '\n') i++;
+        if (!(row.size() == 1 && row[0].text.empty())) c.rows.push_back(row);
+        row.clear();
+    }
+    if (!row.empty()) c.rows.push_back(row);
 }
-bool import_catalog_card(const fs::path &dir, const fs::path &map_file, const std::string &default_name, std::string &what) {
+std::mutex g_catalog_lock;
+std::map<std::string, Catalog> g_catalogs;   // (read once each, again when the file changes)
+const Catalog *read_catalog(const fs::path &p) {
+    std::error_code ec;
+    const auto when = fs::last_write_time(p, ec);
+    Catalog &c = g_catalogs[p.u8string()];
+    if (c.file.empty() || c.when != when) {
+        c = Catalog();
+        c.file = p;
+        c.when = when;
+        std::ifstream f(p, std::ios::binary);
+        c.bytes.assign((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        parse_csv(c);
+    }
+    return c.col("Extracted .map File(s)") >= 0 && c.col("Map Name") >= 0 ? &c : nullptr;
+}
+// The catalog near the map (a .csv in its folder or one of the six above it) and its row naming the map file (or,
+// failing that, its archive named like it). Call with g_catalog_lock held.
+const Catalog *find_catalog_row(const fs::path &map_file, size_t &row) {
     std::error_code ec;
     const std::string file = lower8(map_file.filename().u8string()), stem = lower8(map_file.stem().u8string());
-    // The catalog: the first .csv near the map with the columns, and its row for this map.
-    std::vector<std::string> head, row;
-    fs::path catalog;
     fs::path folder = map_file.parent_path();
-    for (int up = 0; up < 3 && row.empty() && !folder.empty(); up++, folder = folder.parent_path()) {
+    for (int up = 0; up < 7 && !folder.empty(); up++) {
         for (auto &e : fs::directory_iterator(folder, ec)) {
             if (!e.is_regular_file(ec) || lower8(e.path().extension().u8string()) != ".csv" || e.file_size(ec) > (64u << 20)) continue;
-            auto rows = read_csv(e.path());
-            if (rows.empty()) continue;
-            auto col = [&](const char *n) {
-                for (size_t k = 0; k < rows[0].size(); k++)
-                    if (lower8(rows[0][k]) == lower8(n)) return (int)k;
-                return -1;
-            };
-            const int files = col("Extracted .map File(s)"), archive = col("Archive Filename");
-            if (files < 0 || col("Map Name") < 0) continue;
-            for (size_t r = 1; r < rows.size() && row.empty(); r++) {
-                auto at = [&](int k) { return k >= 0 && k < (int)rows[r].size() ? rows[r][(size_t)k] : std::string(); };
-                std::string list = lower8(at(files));
-                for (char &c : list) if (c == ';' || c == '|' || c == ',') c = '\n';
+            const Catalog *c = read_catalog(e.path());
+            if (!c) continue;
+            const int files = c->col("Extracted .map File(s)"), archive = c->col("Archive Filename");
+            for (size_t r = 1; r < c->rows.size(); r++) {
+                std::string list = lower8(c->at(r, files));
+                for (char &ch : list) if (ch == ';' || ch == '|' || ch == ',') ch = '\n';
                 std::istringstream ls(list);
-                for (std::string one; std::getline(ls, one) && row.empty();) {
+                for (std::string one; std::getline(ls, one);) {
                     size_t a = one.find_first_not_of(" \t"), b = one.find_last_not_of(" \t");
-                    if (a != std::string::npos && fs::path(one.substr(a, b - a + 1)).filename().u8string() == file) row = rows[r];
+                    if (a != std::string::npos && fs::u8path(one.substr(a, b - a + 1)).filename().u8string() == file) { row = r; return c; }
                 }
-                if (row.empty() && lower8(fs::path(at(archive)).stem().u8string()) == stem && !stem.empty()) row = rows[r];
             }
-            if (!row.empty()) { head = rows[0]; catalog = e.path(); break; }
+            for (size_t r = 1; r < c->rows.size(); r++)
+                if (!stem.empty() && lower8(fs::u8path(c->at(r, archive)).stem().u8string()) == stem) { row = r; return c; }
+        }
+        if (folder == folder.parent_path()) break;
+        folder = folder.parent_path();
+    }
+    return nullptr;
+}
+}   // namespace
+
+bool catalog_set_status(const fs::path &map_file, const std::string &status, std::string &err) {
+    std::lock_guard<std::mutex> g(g_catalog_lock);
+    size_t r = 0;
+    const Catalog *found = find_catalog_row(map_file, r);
+    if (!found) return false;
+    Catalog c = *found;
+    const int k = c.col("Processed Status");
+    if (k < 0) return false;
+    // the field written over (quoted when it needs to be), the rest of the file as it was
+    std::string v = status;
+    for (char &ch : v) if (ch == '\r' || ch == '\n') ch = ' ';
+    if (v.find_first_of(",\"") != std::string::npos) {
+        std::string q = "\"";
+        for (char ch : v) q += ch == '"' ? std::string("\"\"") : std::string(1, ch);
+        v = q + "\"";
+    }
+    if (k >= (int)c.rows[r].size()) { err = "its row in " + c.file.filename().u8string() + " is short of the column"; return false; }
+    const CsvField f = c.rows[r][(size_t)k];
+    if (c.bytes.compare(f.b, f.e - f.b, v) == 0) return true;
+    std::string out = c.bytes.substr(0, f.b) + v + c.bytes.substr(f.e);
+    const fs::path tmp = c.file.u8string() + ".tmp";
+    {
+        std::ofstream o(tmp, std::ios::binary | std::ios::trunc);
+        o.write(out.data(), (std::streamsize)out.size());
+        if (!o) { err = "couldn't write " + tmp.u8string(); return false; }
+    }
+    std::error_code ec;
+    for (int tries = 0; tries < 8; tries++) {   // (open in a spreadsheet: it's locked)
+        fs::rename(tmp, c.file, ec);
+        if (!ec) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    }
+    if (ec) {
+        fs::remove(tmp, ec);
+        err = "couldn't update " + c.file.u8string() + " (open in another program?)";
+        return false;
+    }
+    g_catalogs.erase(c.file.u8string());   // (read again next time)
+    return true;
+}
+
+bool import_catalog_card(const fs::path &dir, const fs::path &map_file, const std::string &default_name, std::string &what) {
+    std::error_code ec;
+    std::vector<std::string> head, row;
+    fs::path catalog;
+    {
+        std::lock_guard<std::mutex> g(g_catalog_lock);
+        size_t r = 0;
+        if (const Catalog *c = find_catalog_row(map_file, r)) {
+            for (auto &f : c->rows[0]) head.push_back(f.text);
+            for (auto &f : c->rows[r]) row.push_back(f.text);
+            catalog = c->file;
         }
     }
     auto get = [&](const char *n) {
