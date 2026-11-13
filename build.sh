@@ -15,6 +15,7 @@ for f in allocator simplifier stripifier; do   # meshoptimizer (MIT, see meshopt
   $CXX -std=c++17 -O2 -c meshoptimizer/$f.cpp -o build/meshopt_$f.o
 done
 $CC -O2 -c stb_impl.c -o build/stb_impl.o
-$CXX -municode -mwindows -static -O2 -s -o HaloMapPorter.exe build/*.o build/app.res \
+# (not stripped: a crash report names places in it, which its symbols turn into functions)
+$CXX -municode -mwindows -static -O2 -o HaloMapPorter.exe build/*.o build/app.res \
   -lcomctl32 -lcomdlg32 -lgdi32 -lole32 -lopengl32 -lshell32 -lurlmon -luuid -luxtheme
 echo "built HaloMapPorter.exe"

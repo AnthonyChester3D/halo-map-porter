@@ -12,6 +12,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <exception>
+#include <new>
 #include <cstring>
 #include <mutex>
 #include <set>
@@ -112,8 +114,8 @@ enum {
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new102.exe is 1.102).
-#define HMP_VERSION L"1.102"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new103.exe is 1.103).
+#define HMP_VERSION L"1.103"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -359,6 +361,77 @@ static void open_log_file() {
         if (e.is_regular_file(ec)) old.push_back(e.path());
     std::sort(old.begin(), old.end());
     for (size_t i = 0; i + 80 < old.size(); i++) fs::remove(old[i], ec);
+}
+// A crash: what and where, written to the saved log (and logs/crash.txt) before Windows ends the app. Each place is
+// a module and an offset into it: the app's map to its functions with the exe's symbols (the exe isn't stripped).
+static std::string crash_place(void *a) {
+    HMODULE m = nullptr;
+    char name[MAX_PATH] = "?";
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)a, &m) && m) {
+        GetModuleFileNameA(m, name, MAX_PATH);
+        char *b = strrchr(name, '\\');
+        char t[MAX_PATH + 32];
+        snprintf(t, sizeof t, "%s+0x%llx", b ? b + 1 : name, (unsigned long long)((char *)a - (char *)m));
+        return t;
+    }
+    char t[32];
+    snprintf(t, sizeof t, "0x%llx", (unsigned long long)a);
+    return t;
+}
+static void write_crash(const std::string &text) {
+    if (g_log_file) {
+        fwrite(text.data(), 1, text.size(), g_log_file);
+        fflush(g_log_file);
+    }
+    if (FILE *f = _wfopen((appdata_dir(CSIDL_LOCAL_APPDATA) / "logs" / "crash.txt").c_str(), L"ab")) {
+        fwrite(text.data(), 1, text.size(), f);
+        fclose(f);
+    }
+}
+static std::string crash_header(const char *what) {
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    char t[256];
+    snprintf(t, sizeof t, "\r\n*** %04d-%02d-%02d %02d:%02d:%02d Halo Map Porter %ls crashed (thread %lu): %s\r\n", st.wYear, st.wMonth,
+             st.wDay, st.wHour, st.wMinute, st.wSecond, HMP_VERSION, GetCurrentThreadId(), what);
+    return t;
+}
+static std::string crash_stack() {
+    void *frames[48];
+    const USHORT n = RtlCaptureStackBackTrace(0, 48, frames, nullptr);
+    std::string s;
+    for (USHORT i = 0; i < n; i++) s += "    at " + crash_place(frames[i]) + "\r\n";
+    return s;
+}
+static LONG WINAPI on_crash(EXCEPTION_POINTERS *ep) {
+    static std::atomic<bool> once{false};
+    if (once.exchange(true)) return EXCEPTION_CONTINUE_SEARCH;
+    const EXCEPTION_RECORD *r = ep->ExceptionRecord;
+    char what[256];
+    snprintf(what, sizeof what, "exception 0x%08lX at %s", r->ExceptionCode, crash_place(r->ExceptionAddress).c_str());
+    std::string text = crash_header(what);
+    if (r->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && r->NumberParameters >= 2) {
+        char t[96];
+        snprintf(t, sizeof t, "    (%s address 0x%llx)\r\n", r->ExceptionInformation[0] == 1 ? "writing" : "reading",
+                 (unsigned long long)r->ExceptionInformation[1]);
+        text += t;
+    }
+    write_crash(text + crash_stack());
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+static void on_terminate() {
+    std::string what = "an error nothing caught";
+    try {
+        if (auto e = std::current_exception()) std::rethrow_exception(e);
+    } catch (const std::bad_alloc &) {
+        what = "out of memory (std::bad_alloc)";
+    } catch (const std::exception &e) {
+        what = std::string("an error nothing caught: ") + e.what();
+    } catch (...) {
+    }
+    static std::atomic<bool> once{false};
+    if (!once.exchange(true)) write_crash(crash_header(what.c_str()) + crash_stack());
+    std::abort();
 }
 static void close_log_file() {
     if (g_log_file) fclose(g_log_file);
@@ -1755,6 +1828,16 @@ static void open_shaders() {
 
 static void remember_conversion(const fs::path &in, const fs::path &out);
 
+// A protected map's conversion fails before anything of it is made: the folder made for it (if it wasn't there
+// before) is taken away again, with the map card's info.txt made in it.
+static void drop_folder_if_protected(const Result &r, const fs::path &folder, bool existed) {
+    if (r.ok || existed || folder.empty() || r.error.rfind("This map is protected", 0) != 0) return;
+    std::error_code ec;
+    for (auto &e : fs::directory_iterator(folder, ec))
+        if (e.path().filename() != "info.txt") return;   // (something else in it: left as it is)
+    fs::remove_all(folder, ec);
+}
+
 // The Xbox tab's "drawing on stock.shared": a converted map with what stock.shared has (every texture and sound of the
 // stock multiplayer maps and what three or more campaign levels use) left out, rewritten where it is (sharedfile.hpp;
 // a map on its own has nothing to share with others, so no pack file). stock.shared isn't written beside it: it's the
@@ -1829,7 +1912,10 @@ static void start_convert(bool again = false) {
     }
     std::thread([=] {
         auto m = to == Game::Xbox && prepared.empty() ? std::make_shared<ContentAnalysis>() : nullptr;
+        std::error_code ec;
+        const bool existed = fs::exists(out.parent_path(), ec);
         Result r = !prepared.empty() ? build_prepared(cfg, prepared, post_log) : convert_map(cfg, in, from, to, out, share, post_log, m.get());
+        drop_folder_if_protected(r, out.parent_path(), existed);
         keep_measurement(r, key, m);
         if (!lkey.empty()) shadersui::remember(lkey, r.shaders);
         if (r.ok && !card_dir.empty())
@@ -2269,8 +2355,20 @@ static void open_batch() {
                     r.error = "Not a Custom Edition or MCC map.";
                 } else {
                     std::error_code ec;
+                    const bool existed = fs::exists(j.out.parent_path(), ec);
                     fs::create_directories(j.out.parent_path(), ec);
-                    r = convert_map(j.cfg, j.in, j.from, Game::Xbox, j.out, share, log, nullptr);
+                    // (a map that runs the app out of memory, or hits an error nothing else caught, fails on its own)
+                    try {
+                        r = convert_map(j.cfg, j.in, j.from, Game::Xbox, j.out, share, log, nullptr);
+                    } catch (const std::bad_alloc &) {
+                        r = Result();
+                        r.error = "The app ran out of memory converting it (with " + std::to_string(at_once) +
+                                  " maps at once: try it on its own, or fewer at once).";
+                    } catch (const std::exception &e) {
+                        r = Result();
+                        r.error = std::string("The app hit an error converting it: ") + e.what();
+                    }
+                    drop_folder_if_protected(r, j.out.parent_path(), existed);
                 }
                 done++;
                 std::wstring st, size = L"\x01";
@@ -3659,6 +3757,8 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
+    SetUnhandledExceptionFilter(on_crash);
+    std::set_terminate(on_terminate);
     SetProcessDPIAware();
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_TAB_CLASSES | ICC_STANDARD_CLASSES | ICC_LISTVIEW_CLASSES};
