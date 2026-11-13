@@ -112,8 +112,8 @@ enum {
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new101.exe is 1.101).
-#define HMP_VERSION L"1.101"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new102.exe is 1.102).
+#define HMP_VERSION L"1.102"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -3494,8 +3494,6 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (!f.empty()) { set_text(ID_SCEN, f); refresh_build_names(); if (build_scenario_set()) set_xbox_for(1); }
             break;
         }
-        case ID_B_MCC_BROWSE: case ID_B_CE_BROWSE: case ID_S_CE_BROWSE: case ID_S_MCC_BROWSE:
-        case ID_B_XBOX_BROWSE: case ID_S_XT_BROWSE: case ID_S_XM_BROWSE:
         case ID_S_CLEAR: if (!g_busy) clear_temp_files(); break;
         case ID_S_THEME:
             if (code == CBN_SELCHANGE) {
@@ -3513,6 +3511,9 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case ID_S_PERF:
             read_perf_logs();
             break;
+        // (each folder's Browse button: the field just before it)
+        case ID_B_MCC_BROWSE: case ID_B_CE_BROWSE: case ID_S_CE_BROWSE: case ID_S_MCC_BROWSE:
+        case ID_B_XBOX_BROWSE: case ID_S_XT_BROWSE: case ID_S_XM_BROWSE:
         case ID_S_EK_BROWSE: case ID_S_INV_BROWSE: case ID_S_LOD_BROWSE: {
             int target = id - 1;
             auto f = pick_folder(get_text(target));
