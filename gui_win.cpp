@@ -114,8 +114,8 @@ enum {
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new103.exe is 1.103).
-#define HMP_VERSION L"1.103"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new104.exe is 1.104).
+#define HMP_VERSION L"1.104"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -970,6 +970,9 @@ static void on_input_chosen() {
             append_log(L"Map card started from the map's folder, " + in.parent_path().filename().wstring() + L"\\.");
         // from an MCC mod (Steam Workshop item)? start its card from the mod's title, description and thumbnail
         else if (mapcard::import_mcc_mod_card(conv_card_dir(), in, N(conv_card_name()), what) && folder_mode())
+            append_log(W(what) + L" \"Map card...\" to change it.");
+        // from a downloaded maps catalog (a .csv near the map) and the screenshot beside the map
+        else if (mapcard::import_catalog_card(conv_card_dir(), in, N(conv_card_name()), what) && folder_mode())
             append_log(W(what) + L" \"Map card...\" to change it.");
     } else if (fs::exists(in)) {
         set_text(ID_DETECT, L"Couldn't recognize this file as a Halo CE map");
@@ -2322,6 +2325,10 @@ static void open_batch() {
                 j.card_dir = mapcard::find_card_by_output(cards_root(), j.out);
                 if (j.card_dir.empty()) j.card_dir = mapcard::card_dir(cards_root(), j.in);
                 j.card_name = N(lower(j.in.stem().wstring()));
+                // (started from a downloaded maps catalog near the map and its screenshot, when you haven't filled it in)
+                std::string what;
+                if (mapcard::import_catalog_card(j.card_dir, j.in, j.card_name, what))
+                    post_log("[" + N(j.in.stem().wstring()) + "] " + what);
                 std::wstring note;
                 if (!write_card(j.card_dir, W(j.card_name), j.out, note)) j.card_dir.clear();
             }

@@ -875,6 +875,121 @@ bool import_mcc_mod_card(const fs::path &dir, const fs::path &map_file, const st
     return true;
 }
 
+// One CSV file's rows (RFC 4180: quoted fields, "" inside them; the first row is the header).
+static std::vector<std::vector<std::string>> read_csv(const fs::path &p) {
+    std::vector<std::vector<std::string>> rows;
+    std::ifstream f(p, std::ios::binary);
+    std::string t((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    if (t.compare(0, 3, "\xEF\xBB\xBF") == 0) t.erase(0, 3);
+    std::vector<std::string> row;
+    std::string field;
+    bool quoted = false, any = false;
+    for (size_t i = 0; i < t.size(); i++) {
+        const char c = t[i];
+        if (quoted) {
+            if (c == '"' && i + 1 < t.size() && t[i + 1] == '"') { field += '"'; i++; }
+            else if (c == '"') quoted = false;
+            else field += c;
+        } else if (c == '"') { quoted = true; any = true; }
+        else if (c == ',') { row.push_back(field); field.clear(); any = true; }
+        else if (c == '\n' || c == '\r') {
+            if (c == '\r' && i + 1 < t.size() && t[i + 1] == '\n') i++;
+            if (any || !field.empty()) { row.push_back(field); rows.push_back(row); }
+            row.clear(); field.clear(); any = false;
+        } else { field += c; any = true; }
+    }
+    if (any || !field.empty()) { row.push_back(field); rows.push_back(row); }
+    return rows;
+}
+bool import_catalog_card(const fs::path &dir, const fs::path &map_file, const std::string &default_name, std::string &what) {
+    std::error_code ec;
+    const std::string file = lower8(map_file.filename().u8string()), stem = lower8(map_file.stem().u8string());
+    // The catalog: the first .csv near the map with the columns, and its row for this map.
+    std::vector<std::string> head, row;
+    fs::path catalog;
+    fs::path folder = map_file.parent_path();
+    for (int up = 0; up < 3 && row.empty() && !folder.empty(); up++, folder = folder.parent_path()) {
+        for (auto &e : fs::directory_iterator(folder, ec)) {
+            if (!e.is_regular_file(ec) || lower8(e.path().extension().u8string()) != ".csv" || e.file_size(ec) > (64u << 20)) continue;
+            auto rows = read_csv(e.path());
+            if (rows.empty()) continue;
+            auto col = [&](const char *n) {
+                for (size_t k = 0; k < rows[0].size(); k++)
+                    if (lower8(rows[0][k]) == lower8(n)) return (int)k;
+                return -1;
+            };
+            const int files = col("Extracted .map File(s)"), archive = col("Archive Filename");
+            if (files < 0 || col("Map Name") < 0) continue;
+            for (size_t r = 1; r < rows.size() && row.empty(); r++) {
+                auto at = [&](int k) { return k >= 0 && k < (int)rows[r].size() ? rows[r][(size_t)k] : std::string(); };
+                std::string list = lower8(at(files));
+                for (char &c : list) if (c == ';' || c == '|' || c == ',') c = '\n';
+                std::istringstream ls(list);
+                for (std::string one; std::getline(ls, one) && row.empty();) {
+                    size_t a = one.find_first_not_of(" \t"), b = one.find_last_not_of(" \t");
+                    if (a != std::string::npos && fs::path(one.substr(a, b - a + 1)).filename().u8string() == file) row = rows[r];
+                }
+                if (row.empty() && lower8(fs::path(at(archive)).stem().u8string()) == stem && !stem.empty()) row = rows[r];
+            }
+            if (!row.empty()) { head = rows[0]; catalog = e.path(); break; }
+        }
+    }
+    auto get = [&](const char *n) {
+        for (size_t k = 0; k < head.size() && k < row.size(); k++)
+            if (lower8(head[k]) == lower8(n)) return row[k];
+        return std::string();
+    };
+    // The screenshot beside the map.
+    fs::path pic;
+    const std::string listed = get("Preview Image");
+    if (!listed.empty() && fs::is_regular_file(map_file.parent_path() / fs::u8path(listed), ec)) pic = map_file.parent_path() / fs::u8path(listed);
+    for (const char *x : {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff"})
+        if (pic.empty() && fs::is_regular_file(map_file.parent_path() / fs::u8path(map_file.stem().u8string() + x), ec))
+            pic = map_file.parent_path() / fs::u8path(map_file.stem().u8string() + x);
+    if (row.empty() && pic.empty()) return false;
+
+    Card c = load_card(dir, default_name);
+    const bool untouched = c.desc.empty() && lower8(c.name) == lower8(default_name.substr(0, NAME_MAX));
+    std::vector<std::string> did;
+    if (!row.empty() && untouched) {
+        const std::string title = card_text(get("Map Name"), true, NAME_MAX), author = card_text(get("Author"), true, 120);
+        std::string date = get("Release Date"), year;
+        for (size_t k = 0; k + 4 <= date.size(); k++)
+            if (std::all_of(date.begin() + (long)k, date.begin() + (long)k + 4, ::isdigit) && (date[k] == '1' || date[k] == '2')) year = date.substr(k, 4);
+        if (!title.empty()) {
+            c.name = title;
+            c.folder = sanitize_folder(title);
+            did.push_back("\"" + title + "\"");
+        }
+        std::string desc = author.empty() ? "" : "By " + author;
+        if (!year.empty()) desc += (desc.empty() ? "Released " : ", ") + year;
+        if (!desc.empty()) {
+            c.desc = card_text(desc + ".", false, DESC_MAX);
+            did.push_back("\"" + c.desc + "\"");
+        }
+    }
+    std::string ext = lower8(pic.extension().u8string());
+    if (!pic.empty() && c.image.empty()) {
+        fs::create_directories(dir, ec);
+        for (auto &e : fs::directory_iterator(dir, ec))   // the editor keeps its picture as source.<ext>
+            if (e.path().stem() == "source") fs::remove(e.path(), ec);
+        copy_over(pic, dir / ("source" + ext), ec);
+        if (!ec) {
+            c.image = "source" + ext;
+            c.zoom = 1;
+            c.cx = c.cy = 0.5;
+            did.push_back("picture " + pic.filename().u8string());
+        }
+    }
+    if (did.empty()) return false;
+    fs::create_directories(dir, ec);
+    if (!save_card(dir, c)) return false;
+    std::string list;
+    for (auto &d : did) list += (list.empty() ? "" : ", ") + d;
+    what = "Map card filled in" + (catalog.empty() ? std::string() : " from " + catalog.filename().u8string()) + ": " + list + ".";
+    return true;
+}
+
 std::string info_lines(const Card &c) {
     std::string o;
     auto add = [&](const char *k, const std::string &v) {

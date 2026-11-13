@@ -2157,6 +2157,15 @@ works for any MCC mod folder laid out the same way, not just Steam's.
 It only fills in a new card: a card you've already edited is kept. Open
 "Map card..." to check it, since MCC titles and descriptions can be
 longer than the Xbox menu shows.
+
+Downloaded maps fill in their card from a maps catalog and a screenshot.
+Put the catalog (a .csv with the columns "Map Name", "Author", "Release
+Date" and "Extracted .map File(s)") in the map's folder or one of the two
+above it, and the screenshot beside the map, named like it (cmt_snow_grove
+.map and cmt_snow_grove.jpg) or as the catalog's "Preview Image" column
+says. Picking the map, or converting it in a batch, gives its card the
+catalog's name and "By <author>, <year>." while you haven't filled it in,
+and the screenshot as its picture while it has none.
 The Halo Universal XBE shows preview.bin in the map select list, the
 lobby and the system link game browser. A folder without one uses Halo's
 "unknown map" picture. The XBE also breaks long lines in any info.txt the
