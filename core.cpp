@@ -1744,6 +1744,7 @@ static bool fix_script_shadow(Job &job, const std::string &err, std::string &wha
 static bool fix_script_navpoint(Job &job, const std::string &err, std::string &what);
 static bool fix_script_missing_tag(Job &job, const std::string &err, std::string &what);
 static bool fix_script_unterminated(Job &job, const std::string &err, std::string &what);
+static bool fix_script_stray_statement(Job &job, const std::string &err, std::string &what);
 static std::string script_error_line(Job &job, const std::string &err);
 static std::set<std::string> add_stock_choices_for_analysis(Job &job);
 static bool analyze_built_map(Job &job, const fs::path &map, const std::set<std::string> &added, ContentAnalysis &a,
@@ -3341,7 +3342,8 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
             std::string what;
             if (!job.extra.empty() && none_fixes < 40 &&
                 (fix_script_none(job, f.script_error, what) || fix_script_shadow(job, f.script_error, what) ||
-                 fix_script_missing_tag(job, f.script_error, what) || fix_script_unterminated(job, f.script_error, what))) {
+                 fix_script_missing_tag(job, f.script_error, what) || fix_script_unterminated(job, f.script_error, what) ||
+                 fix_script_stray_statement(job, f.script_error, what))) {
                 none_fixes++;
                 job.note("[scripts] " + what);
                 continue;
@@ -10276,6 +10278,70 @@ static bool fix_script_unterminated(Job &job, const std::string &err, std::strin
     return true;
 }
 
+// A statement outside any script ("expected 'global' or 'script', got 'switch_bsp'"): the script before it was
+// written ending one statement early, so it ran to the end of that script. The statement (and any more like it in a
+// row) is put back inside: the script's closing parenthesis moves to after it.
+static bool fix_script_stray_statement(Job &job, const std::string &err, std::string &what) {
+    static const std::regex stray(R"(expected 'global' or 'script', got '([^']+)')");
+    std::smatch m;
+    if (!std::regex_search(err, m, stray)) return false;
+    fs::path file;
+    int line = 0, col = 0;
+    if (!script_error_place(job, err, file, line, col)) return false;
+    std::ifstream in(file, std::ios::binary);
+    std::string s((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+    // The top-level forms: where each opens and closes, outside strings and comments.
+    std::vector<std::pair<size_t, size_t>> forms;
+    int depth = 0;
+    size_t open = 0;
+    for (size_t i = 0; i < s.size(); i++) {
+        const char c = s[i];
+        if (c == '"') {
+            size_t e = s.find('"', i + 1);
+            if (e == std::string::npos) return false;
+            i = e;
+        } else if (c == ';') {
+            if (i + 1 < s.size() && s[i + 1] == '*') {
+                size_t e = s.find("*;", i + 2);
+                if (e == std::string::npos) return false;
+                i = e + 1;
+            } else {
+                size_t e = s.find('\n', i);
+                i = e == std::string::npos ? s.size() : e;
+            }
+        } else if (c == '(') {
+            if (depth++ == 0) open = i;
+        } else if (c == ')') {
+            if (--depth < 0) return false;
+            if (depth == 0) forms.push_back({open, i});
+        }
+    }
+    if (depth != 0) return false;
+    auto head = [&](size_t at) {   // a form's first word
+        size_t b = at + 1;
+        while (b < s.size() && isspace((unsigned char)s[b])) b++;
+        size_t e = b;
+        while (e < s.size() && !isspace((unsigned char)s[e]) && s[e] != '(' && s[e] != ')') e++;
+        return s.substr(b, e - b);
+    };
+    // The error's place: the first form that's neither a script nor a global, after a script.
+    size_t k = 0;
+    while (k < forms.size() && (head(forms[k].first) == "script" || head(forms[k].first) == "global")) k++;
+    if (k == 0 || k >= forms.size() || head(forms[k - 1].first) != "script") return false;
+    size_t last = k;
+    while (last + 1 < forms.size() && head(forms[last + 1].first) != "script" && head(forms[last + 1].first) != "global") last++;
+    const size_t close = forms[k - 1].second, end = forms[last].second;
+    s.insert(end + 1, ")");
+    s.erase(close, 1);
+    std::ofstream(file, std::ios::binary) << s;
+    const size_t moved = last - k + 1;
+    what = "the map's scripts had " + std::to_string(moved) + " statement" + (moved == 1 ? "" : "s") + " (" + m[1].str() +
+           (moved == 1 ? "" : "...") + ") written after the end of the script before " + (moved == 1 ? "it" : "them") +
+           "; put back at the end of that script";
+    return true;
+}
+
 // A tag the map's scripts name that the map itself doesn't have (removed after its scripts were compiled: the game
 // finds nothing there and does nothing with it): every place the scripts name it now says "none", as the game reads it.
 static bool fix_script_missing_tag(Job &job, const std::string &err, std::string &what) {
@@ -16635,13 +16701,100 @@ static void perfect_link(Job &job, const fs::path &output, const std::string &st
 }
 }   // namespace
 
-static Result convert_map_impl(const Config &cfg, const fs::path &input, Game in_game, Game out_game,
+// A Custom Edition map whose tag names have letters outside ASCII (a Latin-1 "montaña"): Windows paths can't be made
+// of them, by the app or Invader. A copy of it with each such letter made plain (ñ n, é e, © c; others _), the same
+// length so nothing in it moves, wherever a whole name is in its tag data (the tag index, the scripts' strings), is
+// converted in its place; kept with the app's cache. The map itself when it has none (or isn't laid out so).
+static fs::path ascii_named_copy(const Config &cfg, const fs::path &map, const Log &log) {
+    std::error_code ec;
+    const auto size = fs::file_size(map, ec);
+    if (ec || size < 0x800 || size > (512u << 20)) return map;
+    std::string d;
+    {
+        std::ifstream f(map, std::ios::binary);
+        d.assign((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    }
+    auto u32 = [&](size_t o) { return o + 4 <= d.size() ? (uint32_t)(uint8_t)d[o] | (uint32_t)(uint8_t)d[o + 1] << 8 |
+                                                          (uint32_t)(uint8_t)d[o + 2] << 16 | (uint32_t)(uint8_t)d[o + 3] << 24 : 0u; };
+    if (d.compare(0, 4, "daeh") != 0 || d.compare(0x7FC, 4, "toof") != 0 || u32(8) != d.size()) return map;
+    const size_t to = u32(0x10), ts = u32(0x14);
+    if (to + 0x28 > d.size() || to + ts > d.size()) return map;
+    const uint32_t base = u32(to) - 0x28, count = u32(to + 12);   // (the tag index right after the tag data's header)
+    if ((size_t)(u32(to) - base) + (size_t)count * 0x20 > ts) return map;
+    static const std::string from = "\xE0\xE1\xE2\xE3\xE4\xE5\xE7\xE8\xE9\xEA\xEB\xEC\xED\xEE\xEF\xF1\xF2\xF3\xF4\xF5\xF6\xF8"
+                                    "\xF9\xFA\xFB\xFC\xFD\xFF\xC0\xC1\xC2\xC3\xC4\xC5\xC7\xC8\xC9\xCA\xCB\xCC\xCD\xCE\xCF\xD1\xD2"
+                                    "\xD3\xD4\xD5\xD6\xD8\xD9\xDA\xDB\xDC\xDD\xDF\xA9\xAE",
+                             into = "aaaaaaceeeeiiiinoooooouuuuyyAAAAAACEEEEIIIINOOOOOUUUUYscr";
+    std::set<std::pair<std::string, uint32_t>> names;   // (name, group): what a new name mustn't be
+    std::vector<std::pair<std::string, uint32_t>> odd;
+    for (uint32_t k = 0; k < count; k++) {
+        const size_t e = to + (u32(to) - base) + (size_t)k * 0x20, p = (size_t)(u32(e + 0x10) - base);
+        if (p >= ts) continue;
+        const size_t z = d.find('\0', to + p);
+        if (z == std::string::npos || z > to + ts) continue;
+        std::string n = d.substr(to + p, z - to - p);
+        names.insert({n, u32(e)});
+        if (std::any_of(n.begin(), n.end(), [](char c) { return (unsigned char)c > 127; })) odd.push_back({n, u32(e)});
+    }
+    if (odd.empty()) return map;
+    std::map<std::string, std::string> rename;
+    for (auto &[n, group] : odd) {
+        if (rename.count(n)) continue;
+        std::string a = n;
+        for (char &c : a)
+            if ((unsigned char)c > 127) {
+                const size_t i = from.find(c);
+                c = i == std::string::npos ? '_' : into[i];
+            }
+        for (char digit = '0'; names.count({a, group}) && digit <= '9'; digit++)   // (taken: a digit in the first changed place)
+            for (size_t i = 0; i < n.size(); i++)
+                if ((unsigned char)n[i] > 127) { a[i] = digit; break; }
+        rename[n] = a;
+        names.insert({a, group});
+    }
+    // every whole name in the tag data (a zero before and after it)
+    size_t replaced = 0;
+    for (auto &[n, a] : rename)
+        for (size_t at = d.find(n, to); at != std::string::npos && at < to + ts; at = d.find(n, at + 1))
+            if (d[at - 1] == '\0' && at + n.size() < d.size() && d[at + n.size()] == '\0') {
+                d.replace(at, n.size(), a);
+                replaced++;
+            }
+    const fs::path dir = cfg.cache_dir / "ascii" / [&] {
+        char h[20];
+        snprintf(h, sizeof h, "%016llx", (unsigned long long)std::hash<std::string>{}(file_identity(map)));
+        return std::string(h);
+    }();
+    const fs::path copy = dir / map.filename();
+    if (!fs::exists(copy, ec)) {
+        fs::create_directories(dir, ec);
+        std::ofstream o(copy, std::ios::binary);
+        o.write(d.data(), (std::streamsize)d.size());
+        if (!o) return map;
+    }
+    auto shown = [](std::string s) {   // (as Windows-1252 shows it, for the log)
+        std::string o;
+        for (unsigned char c : s) {
+            if (c < 128) o += (char)c;
+            else { o += (char)(0xC0 | (c >> 6)); o += (char)(0x80 | (c & 63)); }
+        }
+        return o;
+    };
+    log("  [names] " + std::to_string(rename.size()) + " tag name" + (rename.size() == 1 ? "" : "s") +
+        " had letters Windows paths can't hold (" + shown(rename.begin()->first) + "); converted from a copy of the map "
+        "with plain ones (" + rename.begin()->second + "), " + std::to_string(replaced) + " place" + (replaced == 1 ? "" : "s") +
+        " in its tag data");
+    return copy;
+}
+
+static Result convert_map_impl(const Config &cfg, const fs::path &input_given, Game in_game, Game out_game,
                                const fs::path &output, bool share, const Log &log, ContentAnalysis *an,
                                ContentAnalysis *measure = nullptr) {
     Result r;
     if (!invader_ok(cfg)) { r.error = "Invader wasn't found. Set it up in Settings."; return r; }
     if (out_game == Game::Unknown) { r.error = "Pick an output game."; return r; }
 
+    const fs::path input = in_game == Game::CE ? ascii_named_copy(cfg, input_given, log) : input_given;
     Job job(cfg, log, out_game);
     job.from = in_game;
     job.analysis = an;
