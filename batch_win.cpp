@@ -16,7 +16,9 @@ namespace fs = std::filesystem;
 namespace {
 
 enum { IDC_INTRO = 400, IDC_LIST, IDC_FIND, IDC_ADD, IDC_REMOVE, IDC_ALL, IDC_NONE, IDC_GO, IDC_STOP, IDC_CLOSE, IDC_STATUS,
-       IDC_BROWSE, IDC_AT_ONCE_LBL, IDC_AT_ONCE };
+       IDC_BROWSE, IDC_AT_ONCE_LBL, IDC_AT_ONCE, IDC_ROOT_LBL, IDC_ROOT, IDC_ROOT_BROWSE, IDC_PACKS_LBL, IDC_PACK_CROSS,
+       IDC_PACK_CE, IDC_PACK_XBOX };
+struct Progress { std::wstring status, size, out; };
 const UINT WM_B_PROGRESS = WM_APP + 60, WM_B_DONE = WM_APP + 61;
 
 struct State {
@@ -141,10 +143,24 @@ void sort_by(int col) {
     save();
 }
 
+std::wstring text_of(int id) {
+    wchar_t b[1024];
+    GetWindowTextW(item(id), b, 1024);
+    std::wstring s = b;
+    while (!s.empty() && iswspace(s.back())) s.pop_back();
+    while (!s.empty() && iswspace(s.front())) s.erase(s.begin());
+    return s;
+}
+void tell_layout() {
+    if (St->hooks.layout_changed)
+        St->hooks.layout_changed(text_of(IDC_ROOT), text_of(IDC_PACK_CROSS), text_of(IDC_PACK_CE), text_of(IDC_PACK_XBOX));
+}
+
 void update_buttons() {
     int ticked = 0;
     for (auto &it : St->items) ticked += it.on;
-    for (int id : {IDC_FIND, IDC_ADD, IDC_BROWSE, IDC_REMOVE, IDC_ALL, IDC_NONE, IDC_CLOSE, IDC_AT_ONCE})
+    for (int id : {IDC_FIND, IDC_ADD, IDC_BROWSE, IDC_REMOVE, IDC_ALL, IDC_NONE, IDC_CLOSE, IDC_AT_ONCE, IDC_ROOT, IDC_ROOT_BROWSE,
+                   IDC_PACK_CROSS, IDC_PACK_CE, IDC_PACK_XBOX})
         EnableWindow(item(id), !St->running);
     EnableWindow(item(IDC_GO), !St->running && ticked > 0);
     ShowWindow(item(IDC_STOP), St->running ? SW_SHOW : SW_HIDE);
@@ -169,12 +185,16 @@ void add_items(const std::vector<Item> &found, int &added) {
 LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_B_PROGRESS: {
-        std::unique_ptr<std::pair<std::wstring, std::wstring>> m((std::pair<std::wstring, std::wstring> *)lp);
-        const std::wstring *s = &m->first;
+        std::unique_ptr<Progress> m((Progress *)lp);
+        const std::wstring *s = &m->status;
         int i = (int)wp;
         if (St && i >= 0 && i < (int)St->items.size()) {
             St->items[(size_t)i].status = *s;
-            if (m->second != L"\x01") St->items[(size_t)i].size = m->second;
+            if (m->size != L"\x01") St->items[(size_t)i].size = m->size;
+            if (m->out != L"\x01") {
+                St->items[(size_t)i].out = m->out;
+                ListView_SetItemText(St->list, i, 2, (LPWSTR)St->items[(size_t)i].out.c_str());
+            }
             save();
             ListView_SetItemText(St->list, i, 3, (LPWSTR)St->items[(size_t)i].size.c_str());
             ListView_SetItemText(St->list, i, 4, (LPWSTR)St->items[(size_t)i].status.c_str());
@@ -342,6 +362,7 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             update_buttons();
             return 0;
         case IDC_GO: {
+            tell_layout();
             std::vector<int> which;
             std::vector<std::wstring> was;
             for (auto &it : St->items) was.push_back(it.status);
@@ -363,6 +384,18 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         }
+        case IDC_ROOT_BROWSE:
+            if (St->hooks.pick_folder) {
+                std::wstring f = St->hooks.pick_folder(St->wnd, text_of(IDC_ROOT));
+                if (!f.empty()) {
+                    SetWindowTextW(item(IDC_ROOT), f.c_str());
+                    tell_layout();
+                }
+            }
+            return 0;
+        case IDC_ROOT: case IDC_PACK_CROSS: case IDC_PACK_CE: case IDC_PACK_XBOX:
+            if (HIWORD(wp) == EN_KILLFOCUS) tell_layout();
+            return 0;
         case IDC_STOP:
             if (St->hooks.stop) St->hooks.stop();
             SetWindowTextW(item(IDC_STATUS), L"Stopping once the maps being converted are done...");
@@ -394,9 +427,10 @@ HWND add(const wchar_t *cls, const wchar_t *text, DWORD style, int x, int y, int
 
 void create_controls() {
     add(L"STATIC",
-        L"Converts the ticked maps for the Xbox one after another, each to where it's saved, with the Xbox tab's options as "
-        L"they are now (Perfect Conversion included) and each map's own picks: weapons & vehicles, Level, scripts. Every map's "
-        L"report, pair check and link file are written as for a single conversion. Click a column's title to sort by it.",
+        L"Converts the ticked maps for the Xbox one after another, with the Xbox tab's options as they are now (Perfect "
+        L"Conversion included) and each map's own picks. With a \"Save to\" folder, linked pairs go in its first map pack "
+        L"(their Custom Edition maps copied into the second), maps that aren't linked in the third, protected maps' originals "
+        L"move into \"Map Protected (Fail)\" beside them, other failures leave nothing; \"Batch report.csv\" lists them all.",
         SS_NOPREFIX, 16, 12, 948, 52, IDC_INTRO);
     St->list = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS,
                                S(16), S(70), S(948), S(400), St->wnd, (HMENU)(INT_PTR)IDC_LIST, GetModuleHandleW(nullptr), nullptr);
@@ -418,22 +452,30 @@ void create_controls() {
     add(L"BUTTON", L"Remove selected", WS_TABSTOP, 540, 480, 130, 28, IDC_REMOVE);
     add(L"BUTTON", L"Tick all", WS_TABSTOP, 678, 480, 90, 28, IDC_ALL);
     add(L"BUTTON", L"Tick none", WS_TABSTOP, 776, 480, 90, 28, IDC_NONE);
-    add(L"STATIC", L"", SS_NOPREFIX | SS_ENDELLIPSIS, 16, 524, 390, 20, IDC_STATUS);
+    // Where the maps go: one folder, and the map pack folders in it
+    add(L"STATIC", L"Save to:", SS_NOPREFIX, 16, 522, 60, 20, IDC_ROOT_LBL);
+    add(L"EDIT", St->hooks.root.c_str(), WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL, 78, 518, 270, 24, IDC_ROOT);
+    add(L"BUTTON", L"...", WS_TABSTOP, 352, 517, 30, 26, IDC_ROOT_BROWSE);
+    add(L"STATIC", L"Packs (linked, their CE maps, not linked):", SS_NOPREFIX | SS_RIGHT, 388, 522, 140, 20, IDC_PACKS_LBL);
+    add(L"EDIT", St->hooks.crossplay.c_str(), WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL, 532, 518, 130, 24, IDC_PACK_CROSS);
+    add(L"EDIT", St->hooks.crossplay_ce.c_str(), WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL, 666, 518, 180, 24, IDC_PACK_CE);
+    add(L"EDIT", St->hooks.xbox.c_str(), WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL, 850, 518, 114, 24, IDC_PACK_XBOX);
+    add(L"STATIC", L"", SS_NOPREFIX | SS_ENDELLIPSIS, 16, 560, 390, 20, IDC_STATUS);
     // (each map at once is an Invader build of its own: about one per two processor cores)
-    add(L"STATIC", L"Maps at once:", SS_NOPREFIX | SS_RIGHT, 410, 524, 96, 20, IDC_AT_ONCE_LBL);
-    HWND at = add(L"COMBOBOX", L"", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 512, 520, 64, 240, IDC_AT_ONCE);
+    add(L"STATIC", L"Maps at once:", SS_NOPREFIX | SS_RIGHT, 410, 560, 96, 20, IDC_AT_ONCE_LBL);
+    HWND at = add(L"COMBOBOX", L"", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 512, 556, 64, 240, IDC_AT_ONCE);
     for (int i = 1; i <= kMaxAtOnce; i++) SendMessageW(at, CB_ADDSTRING, 0, (LPARAM)std::to_wstring(i).c_str());
     SendMessageW(at, CB_SETCURSEL, (WPARAM)(std::clamp(St->hooks.at_once, 1, kMaxAtOnce) - 1), 0);
-    add(L"BUTTON", L"Stop after this map", WS_TABSTOP, 590, 518, 150, 30, IDC_STOP);
-    add(L"BUTTON", L"Convert ticked", WS_TABSTOP | BS_DEFPUSHBUTTON, 748, 518, 120, 30, IDC_GO);
-    add(L"BUTTON", L"Close", WS_TABSTOP, 876, 518, 88, 30, IDC_CLOSE);
+    add(L"BUTTON", L"Stop after this map", WS_TABSTOP, 590, 554, 150, 30, IDC_STOP);
+    add(L"BUTTON", L"Convert ticked", WS_TABSTOP | BS_DEFPUSHBUTTON, 748, 554, 120, 30, IDC_GO);
+    add(L"BUTTON", L"Close", WS_TABSTOP, 876, 554, 88, 30, IDC_CLOSE);
 }
 
 }   // namespace
 
-void progress(int index, const std::wstring &status, const std::wstring &size) {
+void progress(int index, const std::wstring &status, const std::wstring &size, const std::wstring &out) {
     if (HWND t = g_target)
-        PostMessageW(t, WM_B_PROGRESS, (WPARAM)index, (LPARAM) new std::pair<std::wstring, std::wstring>(status, size));
+        PostMessageW(t, WM_B_PROGRESS, (WPARAM)index, (LPARAM) new Progress{status, size, out});
 }
 void done(const std::wstring &summary) {
     if (HWND t = g_target) PostMessageW(t, WM_B_DONE, 0, (LPARAM) new std::wstring(summary));
@@ -466,7 +508,7 @@ void open(HWND owner, const fs::path &list_file, Hooks hooks) {
     st.file = list_file;
     st.hooks = std::move(hooks);
     load();
-    RECT r{0, 0, S(980), S(562)};
+    RECT r{0, 0, S(980), S(598)};
     DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
     AdjustWindowRect(&r, style, FALSE);
     RECT orc;

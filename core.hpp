@@ -324,6 +324,8 @@ struct Result {
     fs::path output;
     fs::path report;
     fs::path link;                     // Perfect Conversion: the link file written (empty: the pair didn't match)
+    fs::path linked_ce;                // ...and the Custom Edition map it links to (the map converted, or the copy of it
+                                       // with plain tag names it was converted from)
     fs::path pair_check;               // Perfect Conversion: the comparison's report
     std::string campaign;              // a campaign level: its cutscenes, for the Campaign tab (campaign.hpp)
     bool no_piece = false;             // a cutscene piece (Config::campaign_piece) the level hasn't: nothing built

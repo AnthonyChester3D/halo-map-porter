@@ -11,6 +11,7 @@
 #include <urlmon.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <exception>
 #include <new>
@@ -114,8 +115,8 @@ enum {
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new107.exe is 1.107).
-#define HMP_VERSION L"1.107"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new108.exe is 1.108).
+#define HMP_VERSION L"1.108"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -816,6 +817,7 @@ static void set_busy(bool b) {
 }
 
 static bool same_path(const fs::path &a, const fs::path &b) { return _wcsicmp(a.wstring().c_str(), b.wstring().c_str()) == 0; }
+static fs::path xbox_pack_dir(const fs::path &dir);
 
 // Convert tab, Xbox output: the file name is the map's name on the Xbox.
 static std::wstring conv_xbox_name() {
@@ -892,6 +894,7 @@ static void update_out_path() {
             else base = in.parent_path();
             out = base / folder / in.filename();
         } else if (to == Game::Xbox && folder_mode()) {
+            dir = xbox_pack_dir(dir);   // (built in the Xbox pack folder, then put where it belongs)
             out = dir / W(conv_card().folder) / (conv_map_name() + L".map");
         } else if (to == Game::Xbox) {
             std::wstring name = conv_xbox_name();
@@ -1831,6 +1834,85 @@ static void open_shaders() {
 
 static void remember_conversion(const fs::path &in, const fs::path &out);
 
+// Where Xbox conversions go, under the Build tab's Xbox folder: linked pairs in one map pack folder (with the Custom
+// Edition maps they're linked to, copied as they are, in another), maps that converted but aren't linked in a third.
+struct PackLayout {
+    fs::path root;                        // (empty: conversions go where they're saved, as they are)
+    std::wstring crossplay, ce, xbox;     // the three folders' names
+};
+static PackLayout pack_layout() {
+    PackLayout l;
+    l.root = fs::path(get_text(ID_B_XBOX_OUT));
+    std::error_code ec;
+    if (!l.root.empty() && !fs::is_directory(l.root, ec)) l.root.clear();
+    l.crossplay = ini_get(L"pack_crossplay", L"H1U Crossplay");
+    l.ce = ini_get(L"pack_crossplay_ce", L"H1U Crossplay (Custom Edition)");
+    l.xbox = ini_get(L"pack_xbox", L"H1U Xbox");
+    return l;
+}
+// The Build tab's Xbox folder, as a conversion's folder: its Xbox pack folder (any other folder: itself).
+static fs::path xbox_pack_dir(const fs::path &dir) {
+    const PackLayout l = pack_layout();
+    return !l.root.empty() && same_path(dir, l.root) ? dir / l.xbox : dir;
+}
+static bool move_folder(const fs::path &from, const fs::path &to) {
+    std::error_code ec;
+    fs::remove_all(to, ec);
+    fs::create_directories(to.parent_path(), ec);
+    fs::rename(from, to, ec);
+    if (!ec) return true;
+    ec.clear();
+    fs::copy(from, to, fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+    if (ec) return false;
+    fs::remove_all(from, ec);
+    return true;
+}
+// A conversion built into the Xbox pack folder (<root>\<xbox>\<map folder>\), put where it belongs once it's done:
+// linked, its folder moves to the crossplay pack and the Custom Edition map it's linked to is copied beside the
+// others; converted but not linked, it stays; failed, nothing of it is left (and none of an earlier run's, in any of
+// the three), and a protected map's original moves into "Map Protected (Fail)" beside it. Returns where the map is
+// now (`built` when it isn't under the layout). `where` says which, for the report.
+static fs::path place_conversion(const PackLayout &l, const fs::path &in, const fs::path &built, Result &r, std::string &where,
+                                 const Log &log) {
+    where.clear();
+    if (l.root.empty() || !same_path(built.parent_path().parent_path(), l.root / l.xbox)) return built;
+    std::error_code ec;
+    const fs::path folder = built.parent_path().filename();
+    const fs::path xbox = l.root / l.xbox / folder, cross = l.root / l.crossplay / folder, ce = l.root / l.ce / in.filename();
+    if (r.ok && !r.link.empty()) {
+        fs::remove_all(cross, ec);
+        if (move_folder(xbox, cross)) {
+            fs::create_directories(ce.parent_path(), ec);
+            fs::copy_file(r.linked_ce.empty() ? in : r.linked_ce, ce, fs::copy_options::overwrite_existing, ec);   // (what the link names)
+            r.link = cross / r.link.filename();
+            r.output = cross / built.filename();
+            where = N(l.crossplay);
+            log("Linked: in " + N((l.root / l.crossplay).wstring()) + ", with the Custom Edition map in " + N((l.root / l.ce).wstring()));
+            return r.output;
+        }
+        where = N(l.xbox);
+        return built;
+    }
+    fs::remove_all(cross, ec);   // (an earlier run's, linked then)
+    fs::remove(ce, ec);
+    if (r.ok) {
+        where = N(l.xbox);
+        return built;
+    }
+    fs::remove_all(xbox, ec);
+    if (r.error.rfind("This map is protected", 0) == 0) {
+        const fs::path jail = in.parent_path() / "Map Protected (Fail)" / in.filename();
+        fs::create_directories(jail.parent_path(), ec);
+        fs::remove(jail, ec);
+        fs::rename(in, jail, ec);
+        if (!ec) {
+            where = "Map Protected (Fail)";
+            log("Protected: the map moved to " + N(jail.wstring()));
+        }
+    }
+    return built;
+}
+
 // A protected map's conversion fails before anything of it is made: the folder made for it (if it wasn't there
 // before) is taken away again, with the map card's info.txt made in it.
 static void drop_folder_if_protected(const Result &r, const fs::path &folder, bool existed) {
@@ -1909,6 +1991,7 @@ static void start_convert(bool again = false) {
     }
     apply_user_scripts(cfg, in);   // (the scripts window's edits: for every game)
     bool share = checked(ID_SHARE), stock_shared = checked(ID_X_STOCK_SHARED);
+    const PackLayout layout = pack_layout();
     set_busy(true);
     SetWindowTextW(g_log, L"");
     append_log(L"Converting " + in.filename().wstring() + L": " + W(game_name(from)) + L" -> " + W(game_name(to)));
@@ -1931,14 +2014,20 @@ static void start_convert(bool again = false) {
         std::error_code ec;
         const bool existed = fs::exists(out.parent_path(), ec);
         Result r = !prepared.empty() ? build_prepared(cfg, prepared, post_log) : convert_map(cfg, in, from, to, out, share, post_log, m.get());
-        drop_folder_if_protected(r, out.parent_path(), existed);
+        if (layout.root.empty() || !same_path(out.parent_path().parent_path(), layout.root / layout.xbox))
+            drop_folder_if_protected(r, out.parent_path(), existed);
         if (prepared.empty() && to == Game::Xbox) mark_in_catalog(in, r, post_log);
         keep_measurement(r, key, m);
         if (!lkey.empty()) shadersui::remember(lkey, r.shaders);
         if (r.ok && !card_dir.empty())
             if (std::string t = card_traits(cfg, card_dir, card_name, out, out.parent_path()); !t.empty()) post_log(t);
-        if (r.ok && to == Game::Xbox) remember_conversion(in, out);
         if (r.ok && to == Game::Xbox && stock_shared) draw_on_stock(cfg, out, post_log);
+        fs::path placed = out;
+        if (to == Game::Xbox && prepared.empty()) {
+            std::string where;
+            placed = place_conversion(layout, in, out, r, where, post_log);
+        }
+        if (r.ok && to == Game::Xbox) remember_conversion(in, placed);
         finish(r, std::string("Converted to ") + game_name(to), keys);
     }).detach();
 }
@@ -2311,6 +2400,22 @@ static void open_batch() {
     unsigned cores = std::max(1u, std::thread::hardware_concurrency());
     h.at_once = std::clamp(_wtoi(ini_get(L"batch_at_once", std::to_wstring(std::clamp(cores / 2, 1u, 4u)).c_str()).c_str()), 1, batchui::kMaxAtOnce);
     h.at_once_changed = [](int n) { ini_set(L"batch_at_once", std::to_wstring(n)); };
+    {
+        const PackLayout l = pack_layout();
+        h.root = get_text(ID_B_XBOX_OUT);
+        h.crossplay = l.crossplay;
+        h.crossplay_ce = l.ce;
+        h.xbox = l.xbox;
+    }
+    // (the Build tab's Xbox folder is the batch's "Save to")
+    h.layout_changed = [](const std::wstring &root, const std::wstring &cross, const std::wstring &ce, const std::wstring &xbox) {
+        set_text(ID_B_XBOX_OUT, root);
+        ini_set(L"pack_crossplay", cross.empty() ? L"H1U Crossplay" : cross);
+        ini_set(L"pack_crossplay_ce", ce.empty() ? L"H1U Crossplay (Custom Edition)" : ce);
+        ini_set(L"pack_xbox", xbox.empty() ? L"H1U Xbox" : xbox);
+        save_settings();
+    };
+    h.pick_folder = [](HWND, const std::wstring &start) { return pick_folder(start); };
     h.start = [](const std::vector<batchui::Item> &items, const std::vector<int> &which, int at_once) {
         // Each map's options, worked out here (they read the windows' saved picks; the worker reads nothing of the
         // window): the Xbox tab's as they are, then the map's own.
@@ -2321,6 +2426,7 @@ static void open_batch() {
         // (a map still over the standard Xbox's 47 MB after every shrink: built for the big-map limit, as shrunk)
         if (base.xbox_max_mb <= 0) base.xbox_overflow_mb = 115;   // (make_config's too)
         bool share = checked(ID_SHARE), stock_shared = checked(ID_X_STOCK_SHARED);
+        const PackLayout layout = pack_layout();
         for (int i : which) {
             const auto &it = items[(size_t)i];
             Job1 j;
@@ -2343,6 +2449,16 @@ static void open_batch() {
                 std::string what;
                 if (mapcard::import_catalog_card(j.card_dir, j.in, j.card_name, what))
                     post_log("[" + N(j.in.stem().wstring()) + "] " + what);
+            }
+            // Built into the Xbox pack folder, in a folder of the card's name (else the map's), and put where it
+            // belongs once it's done (place_conversion).
+            if (!layout.root.empty()) {
+                std::wstring folder = j.in.stem().wstring();
+                if (!j.card_dir.empty())
+                    if (auto c = mapcard::load_card(j.card_dir, j.card_name); !c.folder.empty()) folder = W(c.folder);
+                j.out = layout.root / layout.xbox / folder / (lower(j.in.stem().wstring()) + L".map");
+            }
+            if (folder_mode()) {
                 std::wstring note;
                 if (!write_card(j.card_dir, W(j.card_name), j.out, note)) j.card_dir.clear();
             }
@@ -2355,8 +2471,10 @@ static void open_batch() {
         append_log(L"Batch: converting " + std::to_wstring(jobs->size()) + L" maps for the Xbox" +
                    (base.xbox_perfect ? L" (Perfect Conversion)" : L"") +
                    (at_once > 1 ? L", " + std::to_wstring(at_once) + L" at once (each line starts with its map)" : L"") + L".");
-        std::thread([jobs, share, stock_shared, at_once] {
+        std::thread([jobs, share, stock_shared, at_once, layout] {
             std::atomic<int> ok{0}, linked{0}, failed{0}, done{0};
+            std::mutex report_lock;   // (the batch report: a row for each map, written when the batch is over)
+            std::vector<std::array<std::string, 5>> report;
             std::atomic<size_t> next{0};
             std::mutex last_lock;   // (the map finished last: the one the Xbox tab's windows build from)
             Result last;
@@ -2389,10 +2507,11 @@ static void open_batch() {
                         r = Result();
                         r.error = std::string("The app hit an error converting it: ") + e.what();
                     }
-                    drop_folder_if_protected(r, j.out.parent_path(), existed);
+                    if (layout.root.empty()) drop_folder_if_protected(r, j.out.parent_path(), existed);
                     mark_in_catalog(j.in, r, log);
                 }
                 done++;
+                std::string where;
                 std::wstring st, size = L"\x01";
                 if (r.ok) {
                     // (its size as the Xbox's limit counts it: uncompressed, from invader-info)
@@ -2402,8 +2521,9 @@ static void open_batch() {
                     ok++;
                     if (!j.card_dir.empty())
                         if (std::string t = card_traits(j.cfg, j.card_dir, j.card_name, j.out, j.out.parent_path()); !t.empty()) log(t);
-                    remember_conversion(j.in, j.out);
                     if (stock_shared) draw_on_stock(j.cfg, j.out, log);
+                    j.out = place_conversion(layout, j.in, j.out, r, where, log);
+                    remember_conversion(j.in, j.out);
                     if (!r.link.empty()) { linked++; st = L"Done, linked"; }
                     else if (j.cfg.xbox_perfect && !r.pair_check.empty()) st = L"Done, not linked: see its pair check";
                     else st = L"Done";
@@ -2422,8 +2542,16 @@ static void open_batch() {
                     }
                     st = L"Failed: " + W(e) + (tag.empty() ? L"" : L" (" + W(tag) + L")");
                     log("FAILED: " + r.error);
+                    place_conversion(layout, j.in, j.out, r, where, log);
+                    if (where == "Map Protected (Fail)") st = L"Protected: moved to Map Protected (Fail)";
                 }
-                batchui::progress(j.index, st, r.ok ? size : std::wstring());
+                batchui::progress(j.index, st, r.ok ? size : std::wstring(), r.ok ? j.out.wstring() : std::wstring(L"\x01"));
+                {
+                    std::lock_guard<std::mutex> g(report_lock);
+                    report.push_back({N(j.in.stem().wstring()), N(j.in.wstring()),
+                                      r.ok ? (r.link.empty() ? "Converted" : "Converted, linked") : where == "Map Protected (Fail)" ? "Protected" : "Failed",
+                                      r.ok ? N(j.out.wstring()) : where, r.ok ? std::string() : N(st)});
+                }
                 std::lock_guard<std::mutex> g(last_lock);
                 last = r;
                 last_keys = j.keys;
@@ -2438,6 +2566,19 @@ static void open_batch() {
                                (failed ? L", " + std::to_wstring(failed) + L" failed" : L"") +
                                (done < (int)jobs->size() ? L", stopped before " + std::to_wstring(jobs->size() - done) + L" more" : L"") + L".";
             batchui::done(sum);
+            // The batch report: each map's result, where it went and why it failed (beside the pack folders).
+            if (!layout.root.empty() && !report.empty()) {
+                auto q = [](std::string v) {
+                    std::string o = "\"";
+                    for (char c : v) o += c == '"' ? std::string("\"\"") : std::string(1, c);
+                    return o + "\"";
+                };
+                std::sort(report.begin(), report.end());
+                std::ofstream f(layout.root / "Batch report.csv", std::ios::binary | std::ios::trunc);
+                f << "\xEF\xBB\xBFMap,Input,Result,Where,Reason\r\n";
+                for (auto &row : report) f << q(row[0]) << ',' << q(row[1]) << ',' << q(row[2]) << ',' << q(row[3]) << ',' << q(row[4]) << "\r\n";
+                if (f) post_log("Batch report: " + N((layout.root / "Batch report.csv").wstring()));
+            }
             // (the last map's conversion is the one the Xbox tab's windows and "Convert" can build from now)
             if (done > 0) {
                 last.changes.clear();

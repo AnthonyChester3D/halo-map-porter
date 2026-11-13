@@ -16695,6 +16695,7 @@ static void perfect_link(Job &job, const fs::path &output, const std::string &st
         return;
     }
     r.link = link;
+    r.linked_ce = job.input_map;
     job.note("[perfect] the Xbox map's gameplay matches the Custom Edition map's (" + n("gameplay-tags") + " gameplay tags, " +
              n("models") + " models, " + n("shaders") + " shaders, the level's collision, placements and globals" +
              (pr.scripts_differ ? "; its scripts converted for the Xbox" : "") + "): wrote the link file " + u8(link));

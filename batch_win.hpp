@@ -44,13 +44,21 @@ struct Hooks {
     // "Maps at once" as the window opens (1 to kMaxAtOnce), and told when it's changed (to keep it).
     int at_once = 1;
     std::function<void(int)> at_once_changed;
+    // Where the batch's maps go (the Build tab's Xbox folder) and its three map pack folders' names: linked pairs
+    // (the Xbox maps), the Custom Edition maps they're linked to, and maps converted but not linked. Shown in the
+    // window; told when one's changed (and before converting), to keep them. Empty folder: each map where it's saved.
+    std::wstring root, crossplay, crossplay_ce, xbox;
+    std::function<void(const std::wstring &root, const std::wstring &crossplay, const std::wstring &crossplay_ce,
+                       const std::wstring &xbox)> layout_changed;
+    // A folder picked with the window's "Browse..." for it ("" cancelled).
+    std::function<std::wstring(HWND owner, const std::wstring &start)> pick_folder;
 };
 const int kMaxAtOnce = 8;
 
 // The window (modal); the list is read from and saved to `list_file`.
 void open(HWND owner, const std::filesystem::path &list_file, Hooks hooks);
-// From the worker (any thread): item `index`'s status (and its map's size, when there's one).
-void progress(int index, const std::wstring &status, const std::wstring &size = L"\x01");
+// From the worker (any thread): item `index`'s status (and its map's size, and where it went, when there's one).
+void progress(int index, const std::wstring &status, const std::wstring &size = L"\x01", const std::wstring &out = L"\x01");
 // From the worker (any thread): the run is over.
 void done(const std::wstring &summary);
 

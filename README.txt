@@ -2325,6 +2325,20 @@ one go, with the names, descriptions and pictures the pack's menu shows.
      folders (stock.shared, in maps itself, only for an Xbox whose
      installer hasn't built it).
 
+Where Xbox conversions go. With the Build tab's Xbox folder set (the batch
+window's "Save to"), each map is built into a map pack folder in it, then
+put where it belongs once it's done:
+  H1U Crossplay\<map>\              linked pairs: the Xbox maps
+  H1U Crossplay (Custom Edition)\    the Custom Edition maps they're linked to,
+                                     copied as they are (your originals stay)
+  H1U Xbox\<map>\                   converted, but not linked
+  Batch report.csv                   each map of the last batch: its result,
+                                     where it went and why it failed
+A map that fails leaves nothing behind (and an earlier run's output of it
+is taken away), and a protected map's original moves into "Map Protected
+(Fail)" beside it. The three pack folders' names can be changed in the batch
+window. Single conversions do the same.
+
 Drawing on stock.shared one map at a time (Xbox tab, "Save the map drawing
 on stock.shared"): each map converted for the Xbox, on its own or in a
 batch, is laid out again with what stock.shared has left out of it, the
