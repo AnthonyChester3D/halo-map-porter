@@ -898,7 +898,7 @@ struct Job {
         fs::path own = owner(tag);
         if (own.empty()) return 0;
         static const std::regex opt(
-            R"(^(netgame_flags\[(\d+)\]\.type|(?:player_starting_locations|netgame_equipment)\[\d+\]\.type_[0-3])(\.\w+)?$)");
+            R"(^(netgame_flags\[(\d+)\]\.type|(?:player_starting_locations|netgame_equipment|starting_equipment)\[\d+\]\.type_[0-3])(\.\w+)?$)");
         std::map<std::string, bool> marked;   // "netgame_flags[3].type" -> has a value Invader knows
         std::map<std::string, int> flag_of;
         for (auto &[k, v] : list_values(cfg, own, tag)) {
@@ -1088,6 +1088,247 @@ struct Job {
                 return true;
             }
         }
+        // invader-edit on the copy of a tag the build uses: one value, or a count.
+        auto ask = [&](const std::string &t, const char *op, const std::string &key) {
+            fs::path own = owner(t);
+            std::string v;
+            if (!own.empty()) run_process({u8(tool(cfg, "invader-edit")), "-t", u8(own), t, op, key}, v);
+            while (!v.empty() && (v.back() == '\n' || v.back() == '\r' || v.back() == ' ')) v.pop_back();
+            return v;
+        };
+        auto lines_of = [](const std::string &v) {
+            std::vector<std::string> o;
+            std::istringstream in(v);
+            for (std::string l; std::getline(in, l);) {
+                while (!l.empty() && (l.back() == '\r' || l.back() == ' ')) l.pop_back();
+                o.push_back(l);
+            }
+            return o;
+        };
+        // A copy of a bitmap tag as another type, beside it ("<name> <suffix>.bitmap"), for one use that needs that
+        // type when the bitmap's other uses need its own: sprites get one sprite per texture of each sequence (a
+        // sequence for them all when it has none), drawing the whole texture. Returns its path ("" if it couldn't).
+        auto retyped_copy = [&](const std::string &bm, const std::string &type, const std::string &suffix) -> std::string {
+            const std::string to = bm.substr(0, bm.size() - 7) + " " + suffix + ".bitmap";
+            if (!owner(to).empty()) return to;   // (made for an earlier use)
+            fs::path own = owner(bm);
+            if (own.empty()) return "";
+            std::error_code ec;
+            fs::create_directories((fixes / from_u8(to)).parent_path(), ec);
+            fs::copy_file(own / from_u8(bm), fixes / from_u8(to), fs::copy_options::overwrite_existing, ec);
+            if (ec) return "";
+            std::vector<std::string> cmd{u8(tool(cfg, "invader-edit")), "-n", "-t", u8(fixes), to, "-S", "type", type};
+            if (type == "sprites") {
+                const int textures = std::atoi(ask(to, "-C", "bitmap_data").c_str());
+                int seqs = std::atoi(ask(to, "-C", "bitmap_group_sequence").c_str());
+                std::vector<std::pair<int, int>> range;   // each sequence's first texture and how many
+                if (seqs == 0) {
+                    cmd.insert(cmd.end(), {"-I", "bitmap_group_sequence", "1", "end", "-S", "bitmap_group_sequence[0].first_bitmap_index", "0",
+                                           "-S", "bitmap_group_sequence[0].bitmap_count", std::to_string(textures)});
+                    range.push_back({0, textures});
+                    seqs = 1;
+                } else {
+                    auto firsts = lines_of(ask(to, "-G", "bitmap_group_sequence[*].first_bitmap_index"));
+                    auto counts = lines_of(ask(to, "-G", "bitmap_group_sequence[*].bitmap_count"));
+                    for (int i = 0; i < seqs; i++)
+                        range.push_back({i < (int)firsts.size() ? std::atoi(firsts[(size_t)i].c_str()) : 0,
+                                         i < (int)counts.size() ? std::atoi(counts[(size_t)i].c_str()) : 0});
+                }
+                for (int i = 0; i < seqs; i++) {
+                    const std::string q = "bitmap_group_sequence[" + std::to_string(i) + "]";
+                    if (range[(size_t)i].second <= 0 || std::atoi(ask(to, "-C", q + ".sprites").c_str()) > 0) continue;
+                    cmd.insert(cmd.end(), {"-I", q + ".sprites", std::to_string(range[(size_t)i].second), "end"});
+                    for (int k = 0; k < range[(size_t)i].second; k++) {
+                        const std::string sp = q + ".sprites[" + std::to_string(k) + "]";
+                        cmd.insert(cmd.end(), {"-S", sp + ".bitmap_index", std::to_string(range[(size_t)i].first + k), "-S", sp + ".left", "0",
+                                               "-S", sp + ".right", "1", "-S", sp + ".top", "0", "-S", sp + ".bottom", "1",
+                                               "-S", sp + ".registration_point", "0.5,0.5"});
+                    }
+                }
+            }
+            std::string out;
+            if (run_process(cmd, out) != 0) {
+                fs::remove(fixes / from_u8(to), ec);
+                return "";
+            }
+            return to;
+        };
+        // A particle state's bitmap that isn't a sprite sheet (MCC draws it whole): a sprites copy of it, each texture
+        // one sprite, for the particle.
+        static const std::regex not_sprites(R"(Bitmap '([^']+)' referenced in particle state #(\d+) of particle type #(\d+) is not of type sprites)");
+        if (std::regex_search(msg, m, not_sprites)) {
+            const std::string bm = norm_rel(m[1].str()), copy = retyped_copy(bm, "sprites", "sprites");
+            const std::string key = "particle_types[" + m[3].str() + "].particle_states[" + m[2].str() + "].bitmaps";
+            if (!copy.empty() && edit(tag, key, copy)) {
+                note("[fix]  " + tag + ": particle type #" + m[3].str() + "'s state #" + m[2].str() + " drew " + bm +
+                     ", which isn't a sprite sheet; it draws a sprites copy of it (" + copy + "), each picture whole, as MCC does");
+                return true;
+            }
+        }
+        // A shader's map naming a bitmap of another type (an interface bitmap as a model's base map): a copy of the
+        // bitmap of the type the map needs, for that shader.
+        static const std::regex wrong_type(R"((\w+) references (\w+) bitmap '([^']+)'\s+where a (\w+) was expected)");
+        if (std::regex_search(msg, m, wrong_type)) {
+            const std::string bm = norm_rel(m[3].str()), want = m[4].str();
+            const std::string copy = retyped_copy(bm, want, want == "2d_textures" ? "2d" : want);
+            if (!copy.empty() && edit(tag, m[1].str(), copy)) {
+                note("[fix]  " + tag + ": its " + m[1].str() + " named " + bm + ", a bitmap of " + m[2].str() + "; it names a " +
+                     want + " copy of it (" + copy + ")");
+                return true;
+            }
+        }
+        // A crosshair overlay's sequence past the end of its bitmap's: the bitmap's last.
+        static const std::regex seq_oob(R"(Sequence #(\d+) in '[^']+' referenced in overlay #(\d+) of crosshair #(\d+) is out of bounds \(>= (\d+)\))");
+        if (std::regex_search(msg, m, seq_oob) && std::stoi(m[4].str()) > 0) {
+            const std::string last = std::to_string(std::stoi(m[4].str()) - 1);
+            if (edit(tag, "crosshairs[" + m[3].str() + "].crosshair_overlays[" + m[2].str() + "].sequence_index", last)) {
+                note("[fix]  " + tag + ": crosshair #" + m[3].str() + "'s overlay #" + m[2].str() + " drew sequence #" + m[1].str() +
+                     " of a bitmap with " + m[4].str() + "; it draws the last, #" + last);
+                return true;
+            }
+        }
+        // A palette entry naming no tag (what's placed from it is nothing in the game): it and what's placed from it
+        // taken out, and the placements of the entries after it renumbered.
+        static const std::regex null_palette(R"(Scenario(\w+)Palette::name must not be null)");
+        if (std::regex_search(msg, m, null_palette)) {
+            static const std::map<std::string, std::pair<std::string, std::string>> kinds{
+                {"Scenery", {"scenery_palette", "scenery"}}, {"Biped", {"biped_palette", "bipeds"}},
+                {"Vehicle", {"vehicle_palette", "vehicles"}}, {"Equipment", {"equipment_palette", "equipment"}},
+                {"Weapon", {"weapon_palette", "weapons"}}, {"Machine", {"machine_palette", "machines"}},
+                {"Control", {"control_palette", "controls"}}, {"LightFixture", {"light_fixture_palette", "light_fixtures"}},
+                {"SoundScenery", {"sound_scenery_palette", "sound_scenery"}}};
+            auto k = kinds.find(m[1].str());
+            fs::path own = owner(tag);
+            if (k != kinds.end() && !own.empty() && (own == fixes || to_fixes(tag, own))) {
+                const std::string pal = k->second.first, placed = k->second.second;
+                auto names = lines_of(ask(tag, "-G", pal + "[*].name"));
+                auto types = lines_of(ask(tag, "-G", placed + "[*].type"));
+                std::vector<int> empty;
+                for (size_t i = 0; i < names.size(); i++)
+                    if (names[i].empty() || names[i][0] == '.' || names[i] == "null") empty.push_back((int)i);   // (none: ".scenery")
+                if (!empty.empty()) {
+                    std::vector<std::string> cmd{u8(tool(cfg, "invader-edit")), "-n", "-t", u8(fixes), tag};
+                    int dropped = 0;
+                    for (int i = (int)types.size() - 1; i >= 0; i--) {
+                        int t = std::atoi(types[(size_t)i].c_str()), before = 0;
+                        bool gone = false;
+                        for (int e : empty) { if (e == t) gone = true; if (e < t) before++; }
+                        if (gone) { cmd.insert(cmd.end(), {"-E", placed + "[" + std::to_string(i) + "]"}); dropped++; }
+                        else if (before) cmd.insert(cmd.end(), {"-S", placed + "[" + std::to_string(i) + "].type", std::to_string(t - before)});
+                    }
+                    for (auto e = empty.rbegin(); e != empty.rend(); ++e) cmd.insert(cmd.end(), {"-E", pal + "[" + std::to_string(*e) + "]"});
+                    std::string out;
+                    if (run_process(cmd, out) == 0) {
+                        note("[fix]  " + tag + ": " + std::to_string(empty.size()) + " " + pal + " entr" + (empty.size() == 1 ? "y" : "ies") +
+                             " named no tag (nothing in the game); taken out, with the " + std::to_string(dropped) + " placed from " +
+                             (empty.size() == 1 ? "it" : "them"));
+                        return true;
+                    }
+                }
+            }
+        }
+        // An object with an animation graph and no model (its model left empty, as it couldn't be taken out of the
+        // map): the animations go too (nothing is drawn to animate).
+        if (msg.find("Object tag has an animation graph but no model tag") != std::string::npos && edit(tag, "animation_graph", "")) {
+            note("[fix]  " + tag + ": has no model, so nothing to animate; its animation graph taken off too");
+            return true;
+        }
+        // One name on more than one object: the first keeps it, the others lose it (the game finds one of them by it).
+        static const std::regex name_twice(R"(Object name #\d+ \(([^)]*)\) is used multiple times)");
+        static const std::regex name_user(R"((Biped|Vehicle|Equipment|Weapon|Machine|Control|Light Fixture|LightFixture|Scenery|Sound Scenery|SoundScenery) #(\d+))");
+        if (std::regex_search(msg, m, name_twice)) {
+            const std::string name = m[1].str();
+            static const std::map<std::string, std::string> block{{"Biped", "bipeds"}, {"Vehicle", "vehicles"}, {"Equipment", "equipment"},
+                {"Weapon", "weapons"}, {"Machine", "machines"}, {"Control", "controls"}, {"Light Fixture", "light_fixtures"},
+                {"LightFixture", "light_fixtures"}, {"Scenery", "scenery"}, {"Sound Scenery", "sound_scenery"}, {"SoundScenery", "sound_scenery"}};
+            std::vector<std::string> users;
+            const std::string after = msg.substr(msg.find("objects with this name") == std::string::npos ? 0 : msg.find("objects with this name"));
+            for (auto it = std::sregex_iterator(after.begin(), after.end(), name_user); it != std::sregex_iterator(); ++it)
+                users.push_back(block.at((*it)[1].str()) + "[" + (*it)[2].str() + "].name");
+            bool all = users.size() >= 2;
+            for (size_t i = 1; all && i < users.size(); i++)
+                all = edit(tag, users[i], "65535") || edit(tag, users[i], "-1") || edit(tag, users[i], "null");
+            if (all) {
+                note("[fix]  " + tag + ": the name \"" + name + "\" was on " + std::to_string(users.size()) + " objects; " + users[0] +
+                     " keeps it, the others go unnamed");
+                return true;
+            }
+        }
+        // A collision edge with a surface past the BSP's (a side with none): every such side takes its other side's
+        // surface, in each of the BSP's collision BSPs at once.
+        if (msg.find("has an invalid surface index") != std::string::npos) {
+            fs::path own = owner(tag);
+            if (!own.empty() && (own == fixes || to_fixes(tag, own))) {
+                const int bsps = std::atoi(ask(tag, "-C", "collision_bsp").c_str());
+                std::vector<std::string> cmd{u8(tool(cfg, "invader-edit")), "-n", "-t", u8(fixes), tag};
+                size_t n = 0;
+                for (int b = 0; b < bsps; b++) {
+                    const std::string c = "collision_bsp[" + std::to_string(b) + "]";
+                    const long surfaces = std::atol(ask(tag, "-C", c + ".surfaces").c_str());
+                    auto left = lines_of(ask(tag, "-G", c + ".edges[*].left_surface"));
+                    auto right = lines_of(ask(tag, "-G", c + ".edges[*].right_surface"));
+                    for (size_t e = 0; e < left.size() && e < right.size(); e++) {
+                        const long l = std::atol(left[e].c_str()), r = std::atol(right[e].c_str());
+                        const bool lok = l >= 0 && l < surfaces, rok = r >= 0 && r < surfaces;
+                        const std::string k = c + ".edges[" + std::to_string(e) + "].";
+                        if (lok && !rok) { cmd.insert(cmd.end(), {"-S", k + "right_surface", std::to_string(l)}); n++; }
+                        else if (rok && !lok) { cmd.insert(cmd.end(), {"-S", k + "left_surface", std::to_string(r)}); n++; }
+                    }
+                }
+                std::string out;
+                if (n && run_process(cmd, out) == 0) {
+                    note("[fix]  " + tag + ": " + std::to_string(n) + " collision edge" + (n == 1 ? "" : "s") +
+                         " had a side with no surface; each takes its other side's");
+                    return true;
+                }
+            }
+        }
+        // A bitmap's texture no sequence names: a sequence of its own for each.
+        static const std::regex unsequenced(R"(Bitmap #(\d+) is not referenced by a sequence)");
+        if (std::regex_search(msg, m, unsequenced)) {
+            fs::path own = owner(tag);
+            if (!own.empty() && (own == fixes || to_fixes(tag, own))) {
+                const int textures = std::atoi(ask(tag, "-C", "bitmap_data").c_str());
+                auto firsts = lines_of(ask(tag, "-G", "bitmap_group_sequence[*].first_bitmap_index"));
+                auto counts = lines_of(ask(tag, "-G", "bitmap_group_sequence[*].bitmap_count"));
+                std::vector<bool> named((size_t)std::max(0, textures), false);
+                for (size_t i = 0; i < firsts.size() && i < counts.size(); i++)
+                    for (int k = 0; k < std::atoi(counts[i].c_str()); k++) {
+                        const int t = std::atoi(firsts[i].c_str()) + k;
+                        if (t >= 0 && t < textures) named[(size_t)t] = true;
+                    }
+                std::vector<std::string> cmd{u8(tool(cfg, "invader-edit")), "-n", "-t", u8(fixes), tag};
+                int at = (int)firsts.size(), added = 0;
+                for (int t = 0; t < textures; t++) {
+                    if (named[(size_t)t]) continue;
+                    const std::string q = "bitmap_group_sequence[" + std::to_string(at++) + "]";
+                    cmd.insert(cmd.end(), {"-I", "bitmap_group_sequence", "1", "end", "-S", q + ".first_bitmap_index", std::to_string(t),
+                                           "-S", q + ".bitmap_count", "1"});
+                    added++;
+                }
+                std::string out;
+                if (added && run_process(cmd, out) == 0) {
+                    note("[fix]  " + tag + ": " + std::to_string(added) + " of its textures weren't in a sequence; each has one of its own");
+                    return true;
+                }
+            }
+        }
+        // A transparent generic shader with no maps and no stages (draws nothing): one map that still draws nothing.
+        if (msg.find("shader_transparent_generic tags must contain at least either one map or one stage") != std::string::npos) {
+            const std::string black = "ui/shell/bitmaps/black.bitmap";
+            fs::path own = owner(tag);
+            if (!own.empty() && (own == fixes || to_fixes(tag, own))) {
+                std::vector<std::string> cmd{u8(tool(cfg, "invader-edit")), "-n", "-t", u8(fixes), tag, "-I", "maps", "1", "end",
+                                             "-S", "framebuffer_blend_function", "add"};
+                if (!owner(black).empty()) cmd.insert(cmd.end(), {"-S", "maps[0].map", black});
+                std::string out;
+                if (run_process(cmd, out) == 0) {
+                    note("[fix]  " + tag + ": a transparent shader with no maps (draws nothing); gave it one that still draws "
+                         "nothing (black, added to the screen)");
+                    return true;
+                }
+            }
+        }
         // The other way round: an overlay not marked "not a sprite" on a bitmap that isn't a sprite sheet: the mark put on.
         static const std::regex is_sprite(R"(Overlay #(\d+) of crosshair #(\d+) is not marked as not a sprite, but)");
         if (std::regex_search(msg, m, is_sprite)) {
@@ -1111,14 +1352,14 @@ struct Job {
             }
         }
         // A string list's string with no terminating zero: one added.
-        static const std::regex no_null(R"(String #(\d+) is not null terminated)");
+        static const std::regex no_null(R"(String #(\d+) (?:is not null terminated|contains an extraneous null terminator))");
         if (std::regex_search(msg, m, no_null)) {
             fs::path own = owner(tag);
             if (!own.empty() && (own == fixes || to_fixes(tag, own))) {
                 const int n = terminate_string_list(fixes / from_u8(tag));
                 if (n > 0) {
-                    note("[fix]  " + tag + ": " + std::to_string(n) + " of its strings had no ending zero (what ends a string); "
-                         "one added to each");
+                    note("[fix]  " + tag + ": " + std::to_string(n) + " of its strings didn't end in one zero character (what "
+                         "ends a string); each now ends at its first, as the game reads it");
                     return true;
                 }
             }
@@ -5011,8 +5252,8 @@ struct BitmapParts {
     }
 };
 
-// A string list (unicode_string_list or string_list) whose strings don't all end in a zero character: a zero added
-// to each that doesn't. Layout: 64-byte header, the strings block (12), each string's data field (20), their bytes.
+// A string list (unicode_string_list or string_list) whose strings don't each end in one zero character: each cut at
+// its first zero (what the game shows stops there) and ended with one. Layout: 64-byte header, the strings block (12), each string's data field (20), their bytes.
 // Returns how many strings got one (0: none, or a file not laid out so).
 static int terminate_string_list(const fs::path &p) {
     std::string b;
@@ -5034,10 +5275,21 @@ static int terminate_string_list(const fs::path &p) {
         if (o + sz > b.size()) return 0;
         std::string str = b.substr(o, sz);
         o += sz;
-        bool ends = str.size() >= ch && str.size() % ch == 0;
-        for (size_t k = 0; ends && k < ch; k++) ends = str[str.size() - 1 - k] == 0;
-        if (!ends && str.size() % ch == 0) {
-            str.append(ch, '\0');
+        if (str.size() % ch) {
+            data += str;
+            continue;
+        }
+        // (cut at its first zero character: none extra in it, or after it; then one zero to end it)
+        size_t end = 0;
+        while (end + ch <= str.size()) {
+            bool zero = true;
+            for (size_t k = 0; k < ch; k++) zero = zero && str[end + k] == 0;
+            if (zero) break;
+            end += ch;
+        }
+        std::string fixed = str.substr(0, end) + std::string(ch, '\0');
+        if (fixed != str) {
+            str = fixed;
             put_be32(out, e, (uint32_t)str.size());
             added++;
         }
