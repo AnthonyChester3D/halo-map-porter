@@ -110,6 +110,37 @@ struct Trim {
 };
 Trim trim_top(const std::filesystem::path &model, const TrimSettings &ts, const Settings &settings, const std::string &tag = {});
 
+// Leaf cards: the separate small pieces of a model's cut-out parts (a tree's or a plant's leaves and fronds, grass,
+// branches drawn as pictures on flat cards: drawn with a cut-out shader, reaching see-through texture), each 32
+// triangles or fewer and touching no other. A tree can be thousands of them, which trimming keeps exactly as made (a
+// card's outline is its texture's), so this is how such a model gets lighter: fewer cards.
+struct Cards {
+    int cards = 0;            // in its most detailed versions (every permutation's)
+    int card_triangles = 0;   // their triangles
+    int triangles = 0;        // the model's most detailed triangles (its regions' first permutations, as the game counts)
+    // Foliage: 24 cards or more, and a quarter of its triangles or more
+    bool foliage() const { return cards >= 24 && card_triangles * 4 >= triangles; }
+};
+Cards count_cards(const std::filesystem::path &model, const Settings &settings);
+// Takes out `share` of the model's leaf cards (0 to 0.9), in every geometry it draws (lower-detail versions too), evenly
+// through the model: the cards in order along a path that fills its box (nearby cards next to each other), every
+// so many of them taken out, so the foliage thins out the same everywhere and keeps its outline. No part loses its
+// last card. Saved in place.
+struct Thin {
+    bool changed = false;
+    std::string why;              // nothing changed: why
+    int cards = 0, taken = 0;     // leaf cards in its most detailed versions, and of those taken out
+    int before = 0, after = 0;    // most detailed triangles
+    size_t xbox_bytes_saved = 0;
+};
+Thin thin_cards(const std::filesystem::path &model, double share, const Settings &settings);
+
+// Takes out every separate piece of the model smaller than `share` of its size (the diagonal of the box around its
+// most detailed versions; each piece's the same, pieces being triangles that share no place with the rest): small
+// decorative bits, bolts, trim, greebles. In every geometry it draws; leaf cards (cut-out parts) are left to
+// thin_cards; each geometry keeps its biggest piece. Saved in place. `cards`/`taken` in the result: pieces.
+Thin drop_small_pieces(const std::filesystem::path &model, double share, const Settings &settings);
+
 // What Bungie's stock models of a kind have, for their size: the triangles of the most detailed version (the
 // regions' first permutations), `size` the diagonal of the box around them (world units). Fitted to all of Bungie's
 // models (Xbox tags; lod.cpp has the numbers). `kind`: f first-person weapon, w weapon or item, b character, v vehicle,
@@ -127,6 +158,8 @@ struct Choice {
     int medium = 0, low = 0;    // m: the model's triangles to aim for (0: automatic, about half and a fifth)
     char top = 'a';             // most detailed version: a as "Heavy models" says, k keep it as made, t trim it
     int top_triangles = 0;      // t: to this many
+    int cards = -1;             // leaf cards to take out, in percent: -1 as the Xbox tab says (for foliage), 0 none
+    int pieces = 0;             // separate pieces smaller than this percent of the model's size taken out (0: none)
     bool skip = false;          // from skip.txt (lods n, top k)
     bool chosen = false;        // a line in choices.txt
 };

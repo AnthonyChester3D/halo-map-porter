@@ -9218,6 +9218,7 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
     // LODs window's, or skip.txt). The window lists them all, changed or not, with what Bungie's of its kind and size
     // have.
     std::vector<std::string> own_models;
+    std::set<std::string> foliage;   // (of those, made mostly of leaf cards: lod.hpp Cards)
     std::set<std::string> far_set;   // (scenery players never come near: trimmed for this level, distant_seen)
     std::map<std::string, lod::Choice> chosen;
     for (auto &dep : deps) {
@@ -9233,6 +9234,11 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
         LodView::Model &m = record(dep, kind, "");
         double size = lod::model_size(own / from_u8(dep));
         if (size > 0) m.density = (int)std::lround(lod::stock_triangles(kind, size));
+        if (kind != 'f') {   // (leaf cards: foliage, for the LODs window and the Xbox tab's option)
+            lod::Cards cc = lod::count_cards(own / from_u8(dep), lod_settings);
+            if (cc.cards >= 2) m.cards = cc.cards, m.card_triangles = cc.card_triangles;
+            if (cc.foliage()) foliage.insert(dep);
+        }
     }
     // Bungie's models drawn in the world (the Xbox tags'): those with no lower-detail versions of their own get them
     // with the Xbox tab's option for Bungie's models, or a model's own choice (edited copies: your tags stay as they
@@ -9270,6 +9276,76 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
         // (Bungie's too, but only by your choice: made for the Xbox, the Trim setting leaves them as they are)
         std::vector<std::string> to_trim = own_models;
         to_trim.insert(to_trim.end(), stock_models.begin(), stock_models.end());
+
+        // Leaf cards first (trimming keeps them as made): foliage loses the share the Xbox tab says, any model the
+        // share chosen for it in the LODs window. The model as made stays what the window compares with.
+        std::map<std::string, std::pair<std::string, int>> thinned;   // (as made: its bytes and triangles)
+        {
+            std::vector<std::string> thin_list, pieces_list;
+            bool by_choice_cards = false, by_setting_cards = false;
+            size_t thin_saved = 0;
+            for (auto &dep : to_trim) {
+                if (job.analysis) break;
+                fs::path own = job.owner(dep);
+                const bool bungies = own == job.overlay;
+                const lod::Choice &ch = chosen[dep];
+                const int pct = ch.cards >= 0 ? ch.cards : !bungies && foliage.count(dep) ? job.cfg.xbox_foliage_cards : 0;
+                if ((pct <= 0 && ch.pieces <= 0) || first_person.count(dep)) continue;
+                fs::path ed = editable(dep, bungies);
+                if (ed.empty()) continue;
+                std::ifstream in(ed / from_u8(dep), std::ios::binary);
+                std::string made((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                in.close();
+                keep_original(ed / from_u8(dep), made);
+                lod::Thin th;
+                if (pct > 0) {
+                    th = lod::thin_cards(ed / from_u8(dep), pct / 100.0, lod_settings);
+                    if (!th.changed && ch.cards > 0) note(dep, "no leaf cards taken out: it " + th.why);
+                }
+                // (and the small pieces chosen for it in the LODs window)
+                lod::Thin sp;
+                if (ch.pieces > 0) {
+                    sp = lod::drop_small_pieces(ed / from_u8(dep), ch.pieces / 100.0, lod_settings);
+                    if (sp.changed) {
+                        pieces_list.push_back(name_of(dep) + " " + thousands(sp.taken) + " of " + thousands(sp.cards) + " (under " +
+                                              std::to_string(ch.pieces) + "% of its size; " + thousands(sp.before) + " > " +
+                                              thousands(sp.after) + " triangles)");
+                        thin_saved += sp.xbox_bytes_saved;
+                    } else {
+                        note(dep, "no small pieces taken out: it " + sp.why);
+                    }
+                }
+                if (!th.changed && !sp.changed) continue;
+                if (!th.changed) th.before = sp.before, th.after = sp.after;
+                else if (sp.changed) th.after = sp.after;
+                thin_saved += th.xbox_bytes_saved;
+                if (th.taken) (ch.cards >= 0 ? by_choice_cards : by_setting_cards) = true;
+                thinned[dep] = {std::move(made), th.before};
+                char kind = kinds.count(dep) ? kinds[dep] : 's';
+                LodView::Model &m = record(dep, kind, "trimmed");
+                m.trimmed_from = th.before;
+                m.cards_taken = th.taken;
+                job.trim_originals[dep] = thinned[dep].first;
+                if (th.taken) thin_list.push_back(name_of(dep) + " " + thousands(th.taken) + " of " + thousands(th.cards) + " (" +
+                                    std::to_string(pct) + "%; " + thousands(th.before) + " > " + thousands(th.after) + " triangles)");
+            }
+            if (!thin_list.empty()) {
+                job.note("[foliage] took out leaf cards of " + std::to_string(thin_list.size()) +
+                         (thin_list.size() == 1 ? " model" : " models") + ", evenly through each so it thins out the same "
+                         "everywhere" + (by_choice_cards && !by_setting_cards ? " (your choice in the LODs window)" : by_choice_cards
+                         ? " (as the Xbox tab says for trees and plants, and your choices in the LODs window)" : " (as the Xbox tab says for trees and plants)") +
+                         ": " + list(thin_list));
+            }
+            if (!pieces_list.empty())
+                job.note("[pieces] took out the small separate pieces of " + std::to_string(pieces_list.size()) +
+                         (pieces_list.size() == 1 ? " model" : " models") + " (your choice in the LODs window): " + list(pieces_list));
+            if (!thin_list.empty() || !pieces_list.empty()) {
+                char size[32];
+                if (thin_saved >= 1048576) snprintf(size, sizeof size, "%.1f MB", thin_saved / 1048576.0);
+                else snprintf(size, sizeof size, "%d KB", (int)((thin_saved + 1023) / 1024));
+                job.note(std::string("  (") + size + " less of the Xbox's tag memory and map file)");
+            }
+        }
         for (auto &dep : to_trim) {
             fs::path own = job.owner(dep);
             const bool bungies = own == job.overlay;
@@ -9379,8 +9455,8 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
                 trim = false;   // (within its budget: trim_top would say so too)
             if (!trim) {
                 if (cleaned_from > 0 && !job.analysis) {   // (simplified, and within its budget after)
-                    job.trim_originals[dep] = std::move(before);
-                    record(dep, kind, "trimmed").trimmed_from = cleaned_from;
+                    if (!thinned.count(dep)) job.trim_originals[dep] = std::move(before);
+                    record(dep, kind, "trimmed").trimmed_from = thinned.count(dep) ? thinned[dep].second : cleaned_from;
                 }
                 continue;
             }
@@ -9396,8 +9472,8 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
             if (cleaned_from > 0) {   // (from the model as made)
                 if (!r.changed) {
                     if (!job.analysis) {
-                        job.trim_originals[dep] = std::move(before);
-                        record(dep, kind, "trimmed").trimmed_from = cleaned_from;
+                        if (!thinned.count(dep)) job.trim_originals[dep] = std::move(before);
+                        record(dep, kind, "trimmed").trimmed_from = thinned.count(dep) ? thinned[dep].second : cleaned_from;
                     }
                     continue;
                 }
@@ -9419,8 +9495,8 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
             if (measured) by_first_person = true;
             (mine ? by_choice : mode >= 3 ? by_density : by_setting) = true;
             if (!job.analysis) {
-                job.trim_originals[dep] = std::move(before);
-                record(dep, kind, "trimmed").trimmed_from = r.before;
+                if (!thinned.count(dep)) job.trim_originals[dep] = std::move(before);
+                record(dep, kind, "trimmed").trimmed_from = thinned.count(dep) ? thinned[dep].second : r.before;
             }
         }
         if (!trimmed.empty()) {
@@ -18004,7 +18080,8 @@ bool save_lod_view(const LodView &v, const fs::path &file) {
         f << m.tag << "\n" << m.name << "\n" << m.change << "\n" << m.kind << " " << m.undone << " " << m.placed << " " << m.radius;
         for (double c : m.cutoffs) f << " " << c;
         for (int l : m.level) f << " " << l;
-        f << " " << m.trimmed_from << " " << m.as_made << " " << m.coll_made << " " << m.coll_now << " " << m.density << " " << m.had_lods << " " << m.stock << " " << m.unused;
+        f << " " << m.trimmed_from << " " << m.as_made << " " << m.coll_made << " " << m.coll_now << " " << m.density << " " << m.had_lods << " " << m.stock << " " << m.unused
+          << " " << m.cards << " " << m.card_triangles << " " << m.cards_taken;
         f << "\n" << m.collision << "\n" << m.note << "\n";
     }
     f << "end\n";
@@ -18041,6 +18118,7 @@ bool load_lod_view(LodView &out, const fs::path &file) {
         if (v4 && !(ss >> m.stock)) return false;
         if (!v4 && m.change == "stock") m.stock = true;
         if (v4 && !(ss >> m.unused)) m.unused = false;   // (saved before it was kept)
+        if (v4 && !(ss >> m.cards >> m.card_triangles >> m.cards_taken)) m.cards = m.card_triangles = m.cards_taken = 0;
         if (v2 && !text(m.collision)) return false;
         if (v3 && !text(m.note)) return false;
     }

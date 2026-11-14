@@ -84,7 +84,7 @@ enum {
     // stock models' unused levels of detail; storing animations as keyframes
     ID_X_LODSTOCK, ID_X_ANIM_LBL, ID_X_ANIM,
     // making lower-detail versions, and the LOD library's folder (each *_BROWSE directly follows its edit box)
-    ID_X_MAKELOD, ID_X_TRIM_LBL, ID_X_TRIM, ID_S_LOD_LBL, ID_S_LOD, ID_S_LOD_BROWSE, ID_S_LOD_HINT, ID_S_TOUR, ID_S_KEEP_FAILED,
+    ID_X_MAKELOD, ID_X_TRIM_LBL, ID_X_TRIM, ID_X_FOLIAGE_LBL, ID_X_FOLIAGE, ID_S_LOD_LBL, ID_S_LOD, ID_S_LOD_BROWSE, ID_S_LOD_HINT, ID_S_TOUR, ID_S_KEEP_FAILED,
     // portals for levels made without them
     ID_X_PORTALS,
     ID_X_BOTS, ID_X_STOCK_SHARED,
@@ -115,8 +115,8 @@ enum {
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new113.exe is 1.113).
-#define HMP_VERSION L"1.113"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new114.exe is 1.114).
+#define HMP_VERSION L"1.114"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -209,6 +209,7 @@ static void save_settings() {
     ini_set(L"x_bots", checked(ID_X_BOTS) ? L"1" : L"0");
     ini_set(L"x_stock_shared", checked(ID_X_STOCK_SHARED) ? L"1" : L"0");
     ini_set(L"x_trim", std::to_wstring(std::max(0, sel(ID_X_TRIM))));
+    ini_set(L"x_foliage", std::to_wstring(std::max(0, sel(ID_X_FOLIAGE))));
     ini_set(L"ca_open", checked(ID_CA_OPEN) ? L"1" : L"0");
     ini_set(L"ca_close", checked(ID_CA_CLOSE) ? L"1" : L"0");
     ini_set(L"ca_shared", checked(ID_CA_SHARED) ? L"1" : L"0");
@@ -602,6 +603,7 @@ static void apply_xbox_options(Config &cfg) {
     cfg.xbox_make_lods = checked(ID_X_MAKELOD);
     cfg.xbox_bot_nodes = checked(ID_X_BOTS);
     cfg.xbox_trim_models = std::clamp(sel(ID_X_TRIM), 0, 5);
+    cfg.xbox_foliage_cards = std::clamp(sel(ID_X_FOLIAGE), 0, 3) * 25;
     cfg.xbox_collision = cfg.xbox_trim_models == 4 ? 1 : std::min(cfg.xbox_trim_models, 2);   // (heavy models: their collision too)
     cfg.xbox_compress_animations = std::clamp(sel(ID_X_ANIM), 0, 2);
     cfg.xbox_add_portals = sel(ID_X_PORTALS) >= 1;
@@ -1281,6 +1283,7 @@ static std::string contents_key(const Config &cfg, const fs::path &in, bool with
     std::string key = N(lower(in.wstring())) + "|" + std::to_string((long long)mt.time_since_epoch().count()) + "|" +
                       (cfg.xbox_use_stock_versions ? "s" : "-") + (cfg.xbox_keep_all_vehicles ? "a" : "-") +
                       (cfg.xbox_make_lods ? "l" : "-") + std::to_string(cfg.xbox_trim_models) + std::to_string(cfg.xbox_compress_animations) + "|" +
+                      (cfg.xbox_foliage_cards ? "f" + std::to_string(cfg.xbox_foliage_cards) + "|" : "") +
                       cfg.xbox_other_weapons + (cfg.xbox_perfect ? "|perfect" : "");
     for (auto &w : cfg.xbox_keep_weapons) key += "|k" + w;
     for (auto &[w, r] : cfg.xbox_weapon_replacements) key += "|r" + w + "=" + r;
@@ -1320,7 +1323,8 @@ static std::string prepared_key(const Config &cfg, const fs::path &in) {
 // Bungie's), trims, the LOD library.
 static std::string models_key(const Config &cfg) {
     char b[64];
-    snprintf(b, sizeof b, "%d%d%d|", (int)cfg.xbox_make_lods, (int)cfg.xbox_lod_stock_models, cfg.xbox_trim_models);
+    snprintf(b, sizeof b, "%d%d%d|%s", (int)cfg.xbox_make_lods, (int)cfg.xbox_lod_stock_models, cfg.xbox_trim_models,
+             cfg.xbox_foliage_cards ? ("f" + std::to_string(cfg.xbox_foliage_cards) + "|").c_str() : "");
     return hashed(b + u8(cfg.lod_library));
 }
 // Everything a conversion's prepared tags were made from (xbox_prepare_key: every option, the weapons & vehicles
@@ -3494,6 +3498,10 @@ static void create_controls() {
     list_combo(2, 500, y - 2, 234, ID_X_ANIM,
                {L"Leave them as made", L"Compress (they move the same)", L"Compress harder (fast moves drift)"});
     y += 24;
+    label(2, L"Trees, plants:", 410, y - 2, 86, ID_X_FOLIAGE_LBL);
+    list_combo(2, 500, y - 2, 234, ID_X_FOLIAGE,
+               {L"Keep every leaf card", L"25% fewer leaf cards", L"Half the leaf cards", L"75% fewer leaf cards"});
+    y += 24;
     label(2, L"Portals:", 26, y - 2, 60, ID_X_PORTALS_LBL);
     list_combo(2, 90, y - 2, 430, ID_X_PORTALS,
                {L"Leave every level's as they are", L"Add them to levels made without any, so walls hide what's behind",
@@ -3618,6 +3626,7 @@ static void create_controls() {
     set_check(ID_X_BOTS, ini_get(L"x_bots", L"1") == L"1");
     set_check(ID_X_STOCK_SHARED, ini_get(L"x_stock_shared", L"0") == L"1");
     SendDlgItemMessageW(g_wnd, ID_X_TRIM, CB_SETCURSEL, std::clamp(_wtoi(ini_get(L"x_trim", L"1").c_str()), 0, 5), 0);
+    SendDlgItemMessageW(g_wnd, ID_X_FOLIAGE, CB_SETCURSEL, std::clamp(_wtoi(ini_get(L"x_foliage", L"0").c_str()), 0, 3), 0);
     SendDlgItemMessageW(g_wnd, ID_X_ANIM, CB_SETCURSEL, std::clamp(_wtoi(ini_get(L"x_anim", L"1").c_str()), 0, 2), 0);
     SendDlgItemMessageW(g_wnd, ID_X_PORTALS, CB_SETCURSEL, std::clamp(_wtoi(ini_get(L"x_portals", L"1").c_str()), 0, 2), 0);
     {
@@ -3758,7 +3767,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case ID_X_LODSTOCK: case ID_X_MAKELOD: case ID_X_BOTS: case ID_X_STOCK_SHARED: case ID_S_KEEP_FAILED: case ID_X_SHRINK_STOCK:
             if (code == BN_CLICKED) save_settings();
             break;
-        case ID_X_PORTALS: case ID_X_TRIM: case ID_X_ANIM:
+        case ID_X_PORTALS: case ID_X_TRIM: case ID_X_ANIM: case ID_X_FOLIAGE:
             if (code == CBN_SELCHANGE) save_settings();
             break;
         case ID_X_CONTENTS:

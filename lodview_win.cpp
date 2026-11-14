@@ -26,7 +26,8 @@ namespace {
 enum { IDC_INTRO = 400, IDC_FILTER_LBL, IDC_FILTER, IDC_LIST, IDC_VIEW, IDC_LEVEL0, IDC_LEVEL4 = IDC_LEVEL0 + 4, IDC_WIRE,
        IDC_ASMADE, IDC_ABOUT, IDC_LIBRARY, IDC_CLOSE, IDC_SHOW_MODEL, IDC_SHOW_COLL, IDC_SHOW_COLL_MADE, IDC_GROUP, IDC_HIDE_UNUSED,
        IDC_LODS_LBL, IDC_LODS, IDC_MED_LBL, IDC_MED, IDC_LOW_LBL, IDC_LOW, IDC_TRIS_LBL, IDC_TOP_LBL, IDC_TOP, IDC_TOPN,
-       IDC_TOPN_LBL, IDC_STATUS, IDC_AGAIN, IDC_REDO };
+       IDC_TOPN_LBL, IDC_STATUS, IDC_AGAIN, IDC_REDO, IDC_CARDS_LBL, IDC_CARDS, IDC_CARDSN, IDC_CARDSN_LBL, IDC_PIECES_LBL, IDC_PIECES, IDC_PIECESN,
+       IDC_PIECESN_LBL };
 
 const UINT WM_UPDATED = WM_APP + 41;   // (the update's thread: done; lParam a Result*)
 const UINT WM_REDONE = WM_APP + 42;    // ("Make it again"'s thread: done; lParam a Result*)
@@ -139,6 +140,9 @@ std::wstring choice_short(const LodView::Model &m) {
                                       : L"LODs";
     if (c.top == 'k') t += (t.empty() ? L"" : L", ") + std::wstring(L"top as made");
     else if (c.top == 't') t += std::wstring(t.empty() ? L"" : L", ") + L"top " + thousands(c.top_triangles);
+    if (c.cards == 0) t += std::wstring(t.empty() ? L"" : L", ") + L"every leaf card";
+    else if (c.cards > 0) t += std::wstring(t.empty() ? L"" : L", ") + std::to_wstring(c.cards) + L"% fewer cards";
+    if (c.pieces > 0) t += std::wstring(t.empty() ? L"" : L", ") + L"pieces under " + std::to_wstring(c.pieces) + L"%";
     return t;
 }
 
@@ -162,12 +166,17 @@ lod::Choice read_choice() {
     c.top = ti == 1 ? 'k' : ti == 2 ? 't' : 'a';
     if (c.top == 't') c.top_triangles = number(IDC_TOPN);
     if (c.top == 't' && c.top_triangles <= 0) c.top = St->saved.top == 't' ? 'a' : St->saved.top;   // (no number yet)
+    int ci = (int)SendMessageW(item(IDC_CARDS), CB_GETCURSEL, 0, 0);
+    c.cards = ci == 1 ? 0 : ci == 2 ? std::min(90, number(IDC_CARDSN)) : -1;
+    if (ci == 2 && c.cards <= 0) c.cards = St->saved.cards;   // (no number yet)
+    c.pieces = SendMessageW(item(IDC_PIECES), CB_GETCURSEL, 0, 0) == 1 ? std::min(50, number(IDC_PIECESN)) : 0;
+    if (SendMessageW(item(IDC_PIECES), CB_GETCURSEL, 0, 0) == 1 && c.pieces <= 0) c.pieces = St->saved.pieces;
     c.skip = St->saved.skip;
     return c;
 }
 bool same(const lod::Choice &a, const lod::Choice &b) {
     return a.lods == b.lods && a.top == b.top && (a.lods != 'm' || (a.medium == b.medium && a.low == b.low)) &&
-           (a.top != 't' || a.top_triangles == b.top_triangles);
+           (a.top != 't' || a.top_triangles == b.top_triangles) && a.cards == b.cards && a.pieces == b.pieces;
 }
 
 // Which choice controls apply to the model shown.
@@ -181,8 +190,18 @@ void enable_choice() {
     for (int id : {IDC_TOP_LBL, IDC_TOP}) EnableWindow(item(id), top);
     EnableWindow(item(IDC_TOPN), top && ti == 2);
     EnableWindow(item(IDC_TOPN_LBL), top);
+    // (leaf cards: a model that has some; not a first-person one)
+    bool cards = any && !fp && m->cards >= 2;
+    int ci = (int)SendMessageW(item(IDC_CARDS), CB_GETCURSEL, 0, 0);
+    for (int id : {IDC_CARDS_LBL, IDC_CARDS, IDC_CARDSN_LBL}) EnableWindow(item(id), cards);
+    EnableWindow(item(IDC_CARDSN), cards && ci == 2);
+    bool pieces = any && !fp;
+    for (int id : {IDC_PIECES_LBL, IDC_PIECES, IDC_PIECESN_LBL}) EnableWindow(item(id), pieces);
+    EnableWindow(item(IDC_PIECESN), pieces && SendMessageW(item(IDC_PIECES), CB_GETCURSEL, 0, 0) == 1);
     EnableWindow(item(IDC_REDO), m && (bool)St->redo && !St->updating && (lods || top));
 }
+
+int top_triangles(const LodView::Model &m);
 
 // The shown model's choice into the controls.
 void load_choice() {
@@ -195,6 +214,22 @@ void load_choice() {
     SetWindowTextW(item(IDC_MED), c.lods == 'm' && c.medium > 0 ? std::to_wstring(c.medium).c_str() : L"");
     SetWindowTextW(item(IDC_LOW), c.lods == 'm' && c.low > 0 ? std::to_wstring(c.low).c_str() : L"");
     SetWindowTextW(item(IDC_TOPN), c.top == 't' ? std::to_wstring(c.top_triangles).c_str() : L"");
+    SendMessageW(item(IDC_CARDS), CB_SETCURSEL, c.cards == 0 ? 1 : c.cards > 0 ? 2 : 0, 0);
+    SetWindowTextW(item(IDC_CARDSN), c.cards > 0 ? std::to_wstring(c.cards).c_str() : L"");
+    SendMessageW(item(IDC_PIECES), CB_SETCURSEL, c.pieces > 0 ? 1 : 0, 0);
+    SetWindowTextW(item(IDC_PIECESN), c.pieces > 0 ? std::to_wstring(c.pieces).c_str() : L"");
+    {
+        std::wstring cl = L"% of them";
+        if (m && m->cards >= 2) {
+            cl += L" (" + thousands(m->cards) + L" cards as made, " + thousands(m->card_triangles) + L" of its " +
+                  thousands(m->trimmed_from > 0 ? m->trimmed_from : top_triangles(*m)) + L" triangles";
+            if (m->cards_taken > 0) cl += L"; " + thousands(m->cards_taken) + L" taken out";
+            cl += L")";
+        } else if (m) {
+            cl += L" (it has no leaf cards)";
+        }
+        SetWindowTextW(item(IDC_CARDSN_LBL), cl.c_str());
+    }
     std::wstring g = m ? L"What every conversion does with " + W(m->name) + L" from now on (on any map that uses it)"
                        : L"What every conversion does with the model, from now on";
     SetWindowTextW(item(IDC_GROUP), g.c_str());
@@ -434,7 +469,8 @@ void enable_all(bool on) {
     for (int id : {IDC_LIST, IDC_FILTER, IDC_AGAIN, IDC_CLOSE, IDC_LIBRARY}) EnableWindow(item(id), on);
     if (on) enable_choice();
     else
-        for (int id : {IDC_LODS, IDC_MED, IDC_LOW, IDC_TOP, IDC_TOPN, IDC_REDO}) EnableWindow(item(id), FALSE);
+        for (int id : {IDC_LODS, IDC_MED, IDC_LOW, IDC_TOP, IDC_TOPN, IDC_CARDS, IDC_CARDSN, IDC_PIECES, IDC_PIECESN, IDC_REDO})
+            EnableWindow(item(id), FALSE);
 }
 
 // "Update the map": the choices saved, then the map's models done again and the map built again (core.hpp
@@ -594,7 +630,13 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         case IDC_LODS:
         case IDC_TOP:
+        case IDC_CARDS:
+        case IDC_PIECES:
             if (code == CBN_SELCHANGE && !St->loading) {
+                if (id == IDC_PIECES && SendMessageW(item(IDC_PIECES), CB_GETCURSEL, 0, 0) == 1 && number(IDC_PIECESN) <= 0)
+                    SetWindowTextW(item(IDC_PIECESN), L"5");
+                if (id == IDC_CARDS && SendMessageW(item(IDC_CARDS), CB_GETCURSEL, 0, 0) == 2 && number(IDC_CARDSN) <= 0)
+                    SetWindowTextW(item(IDC_CARDSN), L"50");
                 // (a model with lower-detail versions of its own: "Make them" replaces them with ones the app makes)
                 // "Trim it to": starting from Bungie's for its kind and size (or half its triangles)
                 if (id == IDC_TOP && SendMessageW(item(IDC_TOP), CB_GETCURSEL, 0, 0) == 2 && number(IDC_TOPN) <= 0 &&
@@ -611,6 +653,8 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case IDC_MED:
         case IDC_LOW:
         case IDC_TOPN:
+        case IDC_CARDSN:
+        case IDC_PIECESN:
             if (code == EN_KILLFOCUS) save_choice();
             return 0;
         case IDC_LIBRARY: {
@@ -621,7 +665,7 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case IDOK: {   // (Enter: in a number box, saves it)
             HWND f = GetFocus();
-            if (f == item(IDC_MED) || f == item(IDC_LOW) || f == item(IDC_TOPN)) {
+            if (f == item(IDC_MED) || f == item(IDC_LOW) || f == item(IDC_TOPN) || f == item(IDC_CARDSN) || f == item(IDC_PIECESN)) {
                 save_choice();
                 return 0;
             }
@@ -738,16 +782,27 @@ void create_controls() {
     add(L"EDIT", L"", WS_TABSTOP | WS_BORDER | ES_NUMBER | ES_AUTOHSCROLL, 500, 610, 72, 23, IDC_TOPN);
     add(L"STATIC", L"triangles", SS_NOPREFIX, 580, 613, 584, 20, IDC_TOPN_LBL);
     for (int id : {IDC_MED, IDC_LOW}) SendMessageW(item(id), EM_SETCUEBANNER, TRUE, (LPARAM)L"auto");
+    add(L"STATIC", L"Leaf cards:", SS_NOPREFIX, 16, 645, 160, 20, IDC_CARDS_LBL);
+    HWND cc = add(L"COMBOBOX", L"", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 180, 641, 250, 200, IDC_CARDS);
+    for (auto t : {L"As the Xbox tab says (trees, plants)", L"Keep every one", L"Take out"}) SendMessageW(cc, CB_ADDSTRING, 0, (LPARAM)t);
+    add(L"EDIT", L"", WS_TABSTOP | WS_BORDER | ES_NUMBER | ES_AUTOHSCROLL, 500, 642, 72, 23, IDC_CARDSN);
+    add(L"STATIC", L"% of them", SS_NOPREFIX, 580, 645, 584, 20, IDC_CARDSN_LBL);
+    add(L"STATIC", L"Small pieces:", SS_NOPREFIX, 16, 677, 160, 20, IDC_PIECES_LBL);
+    HWND pc = add(L"COMBOBOX", L"", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 180, 673, 250, 200, IDC_PIECES);
+    for (auto t : {L"Keep them all", L"Take out those under"}) SendMessageW(pc, CB_ADDSTRING, 0, (LPARAM)t);
+    add(L"EDIT", L"", WS_TABSTOP | WS_BORDER | ES_NUMBER | ES_AUTOHSCROLL, 500, 674, 72, 23, IDC_PIECESN);
+    add(L"STATIC", L"% of its size (bolts, trim, decorations made as separate pieces)", SS_NOPREFIX, 580, 677, 584, 20,
+        IDC_PIECESN_LBL);
 
-    add(L"BUTTON", L"Open the LOD library folder", WS_TABSTOP, 16, 650, 220, 30, IDC_LIBRARY);
-    add(L"STATIC", L"", SS_NOPREFIX, 248, 650, 470, 34, IDC_STATUS);
-    add(L"BUTTON", L"Make it again", WS_TABSTOP, 728, 650, 150, 30, IDC_REDO);
+    add(L"BUTTON", L"Open the LOD library folder", WS_TABSTOP, 16, 714, 220, 30, IDC_LIBRARY);
+    add(L"STATIC", L"", SS_NOPREFIX, 248, 714, 470, 34, IDC_STATUS);
+    add(L"BUTTON", L"Make it again", WS_TABSTOP, 728, 714, 150, 30, IDC_REDO);
     // (only for a map prepared but not built yet: a built one is built again by converting it again, never from here
     // by accident)
-    add(L"BUTTON", L"Build the map", WS_TABSTOP, 888, 650, 150, 30, IDC_AGAIN);
+    add(L"BUTTON", L"Build the map", WS_TABSTOP, 888, 714, 150, 30, IDC_AGAIN);
     if (St->built) ShowWindow(item(IDC_AGAIN), SW_HIDE);
     if (!St->redo) ShowWindow(item(IDC_REDO), SW_HIDE);
-    add(L"BUTTON", L"Close", WS_TABSTOP | BS_DEFPUSHBUTTON, 1048, 650, 116, 30, IDC_CLOSE);
+    add(L"BUTTON", L"Close", WS_TABSTOP | BS_DEFPUSHBUTTON, 1048, 714, 116, 30, IDC_CLOSE);
     for (int i = 0; i < 5; i++) ShowWindow(item(IDC_LEVEL0 + i), SW_HIDE);
     EnableWindow(item(IDC_ASMADE), FALSE);
     if (St->library.empty()) status(L"Set the LOD library folder on the Settings tab to keep choices for models.");
@@ -768,6 +823,18 @@ void create_controls() {
                  L"that many triangles, whatever the Xbox tab says (the shape may move up to 5% of the model's size to get "
                  L"there). It starts at what Bungie's models of its kind and size have.\n\nKept in choices.txt in the "
                  L"LOD library, for every map that uses the model.");
+    tip(IDC_CARDS, L"Leaf cards: the separate small pieces drawn with a cut-out shader (a tree's or a plant's leaves, "
+                   L"grass, branches drawn as pictures on flat cards), 32 triangles or fewer each. Trimming keeps them as made "
+                   L"(a card's outline is its texture's), so a tree mostly made of them only gets lighter with fewer.\n\nAs the "
+                   L"Xbox tab says: \"Trees, plants\" there, for models that are mostly leaf cards (24 or more, a quarter or "
+                   L"more of their triangles).\n\nTake out: that percent of them (up to 90), whatever the Xbox tab says, evenly "
+                   L"through the model so it thins out the same everywhere; no part loses its last card. Its lower-detail "
+                   L"versions lose the same share.\n\nKept in choices.txt in the LOD library, for every map that uses the model.");
+    tip(IDC_PIECES, L"Small pieces: parts of the model made as separate pieces (touching nothing else), smaller than that "
+                    L"percent of the model's size (the diagonal of the box around it; each piece's the same): bolts, trim, "
+                    L"decorations, greebles. Taken out of every level of detail; leaf cards are left to the line above, and "
+                    L"each level keeps its biggest piece. \"Make it again\" shows what's left.\n\nKept in choices.txt in "
+                    L"the LOD library, for every map that uses the model.");
     tip(IDC_AGAIN, L"Puts your choices in the map: its models' levels of detail and trims are done again on the tags the "
                    L"conversion prepared, and the map is built (the rest of the map stays as converted). The list then shows "
                    L"the map as built.");
@@ -816,7 +883,7 @@ bool show(HWND owner, const std::filesystem::path &file, const std::filesystem::
     }
     st.font = CreateFontW(-MulDiv(9, st.dpi, 72), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
     st.bold = CreateFontW(-MulDiv(9, st.dpi, 72), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
-    RECT r{0, 0, S(1180), S(696)};
+    RECT r{0, 0, S(1180), S(760)};
     DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
     AdjustWindowRect(&r, style, FALSE);
     RECT orc;

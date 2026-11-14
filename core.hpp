@@ -75,6 +75,9 @@ struct Config {
     // first pass of 0.05%. 5 hardest (1%, characters 0.65%, first-person weapons 0.4%, 0.025 units: thin parts change). First-person weapons lose what's never on screen whatever the limit. A model's own choice in
     // the LODs window (lod.hpp Choice) comes first.
     int xbox_trim_models = 1;
+    // Foliage (trees, plants: models made mostly of leaf cards, lod.hpp Cards): the percent of their leaf cards to take
+    // out (0 none), evenly through each. A model's own choice in the LODs window comes first.
+    int xbox_foliage_cards = 0;
     // Store the map's animations (its own and the Xbox's it uses) the way Bungie stored the Xbox's cinematics: as
     // keyframes ("compressed", animcomp.hpp), about half the tag memory for first-person animations, a quarter less
     // for characters. 0 as made; 1 compress (every bone within the rounding the Xbox's 6-byte rotations make anyway);
@@ -301,6 +304,8 @@ struct LodView {
         int trimmed_from = 0;            // its most detailed version was trimmed: its triangles as the map made it
         int as_made = -1;                // and that version's drawing in `previews`
         std::string collision;           // its collision changed: how ("" none), e.g. "the Warthog's on 4 parts: ..."
+        int cards = 0, card_triangles = 0;   // its leaf cards as made (lod.hpp Cards), and their triangles
+        int cards_taken = 0;             // of those, taken out
         int coll_made = -1, coll_now = -1;   // its collision's drawings in `previews`: as the map made it, as converted
     };
     std::string map_name;

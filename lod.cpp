@@ -530,7 +530,8 @@ static const char *kChoicesHeader =
     "# Halo Map Porter: what to do with these models (chosen in the LODs window), for every map that uses them.\r\n"
     "# One line per model, tab separated: its tag path; lower-detail versions: auto, none, or make and the medium\r\n"
     "# and low triangles to aim for (0: automatic); its most detailed version: auto, as made, or trim and the\r\n"
-    "# triangles. Lines starting with # are notes.\r\n";
+    "# triangles; then, if chosen, its leaf cards: cards and the percent to take out (none: keep them all), and its\r\n"
+    "# small pieces: pieces and the percent of its size under which they're taken out. Lines starting with # are notes.\r\n";
 
 static std::vector<std::string> split_tabs(const std::string &l) {
     std::vector<std::string> f;
@@ -579,6 +580,14 @@ Choice choice(const Settings &settings, const std::string &model_tag, const std:
         b >> w;
         if (w == "as") got.top = 'k';
         else if (w == "trim" && (b >> got.top_triangles) && got.top_triangles > 0) got.top = 't';
+        for (size_t i = 3; i < f.size(); i++) {   // ("cards 50": half the leaf cards taken out; "cards none": none;
+                                                   // "pieces 10": separate pieces under 10% of its size taken out)
+            std::istringstream x(lower(f[i]));
+            if (!(x >> w)) continue;
+            std::string n;
+            if (w == "cards" && (x >> n)) got.cards = n == "none" ? 0 : std::clamp(std::atoi(n.c_str()), 0, 90);
+            if (w == "pieces" && (x >> n)) got.pieces = std::clamp(std::atoi(n.c_str()), 0, 50);
+        }
         return got;
     }
     return c;
@@ -608,7 +617,7 @@ bool set_choice(const Settings &settings, const std::string &model_tag, const Ch
         }
     }
     std::string key = tag_key(model_tag), line;
-    bool automatic = c.lods == 'a' && c.top == 'a';
+    bool automatic = c.lods == 'a' && c.top == 'a' && c.cards < 0 && c.pieces <= 0;
     if (!automatic || skipped(settings, model_tag, "")) {
         line = model_tag + "\t";
         if (c.lods == 'n') line += "none";
@@ -618,6 +627,8 @@ bool set_choice(const Settings &settings, const std::string &model_tag, const Ch
         if (c.top == 'k') line += "as made";
         else if (c.top == 't' && c.top_triangles > 0) line += "trim " + std::to_string(c.top_triangles);
         else line += "auto";
+        if (c.cards >= 0) line += "\tcards " + (c.cards == 0 ? std::string("none") : std::to_string(std::min(90, c.cards)));
+        if (c.pieces > 0) line += "\tpieces " + std::to_string(std::min(50, c.pieces));
         if (!note.empty()) line += "\t# " + note;
     }
     bool placed = false;
@@ -824,6 +835,327 @@ static int top_triangles(std::vector<TagNode> &geos, std::vector<TagNode> &regio
         if (g >= 0 && g < (int)geos.size()) n += list_triangles(geos[g]);
     }
     return n;
+}
+
+// The leaf cards of one geometry (lod.hpp Cards): per cut-out part, its triangles (a list, three per triangle) in
+// pieces that share no vertex and no place, each 32 triangles or fewer, reaching see-through texture.
+struct CardPiece {
+    size_t part;
+    std::vector<size_t> tris;   // (indices of the part's triangles, in its list)
+    float mid[3];
+};
+static std::vector<CardPiece> card_pieces(TagNode &geo, const Keep &keep, std::vector<std::vector<uint32_t>> &lists) {
+    std::vector<CardPiece> out;
+    auto &parts = *tagfile::block(geo, "parts");
+    lists.assign(parts.size(), {});
+    for (size_t p = 0; p < parts.size(); p++) {
+        auto &V = *tagfile::block(parts[p], "uncompressed vertices");
+        lists[p] = strip_to_list(*tagfile::block(parts[p], "triangles"), V.size());
+        int sh = (int)tagfile::get_num(parts[p], "shader index");
+        if (sh < 0 || (size_t)sh >= keep.shaders.size() || !keep.shaders[(size_t)sh]) continue;
+        const ClearMask *m = (size_t)sh < keep.masks.size() ? keep.masks[(size_t)sh].get() : nullptr;
+        const std::vector<uint32_t> &L = lists[p];
+        const size_t T = L.size() / 3;
+        std::vector<size_t> up(T);
+        for (size_t t = 0; t < T; t++) up[t] = t;
+        std::function<size_t(size_t)> root = [&](size_t x) {
+            while (up[x] != x) x = up[x] = up[up[x]];
+            return x;
+        };
+        auto join = [&](size_t a, size_t b) { a = root(a), b = root(b); if (a != b) up[std::max(a, b)] = std::min(a, b); };
+        std::map<uint32_t, size_t> by_vertex;
+        std::map<Point, size_t> by_place;
+        for (size_t t = 0; t < T; t++)
+            for (int k = 0; k < 3; k++) {
+                uint32_t v = L[t * 3 + k];
+                auto a = by_vertex.emplace(v, t);
+                if (!a.second) join(a.first->second, t);
+                const std::string &f = V[v].fixed;
+                auto b = by_place.emplace(Point{f32(f, 0), f32(f, 4), f32(f, 8)}, t);
+                if (!b.second) join(b.first->second, t);
+            }
+        std::map<size_t, std::vector<size_t>> pieces;
+        for (size_t t = 0; t < T; t++) pieces[root(t)].push_back(t);
+        for (auto &[r, tris] : pieces) {
+            if (tris.size() > 32) continue;   // (a frond or a branch made as one piece: part of the shape)
+            bool clear = !m;
+            double c[3] = {0, 0, 0};
+            for (size_t t : tris) {
+                float uv[6];
+                for (int k = 0; k < 3; k++) {
+                    const std::string &f = V[L[t * 3 + k]].fixed;
+                    uv[k * 2] = f32(f, 48), uv[k * 2 + 1] = f32(f, 52);
+                    for (int a = 0; a < 3; a++) c[a] += f32(f, a * 4);
+                }
+                if (!clear && reaches_clear(*m, uv)) clear = true;
+            }
+            if (!clear) continue;
+            CardPiece cp{p, tris, {}};
+            for (int a = 0; a < 3; a++) cp.mid[a] = (float)(c[a] / (tris.size() * 3));
+            out.push_back(std::move(cp));
+        }
+    }
+    return out;
+}
+
+Cards count_cards(const fs::path &model, const Settings &settings) {
+    Cards r;
+    tagfile::EditTag t;
+    if (!t.load(model)) return r;
+    std::vector<TagNode> *geos = tagfile::block(t.root(), "geometries"), *regions = tagfile::block(t.root(), "regions");
+    if (!geos || !regions) return r;
+    const Keep keep = cut_out_shaders(model, settings);
+    r.triangles = top_triangles(*geos, *regions);
+    if (keep.empty()) return r;
+    // (as the game counts: each region's first permutation)
+    for (auto &reg : *regions) {
+        auto *perms = tagfile::block(reg, "permutations");
+        if (!perms || perms->empty()) continue;
+        int g = (int)tagfile::get_num(perms->front(), "super high");
+        if (g < 0 || g >= (int)geos->size()) continue;
+        std::vector<std::vector<uint32_t>> lists;
+        for (auto &c : card_pieces((*geos)[g], keep, lists)) {
+            r.cards++;
+            r.card_triangles += (int)c.tris.size();
+        }
+    }
+    return r;
+}
+
+// One geometry with `share` of its leaf cards taken out (evenly: lod.hpp thin_cards). `cards`/`taken`: counted.
+static TagNode thin_geometry(const TagNode &geo, const Keep &keep, double share, int &cards, int &taken) {
+    TagNode g = geo;
+    std::vector<std::vector<uint32_t>> lists;
+    std::vector<CardPiece> pieces = card_pieces(g, keep, lists);
+    cards = (int)pieces.size();
+    taken = 0;
+    if (pieces.size() < 2) return geo;
+    // Along a path that fills the box around them (a Morton order: cards near each other come one after another).
+    float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+    for (auto &c : pieces)
+        for (int a = 0; a < 3; a++) lo[a] = std::min(lo[a], c.mid[a]), hi[a] = std::max(hi[a], c.mid[a]);
+    auto code = [&](const CardPiece &c) {
+        uint64_t q[3], k = 0;
+        for (int a = 0; a < 3; a++)
+            q[a] = hi[a] > lo[a] ? (uint64_t)std::min(1023.0, (c.mid[a] - lo[a]) / (hi[a] - lo[a]) * 1023.0) : 0;
+        for (int b = 9; b >= 0; b--)
+            for (int a = 0; a < 3; a++) k = k << 1 | (q[a] >> b & 1);
+        return k;
+    };
+    std::vector<std::pair<uint64_t, size_t>> order;
+    for (size_t i = 0; i < pieces.size(); i++) order.push_back({code(pieces[i]), i});
+    std::sort(order.begin(), order.end());
+    auto &parts = *tagfile::block(g, "parts");
+    std::vector<size_t> left(parts.size(), 0);
+    for (auto &c : pieces) left[c.part]++;
+    std::vector<std::vector<char>> gone(parts.size());
+    for (size_t p = 0; p < parts.size(); p++) gone[p].assign(lists[p].size() / 3, 0);
+    double owed = 0.5;   // (every 1 / share: taken out half way through each step, so the first and last stay)
+    for (auto &[k, i] : order) {
+        owed += share;
+        if (owed < 1) continue;
+        CardPiece &c = pieces[i];
+        if (left[c.part] <= 1) continue;   // (a part keeps its last card)
+        owed -= 1;
+        left[c.part]--;
+        taken++;
+        for (size_t t : c.tris) gone[c.part][t] = 1;
+    }
+    if (!taken) return geo;
+    for (size_t p = 0; p < parts.size(); p++) {
+        if (std::find(gone[p].begin(), gone[p].end(), 1) == gone[p].end()) continue;
+        std::vector<TagNode> &V = *tagfile::block(parts[p], "uncompressed vertices");
+        std::vector<TagNode> *C = tagfile::block(parts[p], "compressed vertices");
+        std::vector<uint32_t> list;
+        for (size_t t = 0; t < gone[p].size(); t++)
+            if (!gone[p][t]) list.insert(list.end(), {lists[p][t * 3], lists[p][t * 3 + 1], lists[p][t * 3 + 2]});
+        // (only the vertices still used, in their order)
+        std::vector<uint32_t> remap(V.size(), ~0u);
+        std::vector<TagNode> nv, nc;
+        for (uint32_t i : list)
+            if (remap[i] == ~0u) remap[i] = 0;   // (marked used)
+        for (size_t i = 0; i < V.size(); i++)
+            if (remap[i] != ~0u) {
+                remap[i] = (uint32_t)nv.size();
+                nv.push_back(V[i]);
+                if (C && C->size() == V.size()) nc.push_back((*C)[i]);
+            }
+        for (auto &i : list) i = remap[i];
+        *tagfile::block(parts[p], "triangles") = list_to_strip(list, nv.size(), tagfile::block_struct(parts[p], "triangles"));
+        V = std::move(nv);
+        if (C) *C = std::move(nc);
+    }
+    return g;
+}
+
+Thin thin_cards(const fs::path &model, double share, const Settings &settings) {
+    Thin r;
+    share = std::clamp(share, 0.0, 0.9);
+    tagfile::EditTag t;
+    if (!t.load(model)) { r.why = "couldn't be read"; return r; }
+    std::vector<TagNode> *geos = tagfile::block(t.root(), "geometries"), *regions = tagfile::block(t.root(), "regions");
+    if (!geos || !regions) { r.why = "not a model"; return r; }
+    const Keep keep = cut_out_shaders(model, settings);
+    if (keep.empty()) { r.why = "has no cut-out parts"; return r; }
+    r.before = r.after = top_triangles(*geos, *regions);
+    std::set<int> tops;
+    top_size(*geos, *regions, &tops);
+    size_t bytes_before = 0, bytes_after = 0;
+    for (size_t g = 0; g < geos->size(); g++) {
+        int cards = 0, taken = 0;
+        TagNode v = thin_geometry((*geos)[g], keep, share, cards, taken);
+        if (tops.count((int)g)) r.cards += cards, r.taken += taken;
+        if (!taken) continue;
+        bytes_before += geometry_xbox_bytes((*geos)[g]);
+        bytes_after += geometry_xbox_bytes(v);
+        (*geos)[g] = std::move(v);
+    }
+    if (!r.taken) { r.why = r.cards < 2 ? "has no leaf cards" : "no card could go (each part keeps its last)"; return r; }
+    r.after = top_triangles(*geos, *regions);
+    if (!t.save(model)) { r.why = "couldn't be saved"; r.after = r.before; return r; }
+    r.changed = true;
+    r.xbox_bytes_saved = bytes_before > bytes_after ? bytes_before - bytes_after : 0;
+    return r;
+}
+
+// One geometry with its separate pieces smaller than `limit` (world units, the diagonal of a piece's box) taken out,
+// but its biggest; cut-out parts left as they are. `pieces`/`taken` counted.
+static TagNode drop_pieces(const TagNode &geo, const Keep &keep, double limit, int &pieces, int &taken) {
+    TagNode g = geo;
+    auto &parts = *tagfile::block(g, "parts");
+    std::vector<std::vector<uint32_t>> lists(parts.size());
+    std::vector<size_t> first(parts.size() + 1, 0);
+    for (size_t p = 0; p < parts.size(); p++) {
+        lists[p] = strip_to_list(*tagfile::block(parts[p], "triangles"), tagfile::block(parts[p], "uncompressed vertices")->size());
+        first[p + 1] = first[p] + lists[p].size() / 3;
+    }
+    auto cut_out = [&](size_t p) {
+        int sh = (int)tagfile::get_num(parts[p], "shader index");
+        return sh >= 0 && (size_t)sh < keep.shaders.size() && keep.shaders[(size_t)sh];
+    };
+    const size_t T = first.back();
+    std::vector<size_t> up(T);
+    for (size_t t = 0; t < T; t++) up[t] = t;
+    std::function<size_t(size_t)> root = [&](size_t x) {
+        while (up[x] != x) x = up[x] = up[up[x]];
+        return x;
+    };
+    auto join = [&](size_t a, size_t b) { a = root(a), b = root(b); if (a != b) up[std::max(a, b)] = std::min(a, b); };
+    std::map<Point, size_t> by_place;   // (across parts too: a piece can be drawn with two shaders)
+    for (size_t p = 0; p < parts.size(); p++) {
+        auto &V = *tagfile::block(parts[p], "uncompressed vertices");
+        std::map<uint32_t, size_t> by_vertex;
+        for (size_t t = 0; t < lists[p].size() / 3; t++)
+            for (int k = 0; k < 3; k++) {
+                uint32_t v = lists[p][t * 3 + k];
+                auto a = by_vertex.emplace(v, first[p] + t);
+                if (!a.second) join(a.first->second, first[p] + t);
+                const std::string &f = V[v].fixed;
+                auto b = by_place.emplace(Point{f32(f, 0), f32(f, 4), f32(f, 8)}, first[p] + t);
+                if (!b.second) join(b.first->second, first[p] + t);
+            }
+    }
+    struct Piece { std::vector<size_t> tris; double size = 0; bool cut = false; };
+    std::map<size_t, Piece> by_root;
+    std::vector<size_t> part_of(T);
+    for (size_t p = 0; p < parts.size(); p++)
+        for (size_t t = first[p]; t < first[p + 1]; t++) part_of[t] = p;
+    for (size_t t = 0; t < T; t++) {
+        Piece &pc = by_root[root(t)];
+        pc.tris.push_back(t);
+        if (cut_out(part_of[t])) pc.cut = true;
+    }
+    size_t biggest = 0;
+    double most = -1;
+    for (auto &[r, pc] : by_root) {
+        float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+        for (size_t t : pc.tris) {
+            size_t p = part_of[t];
+            auto &V = *tagfile::block(parts[p], "uncompressed vertices");
+            for (int k = 0; k < 3; k++)
+                for (int a = 0; a < 3; a++) {
+                    float x = f32(V[lists[p][(t - first[p]) * 3 + k]].fixed, a * 4);
+                    lo[a] = std::min(lo[a], x), hi[a] = std::max(hi[a], x);
+                }
+        }
+        pc.size = std::sqrt((double)(hi[0] - lo[0]) * (hi[0] - lo[0]) + (double)(hi[1] - lo[1]) * (hi[1] - lo[1]) +
+                            (double)(hi[2] - lo[2]) * (hi[2] - lo[2]));
+        if (pc.size > most) most = pc.size, biggest = r;
+    }
+    pieces = (int)by_root.size();
+    taken = 0;
+    std::vector<char> gone(T, 0);
+    for (auto &[r, pc] : by_root) {
+        if (r == biggest || pc.cut || pc.size >= limit) continue;
+        taken++;
+        for (size_t t : pc.tris) gone[t] = 1;
+    }
+    if (!taken) return geo;
+    for (size_t p = 0; p < parts.size(); p++) {
+        bool any = false, all = true;
+        for (size_t t = first[p]; t < first[p + 1]; t++) any |= gone[t] != 0, all &= gone[t] != 0;
+        if (!any) continue;
+        std::vector<TagNode> &V = *tagfile::block(parts[p], "uncompressed vertices");
+        std::vector<TagNode> *C = tagfile::block(parts[p], "compressed vertices");
+        std::vector<uint32_t> list;
+        for (size_t t = first[p]; t < first[p + 1]; t++)
+            if (!gone[t]) {
+                const size_t i = (t - first[p]) * 3;
+                list.insert(list.end(), {lists[p][i], lists[p][i + 1], lists[p][i + 2]});
+            }
+        if (all) {   // (a part with nothing left: one point of it, three times, so parts keep their numbers)
+            const uint32_t v0 = lists[p][0];
+            list = {v0, v0, v0};
+        }
+        std::vector<uint32_t> remap(V.size(), ~0u);
+        std::vector<TagNode> nv, nc;
+        for (uint32_t i : list) remap[i] = 0;
+        for (size_t i = 0; i < V.size(); i++)
+            if (remap[i] != ~0u) {
+                remap[i] = (uint32_t)nv.size();
+                nv.push_back(V[i]);
+                if (C && C->size() == V.size()) nc.push_back((*C)[i]);
+            }
+        for (auto &i : list) i = remap[i];
+        if (all) {   // (three copies of the point: a triangle with no area, which Halo's strips need three vertices for)
+            nv = {nv[0], nv[0], nv[0]};
+            if (!nc.empty()) nc = {nc[0], nc[0], nc[0]};
+            list = {0, 1, 2};
+        }
+        *tagfile::block(parts[p], "triangles") = list_to_strip(list, nv.size(), tagfile::block_struct(parts[p], "triangles"));
+        V = std::move(nv);
+        if (C) *C = std::move(nc);
+    }
+    return g;
+}
+
+Thin drop_small_pieces(const fs::path &model, double share, const Settings &settings) {
+    Thin r;
+    tagfile::EditTag t;
+    if (!t.load(model)) { r.why = "couldn't be read"; return r; }
+    std::vector<TagNode> *geos = tagfile::block(t.root(), "geometries"), *regions = tagfile::block(t.root(), "regions");
+    if (!geos || !regions) { r.why = "not a model"; return r; }
+    const Keep keep = cut_out_shaders(model, settings);
+    r.before = r.after = top_triangles(*geos, *regions);
+    std::set<int> tops;
+    const double size = top_size(*geos, *regions, &tops);
+    if (!(size > 0) || share <= 0) { r.why = "has no size"; return r; }
+    size_t bytes_before = 0, bytes_after = 0;
+    for (size_t g = 0; g < geos->size(); g++) {
+        int pieces = 0, taken = 0;
+        TagNode v = drop_pieces((*geos)[g], keep, share * size, pieces, taken);
+        if (tops.count((int)g)) r.cards += pieces, r.taken += taken;
+        if (!taken) continue;
+        bytes_before += geometry_xbox_bytes((*geos)[g]);
+        bytes_after += geometry_xbox_bytes(v);
+        (*geos)[g] = std::move(v);
+    }
+    if (!r.taken) { r.why = "has no separate pieces that small"; return r; }
+    r.after = top_triangles(*geos, *regions);
+    if (!t.save(model)) { r.why = "couldn't be saved"; r.after = r.before; return r; }
+    r.changed = true;
+    r.xbox_bytes_saved = bytes_before > bytes_after ? bytes_before - bytes_after : 0;
+    return r;
 }
 
 // One geometry trimmed: from the library, or made now (and kept there).
