@@ -115,8 +115,8 @@ enum {
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new110.exe is 1.110).
-#define HMP_VERSION L"1.110"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new111.exe is 1.111).
+#define HMP_VERSION L"1.111"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -1859,16 +1859,36 @@ static void tidy_work(const fs::path &cache, const std::string &tag, const std::
     for (const char *what : {"convert_", "traits_", "scripts_read_"}) fs::remove_all(work / (what + tag), ec);
 }
 // Every batch map's work folders from earlier batches (convert_b<row>, traits_b<row>, scripts_read_b<row>): taken
-// away as a batch starts (none is in use then).
-static void clear_batch_work(const fs::path &cache) {
+// away as a batch starts (none is in use then). Deleting a big batch's takes many minutes, so they're moved into
+// work\_old (a rename: at once) and deleted from there while the batch goes on; what an earlier session left there
+// goes too. Returns how many were moved.
+static size_t clear_batch_work(const fs::path &cache) {
     std::error_code ec;
+    const fs::path old = cache / "work" / "_old";
     std::vector<fs::path> gone;
     for (auto it = fs::directory_iterator(cache / "work", ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
         const std::string n = it->path().filename().u8string();
         for (const char *what : {"convert_b", "traits_b", "scripts_read_b"})
             if (n.rfind(what, 0) == 0 && n.size() > strlen(what) && isdigit((unsigned char)n[strlen(what)])) gone.push_back(it->path());
     }
-    for (auto &p : gone) fs::remove_all(p, ec);
+    ec.clear();
+    fs::create_directories(old, ec);
+    const std::string stamp = std::to_string((long long)time(nullptr)) + "_";
+    size_t moved = 0;
+    for (auto &p : gone) {
+        std::error_code e2;
+        fs::rename(p, old / (stamp + p.filename().u8string()), e2);
+        if (e2) fs::remove_all(p, e2);   // (couldn't be moved: deleted here, the slow way)
+        else moved++;
+    }
+    static std::atomic<bool> deleting{false};
+    if (!deleting.exchange(true))
+        std::thread([old] {
+            std::error_code e3;
+            fs::remove_all(old, e3);
+            deleting = false;
+        }).detach();
+    return moved;
 }
 
 // Where Xbox conversions go, under the Build tab's Xbox folder: linked pairs in one map pack folder (with the Custom
