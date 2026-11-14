@@ -208,13 +208,16 @@ int run_process(const std::vector<std::string> &args, std::string &output, Proce
     std::string name = fs::path(args[0]).stem().string();
     std::transform(name.begin(), name.end(), name.begin(), ::tolower);
     const bool limited = name == "invader-sound" || name == "invader-edit" || name == "invader-bitmap" || name == "invader-info";
+    // (a sound, even a long piece of music, takes invader-sound seconds: one stuck for 4 minutes is stuck, and is
+    // tried again)
+    const int limit_min = name == "invader-sound" ? 4 : 15;
     std::atomic<bool> timed_out{false};
     HANDLE ended = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     std::thread watch;
     if (limited && ended)
         watch = std::thread([&] {
             HANDLE h[2] = {pi.hProcess, ended};
-            if (WaitForMultipleObjects(2, h, FALSE, 15 * 60 * 1000) == WAIT_TIMEOUT) {
+            if (WaitForMultipleObjects(2, h, FALSE, (DWORD)limit_min * 60 * 1000) == WAIT_TIMEOUT) {
                 timed_out = true;
                 TerminateProcess(pi.hProcess, 1);
             }
@@ -229,7 +232,7 @@ int run_process(const std::vector<std::string> &args, std::string &output, Proce
         if (watch.joinable()) watch.join();
         CloseHandle(ended);
     }
-    if (timed_out) output += "\n" + name + " hadn't finished after 15 minutes, so it was stopped (it had hung)";
+    if (timed_out) output += "\n" + name + " hadn't finished after " + std::to_string(limit_min) + " minutes, so it was stopped (it had hung)";
     if (stop) {
         std::lock_guard<std::mutex> g(stop->m);
         stop->proc = nullptr;
@@ -341,6 +344,9 @@ struct Failure {
     // "extracted.hsc:1492:43: error: can't find navpoint 'orange_landingpad'" before a FATAL ERROR
     // "Failed to compile scripts: tag data is invalid" for the scenario.
     std::string hsc_error;
+    // What used the failing tag, outward: "Scenario::netgame_equipment #10 in levels/test/bridge/bridge.scenario"
+    // (the "Failed to compile" lines after the tag's own).
+    std::vector<std::string> users;
 };
 
 static bool parse_failure(const std::string &log_text, Failure &f) {
@@ -376,6 +382,15 @@ static bool parse_failure(const std::string &log_text, Failure &f) {
                 if (f.tag.empty()) f.tag = lines[j].substr(6);
                 j++;
             }
+            // (details listed under it: "    - objects with this name: [Vehicle #8, Machine #1]")
+            while (j < lines.size()) {
+                std::string c = lines[j];
+                size_t a = c.find_first_not_of(' ');
+                if (a == std::string::npos || c.compare(a, 2, "- ") != 0) break;
+                while (!c.empty() && (c.back() == '\r' || c.back() == ' ')) c.pop_back();
+                f.msg += " " + c.substr(a);
+                j++;
+            }
             while (j < lines.size() && lines[j].rfind("Failed to compile", 0) == 0) {
                 std::smatch m;
                 if (std::regex_search(lines[j], m, fail_re))
@@ -383,6 +398,22 @@ static bool parse_failure(const std::string &log_text, Failure &f) {
                 else if (lines[j].rfind("Failed to compile tag", 0) == 0)
                     break;
                 j++;
+            }
+            {   // (the users, after the tag's own "Failed to compile tag")
+                static const std::regex user_re(R"(^Failed to compile (\w+::\w+ #\d+))");
+                std::string pending;
+                for (size_t k = j + 1; k < lines.size() && k < j + 24 && lines[k].rfind("Failed to compile", 0) == 0; k++) {
+                    std::smatch m;
+                    std::string c = lines[k];
+                    while (!c.empty() && (c.back() == '\r' || c.back() == ' ')) c.pop_back();
+                    if (std::regex_search(c, m, user_re)) { if (pending.empty()) pending = m[1].str(); }
+                    else if (c.rfind("Failed to compile tag ", 0) == 0 && !pending.empty()) {
+                        std::string t = c.substr(22);
+                        std::replace(t.begin(), t.end(), '\\', '/');
+                        f.users.push_back(pending + " in " + t);
+                        pending.clear();
+                    }
+                }
             }
             while (!f.tag.empty() && (f.tag.back() == ' ' || f.tag.back() == '\r')) f.tag.pop_back();
             std::replace(f.tag.begin(), f.tag.end(), '\\', '/');
@@ -396,6 +427,7 @@ static bool parse_failure(const std::string &log_text, Failure &f) {
 
 namespace {
 static int fit_xbox_bitmap_sizes(const fs::path &p);
+static int fit_power_of_two(const fs::path &p);
 static int terminate_string_list(const fs::path &p);
 
 int convert_bc7_bitmap_tag(const fs::path &p, bool write);
@@ -983,7 +1015,22 @@ struct Job {
             }
         }
         // Different bones: the object keeps the map's own version of the model (if the map has one).
-        if (md == source || !fs::exists(source / from_u8(model))) return false;
+        if (md == source || !fs::exists(source / from_u8(model))) {
+            // The map's own model and animations, made for other bones (Custom Edition's tools don't check, and its
+            // game plays them as they are): the animations' checksums cleared, which Invader takes as "not checked",
+            // so the Xbox plays them as Custom Edition does.
+            std::vector<std::string> sets;
+            for (auto &[i, s] : sums)
+                if (s != "0") sets.insert(sets.end(), {"-S", "animations[" + std::to_string(i) + "].node_list_checksum", "0"});
+            if (sets.empty() || !(ad == fixes || to_fixes(anim, ad))) return false;
+            std::vector<std::string> cmd{u8(tool(cfg, "invader-edit")), "-n", "-t", u8(fixes), anim};
+            cmd.insert(cmd.end(), sets.begin(), sets.end());
+            std::string out;
+            if (run_process(cmd, out) != 0) return false;
+            note("[fix]  " + anim + ": the map's own animations were made for other bones than " + model + " (Custom "
+                 "Edition plays them anyway); their node checksums cleared so the Xbox does the same");
+            return true;
+        }
         fs::path tdir = fs::path(from_u8(tag)).parent_path();
         std::string stem = fs::path(from_u8(model)).stem().u8string(), copy;
         for (int k = 0; k < 10 && copy.empty(); k++) {
@@ -1481,6 +1528,18 @@ struct Job {
                 }
             }
         }
+        // A 2D texture with sides that aren't powers of two: scaled to the nearest ones.
+        if (msg.find("is non-power-of-two") != std::string::npos) {
+            fs::path own = owner(tag);
+            if (!own.empty() && (own == fixes || to_fixes(tag, own))) {
+                const int n = fit_power_of_two(fixes / from_u8(tag));
+                if (n > 0) {
+                    note("[fix]  " + tag + ": " + std::to_string(n) + " of its textures " + "had sides" +
+                         " that aren't powers of two, which the Xbox can't use outside the interface; scaled to the nearest");
+                    return true;
+                }
+            }
+        }
         // A string list's string with no terminating zero: one added.
         static const std::regex no_null(R"(String #(\d+) (?:is not null terminated|contains an extraneous null terminator|is empty))");
         if (std::regex_search(msg, m, no_null)) {
@@ -1577,6 +1636,28 @@ struct Job {
                 const int n = std::atoi(out.c_str());
                 std::vector<std::string> cmd{u8(tool(cfg, "invader-edit")), "-t", u8(fixes), tag};
                 for (int i = 0; i < n; i++) cmd.insert(cmd.end(), {"-S", "permutations[" + std::to_string(i) + "].weight", "1"});
+                if (n == 0) {
+                    // No items at all (Custom Edition spawns nothing from it): where the level places it, nothing.
+                    static const std::regex place(R"(^Scenario::(netgame_equipment|starting_equipment) #(\d+) in (.+\.scenario)$)");
+                    for (auto &u : f.users) {
+                        std::smatch um;
+                        if (!std::regex_match(u, um, place)) continue;
+                        std::string scen = um[3].str(), key = um[1].str() + "[" + um[2].str() + "]";
+                        std::string field = um[1] == "netgame_equipment" ? ".item_collection" : "";
+                        if (field.empty()) {   // (starting equipment: whichever of its six slots names it)
+                            for (int s = 1; s <= 6 && field.empty(); s++) {
+                                std::string k = key + ".item_collection_" + std::to_string(s);
+                                std::string v = norm_rel(ask(scen, "-G", k));
+                                if (!v.empty() && (v == tag || v + ".item_collection" == tag)) field = ".item_collection_" + std::to_string(s);
+                            }
+                        }
+                        if (!field.empty() && edit(scen, key + field, "")) {
+                            note("[fix]  " + scen + ": " + key + field + " was " + tag + ", which has no items (Custom Edition "
+                                 "spawns nothing from it); now none");
+                            return true;
+                        }
+                    }
+                }
                 if (n > 0 && run_process(cmd, out) == 0) {
                     note("[fix]  " + tag + ": its weights added up to 0 (each under 1, which the game rounds down), which can crash "
                          "the game; each of its " + std::to_string(n) + " is now 1");
@@ -1604,6 +1685,99 @@ struct Job {
                 note("[fix]  " + tag + ": " + key + " used bitmap #" + m[1].str() + " but only " +
                      m[4].str() + " exist; reset to 0");
                 return true;
+            }
+        }
+        // An object whose model and collision model have different numbers of regions (Custom Edition's tools let
+        // that through; its game draws and damages each by its own): the one with fewer gets more. A collision model's
+        // added regions have nothing to hit; a model's added regions draw nothing (one point of its first piece).
+        static const std::regex region_counts(R"('([^']+)\.(?:gbx)?model' and '([^']+)\.model_collision_geometry' have mismatched region counts)");
+        if (std::regex_search(msg, m, region_counts)) {
+            const std::string model = norm_rel(m[1].str()) + ".model", coll = norm_rel(m[2].str()) + ".model_collision_geometry";
+            fs::path mo = owner(model), co = owner(coll);
+            tagfile::EditTag em, ec_;
+            if (!mo.empty() && !co.empty() && em.load(mo / from_u8(model)) && ec_.load(co / from_u8(coll))) {
+                auto *mr = tagfile::block(em.root(), "regions"), *cr = tagfile::block(ec_.root(), "regions");
+                auto *geos = tagfile::block(em.root(), "geometries");
+                auto named = [](tagfile::TagNode n, const std::string &name) {
+                    std::string b = name.substr(0, 31);
+                    b.resize(32, '\0');
+                    if (n.fixed.size() >= 32) n.fixed.replace(0, 32, b);
+                    return n;
+                };
+                // (a copy beside the object, which then uses it: others may use the tag with the right count)
+                auto copy_of = [&](const std::string &t) {
+                    fs::path tdir = fs::path(from_u8(tag)).parent_path();
+                    fs::path tp = from_u8(t);
+                    for (int k = 1; k < 20; k++) {
+                        std::string c = (tdir / (tp.stem().u8string() + "_regions" + (k > 1 ? std::to_string(k) : std::string()) +
+                                                 tp.extension().u8string())).generic_u8string();
+                        if (owner(c).empty()) return c;
+                    }
+                    return std::string();
+                };
+                auto save_copy = [&](tagfile::EditTag &et, const std::string &t, const char *field) {
+                    std::string c = copy_of(t);
+                    if (c.empty()) return std::string();
+                    std::error_code e2;
+                    fs::create_directories((fixes / from_u8(c)).parent_path(), e2);
+                    if (!et.save(fixes / from_u8(c)) || !edit(tag, field, c)) return std::string();
+                    return c;
+                };
+                if (mr && cr && !cr->empty() && mr->size() > cr->size()) {
+                    tagfile::TagNode reg = cr->back();
+                    if (auto *perms = tagfile::block(reg, "permutations"))
+                        if (perms->size() > 1) perms->resize(1);
+                    const size_t had = cr->size();
+                    while (cr->size() < mr->size()) cr->push_back(named(reg, "unused " + std::to_string(cr->size())));
+                    if (std::string c = save_copy(ec_, coll, "collision_model"); !c.empty()) {
+                        note("[fix]  " + tag + ": its collision model " + coll + " had " + std::to_string(had) + " regions to " +
+                             model + "'s " + std::to_string(mr->size()) + "; it uses a copy with regions added that have " +
+                             "nothing to hit (" + c + ")");
+                        return true;
+                    }
+                } else if (mr && cr && !mr->empty() && geos && !geos->empty() && cr->size() > mr->size()) {
+                    // (a piece of nothing: the first geometry's first part, its first triangle's first point three times)
+                    tagfile::TagNode g = geos->front();
+                    bool made = false;
+                    if (auto *parts = tagfile::block(g, "parts"); parts && !parts->empty()) {
+                        parts->resize(1);
+                        auto &part = parts->front();
+                        auto *U = tagfile::block(part, "uncompressed vertices");
+                        auto *C = tagfile::block(part, "compressed vertices");
+                        auto *T = tagfile::block(part, "triangles");
+                        if (U && !U->empty() && T && !T->empty()) {
+                            const int v0 = std::max(0, std::min((int)U->size() - 1, (int)tagfile::get_num(T->front(), "vertex0 index")));
+                            tagfile::TagNode vu = (*U)[(size_t)v0];
+                            *U = {vu, vu, vu};
+                            if (C && C->size() > (size_t)v0) { tagfile::TagNode vc = (*C)[(size_t)v0]; *C = {vc, vc, vc}; }
+                            else if (C) C->clear();
+                            tagfile::TagNode tri = T->front();
+                            for (int j = 0; j < 3; j++)
+                                tagfile::set_num(tri, j == 0 ? "vertex0 index" : j == 1 ? "vertex1 index" : "vertex2 index", j);
+                            *T = {tri};
+                            made = true;
+                        }
+                    }
+                    if (made) {
+                        const double gi = (double)geos->size();
+                        geos->push_back(g);
+                        tagfile::TagNode reg = mr->back();
+                        if (auto *perms = tagfile::block(reg, "permutations"); perms && !perms->empty()) {
+                            perms->resize(1);
+                            auto &pm = perms->front();
+                            for (const char *l : {"super low", "low", "medium", "high", "super high"}) tagfile::set_num(pm, l, gi);
+                            if (auto *mk = tagfile::block(pm, "markers")) mk->clear();
+                            const size_t had = mr->size();
+                            while (mr->size() < cr->size()) mr->push_back(named(reg, "unused " + std::to_string(mr->size())));
+                            if (std::string c = save_copy(em, model, "model"); !c.empty()) {
+                                note("[fix]  " + tag + ": its model " + model + " had " + std::to_string(had) + " regions to " +
+                                     coll + "'s " + std::to_string(cr->size()) + "; it uses a copy with regions added that " +
+                                     "draw nothing (" + c + ")");
+                                return true;
+                            }
+                        }
+                    }
+                }
             }
         }
         static const std::regex node_sums(R"('([^']+)\.(?:gbx)?model' and '([^']+)\.model_animations' animation #\d+ node list checksums are mismatched)");
@@ -4133,11 +4307,17 @@ static bool reencode_sound_now(Job &job, const fs::path &tags, const std::string
     cmd.insert(cmd.end(), split.begin(), split.end());
     cmd.insert(cmd.end(), rate.begin(), rate.end());
     cmd.push_back(noext);
-    if (run_process(cmd, out) != 0) {
+    // (invader-sound has been seen stuck, now and then, on a sound it encodes in a second the next time: tried twice
+    // more when it's stopped for that)
+    for (int tries = 0;; tries++) {
+        if (run_process(cmd, out) == 0) return true;
+        if (tries < 2 && out.find("hadn't finished after") != std::string::npos) {
+            job.log("  [sound] invader-sound got stuck on " + rel + "; trying it again");
+            continue;
+        }
         why = "invader-sound failed: " + out.substr(out.size() > 400 ? out.size() - 400 : 0);
         return false;
     }
-    return true;
 }
 
 // (The re-encoded tag is kept, unless it was made from the user's WAVs: the same sound tag again gets that copy.)
@@ -5499,6 +5679,70 @@ static int fit_xbox_bitmap_sizes(const fs::path &p) {
             put_be16(nb, e + 6, (uint16_t)h);
             put_be16(nb, e + 12, (uint16_t)fmt);
             put_be16(nb, e + 20, (uint16_t)mips);
+        }
+        put_be32(nb, e + 24, (uint32_t)out_pix.size());
+        put_be32(nb, e + 28, (uint32_t)data.size());
+        out_pix += data;
+    }
+    if (!fitted) return 0;
+    std::string out = nb.substr(0, bp.pp_off) + out_pix + nb.substr(bp.pp_off + bp.pp);
+    put_be32(out, 64 + 48, (uint32_t)out_pix.size());
+    put_be32(out, 40, ~crc32_of(out.data() + 64, out.size() - 64));
+    std::ofstream(p, std::ios::binary) << out;
+    return fitted;
+}
+
+// A 2D texture whose sides aren't powers of two (Custom Edition draws them; the Xbox's Invader won't build one outside
+// an interface bitmap): its picture scaled to the nearest powers of two (247x153: 256x128), smoothly, its smaller
+// copies left out (the scaled picture has none). Returns how many textures were scaled (0: none could be).
+static int fit_power_of_two(const fs::path &p) {
+    BitmapParts bp;
+    if (!bp.read(p) || !bp.nbd) return 0;
+    std::string nb = bp.b, out_pix;
+    const std::string pix = bp.b.substr(bp.pp_off, bp.pp);
+    std::vector<uint32_t> offs;
+    for (uint32_t i = 0; i < bp.nbd; i++) offs.push_back(be32(bp.b, bp.bd_off + 48 * (size_t)i + 24));
+    auto near2 = [](int v) {
+        int lo = 1;
+        while (lo * 2 <= v) lo *= 2;
+        return v - lo <= lo * 2 - v ? lo : lo * 2;
+    };
+    int fitted = 0;
+    for (uint32_t i = 0; i < bp.nbd; i++) {
+        const size_t e = bp.bd_off + 48 * (size_t)i;
+        const uint32_t off = offs[i];
+        uint32_t end = (uint32_t)pix.size();
+        for (auto x : offs)
+            if (x > off && x < end) end = x;
+        if (off > pix.size()) return 0;
+        std::string data = pix.substr(off, end - off);
+        const int w = be16(nb, e + 4), h = be16(nb, e + 6), type = be16(nb, e + 10), fmt = be16(nb, e + 12);
+        const int nw = near2(std::max(1, w)), nh = near2(std::max(1, h));
+        if (type == 0 && (nw != w || nh != h)) {
+            std::vector<unsigned char> src, dst((size_t)nw * nh * 4);
+            if (!decode_level(data, w, h, fmt, src)) return 0;
+            for (int y = 0; y < nh; y++)
+                for (int x = 0; x < nw; x++) {   // (bilinear, texel centres matched)
+                    const double fx = std::max(0.0, (x + 0.5) * w / nw - 0.5), fy = std::max(0.0, (y + 0.5) * h / nh - 0.5);
+                    const int x0 = std::min(w - 1, (int)fx), y0 = std::min(h - 1, (int)fy);
+                    const int x1 = std::min(w - 1, x0 + 1), y1 = std::min(h - 1, y0 + 1);
+                    const double ax = fx - x0, ay = fy - y0;
+                    for (int c = 0; c < 4; c++) {
+                        auto at = [&](int xx, int yy) { return (double)src[((size_t)yy * w + xx) * 4 + c]; };
+                        const double v = (at(x0, y0) * (1 - ax) + at(x1, y0) * ax) * (1 - ay) + (at(x0, y1) * (1 - ax) + at(x1, y1) * ax) * ay;
+                        dst[((size_t)y * nw + x) * 4 + c] = (unsigned char)std::lround(std::min(255.0, std::max(0.0, v)));
+                    }
+                }
+            std::string enc = encode_level(dst, nw, nh, fmt);
+            if (enc.empty()) return 0;
+            data = enc;
+            fitted++;
+            put_be16(nb, e + 16, (uint16_t)((int16_t)be16(nb, e + 16) * nw / std::max(1, w)));   // registration point
+            put_be16(nb, e + 18, (uint16_t)((int16_t)be16(nb, e + 18) * nh / std::max(1, h)));
+            put_be16(nb, e + 4, (uint16_t)nw);
+            put_be16(nb, e + 6, (uint16_t)nh);
+            put_be16(nb, e + 14, (uint16_t)(be16(nb, e + 14) | 1));   // (power-of-two sides)
+            put_be16(nb, e + 20, 0);
         }
         put_be32(nb, e + 24, (uint32_t)out_pix.size());
         put_be32(nb, e + 28, (uint32_t)data.size());
@@ -7173,7 +7417,8 @@ static void xbox_animations(Job &job, const std::vector<std::string> &deps) {
         if (own.empty() || !ed.load(own / from_u8(dep))) continue;
         std::string dep_lc = dep;
         for (auto &c : dep_lc) c = (char)tolower((unsigned char)c);
-        int gone = need.ok && need.graphs.count(dep_lc) ? trim_graph(ed.root(), need, trimmed_bytes) : 0;
+        // (Perfect Conversion: none left out; the animations' numbers are gameplay, and the Custom Edition map's must stay)
+        int gone = !job.cfg.xbox_perfect && need.ok && need.graphs.count(dep_lc) ? trim_graph(ed.root(), need, trimmed_bytes) : 0;
         if (gone) { trimmed_graphs++; trimmed += gone; }
         animcomp::GraphResult r = animcomp::compress_graph(ed.root(), level);
         if (!r.compressed && !r.overlays_restored && !gone) continue;

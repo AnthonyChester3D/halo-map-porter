@@ -3,6 +3,7 @@
 #include "tagedit.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <functional>
@@ -116,15 +117,14 @@ bool element_of(const std::string &k, const std::string &block, std::string &whe
     return false;
 }
 
-// Drops the elements of `block` whose reference `field` is to a visual or audio tag, and numbers the rest again
-// (an object's attachments, an effect's parts: their lights and particles may go, the rest stays in order).
-void keep_gameplay_elements(Flat &f, const std::string &block, const std::string &field) {
+// Drops the elements of `block` with a field `field` whose value `gone` picks, and numbers the rest again.
+void drop_elements(Flat &f, const std::string &block, const std::string &field,
+                   const std::function<bool(const std::string &)> &gone) {
     std::map<std::string, std::set<size_t>> drop;
     std::string where, rest;
     size_t i;
     for (auto &[k, v] : f)
-        if (element_of(k, block, where, i, rest) && rest == "." + field && v.size() > 1 && visual_group(dep_ext(v)))
-            drop[where].insert(i);
+        if (element_of(k, block, where, i, rest) && rest == "." + field && gone(v)) drop[where].insert(i);
     if (drop.empty()) return;
     Flat out;
     for (auto &[k, v] : f) {
@@ -142,6 +142,66 @@ void keep_gameplay_elements(Flat &f, const std::string &block, const std::string
         out.push_back({k, v});
     }
     f.swap(out);
+}
+// Drops the elements of `block` whose reference `field` is to a visual or audio tag (an object's attachments, an
+// effect's parts: their lights and particles may go, the rest stays in order).
+void keep_gameplay_elements(Flat &f, const std::string &block, const std::string &field) {
+    drop_elements(f, block, field, [](const std::string &v) { return v.size() > 1 && visual_group(dep_ext(v)); });
+}
+
+// A value Custom Edition's tools let through that the Xbox map can't hold, made the nearest it can: a fraction above
+// 1 or below 0 (a stun, a chance, a shield fraction) as 1 or 0. Each of a list's values ("0.45,1.2" | "0.45,1").
+bool clamped_fraction(const std::string &a, const std::string &b) {
+    auto nums = [](const std::string &s, std::vector<double> &v) {
+        size_t i = 0;
+        while (i <= s.size()) {
+            size_t j = s.find(',', i);
+            if (j == std::string::npos) j = s.size();
+            std::string t = s.substr(i, j - i);
+            char *e = nullptr;
+            double d = std::strtod(t.c_str(), &e);
+            if (t.empty() || !e || *e) return false;
+            v.push_back(d);
+            i = j + 1;
+        }
+        return true;
+    };
+    std::vector<double> x, y;
+    if (a.find('.') == std::string::npos) return false;   // (a number, not a fraction)
+    if (!nums(a, x) || !nums(b, y) || x.size() != y.size()) return false;
+    bool out = false;
+    for (size_t i = 0; i < x.size(); i++) {
+        double c = std::min(1.0, std::max(0.0, x[i]));
+        if (std::fabs(c - y[i]) > 1e-5) {
+            if (std::fabs(x[i] - y[i]) > 1e-5) return false;
+            continue;
+        }
+        if (c != x[i]) out = true;
+    }
+    return out;
+}
+
+// A camera track with fewer than the 4 control points Invader needs, its last one repeated to make 4: the same view.
+void unpad_camera_points(const Flat &a, Flat &b) {
+    std::map<std::string, std::string> A(a.begin(), a.end()), B(b.begin(), b.end());
+    auto na = A.find("control_points.size"), nb = B.find("control_points.size");
+    if (na == A.end() || nb == B.end()) return;
+    size_t n = std::stoul(na->second), m = std::stoul(nb->second);
+    if (n == 0 || m <= n) return;
+    std::string where, rest;
+    size_t i;
+    for (auto &[k, v] : b)
+        if (element_of(k, "control_points", where, i, rest) && i >= n) {
+            auto last = B.find("control_points[" + std::to_string(n - 1) + "]" + rest);
+            if (last == B.end() || last->second != v) return;
+        }
+    Flat out;
+    for (auto &[k, v] : b) {
+        if (k == "control_points.size") { out.push_back({k, na->second}); continue; }
+        if (element_of(k, "control_points", where, i, rest) && i >= n) continue;
+        out.push_back({k, v});
+    }
+    b.swap(out);
 }
 
 std::string strip_word(std::string v, const std::string &w) {
@@ -284,6 +344,9 @@ void compare(const std::string &tag, const std::string &g, Flat a, Flat b, Resul
         sort_markers(a);
         sort_markers(b);
     }
+    if (g == "scenario")   // (netgame flags of the kinds the game never uses: removed for the Xbox, as Invader needs)
+        drop_elements(a, "netgame_flags", "type", [](const std::string &v) { return v == "vegas_bank" || v == "ctf_vehicle"; });
+    if (g == "camera_track") unpad_camera_points(a, b);
     std::map<std::string, std::string> A(a.begin(), a.end()), B(b.begin(), b.end());
     // An animation graph's animations stored compressed in the Custom Edition map and as plain frames in the Xbox's
     // (the same motion: Invader keeps the plain frames a compressed animation carries before its compressed copy,
@@ -316,6 +379,12 @@ void compare(const std::string &tag, const std::string &g, Flat a, Flat b, Resul
                 continue;
             if (dep_key(va) == dep_key(vb)) continue;
         } else if (va != vb) {
+            // An animation's node checksum cleared (Invader then doesn't check it; the game never does).
+            if (g == "model_animations" && gk == "animations[].node_list_checksum" && vb == "0") continue;
+            // A spawn point's or item's gametype of a kind the game never uses ("stub", "ignored"): none, either way.
+            if (g == "scenario" && vb == "none" && (starts(va, "ignored") || starts(va, "stub")) &&
+                (under(gk, "player_starting_locations") || under(gk, "netgame_equipment") || under(gk, "starting_equipment")))
+                continue;
             // Invader sets this one itself when it builds for Custom Edition (projectiles the client works out itself)
             if (g == "weapon" && gk == "triggers[].flags" &&
                 strip_word(va, "projectile_is_client_side_only") == strip_word(vb, "projectile_is_client_side_only"))
@@ -350,6 +419,18 @@ void compare(const std::string &tag, const std::string &g, Flat a, Flat b, Resul
             d.ce = "(not one of its choices)";
             note = true;
         }
+        if (!dep && clamped_fraction(va, vb)) {
+            d.ce += " (out of its 0 to 1 range: the Xbox map holds the nearest it can)";
+            note = true;
+        }
+        // A spawn point on a BSP the level doesn't have (the first one instead, the only one there is).
+        if (g == "scenario" && gk == "player_starting_locations[].bsp_index" && vb == "0") {
+            auto n = A.find("structure_bsps.size");
+            if (n != A.end() && std::atol(va.c_str()) >= std::atol(n->second.c_str())) {
+                d.ce += " (not one of the level's BSPs)";
+                note = true;
+            }
+        }
         // A reference to a tag that couldn't be extracted from the Custom Edition map (its data out of bounds): it
         // can't be in the Xbox map either. Reported, not counted.
         if (dep && va.size() > 1) {
@@ -378,12 +459,41 @@ Result check(const std::string &ce_dir, const std::string &xbox_dir) {
         r.diffs.push_back({"unreadable", A.empty() ? ce_dir : xbox_dir, "", "(no tags there)", ""});
         return r;
     }
+    // What the Custom Edition map's scenario and globals reach (worked out when something's missing): a tag nothing
+    // reaches (left in the map by its author's tools) can't be in a match on either side.
+    std::set<std::string> reach;
+    bool reached = false;
+    auto reachable = [&](const std::string &key) {
+        if (!reached) {
+            reached = true;
+            std::vector<std::string> todo;
+            for (auto &[k, f] : A)
+                if (ends(k, ".scenario") || ends(k, ".globals")) { reach.insert(k); todo.push_back(k); }
+            while (!todo.empty()) {
+                std::string t = todo.back();
+                todo.pop_back();
+                const std::string &ext = A[t].ext;
+                if (ext == "bitmap" || ext == "sound") continue;   // (they reach nothing a match uses)
+                Flat f;
+                if (!tagedit::flatten(A[t].file, f)) continue;
+                for (auto &[k, v] : f) {
+                    if (v.size() < 2 || v[0] != '@') continue;
+                    std::string d = dep_key(v).substr(1);
+                    std::replace(d.begin(), d.end(), '\\', '/');
+                    if (A.count(d) && reach.insert(d).second) todo.push_back(d);
+                }
+            }
+        }
+        return reach.count(key) > 0;
+    };
     std::set<std::string> hit;
     for (auto &[key, fa] : A) {
         std::string g = key.substr(key.rfind('.') + 1);
         auto it = B.find(key);
         if (it == B.end()) {
-            if (named_group(g)) {
+            if (named_group(g) && !reachable(key)) {
+                r.notes.push_back({"unused", key, "", "(in the map, but nothing uses it)", "(not in the map)"});
+            } else if (named_group(g)) {
                 r.diffs.push_back({"missing", key, "", "(in the map)", "(not in the map)"});
                 r.failed["missing"]++;
             }
@@ -430,6 +540,7 @@ std::string report(const Result &r, size_t per_tag) {
         std::stable_sort(v.begin(), v.end(), [](const Diff &a, const Diff &b) {
             bool ma = a.field.empty(), mb = b.field.empty();   // (whole tags, missing or extra, last)
             if (ma != mb) return mb;
+            if (ma && a.check != b.check) return a.check < b.check;
             return a.tag != b.tag ? a.tag < b.tag : a.check < b.check;
         });
         s += std::string("\n") + title + "\n";
@@ -438,7 +549,9 @@ std::string report(const Result &r, size_t per_tag) {
         for (auto &d : v) {
             if (d.field.empty()) {   // (a whole tag: one line each, under one heading)
                 std::string head = d.check == "missing" ? "missing from the Xbox map:" :
-                                   d.check == "extra" ? "only in the Xbox map:" : d.check + ":";
+                                   d.check == "extra" ? "only in the Xbox map:" :
+                                   d.check == "unused" ? "used by nothing in the Custom Edition map (so not built into the Xbox map):" :
+                                   d.check + ":";
                 if (head != last) { s += head + "\n"; last = head; }
                 s += "    " + d.tag + "\n";
                 continue;
