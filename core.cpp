@@ -379,7 +379,15 @@ static bool parse_failure(const std::string &log_text, Failure &f) {
                 j++;
             }
             while (j < lines.size() && lines[j].rfind("...in ", 0) == 0) {
-                if (f.tag.empty()) f.tag = lines[j].substr(6);
+                if (f.tag.empty()) {
+                    f.tag = lines[j].substr(6);
+                    // (a detail line joined onto it: "...in x.scenario - objects with this name: [...]")
+                    size_t d = f.tag.find(" - ");
+                    if (d != std::string::npos && f.tag.find(" - ") > f.tag.rfind('.')) {
+                        f.msg += " " + f.tag.substr(d + 1);
+                        f.tag.resize(d);
+                    }
+                }
                 j++;
             }
             // (details listed under it: "    - objects with this name: [Vehicle #8, Machine #1]")
@@ -1381,6 +1389,17 @@ struct Job {
             }
         }
         // A crosshair overlay on a sequence with no pictures (it draws nothing): taken out.
+        // A crosshair with no bitmap at all (none of its overlays draws anything): taken out.
+        static const std::regex null_seq(R"(Sequence #\d+ in 'NULL' referenced in overlay #\d+ of crosshair #(\d+) is out of bounds \(>= 0\))");
+        if (std::regex_search(msg, m, null_seq)) {
+            fs::path own = owner(tag);
+            std::string out;
+            if (!own.empty() && (own == fixes || to_fixes(tag, own)) &&
+                run_process({u8(tool(cfg, "invader-edit")), "-n", "-t", u8(fixes), tag, "-E", "crosshairs[" + m[1].str() + "]"}, out) == 0) {
+                note("[fix]  " + tag + ": crosshair #" + m[1].str() + " has no bitmap (it draws nothing); taken out");
+                return true;
+            }
+        }
         static const std::regex empty_seq(R"(Sequence #\d+ in '[^']+' referenced in overlay #(\d+) of crosshair #(\d+) has 0 bitmaps)");
         if (std::regex_search(msg, m, empty_seq)) {
             fs::path own = owner(tag);
@@ -1637,25 +1656,32 @@ struct Job {
                 std::vector<std::string> cmd{u8(tool(cfg, "invader-edit")), "-t", u8(fixes), tag};
                 for (int i = 0; i < n; i++) cmd.insert(cmd.end(), {"-S", "permutations[" + std::to_string(i) + "].weight", "1"});
                 if (n == 0) {
-                    // No items at all (Custom Edition spawns nothing from it): where the level places it, nothing.
-                    static const std::regex place(R"(^Scenario::(netgame_equipment|starting_equipment) #(\d+) in (.+\.scenario)$)");
+                    // No items at all (Custom Edition spawns nothing from it): everywhere the level places it, nothing
+                    // (all at once: the next build would only stop on the next one).
+                    static const std::regex place(R"(^Scenario::\w+ #\d+ in (.+\.scenario)$)");
+                    std::set<std::string> scens;
                     for (auto &u : f.users) {
                         std::smatch um;
-                        if (!std::regex_match(u, um, place)) continue;
-                        std::string scen = um[3].str(), key = um[1].str() + "[" + um[2].str() + "]";
-                        std::string field = um[1] == "netgame_equipment" ? ".item_collection" : "";
-                        if (field.empty()) {   // (starting equipment: whichever of its six slots names it)
-                            for (int s = 1; s <= 6 && field.empty(); s++) {
-                                std::string k = key + ".item_collection_" + std::to_string(s);
-                                std::string v = norm_rel(ask(scen, "-G", k));
-                                if (!v.empty() && (v == tag || v + ".item_collection" == tag)) field = ".item_collection_" + std::to_string(s);
-                            }
+                        if (std::regex_match(u, um, place)) scens.insert(um[1].str());
+                    }
+                    auto names_it = [&](const std::string &v) {
+                        std::string r = norm_rel(v);
+                        return !r.empty() && (r == tag || r + ".item_collection" == tag);
+                    };
+                    int cleared = 0;
+                    for (auto &scen : scens) {
+                        std::vector<std::pair<std::string, std::string>> fields{{"netgame_equipment", "item_collection"}};
+                        for (int k = 1; k <= 6; k++) fields.push_back({"starting_equipment", "item_collection_" + std::to_string(k)});
+                        for (auto &[blk, fld] : fields) {
+                            auto vals = lines_of(ask(scen, "-G", blk + "[*]." + fld));
+                            for (size_t i = 0; i < vals.size(); i++)
+                                if (names_it(vals[i]) && edit(scen, blk + "[" + std::to_string(i) + "]." + fld, "")) cleared++;
                         }
-                        if (!field.empty() && edit(scen, key + field, "")) {
-                            note("[fix]  " + scen + ": " + key + field + " was " + tag + ", which has no items (Custom Edition "
-                                 "spawns nothing from it); now none");
-                            return true;
-                        }
+                    }
+                    if (cleared) {
+                        note("[fix]  " + tag + " has no items (Custom Edition spawns nothing from it); the " + std::to_string(cleared) +
+                             " places the level puts it now hold nothing");
+                        return true;
                     }
                 }
                 if (n > 0 && run_process(cmd, out) == 0) {

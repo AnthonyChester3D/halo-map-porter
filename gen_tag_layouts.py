@@ -1,6 +1,6 @@
 # Generates tag_layouts.inc from Invader's tag definitions (invader/src/tag/hek/definition/*.json):
 #   python3 gen_tag_layouts.py <definition folder> tag_layouts.inc
-# The app reads a few kinds of tag itself (structure BSPs, models, animations, scenarios, objects, bitmaps, shaders)
+# The app reads a few kinds of tag itself (structure BSPs, models, animations, scenarios, objects, bitmaps, shaders, sounds)
 # instead of asking invader-edit for each value: these are their structs' sizes and fields, and every struct they
 # contain.
 import glob, json, os, sys
@@ -19,7 +19,7 @@ ROOTS = {   # tag extension -> root struct
     'damage_effect': 'DamageEffect', 'lens_flare': 'LensFlare', 'material_effects': 'MaterialEffects',
     'point_physics': 'PointPhysics', 'unicode_string_list': 'UnicodeStringList',
     'weapon_hud_interface': 'WeaponHUDInterface', 'grenade_hud_interface': 'GrenadeHUDInterface', 'hud_globals': 'HUDGlobals',
-    'unit_hud_interface': 'UnitHUDInterface',
+    'unit_hud_interface': 'UnitHUDInterface', 'sound': 'Sound',
 }
 
 types = {}
