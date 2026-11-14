@@ -1259,11 +1259,15 @@ struct Job {
         if (msg.find("has an invalid surface index") != std::string::npos) {
             fs::path own = owner(tag);
             if (!own.empty() && (own == fixes || to_fixes(tag, own))) {
-                const int bsps = std::atoi(ask(tag, "-C", "collision_bsp").c_str());
+                // (the BSP the failure names, as a model's collision has: nodes[0].bsps[0]; else each of the level's)
+                std::vector<std::string> list;
+                if (!prefix.empty()) list.push_back(prefix);
+                else
+                    for (int b = 0, n = std::atoi(ask(tag, "-C", "collision_bsp").c_str()); b < n; b++)
+                        list.push_back("collision_bsp[" + std::to_string(b) + "]");
                 std::vector<std::string> cmd{u8(tool(cfg, "invader-edit")), "-n", "-t", u8(fixes), tag};
                 size_t n = 0;
-                for (int b = 0; b < bsps; b++) {
-                    const std::string c = "collision_bsp[" + std::to_string(b) + "]";
+                for (const std::string &c : list) {
                     const long surfaces = std::atol(ask(tag, "-C", c + ".surfaces").c_str());
                     auto left = lines_of(ask(tag, "-G", c + ".edges[*].left_surface"));
                     auto right = lines_of(ask(tag, "-G", c + ".edges[*].right_surface"));
@@ -1329,6 +1333,132 @@ struct Job {
                 }
             }
         }
+        // A crosshair overlay on a sequence with no pictures (it draws nothing): taken out.
+        static const std::regex empty_seq(R"(Sequence #\d+ in '[^']+' referenced in overlay #(\d+) of crosshair #(\d+) has 0 bitmaps)");
+        if (std::regex_search(msg, m, empty_seq)) {
+            fs::path own = owner(tag);
+            std::string out;
+            if (!own.empty() && (own == fixes || to_fixes(tag, own)) &&
+                run_process({u8(tool(cfg, "invader-edit")), "-n", "-t", u8(fixes), tag, "-E",
+                             "crosshairs[" + m[2].str() + "].crosshair_overlays[" + m[1].str() + "]"}, out) == 0) {
+                note("[fix]  " + tag + ": crosshair #" + m[2].str() + "'s overlay #" + m[1].str() + " drew a sequence with no pictures "
+                     "(nothing); taken out");
+                return true;
+            }
+        }
+        // A light volume's sequence past its bitmap's end: the last.
+        static const std::regex lv_seq(R"(Sequence #(\d+) in '[^']+' referenced by light volume is out of bounds \(>= (\d+)\))");
+        if (std::regex_search(msg, m, lv_seq) && std::stoi(m[2].str()) > 0) {
+            const std::string last = std::to_string(std::stoi(m[2].str()) - 1);
+            if (edit(tag, "sequence_index", last)) {
+                note("[fix]  " + tag + ": drew sequence #" + m[1].str() + " of a bitmap with " + m[2].str() + "; it draws the last, #" + last);
+                return true;
+            }
+        }
+        // Placements naming a palette entry past the palette's end (nothing is placed from them): taken out.
+        static const std::regex bad_type(R"((Scenery|Vehicle|Biped|Equipment|Weapon|Machine|Control|Light fixture|Sound scenery) spawn #\d+ has an invalid type index)");
+        if (std::regex_search(msg, m, bad_type)) {
+            static const std::map<std::string, std::pair<std::string, std::string>> kinds{
+                {"Scenery", {"scenery", "scenery_palette"}}, {"Vehicle", {"vehicles", "vehicle_palette"}}, {"Biped", {"bipeds", "biped_palette"}},
+                {"Equipment", {"equipment", "equipment_palette"}}, {"Weapon", {"weapons", "weapon_palette"}},
+                {"Machine", {"machines", "machine_palette"}}, {"Control", {"controls", "control_palette"}},
+                {"Light fixture", {"light_fixtures", "light_fixture_palette"}}, {"Sound scenery", {"sound_scenery", "sound_scenery_palette"}}};
+            const auto &k = kinds.at(m[1].str());
+            fs::path own = owner(tag);
+            if (!own.empty() && (own == fixes || to_fixes(tag, own))) {
+                const long pal = std::atol(ask(tag, "-C", k.second).c_str());
+                auto types = lines_of(ask(tag, "-G", k.first + "[*].type"));
+                std::vector<std::string> cmd{u8(tool(cfg, "invader-edit")), "-n", "-t", u8(fixes), tag};
+                int gone = 0;
+                for (int i = (int)types.size() - 1; i >= 0; i--) {
+                    const long t = std::atol(types[(size_t)i].c_str());
+                    if (t >= pal || t < -1) { cmd.insert(cmd.end(), {"-E", k.first + "[" + std::to_string(i) + "]"}); gone++; }
+                }
+                std::string out;
+                if (gone && run_process(cmd, out) == 0) {
+                    note("[fix]  " + tag + ": " + std::to_string(gone) + " " + k.first + " placement" + (gone == 1 ? "" : "s") +
+                         " named a palette entry past the palette's end (nothing in the game); taken out");
+                    return true;
+                }
+            }
+        }
+        // A bitmap sequence running past the bitmap's textures: it ends at the last one (or is the last, alone).
+        static const std::regex seq_past(R"(Sequence #(\d+) has an out-of-bounds sequence \(\[(\d+)-(\d+)\) >= (\d+)\))");
+        if (std::regex_search(msg, m, seq_past) && std::stoi(m[4].str()) > 0) {
+            const int first = std::stoi(m[2].str()), total = std::stoi(m[4].str());
+            const std::string q = "bitmap_group_sequence[" + m[1].str() + "]";
+            const bool ok = first >= total ? edit(tag, q + ".first_bitmap_index", std::to_string(total - 1)) && edit(tag, q + ".bitmap_count", "1")
+                                           : edit(tag, q + ".bitmap_count", std::to_string(total - first));
+            if (ok) {
+                note("[fix]  " + tag + ": sequence #" + m[1].str() + " ran past its " + m[4].str() + " textures; it ends at the last");
+                return true;
+            }
+        }
+        // A unit seat with more animations than the engine has room for: the ones after its first N taken out.
+        static const std::regex seat_anims(R"(ModelAnimationsAnimationGraphUnitSeat::animations must have no more than (\d+) blocks)");
+        if (std::regex_search(msg, m, seat_anims) && !prefix.empty()) {
+            const int most = std::stoi(m[1].str()), n = std::atoi(ask(tag, "-C", join("animations")).c_str());
+            fs::path own = owner(tag);
+            if (n > most && !own.empty() && (own == fixes || to_fixes(tag, own))) {
+                std::vector<std::string> cmd{u8(tool(cfg, "invader-edit")), "-n", "-t", u8(fixes), tag};
+                for (int i = n - 1; i >= most; i--) cmd.insert(cmd.end(), {"-E", join("animations") + "[" + std::to_string(i) + "]"});
+                std::string out;
+                if (run_process(cmd, out) == 0) {
+                    note("[fix]  " + tag + ": " + prefix + " had " + std::to_string(n) + " animations, more than the " + m[1].str() +
+                         " the engine has room for; the ones after them taken out");
+                    return true;
+                }
+            }
+        }
+        // A globals vehicle naming something that isn't a vehicle or biped: taken off.
+        if (msg.find("GlobalsVehicle::vehicle must be vehicle or biped") != std::string::npos && !prefix.empty() && edit(tag, join("vehicle"), "")) {
+            note("[fix]  " + tag + ": " + prefix + " named a tag that isn't a vehicle or biped; taken off");
+            return true;
+        }
+        // Multiplayer globals with fewer weapons than the engine's list has (14 on the Xbox): the list filled out with
+        // its first weapon (the entries past the map's own aren't used).
+        static const std::regex few_weapons(R"(Globals tag does not have at least (\d+) weapons blocks)");
+        if (std::regex_search(msg, m, few_weapons)) {
+            const int need = std::stoi(m[1].str()), have = std::atoi(ask(tag, "-C", "weapon_list").c_str());
+            fs::path own = owner(tag);
+            if (have > 0 && have < need && !own.empty() && (own == fixes || to_fixes(tag, own))) {
+                const std::string first = ask(tag, "-G", "weapon_list[0].weapon");
+                std::vector<std::string> cmd{u8(tool(cfg, "invader-edit")), "-n", "-t", u8(fixes), tag, "-I", "weapon_list",
+                                             std::to_string(need - have), "end"};
+                for (int i = have; i < need; i++) cmd.insert(cmd.end(), {"-S", "weapon_list[" + std::to_string(i) + "].weapon", first});
+                std::string out;
+                if (run_process(cmd, out) == 0) {
+                    note("[fix]  " + tag + ": its weapon list had " + std::to_string(have) + " of the " + m[1].str() +
+                         " the Xbox needs; filled out with its first weapon (" + first + ")");
+                    return true;
+                }
+            }
+        }
+        // A sound permutation whose samples aren't a whole number of blocks (Xbox ADPCM: 36 bytes; 16-bit PCM: 2): the
+        // part block at the end taken off, in each permutation.
+        if (msg.find("has an invalid size") != std::string::npos && msg.find("Sound permutation") != std::string::npos) {
+            fs::path own = owner(tag);
+            if (!own.empty() && (own == fixes || to_fixes(tag, own))) {
+                tagfile::EditTag et;
+                int cut = 0;
+                if (et.load(fixes / from_u8(tag))) {
+                    if (auto *ranges = tagfile::block(et.root(), "pitch ranges"))
+                        for (auto &pr : *ranges)
+                            if (auto *perms = tagfile::block(pr, "permutations"))
+                                for (auto &pm : *perms) {
+                                    const int fmt = (int)tagfile::get_num(pm, "format");
+                                    const size_t unit = fmt == 1 ? 36 : fmt == 0 ? 2 : 0;
+                                    std::string *d = tagfile::data(pm, "samples");
+                                    if (unit && d && d->size() % unit) { d->resize(d->size() / unit * unit); cut++; }
+                                }
+                    if (cut && et.save(fixes / from_u8(tag))) {
+                        note("[fix]  " + tag + ": " + std::to_string(cut) + " of its permutations ended part way through a block of "
+                             "samples; the part taken off");
+                        return true;
+                    }
+                }
+            }
+        }
         // The other way round: an overlay not marked "not a sprite" on a bitmap that isn't a sprite sheet: the mark put on.
         static const std::regex is_sprite(R"(Overlay #(\d+) of crosshair #(\d+) is not marked as not a sprite, but)");
         if (std::regex_search(msg, m, is_sprite)) {
@@ -1352,7 +1482,7 @@ struct Job {
             }
         }
         // A string list's string with no terminating zero: one added.
-        static const std::regex no_null(R"(String #(\d+) (?:is not null terminated|contains an extraneous null terminator))");
+        static const std::regex no_null(R"(String #(\d+) (?:is not null terminated|contains an extraneous null terminator|is empty))");
         if (std::regex_search(msg, m, no_null)) {
             fs::path own = owner(tag);
             if (!own.empty() && (own == fixes || to_fixes(tag, own))) {
@@ -3990,7 +4120,11 @@ static bool reencode_sound_now(Job &job, const fs::path &tags, const std::string
             if (!decode_chain(t, r, j, pcm, ch, rate)) { why = "unsupported sample format"; return false; }
             std::string pn = plain(r.perms[j].name);
             if (pn.empty()) pn = "perm" + std::to_string(j);
-            while (names.count(pn)) pn += "_";
+            if (pn.size() > 31) pn.resize(31);   // (a permutation's name is 31 characters at most)
+            for (int k = 1; names.count(pn); k++) {
+                const std::string d = std::to_string(k);
+                pn = pn.substr(0, std::min(pn.size(), 31 - d.size())) + d;
+            }
             names.insert(pn);
             write_wav(dir / from_u8(rn) / from_u8(pn + ".wav"), ch, rate, pcm);
         }
@@ -5290,6 +5424,7 @@ static int terminate_string_list(const fs::path &p) {
             end += ch;
         }
         std::string fixed = str.substr(0, end) + std::string(ch, '\0');
+        if (end == 0) fixed = (ch == 2 ? std::string(" \0", 2) : std::string(" ")) + std::string(ch, '\0');   // (empty: a space)
         if (fixed != str) {
             str = fixed;
             put_be32(out, e, (uint32_t)str.size());

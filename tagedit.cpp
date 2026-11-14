@@ -1047,7 +1047,9 @@ bool refactor(const std::vector<std::string> &args, std::string &output, int &co
     std::vector<File> all;
     for (auto it = fs::recursive_directory_iterator(dir, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
         if (!it->is_regular_file(ec)) continue;
-        std::string ext = it->path().extension().u8string();
+        // (a tag named only by its group, ".weapon": the filesystem reads that as a name with no extension)
+        std::string name = it->path().filename().u8string(), ext = it->path().extension().u8string();
+        if (ext.empty() && name.size() > 1 && name[0] == '.') ext = name;
         uint32_t cc = ext.size() > 1 ? fourcc_of(ext.substr(1)) : 0;
         if (!cc) continue;
         all.push_back({it->path(), fs::relative(it->path(), dir, ec).u8string(), cc});

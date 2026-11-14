@@ -84,7 +84,7 @@ enum {
     // stock models' unused levels of detail; storing animations as keyframes
     ID_X_LODSTOCK, ID_X_ANIM_LBL, ID_X_ANIM,
     // making lower-detail versions, and the LOD library's folder (each *_BROWSE directly follows its edit box)
-    ID_X_MAKELOD, ID_X_TRIM_LBL, ID_X_TRIM, ID_S_LOD_LBL, ID_S_LOD, ID_S_LOD_BROWSE, ID_S_LOD_HINT, ID_S_TOUR,
+    ID_X_MAKELOD, ID_X_TRIM_LBL, ID_X_TRIM, ID_S_LOD_LBL, ID_S_LOD, ID_S_LOD_BROWSE, ID_S_LOD_HINT, ID_S_TOUR, ID_S_KEEP_FAILED,
     // portals for levels made without them
     ID_X_PORTALS,
     ID_X_BOTS, ID_X_STOCK_SHARED,
@@ -115,8 +115,8 @@ enum {
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new108.exe is 1.108).
-#define HMP_VERSION L"1.108"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new109.exe is 1.109).
+#define HMP_VERSION L"1.109"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -221,6 +221,7 @@ static void save_settings() {
     ini_set(L"x_shrink", checked(ID_X_SHRINK) ? L"1" : L"0");
     ini_set(L"x_shrink_stock", checked(ID_X_SHRINK_STOCK) ? L"1" : L"0");
     ini_set(L"write_tour", checked(ID_S_TOUR) ? L"1" : L"0");
+    ini_set(L"keep_failed_logs", checked(ID_S_KEEP_FAILED) ? L"1" : L"0");
     ini_set(L"theme", std::to_wstring(std::max(0, sel(ID_S_THEME))));
     ini_set(L"keep_unpacked", std::to_wstring(std::clamp(_wtoi(get_text(ID_S_KEEP).c_str()), 1, 100)));
     ini_set(L"x_target", std::to_wstring(std::max(0, sel(ID_X_TARGET))));
@@ -1834,6 +1835,42 @@ static void open_shaders() {
 
 static void remember_conversion(const fs::path &in, const fs::path &out);
 
+// A batch map's work folders once it's done (its own scratch: its tags as changed for the Xbox, Invader's output),
+// taken away; nothing reads them again but "Update the map" and the Xbox tab's windows, for the latest conversion
+// (which keeps its own). With "Keep failed maps' logs" ticked, a failed map's Invader output and scripts are kept
+// first, in logs\failed builds\<map>\ (a few KB, for reporting a problem).
+static void tidy_work(const fs::path &cache, const std::string &tag, const std::wstring &map, bool failed, bool keep_logs) {
+    std::error_code ec;
+    const fs::path work = cache / "work";
+    if (failed && keep_logs) {
+        const fs::path to = appdata_dir(CSIDL_LOCAL_APPDATA) / L"logs" / L"failed builds" / map;
+        fs::remove_all(to, ec);
+        const fs::path from = work / ("convert_" + tag);
+        for (auto it = fs::recursive_directory_iterator(from, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+            if (!it->is_regular_file(ec)) continue;
+            const std::wstring name = lower(it->path().filename().wstring()), ext = lower(it->path().extension().wstring());
+            if (name != L"build.log" && ext != L".hsc" && name.rfind(L"- pair check", 0) != 0) continue;
+            const fs::path dest = to / fs::relative(it->path(), from, ec);
+            fs::create_directories(dest.parent_path(), ec);
+            fs::copy_file(it->path(), dest, fs::copy_options::overwrite_existing, ec);
+        }
+        ec.clear();
+    }
+    for (const char *what : {"convert_", "traits_", "scripts_read_"}) fs::remove_all(work / (what + tag), ec);
+}
+// Every batch map's work folders from earlier batches (convert_b<row>, traits_b<row>, scripts_read_b<row>): taken
+// away as a batch starts (none is in use then).
+static void clear_batch_work(const fs::path &cache) {
+    std::error_code ec;
+    std::vector<fs::path> gone;
+    for (auto it = fs::directory_iterator(cache / "work", ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+        const std::string n = it->path().filename().u8string();
+        for (const char *what : {"convert_b", "traits_b", "scripts_read_b"})
+            if (n.rfind(what, 0) == 0 && n.size() > strlen(what) && isdigit((unsigned char)n[strlen(what)])) gone.push_back(it->path());
+    }
+    for (auto &p : gone) fs::remove_all(p, ec);
+}
+
 // Where Xbox conversions go, under the Build tab's Xbox folder: linked pairs in one map pack folder (with the Custom
 // Edition maps they're linked to, copied as they are, in another), maps that converted but aren't linked in a third.
 struct PackLayout {
@@ -2464,6 +2501,7 @@ static void open_batch() {
             }
             jobs->push_back(std::move(j));
         }
+        const bool keep_logs = checked(ID_S_KEEP_FAILED);
         g_batch_stop = false;
         set_busy(true);
         SetWindowTextW(g_log, L"");
@@ -2471,7 +2509,9 @@ static void open_batch() {
         append_log(L"Batch: converting " + std::to_wstring(jobs->size()) + L" maps for the Xbox" +
                    (base.xbox_perfect ? L" (Perfect Conversion)" : L"") +
                    (at_once > 1 ? L", " + std::to_wstring(at_once) + L" at once (each line starts with its map)" : L"") + L".");
-        std::thread([jobs, share, stock_shared, at_once, layout] {
+        const fs::path cache = base.cache_dir;
+        std::thread([jobs, share, stock_shared, at_once, layout, keep_logs, cache] {
+            clear_batch_work(cache);   // (earlier batches' work folders: none in use; here, as it can take a while)
             std::atomic<int> ok{0}, linked{0}, failed{0}, done{0};
             std::mutex report_lock;   // (the batch report: a row for each map, written when the batch is over)
             std::vector<std::array<std::string, 5>> report;
@@ -2480,6 +2520,7 @@ static void open_batch() {
             Result last;
             Keys last_keys;
             std::string last_what;
+            struct Kept { std::string tag; std::wstring map; bool failed = false; } kept;   // (the latest's work, kept)
             auto worker = [&] {
             for (size_t k; !g_batch_stop && (k = next++) < jobs->size();) {
                 auto &j = (*jobs)[k];
@@ -2556,12 +2597,16 @@ static void open_batch() {
                 last = r;
                 last_keys = j.keys;
                 last_what = "Batch: " + N(j.in.filename().wstring());
+                // (this map's work kept, as the latest; the one kept before it taken away)
+                if (!kept.tag.empty()) tidy_work(j.cfg.cache_dir, kept.tag, kept.map, kept.failed, keep_logs);
+                kept = {j.cfg.work_tag, j.in.stem().wstring(), !r.ok};
             }
             };
             std::vector<std::thread> more;
             for (int t = 1; t < at_once; t++) more.emplace_back(worker);
             worker();
             for (auto &t : more) t.join();
+            if (kept.failed) tidy_work(jobs->front().cfg.cache_dir, kept.tag, kept.map, true, keep_logs);   // (a failure's isn't built from)
             std::wstring sum = std::to_wstring(ok) + L" converted" + (linked ? L" (" + std::to_wstring(linked) + L" linked)" : L"") +
                                (failed ? L", " + std::to_wstring(failed) + L" failed" : L"") +
                                (done < (int)jobs->size() ? L", stopped before " + std::to_wstring(jobs->size() - done) + L" more" : L"") + L".";
@@ -3485,6 +3530,7 @@ static void create_controls() {
     y += 30;
     add(5, L"STATIC", L"The lower-detail versions the app makes are kept here, so the same model in another map reuses them, "
         L"with your choices for models from the LODs window (choices.txt).", 0, 190, y, 544, 36, ID_S_LOD_HINT);
+    check(5, L"Keep failed maps' logs", 26, y, 160, ID_S_KEEP_FAILED);
     y += 40;
     check(5, L"Write a camera tour for Halo 1 Unlimited's perf log with each Xbox build", 26, y, 420, ID_S_TOUR);
     label(5, L"Maps kept unpacked:", 452, y - 1, 124, ID_S_KEEP_LBL);
@@ -3585,6 +3631,7 @@ static void create_controls() {
     set_check(ID_X_SHRINK, ini_get(L"x_shrink", L"1") == L"1");
     set_check(ID_X_SHRINK_STOCK, ini_get(L"x_shrink_stock", L"0") == L"1");
     set_check(ID_S_TOUR, ini_get(L"write_tour", L"0") == L"1");
+    set_check(ID_S_KEEP_FAILED, ini_get(L"keep_failed_logs", L"0") == L"1");
     set_text(ID_S_KEEP, ini_get(L"keep_unpacked", L"3"));
     SendDlgItemMessageW(g_wnd, ID_S_THEME, CB_SETCURSEL, std::clamp(_wtoi(ini_get(L"theme", L"0").c_str()), 0, 2), 0);
     {
@@ -3683,7 +3730,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case ID_X_PERFECT:
             if (code == BN_CLICKED) { update_perfect(); save_settings(); }
             break;
-        case ID_X_LODSTOCK: case ID_X_MAKELOD: case ID_X_BOTS: case ID_X_STOCK_SHARED: case ID_X_SHRINK_STOCK:
+        case ID_X_LODSTOCK: case ID_X_MAKELOD: case ID_X_BOTS: case ID_X_STOCK_SHARED: case ID_S_KEEP_FAILED: case ID_X_SHRINK_STOCK:
             if (code == BN_CLICKED) save_settings();
             break;
         case ID_X_PORTALS: case ID_X_TRIM: case ID_X_ANIM:

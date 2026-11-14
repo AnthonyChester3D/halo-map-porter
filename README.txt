@@ -2339,6 +2339,13 @@ is taken away), and a protected map's original moves into "Map Protected
 (Fail)" beside it. The three pack folders' names can be changed in the batch
 window. Single conversions do the same.
 
+A batch takes each map's work folder away once the map is done (its scratch
+copy of the tags, hundreds of MB each), keeping only the latest one, which
+the Xbox tab's "Update the map" and windows build from; earlier batches'
+go when the next one starts. Settings' "Keep failed maps' logs" (off to
+start with) keeps a failed map's Invader output and scripts first, a few KB,
+in %LOCALAPPDATA%\HaloMapPorter\logs\failed builds\<map>\.
+
 Drawing on stock.shared one map at a time (Xbox tab, "Save the map drawing
 on stock.shared"): each map converted for the Xbox, on its own or in a
 batch, is laid out again with what stock.shared has left out of it, the
