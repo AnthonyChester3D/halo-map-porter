@@ -4292,6 +4292,8 @@ static bool reencode_sound_now(Job &job, const fs::path &tags, const std::string
             std::vector<int16_t> pcm;
             int ch, rate;
             if (!decode_chain(t, r, j, pcm, ch, rate)) { why = "unsupported sample format"; return false; }
+            // (no sound at all, which Custom Edition plays as nothing and invader-sound stops on: a moment of silence)
+            if (pcm.empty()) pcm.assign((size_t)64 * std::max(1, ch), 0);
             std::string pn = plain(r.perms[j].name);
             if (pn.empty()) pn = "perm" + std::to_string(j);
             if (pn.size() > 31) pn.resize(31);   // (a permutation's name is 31 characters at most)
@@ -13999,6 +14001,19 @@ bool prepare_for_xbox(Job &job, std::string &err) {
     run_process({u8(tool(cfg, "invader-convert")), "-t", u8(xsrc), "-g", "gbxmodel", "model", "-b", "*"}, out);
     run_process({u8(tool(cfg, "invader-convert")), "-t", u8(xsrc), "-g", "shader_transparent_chicago_extended",
                  "shader_transparent_chicago", "-b", "*"}, out);
+    {   // (tags with no name before the dot, "fp\.gbxmodel": the batch's "*" passes them by; each converted by its folder)
+        std::vector<std::pair<std::string, std::string>> left;
+        for (auto &e : fs::recursive_directory_iterator(xsrc)) {
+            const std::string n = e.path().filename().u8string();
+            for (auto [from, to] : {std::pair<const char *, const char *>{"gbxmodel", "model"},
+                                    {"shader_transparent_chicago_extended", "shader_transparent_chicago"}})
+                if (n == std::string(".") + from && !fs::exists(e.path().parent_path() / (std::string(".") + to)))
+                    left.push_back({fs::relative(e.path().parent_path(), xsrc).generic_u8string() + "/", from});
+        }
+        for (auto &[dir, from] : left)
+            run_process({u8(tool(cfg, "invader-convert")), "-t", u8(xsrc), "-g", from,
+                         from == "gbxmodel" ? "model" : "shader_transparent_chicago", dir}, out);
+    }
     if (run_process({u8(tool(cfg, "invader-refactor")), "-t", u8(xsrc), "-M", "no-move", "-g", "gbxmodel", "model",
                      "-g", "shader_transparent_chicago_extended", "shader_transparent_chicago"}, out) != 0) {
         err = "Couldn't convert model/shader references for Xbox:\n" + out.substr(out.size() > 1500 ? out.size() - 1500 : 0);

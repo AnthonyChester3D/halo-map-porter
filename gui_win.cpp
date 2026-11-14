@@ -115,8 +115,8 @@ enum {
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new111.exe is 1.111).
-#define HMP_VERSION L"1.111"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new112.exe is 1.112).
+#define HMP_VERSION L"1.112"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -2551,7 +2551,12 @@ static void open_batch() {
                 post_log("");
                 log("==== " + N(j.in.filename().wstring()) + " -> " + N(j.out.wstring()));
                 Result r;
-                if (j.from == Game::Unknown || j.from == Game::Xbox) {
+                std::error_code ex;
+                if (!fs::exists(j.in, ex)) {   // (gone since it was listed: a protected one an earlier batch moved, say)
+                    const bool jailed = fs::exists(j.in.parent_path() / L"Map Protected (Fail)" / j.in.filename(), ex);
+                    r.error = jailed ? "Found protected by an earlier batch: it's in \"Map Protected (Fail)\" beside where it was."
+                                     : "The map isn't there any more: " + N(j.in.wstring());
+                } else if (j.from == Game::Unknown || j.from == Game::Xbox) {
                     r.error = "Not a Custom Edition or MCC map.";
                 } else {
                     std::error_code ec;
