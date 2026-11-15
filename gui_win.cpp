@@ -115,8 +115,8 @@ enum {
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new114.exe is 1.114).
-#define HMP_VERSION L"1.114"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new115.exe is 1.115).
+#define HMP_VERSION L"1.115"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -2480,7 +2480,8 @@ static void open_batch() {
     h.start = [](const std::vector<batchui::Item> &items, const std::vector<int> &which, int at_once) {
         // Each map's options, worked out here (they read the windows' saved picks; the worker reads nothing of the
         // window): the Xbox tab's as they are, then the map's own.
-        struct Job1 { int index; fs::path in, out; Game from; Config cfg; Keys keys; fs::path card_dir; std::string card_name; };
+        struct Job1 { int index; fs::path in, out; Game from; Config cfg; Keys keys; fs::path card_dir; std::string card_name;
+                      fs::path same_as; };   // (the same file as an earlier map of the batch: converted once)
         auto jobs = std::make_shared<std::vector<Job1>>();
         Config base = make_config();
         apply_xbox_options(base);
@@ -2525,6 +2526,39 @@ static void open_batch() {
             }
             jobs->push_back(std::move(j));
         }
+        // Two maps going to the same place (the same name, from two folders): the same file twice is converted once;
+        // two different maps each get their own folder ("Crap", "Crap (2)"), or the one finished first would be moved
+        // away (or written over) while the other is still being made.
+        {
+            auto same_bytes = [](const fs::path &a, const fs::path &b) {
+                std::error_code e1, e2;
+                if (fs::file_size(a, e1) != fs::file_size(b, e2) || e1 || e2) return false;
+                std::ifstream fa(a, std::ios::binary), fb(b, std::ios::binary);
+                std::vector<char> x(1 << 20), y(1 << 20);
+                while (fa && fb) {
+                    fa.read(x.data(), (std::streamsize)x.size());
+                    fb.read(y.data(), (std::streamsize)y.size());
+                    if (fa.gcount() != fb.gcount() || memcmp(x.data(), y.data(), (size_t)fa.gcount()) != 0) return false;
+                }
+                return true;
+            };
+            std::map<std::wstring, size_t> first_at;
+            for (size_t a = 0; a < jobs->size(); a++) {
+                Job1 &j = (*jobs)[a];
+                const std::wstring key = lower(j.out.parent_path().wstring());
+                auto it = first_at.find(key);
+                if (it == first_at.end()) { first_at[key] = a; continue; }
+                if (same_bytes((*jobs)[it->second].in, j.in)) { j.same_as = (*jobs)[it->second].in; continue; }
+                for (int n = 2;; n++) {
+                    fs::path dir = j.out.parent_path().parent_path() /
+                                   (j.out.parent_path().filename().wstring() + L" (" + std::to_wstring(n) + L")");
+                    if (first_at.count(lower(dir.wstring()))) continue;
+                    first_at[lower(dir.wstring())] = a;
+                    j.out = dir / j.out.filename();
+                    break;
+                }
+            }
+        }
         const bool keep_logs = checked(ID_S_KEEP_FAILED);
         g_batch_stop = false;
         set_busy(true);
@@ -2548,6 +2582,13 @@ static void open_batch() {
             auto worker = [&] {
             for (size_t k; !g_batch_stop && (k = next++) < jobs->size();) {
                 auto &j = (*jobs)[k];
+                if (!j.same_as.empty()) {   // (the same file as an earlier one: converted there)
+                    post_log("[" + N(j.in.stem().wstring()) + "] Skipped: the same map (the same file) as " + N(j.same_as.wstring()) +
+                             ", converted once.");
+                    batchui::progress(j.index, L"Skipped: the same map as another in the batch");
+                    done++;
+                    continue;
+                }
                 batchui::progress(j.index, L"Converting...");
                 // (several at once: each line says which map it's about)
                 std::string tag = at_once > 1 ? "[" + N(j.in.stem().wstring()) + "] " : "";

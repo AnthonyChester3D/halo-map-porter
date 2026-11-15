@@ -2050,6 +2050,7 @@ bool prepare_for_xbox(Job &job, std::string &err);
 size_t shrink_textures_to_fit(Job &job, size_t needed, int &count, bool hard = true);
 size_t shrink_sounds_to_fit(Job &job, size_t needed, bool mono, std::vector<std::string> &names);
 size_t shrink_stock_to_fit(Job &job, size_t needed, int round, std::vector<std::string> &names);
+size_t drop_dialogue(Job &job, std::vector<std::string> &names);
 void restrict_to_xbox_mp(Job &job, const fs::path &xsrc);
 void drop_dead_placements(Job &job, const fs::path &xsrc);
 void bot_route_points(Job &job, const fs::path &xsrc);
@@ -3326,6 +3327,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
     }
     std::string out;
     int shrink_rounds = 0, sound_rounds = 0, stock_rounds = 0;
+    bool dialogue_dropped = false;
     bool shrink_hopeless = false;
     int texture_rounds = 0;
     bool texture_hopeless = false;
@@ -3492,6 +3494,23 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
                          (mono ? "made " + std::to_string(names.size()) + " long stereo sounds mono (22.05 kHz)"
                                : "re-encoded " + std::to_string(names.size()) + " long sounds at 22.05 kHz instead of 44.1 kHz") +
                          ", half the size each (saved about " + std::to_string(saved / 1048576.0).substr(0, 4) + " MB): " + list);
+                continue;
+            }
+        }
+        // Then what the AI says (before any texture is halved: nothing in a match needs it, and a map placing
+        // marines or grunts carries tens of MB of their lines).
+        if (std::regex_search(out, tb, too_big) && job.target == Game::Xbox && cfg.xbox_shrink && !dialogue_dropped) {
+            dialogue_dropped = true;
+            std::vector<std::string> names;
+            size_t saved = drop_dialogue(job, names);
+            if (!names.empty()) {
+                job.cut = true;
+                std::string list;
+                for (size_t i = 0; i < names.size() && i < 6; i++) list += (i ? ", " : "") + fs::path(from_u8(names[i])).stem().u8string();
+                if (names.size() > 6) list += " and " + std::to_string(names.size() - 6) + " more";
+                job.note("[shrink] " + tb[1].str().substr(0, 5) + " MB is over the limit; left out what the AI says (" +
+                         std::to_string(names.size()) + (names.size() == 1 ? " character's" : " characters'") +
+                         " dialogue: they don't talk; saved about " + std::to_string(saved / 1048576.0).substr(0, 4) + " MB): " + list);
                 continue;
             }
         }
@@ -14311,6 +14330,51 @@ size_t shrink_sounds_to_fit(Job &job, size_t needed, bool mono, std::vector<std:
         saved += c.bytes / 2;
         names.push_back(c.tag);
     }
+    return saved;
+}
+
+// What the AI says (each unit's dialogue: a marine's, a grunt's...), left out of a map that's too big: a campaign
+// character's lines are tens of MB of sound, and a multiplayer map placing marines or grunts brings all of them.
+// Nothing in a match depends on it (they just don't talk). The units' dialogue variants are cleared (edited copies
+// for Bungie's); `names` the units. What it saved: the sounds the map no longer has.
+size_t drop_dialogue(Job &job, std::vector<std::string> &names) {
+    std::vector<std::string> before = content_dependencies(job);
+    auto sound_bytes = [&](const std::vector<std::string> &deps) {
+        std::map<std::string, size_t> b;
+        for (auto &d : deps)
+            if (has_suffix(d, ".sound")) {
+                fs::path own = job.owner(d);
+                std::error_code ec;
+                if (!own.empty()) b[d] = (size_t)fs::file_size(own / from_u8(d), ec);
+            }
+        return b;
+    };
+    for (auto &dep : before) {
+        if (!has_suffix(dep, ".biped") && !has_suffix(dep, ".vehicle")) continue;
+        fs::path own = job.owner(dep);
+        if (own.empty()) continue;
+        std::string v;
+        if (run_process({u8(tool(job.cfg, "invader-edit")), "-t", u8(own), dep, "-G", "dialogue_variants[*].dialogue"}, v) != 0) continue;
+        std::vector<std::string> sets;
+        std::istringstream ls(v);
+        int i = 0;
+        for (std::string l; std::getline(ls, l); i++) {
+            while (!l.empty() && (l.back() == '\r' || l.back() == ' ')) l.pop_back();
+            if (!l.empty()) sets.insert(sets.end(), {"-S", "dialogue_variants[" + std::to_string(i) + "].dialogue", ""});
+        }
+        if (sets.empty()) continue;
+        fs::path ed = editable_owner(job, dep, true);   // (Bungie's: a copy in fixes, your Xbox tags as they are)
+        if (ed.empty()) continue;
+        std::vector<std::string> cmd{u8(tool(job.cfg, "invader-edit")), "-n", "-t", u8(ed), dep};
+        cmd.insert(cmd.end(), sets.begin(), sets.end());
+        std::string out;
+        if (run_process(cmd, out) == 0) names.push_back(dep);
+    }
+    if (names.empty()) return 0;
+    std::map<std::string, size_t> was = sound_bytes(before), now = sound_bytes(content_dependencies(job));
+    size_t saved = 0;
+    for (auto &[d, b] : was)
+        if (!now.count(d)) saved += b;
     return saved;
 }
 
