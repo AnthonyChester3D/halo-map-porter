@@ -115,8 +115,8 @@ enum {
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new115.exe is 1.115).
-#define HMP_VERSION L"1.115"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new116.exe is 1.116).
+#define HMP_VERSION L"1.116"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -2526,9 +2526,9 @@ static void open_batch() {
             }
             jobs->push_back(std::move(j));
         }
-        // Two maps going to the same place (the same name, from two folders): the same file twice is converted once;
-        // two different maps each get their own folder ("Crap", "Crap (2)"), or the one finished first would be moved
-        // away (or written over) while the other is still being made.
+        // Two maps going to the same folder (the same name from two folders, or a campaign's chapters under one map
+        // card): the same file twice is converted once; different maps each get their own folder ("Crap", "Crap
+        // (crap)"), or the one finished first would be moved away (or written over) while the other is still made.
         {
             auto same_bytes = [](const fs::path &a, const fs::path &b) {
                 std::error_code e1, e2;
@@ -2549,9 +2549,11 @@ static void open_batch() {
                 auto it = first_at.find(key);
                 if (it == first_at.end()) { first_at[key] = a; continue; }
                 if (same_bytes((*jobs)[it->second].in, j.in)) { j.same_as = (*jobs)[it->second].in; continue; }
-                for (int n = 2;; n++) {
+                // (named for the map: a campaign's chapters share one map card's name, "Wintersmith Campain (wintersmith4)")
+                for (int n = 1;; n++) {
                     fs::path dir = j.out.parent_path().parent_path() /
-                                   (j.out.parent_path().filename().wstring() + L" (" + std::to_wstring(n) + L")");
+                                   (j.out.parent_path().filename().wstring() + L" (" + j.in.stem().wstring() +
+                                    (n > 1 ? L" " + std::to_wstring(n) : std::wstring()) + L")");
                     if (first_at.count(lower(dir.wstring()))) continue;
                     first_at[lower(dir.wstring())] = a;
                     j.out = dir / j.out.filename();

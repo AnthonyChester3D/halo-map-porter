@@ -1547,6 +1547,20 @@ struct Job {
                 }
             }
         }
+        // A model's triangle naming a vertex its part doesn't have (the author's tools let it through; the game
+        // skips it): such triangles left out.
+        if (msg.find("in triangle indices is invalid") != std::string::npos &&
+            (fs::path(from_u8(tag)).extension() == ".model" || fs::path(from_u8(tag)).extension() == ".gbxmodel")) {
+            fs::path own = owner(tag);
+            if (!own.empty() && (own == fixes || to_fixes(tag, own))) {
+                const int n = lod::drop_bad_triangles(fixes / from_u8(tag));
+                if (n > 0) {
+                    note("[fix]  " + tag + ": " + std::to_string(n) + (n == 1 ? " part had" : " parts had") +
+                         " triangles naming vertices it doesn't have (the game skips them); left out");
+                    return true;
+                }
+            }
+        }
         // A 2D texture with sides that aren't powers of two: scaled to the nearest ones.
         if (msg.find("is non-power-of-two") != std::string::npos) {
             fs::path own = owner(tag);
@@ -1771,11 +1785,13 @@ struct Job {
                         auto *U = tagfile::block(part, "uncompressed vertices");
                         auto *C = tagfile::block(part, "compressed vertices");
                         auto *T = tagfile::block(part, "triangles");
-                        if (U && !U->empty() && T && !T->empty()) {
-                            const int v0 = std::max(0, std::min((int)U->size() - 1, (int)tagfile::get_num(T->front(), "vertex0 index")));
-                            tagfile::TagNode vu = (*U)[(size_t)v0];
-                            *U = {vu, vu, vu};
-                            if (C && C->size() > (size_t)v0) { tagfile::TagNode vc = (*C)[(size_t)v0]; *C = {vc, vc, vc}; }
+                        // (a model made for the Xbox may have only compressed vertices)
+                        const size_t nv = U && !U->empty() ? U->size() : C ? C->size() : 0;
+                        if (nv && T && !T->empty()) {
+                            const int v0 = std::max(0, std::min((int)nv - 1, (int)tagfile::get_num(T->front(), "vertex0 index")));
+                            if (U && U->size() == nv) { tagfile::TagNode vu = (*U)[(size_t)v0]; *U = {vu, vu, vu}; }
+                            else if (U) U->clear();
+                            if (C && C->size() == nv) { tagfile::TagNode vc = (*C)[(size_t)v0]; *C = {vc, vc, vc}; }
                             else if (C) C->clear();
                             tagfile::TagNode tri = T->front();
                             for (int j = 0; j < 3; j++)
@@ -1805,6 +1821,16 @@ struct Job {
                     }
                 }
             }
+        }
+        if (std::regex_search(msg, m, region_counts)) {   // (none of the above could: why, for the log)
+            const std::string model = norm_rel(m[1].str()) + ".model", coll = norm_rel(m[2].str()) + ".model_collision_geometry";
+            fs::path mo = owner(model), co = owner(coll);
+            tagfile::EditTag tm, tc;
+            const bool lm = !mo.empty() && tm.load(mo / from_u8(model)), lc_ = !co.empty() && tc.load(co / from_u8(coll));
+            auto count = [](tagfile::EditTag &t) { auto *r = tagfile::block(t.root(), "regions"); return r ? std::to_string(r->size()) : std::string("?"); };
+            note("[fix]  couldn't even out the regions of " + model + " (" + (mo.empty() ? "not found" : !lm ? "unreadable" :
+                 count(tm) + " regions, in " + u8(mo)) + ") and " + coll + " (" + (co.empty() ? "not found" : !lc_ ? "unreadable" :
+                 count(tc) + " regions, in " + u8(co)) + ")");
         }
         static const std::regex node_sums(R"('([^']+)\.(?:gbx)?model' and '([^']+)\.model_animations' animation #\d+ node list checksums are mismatched)");
         if (std::regex_search(msg, m, node_sums) &&

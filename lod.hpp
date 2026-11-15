@@ -141,6 +141,11 @@ Thin thin_cards(const std::filesystem::path &model, double share, const Settings
 // thin_cards; each geometry keeps its biggest piece. Saved in place. `cards`/`taken` in the result: pieces.
 Thin drop_small_pieces(const std::filesystem::path &model, double share, const Settings &settings);
 
+// Triangles that name vertices their part doesn't have (Custom Edition's tools let some through and its game skips
+// them; Invader refuses the model): left out, in every geometry. Saved in place. The parts changed (0: none, -1: the
+// model couldn't be read or saved).
+int drop_bad_triangles(const std::filesystem::path &model);
+
 // What Bungie's stock models of a kind have, for their size: the triangles of the most detailed version (the
 // regions' first permutations), `size` the diagonal of the box around them (world units). Fitted to all of Bungie's
 // models (Xbox tags; lod.cpp has the numbers). `kind`: f first-person weapon, w weapon or item, b character, v vehicle,

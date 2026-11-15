@@ -1158,6 +1158,32 @@ Thin drop_small_pieces(const fs::path &model, double share, const Settings &sett
     return r;
 }
 
+int drop_bad_triangles(const fs::path &model) {
+    tagfile::EditTag t;
+    if (!t.load(model)) return -1;
+    std::vector<TagNode> *geos = tagfile::block(t.root(), "geometries");
+    if (!geos) return -1;
+    int changed = 0;
+    for (auto &g : *geos)
+        for (auto &part : *tagfile::block(g, "parts")) {
+            auto &T = *tagfile::block(part, "triangles");
+            const size_t nv = tagfile::block(part, "uncompressed vertices")->size();
+            bool bad = false;
+            for (auto &tr : T)
+                for (int k = 0; k < 3; k++) {
+                    unsigned x = u16(tr.fixed, k * 2);
+                    if (x != 0xFFFF && x >= nv) bad = true;
+                }
+            if (!bad || nv == 0) continue;
+            std::vector<uint32_t> list = strip_to_list(T, nv);   // (it skips them)
+            if (list.empty()) list = {0, 0, 0};
+            T = list_to_strip(list, nv, tagfile::block_struct(part, "triangles"));
+            changed++;
+        }
+    if (changed && !t.save(model)) return -1;
+    return changed;
+}
+
 // One geometry trimmed: from the library, or made now (and kept there).
 static TagNode trimmed_version(const TagNode &geo, uint32_t checksum, double ratio, double size, double error, How how,
                                const Settings &settings, bool &from_library, std::string &key, const Keep &keep = {},
