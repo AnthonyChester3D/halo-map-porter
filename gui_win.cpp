@@ -115,8 +115,8 @@ enum {
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new116.exe is 1.116).
-#define HMP_VERSION L"1.116"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new117.exe is 1.117).
+#define HMP_VERSION L"1.117"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -2017,6 +2017,26 @@ static void draw_on_stock(const Config &cfg, const fs::path &map, const Log &log
     log(s.ok ? s.report : "Not drawn on stock.shared: " + s.error);
 }
 
+// A campaign's chapters converted in a batch (each in its own folder, a pack's way): what two or more of them use
+// stored once, in the pack's file <campaign>-<version>.shared in the folder above theirs, the one Halo 1 Unlimited
+// looks in after a map's own; drawing on stock.shared under it. Chapters that ended up in different pack folders
+// (some linked, some not) make one file in each.
+static void finish_campaign(const Config &cfg, const std::wstring &name, const std::vector<fs::path> &maps, const Log &log) {
+    std::map<std::wstring, std::vector<fs::path>> by_place;
+    for (auto &m : maps) by_place[lower(m.parent_path().parent_path().wstring())].push_back(m);
+    static std::mutex one_at_a_time;
+    std::lock_guard<std::mutex> g(one_at_a_time);
+    for (auto &[k, ms] : by_place) {
+        if (ms.size() < 2) continue;
+        const fs::path folder = ms.front().parent_path().parent_path();
+        log("");
+        log("==== " + N(name) + ": storing what its " + std::to_string(ms.size()) + " maps share once, in " + N(folder.wstring()));
+        const fs::path cache = cfg.cache_dir / "shared";
+        sharedfile::Result r = sharedfile::make(folder, N(name), ms, cfg.xbox_maps_dir, cache, cache, log);
+        log(r.ok ? r.report : "Not stored once (the maps are as they were): " + r.error);
+    }
+}
+
 // `again`: the LODs window's "Convert again" (the same map and output, so no questions about replacing it).
 static void start_convert(bool again = false) {
     if (card_only()) { save_map_card(); return; }
@@ -2481,7 +2501,8 @@ static void open_batch() {
         // Each map's options, worked out here (they read the windows' saved picks; the worker reads nothing of the
         // window): the Xbox tab's as they are, then the map's own.
         struct Job1 { int index; fs::path in, out; Game from; Config cfg; Keys keys; fs::path card_dir; std::string card_name;
-                      fs::path same_as; };   // (the same file as an earlier map of the batch: converted once)
+                      fs::path same_as;      // (the same file as an earlier map of the batch: converted once)
+                      std::wstring group; }; // (a campaign: maps under one map card, each in its own folder; "" none)
         auto jobs = std::make_shared<std::vector<Job1>>();
         Config base = make_config();
         apply_xbox_options(base);
@@ -2549,6 +2570,9 @@ static void open_batch() {
                 auto it = first_at.find(key);
                 if (it == first_at.end()) { first_at[key] = a; continue; }
                 if (same_bytes((*jobs)[it->second].in, j.in)) { j.same_as = (*jobs)[it->second].in; continue; }
+                // (a campaign when they came from one map card: its chapters share a pack file at the end)
+                if (!j.card_dir.empty() && j.card_dir == (*jobs)[it->second].card_dir)
+                    j.group = (*jobs)[it->second].group = (*jobs)[it->second].out.parent_path().filename().wstring();
                 // (named for the map: a campaign's chapters share one map card's name, "Wintersmith Campain (wintersmith4)")
                 for (int n = 1;; n++) {
                     fs::path dir = j.out.parent_path().parent_path() /
@@ -2562,6 +2586,13 @@ static void open_batch() {
             }
         }
         const bool keep_logs = checked(ID_S_KEEP_FAILED);
+        // A campaign's chapters (Job1::group): what two or more of them use stored once, in the pack's file
+        // (<campaign>-<version>.shared) in the folder above theirs, once the last of them is done; with stock.shared
+        // under it, so on when the Xbox tab draws maps on stock.shared.
+        struct Group { int left = 0; std::vector<fs::path> maps; bool finished = false; };
+        auto groups = std::make_shared<std::map<std::wstring, Group>>();
+        for (auto &j : *jobs)
+            if (!j.group.empty() && j.same_as.empty()) (*groups)[j.group].left++;
         g_batch_stop = false;
         set_busy(true);
         SetWindowTextW(g_log, L"");
@@ -2570,7 +2601,21 @@ static void open_batch() {
                    (base.xbox_perfect ? L" (Perfect Conversion)" : L"") +
                    (at_once > 1 ? L", " + std::to_wstring(at_once) + L" at once (each line starts with its map)" : L"") + L".");
         const fs::path cache = base.cache_dir;
-        std::thread([jobs, share, stock_shared, at_once, layout, keep_logs, cache] {
+        std::thread([jobs, share, stock_shared, at_once, layout, keep_logs, cache, groups] {
+            std::mutex group_lock;
+            auto group_done = [&](Job1 &j, bool ok, const Log &log) {   // (the last chapter: the campaign's file)
+                if (j.group.empty()) return;
+                std::vector<fs::path> maps;
+                {
+                    std::lock_guard<std::mutex> g(group_lock);
+                    Group &gr = (*groups)[j.group];
+                    if (ok) gr.maps.push_back(j.out);
+                    if (--gr.left > 0 || gr.finished) return;
+                    gr.finished = true;
+                    maps = gr.maps;
+                }
+                if (stock_shared) finish_campaign(j.cfg, j.group, maps, log);
+            };
             clear_batch_work(cache);   // (earlier batches' work folders: none in use; here, as it can take a while)
             std::atomic<int> ok{0}, linked{0}, failed{0}, done{0};
             std::mutex report_lock;   // (the batch report: a row for each map, written when the batch is over)
@@ -2659,6 +2704,7 @@ static void open_batch() {
                     if (where == "Map Protected (Fail)") st = L"Protected: moved to Map Protected (Fail)";
                 }
                 batchui::progress(j.index, st, r.ok ? size : std::wstring(), r.ok ? j.out.wstring() : std::wstring(L"\x01"));
+                group_done(j, r.ok, log);
                 {
                     std::lock_guard<std::mutex> g(report_lock);
                     report.push_back({N(j.in.stem().wstring()), N(j.in.wstring()),
@@ -2679,6 +2725,13 @@ static void open_batch() {
             worker();
             for (auto &t : more) t.join();
             if (kept.failed) tidy_work(jobs->front().cfg.cache_dir, kept.tag, kept.map, true, keep_logs);   // (a failure's isn't built from)
+            // (a campaign some of whose chapters the batch was stopped before: the ones it made)
+            if (stock_shared)
+                for (auto &[name, gr] : *groups)
+                    if (!gr.finished && gr.maps.size() >= 2) {
+                        gr.finished = true;
+                        finish_campaign(jobs->front().cfg, name, gr.maps, post_log);
+                    }
             std::wstring sum = std::to_wstring(ok) + L" converted" + (linked ? L" (" + std::to_wstring(linked) + L" linked)" : L"") +
                                (failed ? L", " + std::to_wstring(failed) + L" failed" : L"") +
                                (done < (int)jobs->size() ? L", stopped before " + std::to_wstring(jobs->size() - done) + L" more" : L"") + L".";
