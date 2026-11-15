@@ -15,7 +15,7 @@ namespace fs = std::filesystem;
 
 namespace {
 
-enum { IDC_INTRO = 400, IDC_LIST, IDC_FIND, IDC_ADD, IDC_REMOVE, IDC_ALL, IDC_NONE, IDC_GO, IDC_STOP, IDC_CLOSE, IDC_STATUS,
+enum { IDC_INTRO = 400, IDC_STATS = 499, IDC_LIST, IDC_FIND, IDC_ADD, IDC_REMOVE, IDC_ALL, IDC_NONE, IDC_GO, IDC_STOP, IDC_CLOSE, IDC_STATUS,
        IDC_BROWSE, IDC_AT_ONCE_LBL, IDC_AT_ONCE, IDC_ROOT_LBL, IDC_ROOT, IDC_ROOT_BROWSE, IDC_PACKS_LBL, IDC_PACK_CROSS,
        IDC_PACK_CE, IDC_PACK_XBOX };
 struct Progress { std::wstring status, size, out; };
@@ -278,6 +278,9 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_COMMAND:
         switch (LOWORD(wp)) {
+        case IDC_STATS:
+            if (St->hooks.stats) St->hooks.stats(h);
+            return 0;
         case IDC_FIND: {
             if (!St->hooks.find) return 0;
             HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
@@ -452,6 +455,7 @@ void create_controls() {
     add(L"BUTTON", L"Remove selected", WS_TABSTOP, 540, 480, 130, 28, IDC_REMOVE);
     add(L"BUTTON", L"Tick all", WS_TABSTOP, 678, 480, 90, 28, IDC_ALL);
     add(L"BUTTON", L"Tick none", WS_TABSTOP, 776, 480, 90, 28, IDC_NONE);
+    add(L"BUTTON", L"Map stats", WS_TABSTOP, 874, 480, 90, 28, IDC_STATS);
     // Where the maps go: one folder, and the map pack folders in it
     add(L"STATIC", L"Save to:", SS_NOPREFIX, 16, 522, 60, 20, IDC_ROOT_LBL);
     add(L"EDIT", St->hooks.root.c_str(), WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL, 78, 518, 270, 24, IDC_ROOT);

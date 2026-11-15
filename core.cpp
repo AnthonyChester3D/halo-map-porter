@@ -19,6 +19,7 @@
 #include "pairs.hpp"
 #include "h1ulink.hpp"
 #include "maptrim.hpp"
+#include "stats.hpp"
 
 #include <functional>
 #include <future>
@@ -17457,6 +17458,12 @@ static Result convert_map_impl(const Config &cfg, const fs::path &input_given, G
                 r.error += "\nTip: set your Custom Edition folder in Settings so its bitmaps/sounds.map can be read.";
             return r;
         }
+    }
+    // (the map stats: its weapons, vehicles, bipeds, skies and weather, against Bungie's when they're extracted)
+    if (in_game == Game::CE || in_game == Game::MCC) {
+        std::error_code se;
+        const fs::path stock = cfg.cache_dir / "stock_ce_tags";
+        stats::record(cfg.cache_dir / "stats", input_given, extracted, fs::is_directory(stock, se) ? stock : fs::path());
     }
     // An Xbox conversion copies the tags before it changes any; the others change them where they are, so they get
     // a copy of their own.

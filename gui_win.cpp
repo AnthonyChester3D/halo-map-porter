@@ -39,6 +39,7 @@
 #include "scripts_win.hpp"
 #include "shaders_win.hpp"
 #include "sharedfile.hpp"
+#include "stats.hpp"
 #include "showcase.hpp"
 
 using namespace porter;
@@ -115,8 +116,8 @@ enum {
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new117.exe is 1.117).
-#define HMP_VERSION L"1.117"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new118.exe is 1.118).
+#define HMP_VERSION L"1.118"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -2497,6 +2498,20 @@ static void open_batch() {
         save_settings();
     };
     h.pick_folder = [](HWND, const std::wstring &start) { return pick_folder(start); };
+    // (the report on every map converted so far, written beside its records and opened in the browser)
+    h.stats = [](HWND owner) {
+        Config cfg = make_config();
+        int maps = 0;
+        std::string html = stats::report_html(cfg.cache_dir / "stats", 10, maps);
+        if (maps == 0) {
+            MessageBoxW(owner, L"No maps recorded yet: every Custom Edition or MCC map converted from now on is counted.",
+                        L"Map stats", MB_ICONINFORMATION);
+            return;
+        }
+        const fs::path page = cfg.cache_dir / "stats" / "Map stats.html";
+        std::ofstream(page, std::ios::binary | std::ios::trunc) << html;
+        ShellExecuteW(owner, L"open", page.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    };
     h.start = [](const std::vector<batchui::Item> &items, const std::vector<int> &which, int at_once) {
         // Each map's options, worked out here (they read the windows' saved picks; the worker reads nothing of the
         // window): the Xbox tab's as they are, then the map's own.

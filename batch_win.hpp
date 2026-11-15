@@ -52,6 +52,8 @@ struct Hooks {
                        const std::wstring &xbox)> layout_changed;
     // A folder picked with the window's "Browse..." for it ("" cancelled).
     std::function<std::wstring(HWND owner, const std::wstring &start)> pick_folder;
+    // "Map stats": the report on the weapons, vehicles, bipeds, skies and weather of every map converted, opened.
+    std::function<void(HWND owner)> stats;
 };
 const int kMaxAtOnce = 8;
 
