@@ -116,8 +116,8 @@ enum {
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new121.exe is 1.121).
-#define HMP_VERSION L"1.121"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new122.exe is 1.122).
+#define HMP_VERSION L"1.122"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -1940,7 +1940,14 @@ static fs::path place_conversion(const PackLayout &l, const fs::path &in, const 
     if (l.root.empty() || !same_path(built.parent_path().parent_path(), l.root / l.xbox)) return built;
     std::error_code ec;
     const fs::path folder = built.parent_path().filename();
-    const fs::path xbox = l.root / l.xbox / folder, cross = l.root / l.crossplay / folder, ce = l.root / l.ce / in.filename();
+    fs::path ce = l.root / l.ce / in.filename();
+    const fs::path xbox = l.root / l.xbox / folder, cross = l.root / l.crossplay / folder;
+    // (an MCC map: where OpenCE has it, mcc_maps\<package>\<level>.map, under the crossplay folder's "(MCC)" twin)
+    const std::string mcc_prefix = "mcc_maps\\";
+    if (r.linked_pc_name.rfind(mcc_prefix, 0) == 0) {
+        ce = l.root / (l.crossplay + L" (MCC)") / W(r.linked_pc_name.substr(mcc_prefix.size()));
+        ce += r.linked_ce.extension();
+    }
     if (r.ok && !r.link.empty()) {
         fs::remove_all(cross, ec);
         if (move_folder(xbox, cross)) {
@@ -1949,7 +1956,7 @@ static fs::path place_conversion(const PackLayout &l, const fs::path &in, const 
             r.link = cross / r.link.filename();
             r.output = cross / built.filename();
             where = N(l.crossplay);
-            log("Linked: in " + N((l.root / l.crossplay).wstring()) + ", with the Custom Edition map in " + N((l.root / l.ce).wstring()));
+            log("Linked: in " + N((l.root / l.crossplay).wstring()) + ", with the PC map in " + N(ce.parent_path().wstring()));
             return r.output;
         }
         where = N(l.xbox);

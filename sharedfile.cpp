@@ -1,5 +1,6 @@
 // Halo Map Porter - shared files (sharedfile.hpp; Halo 1 Unlimited's docs/shared_maps.md, format version 3).
 #include "sharedfile.hpp"
+#include "h1ulink.hpp"
 #include "inflate.hpp"
 #include <algorithm>
 #include <atomic>
@@ -961,6 +962,15 @@ Result make(const fs::path &folder, const std::string &base_name, const std::vec
             fs::rename(temp(o.path), o.path, ec);
             if (ec) { r.error = "Couldn't put " + o.path.u8string() + " in place (" + ec.message() + "): its new copy is " + temp(o.path).u8string() + "."; return r; }
         }
+        // ---- the link files beside a map rewritten: its xbox line (size and hash) and Xbox tag IDs are for the file as it is now
+        std::string relinked;
+        for (auto &m : maps) {
+            if (!m->rewrite) continue;
+            std::string why;
+            const int n = h1ulink::refresh_xbox(m->path, why);
+            if (n) relinked += (relinked.empty() ? "" : ", ") + name_of(m->path);
+            if (!why.empty()) log("Link file not updated for " + name_of(m->path) + ": " + why);
+        }
         // ---- the pack's earlier versions in its folder (<pack>-<8 hex>.shared, or <pack>.shared) that no map draws on now
         std::string removed;
         {
@@ -1023,6 +1033,7 @@ Result make(const fs::path &folder, const std::string &base_name, const std::vec
                    "installer builds on every Xbox (checksum a7fe2f70), so it isn't counted or sent\n";
         if (!removed.empty()) rep += "Removed the pack's earlier shared file" + std::string(removed.find(',') != std::string::npos ? "s" : "") +
                                      " (no map draws on " + (removed.find(',') != std::string::npos ? "them" : "it") + " now): " + removed + "\n";
+        if (!relinked.empty()) rep += "Link files updated for the rewritten maps (their Xbox size and hash): " + relinked + "\n";
         r.used_stock = stock_used;
         if (!any) rep += "Nothing in these maps is in two of them" + std::string(use_stock ? " or in stock.shared" : "") + ".\n";
         else rep += "In all: " + mb(before) + " -> " + mb(after) + ". Every texture, sound, BSP and the tag data were read back through the new files and match.\n";

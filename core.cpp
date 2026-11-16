@@ -1,5 +1,6 @@
 // Halo Map Porter - conversion engine
 #include "core.hpp"
+#include <tuple>
 #include "animcomp.hpp"
 #include "collision.hpp"
 #include "effects.hpp"
@@ -480,6 +481,7 @@ struct Job {
     fs::path bots_picture;   // the bots' waypoints from above (bot_route_points), for beside the report
     std::string bot_file;    // Perfect Conversion: the bot file (botnodes::bot_file), for bots.txt beside the map
     fs::path input_map;      // convert: the map converted
+    fs::path given_map;      // convert: the map as the player has it (input_map can be a copy with plainer tag names)
     fs::path original;       // an Xbox conversion: the map's tags as extracted (Perfect Conversion compares with them)
     size_t lod_xbox_bytes = 0;
     std::vector<LodView::Model> lod_changes;   // the models whose levels of detail changed (for the LODs window)
@@ -2656,6 +2658,8 @@ static void save_update(Job &job, const fs::path &output, const fs::path &lods, 
     line("user_tags", u8(job.user_tags));
     if (!job.original.empty()) line("original", u8(job.original));     // (Perfect Conversion compares with them)
     if (!job.input_map.empty()) line("input_map", u8(job.input_map));
+    if (!job.given_map.empty()) line("given_map", u8(job.given_map));
+    for (auto &f : job.resource_files) line("resource_file", u8(f));   // (an MCC map's link hashes those it reads)
     if (!job.bot_file.empty()) {   // (its lines, tab-free: one per "bot_file" line)
         std::istringstream bs(job.bot_file);
         std::string bl;
@@ -2707,6 +2711,8 @@ static bool load_update(Job &job, const fs::path &file, UpdateFile &u, std::stri
         else if (k == "user_tags") job.user_tags = from_u8(v);
         else if (k == "original") job.original = from_u8(v);
         else if (k == "input_map") job.input_map = from_u8(v);
+        else if (k == "given_map") job.given_map = from_u8(v);
+        else if (k == "resource_file") job.resource_files.push_back(from_u8(v));
         else if (k == "bot_file") job.bot_file += v + "\n";
         else if (k == "scenario") u.scenario = v;
         else if (k == "output") u.output = from_u8(v);
@@ -17268,6 +17274,67 @@ static void undo_invader_stock_changes(Job &job, const fs::path &map) {
 
 // Perfect Conversion, after the build: the bot file beside the map, then the built map extracted and compared with
 // the Custom Edition map tag by tag (pairs.hpp). When they match, <map>.h1ulink beside the map.
+// An MCC map's features the Xbox has no place for (H1A's: more than 2 grenade kinds, scavenger hunt objects, script
+// parameters, a placed object's appearance player, a trigger's network prediction, the Anniversary HUD remaps, a HUD
+// element's anchor), one log line naming each found in its tags as extracted: Halo 1 Unlimited tests those maps first.
+static std::string lower_name(std::string s) {
+    for (auto &c : s) c = (char)tolower((unsigned char)c);
+    return s;
+}
+static void h1a_features(Job &job) {
+    struct Check { const char *ext, *field, *usual; bool count; const char *what; };
+    static const Check checks[] = {
+        {"globals", "grenades.size", "2", true, "grenade kinds (the Xbox has 2)"},
+        {"scenario", "scavenger_hunt_objects.size", "0", true, "scavenger hunt objects"},
+        {"scenario", "parameters.size", "0", true, "script parameters"},
+        {"scenario", "appearance_player_index", "0", false, "placed objects with an appearance player"},
+        {"weapon", "prediction_type", "none", false, "weapon triggers with network prediction"},
+        {"hud_globals", "anniversary_hud_remaps.size", "0", true, "Anniversary HUD remaps"},
+        {"weapon_hud_interface", "anchor", "from_parent", false, "weapon HUD elements anchored to the screen"},
+    };
+    std::map<std::string, std::pair<long, std::set<std::string>>> found;   // what -> (count, tags)
+    std::error_code ec;
+    for (auto it = fs::recursive_directory_iterator(job.original, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        if (!it->is_regular_file(ec)) continue;
+        const std::string ext = lower_name(it->path().extension().u8string());
+        bool wanted = false;
+        for (auto &c : checks) wanted |= ext == std::string(".") + c.ext;
+        if (!wanted) continue;
+        std::vector<std::pair<std::string, std::string>> flat;
+        if (!tagedit::flatten(u8(it->path()), flat)) continue;
+        const std::string tag = u8(fs::relative(it->path(), job.original, ec));
+        for (auto &c : checks) {
+            if (ext != std::string(".") + c.ext) continue;
+            const std::string f = c.field;
+            for (auto &[k, v] : flat) {
+                // (the field itself, at the top or in a block: "...parameters.size", "triggers[0].prediction_type")
+                if (k.size() < f.size() || k.compare(k.size() - f.size(), f.size(), f) != 0 ||
+                    (k.size() > f.size() && k[k.size() - f.size() - 1] != '.') || v == c.usual)
+                    continue;
+                if (c.count && std::atol(v.c_str()) <= std::atol(c.usual)) continue;
+                auto &e = found[c.what];
+                e.first += c.count ? std::atol(v.c_str()) : 1;
+                e.second.insert(tag);
+            }
+        }
+    }
+    if (found.empty()) {
+        job.note("[mcc] H1A-only features: none found");
+        return;
+    }
+    std::string line;
+    for (auto &[what, e] : found) {
+        line += (line.empty() ? "" : "; ") + std::to_string(e.first) + " " + what + " (";
+        int shown = 0;
+        for (auto &t : e.second) {
+            if (shown++ == 3) { line += ", and " + std::to_string(e.second.size() - 3) + " more"; break; }
+            line += (shown > 1 ? ", " : "") + t;
+        }
+        line += ")";
+    }
+    job.note("[mcc] H1A-only features the Xbox has no place for: " + line);
+}
+
 static void perfect_link(Job &job, const fs::path &output, const std::string &stem, Result &r) {
     const Config &cfg = job.cfg;
     std::error_code ec;
@@ -17276,15 +17343,21 @@ static void perfect_link(Job &job, const fs::path &output, const std::string &st
         std::ofstream f(bf, std::ios::binary | std::ios::trunc);
         if (f << job.bot_file) job.note("[bots] wrote the map's bot file for Halo 1 Unlimited (its waypoints and ladders): " + u8(bf));
     }
-    fs::path link = output.parent_path() / from_u8(stem + ".h1ulink");
-    fs::remove(link, ec);   // (one written before is for other files)
+    // An MCC map (its cache version 13, wherever it came from) gets <map>.mcc.h1ulink with an mcc line; a Custom Edition
+    // map (609, an MCC package's too) <map>.h1ulink with a ce line.
+    const fs::path pc_file = job.given_map.empty() ? job.input_map : job.given_map;
+    const bool mcc = h1ulink::map_version(pc_file) == 13;
+    const char *pc_game = mcc ? "MCC" : "Custom Edition";
+    fs::path link = output.parent_path() / from_u8(stem + (mcc ? ".mcc.h1ulink" : ".h1ulink"));
+    fs::remove(output.parent_path() / from_u8(stem + ".h1ulink"), ec);       // (either written before is for other files)
+    fs::remove(output.parent_path() / from_u8(stem + ".mcc.h1ulink"), ec);
     if (job.original.empty() || job.input_map.empty() || !fs::exists(job.original / from_u8(job.scenario + ".scenario"), ec) ||
         !fs::exists(job.input_map, ec)) {
-        r.warnings.push_back("WARNING: Perfect Conversion: the Custom Edition map (or its tags as extracted) isn't there to compare with, so no "
-                             "link file was written (convert the map again)");
+        r.warnings.push_back("WARNING: Perfect Conversion: the " + std::string(pc_game) + " map (or its tags as extracted) isn't there to "
+                             "compare with, so no link file was written (convert the map again)");
         return;
     }
-    job.log("Comparing the Xbox map with the Custom Edition map, tag by tag (Perfect Conversion)...");
+    job.log("Comparing the Xbox map with the " + std::string(pc_game) + " map, tag by tag (Perfect Conversion)...");
     fs::path xdir = job.work / "perfect_check";
     fs::remove_all(xdir, ec);
     fs::create_directories(xdir, ec);
@@ -17299,7 +17372,7 @@ static void perfect_link(Job &job, const fs::path &output, const std::string &st
     r.pair_check = reports / from_u8(stem + " - pair check.txt");
     {
         std::ofstream f(r.pair_check, std::ios::binary | std::ios::trunc);
-        f << "Halo Map Porter: Perfect Conversion check\nCustom Edition: " << u8(job.input_map) << "\nXbox: " << u8(output)
+        f << "Halo Map Porter: Perfect Conversion check\n" << pc_game << ": " << u8(pc_file) << "\nXbox: " << u8(output)
           << "\n\n" << pairs::report(pr);
     }
     if (!pr.linkable()) {
@@ -17308,7 +17381,7 @@ static void perfect_link(Job &job, const fs::path &output, const std::string &st
             if (d.check != "scripts") by[d.check]++;
         std::string list;
         for (auto &[c, n] : by) list += (list.empty() ? "" : ", ") + c + " " + std::to_string(n);
-        r.warnings.push_back("WARNING: Perfect Conversion: the Xbox map's gameplay isn't the Custom Edition map's (" + list +
+        r.warnings.push_back("WARNING: Perfect Conversion: the Xbox map's gameplay isn't the " + std::string(pc_game) + " map's (" + list +
                              "), so no link file was written. What differs: " + u8(r.pair_check));
         return;
     }
@@ -17316,7 +17389,36 @@ static void perfect_link(Job &job, const fs::path &output, const std::string &st
     l.tool = "Halo Map Porter 1.0 perfect-conversion";
     l.ce_map = job.input_map;
     l.xbox_map = output;
-    l.ce_name = "custom_maps\\" + job.input_map.stem().u8string();
+    l.pc_file = pc_file;
+    l.ce_name = "custom_maps\\" + pc_file.stem().u8string();
+    if (mcc) {
+        // mcc_maps\<package>\<level>: the level the .map file's name; the package (only shown: the Xbox matches the level)
+        // the folder it's in, the one above when that's a Workshop item's maps folder
+        l.mcc = true;
+        fs::path folder = fs::absolute(pc_file, ec).parent_path();
+        if (lower_name(folder.filename().u8string()) == "maps" && folder.has_parent_path()) folder = folder.parent_path();
+        const std::string package = folder.filename().u8string();
+        l.ce_name = "mcc_maps\\" + (package.empty() ? "" : package + "\\") + pc_file.stem().u8string();
+        // the bitmaps.map and sounds.map it reads (the ones its textures and sounds were extracted from), if it has any there
+        std::string info = u8(tool(cfg, "invader-info"));
+        for (auto [type, field, file] : {std::tuple<uint8_t, const char *, const char *>{1, "external_bitmaps_count", "bitmaps.map"},
+                                        {2, "external_sounds_count", "sounds.map"}}) {
+            std::string out;
+            run_process({info, "-T", field, u8(pc_file)}, out);
+            if (std::atoi(out.c_str()) <= 0) continue;
+            fs::path res;
+            for (auto &f : job.resource_files)
+                if (lower_name(f.filename().u8string()) == file) res = f;
+            if (res.empty()) {
+                r.warnings.push_back(std::string("WARNING: Perfect Conversion: the maps match, but the MCC map reads ") + file +
+                                     ", which wasn't found (the MCC maps folder in Settings, or beside the map), so no link file was written");
+                return;
+            }
+            l.resources.push_back({type, res});
+            job.note("[perfect] the MCC map's link is hashed with the " + std::string(file) + " it reads: " + u8(res));
+        }
+        h1a_features(job);
+    }
     l.xbox_name = output.parent_path().filename().u8string() + "\\" + output.filename().u8string();
     tagfile::Tag st;
     if (st.load(job.original / from_u8(job.scenario + ".scenario"))) {
@@ -17346,8 +17448,9 @@ static void perfect_link(Job &job, const fs::path &output, const std::string &st
         return;
     }
     r.link = link;
-    r.linked_ce = job.input_map;
-    job.note("[perfect] the Xbox map's gameplay matches the Custom Edition map's (" + n("gameplay-tags") + " gameplay tags, " +
+    r.linked_ce = pc_file;
+    r.linked_pc_name = l.ce_name;
+    job.note("[perfect] the Xbox map's gameplay matches the " + std::string(pc_game) + " map's (" + n("gameplay-tags") + " gameplay tags, " +
              n("models") + " models, " + n("shaders") + " shaders, the level's collision, placements and globals" +
              (pr.scripts_differ ? "; its scripts converted for the Xbox" : "") + "): wrote the link file " + u8(link));
 }
@@ -17534,6 +17637,7 @@ static Result convert_map_impl(const Config &cfg, const fs::path &input_given, G
         job.source = extracted;
         job.original = extracted;
         job.input_map = input;
+        job.given_map = input_given;
     } else {
         job.source = job.work / "source_tags";
         if (!copy_tree(extracted, job.source, true, ec)) { r.error = "Couldn't copy the map's tags: " + ec.message(); return r; }
