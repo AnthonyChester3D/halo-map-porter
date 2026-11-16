@@ -1823,6 +1823,45 @@ struct Job {
                 }
             }
         }
+        // The counts match, but the object is reached again through its own collision model: Invader checks an object
+        // whose collision model it's still in the middle of (a vehicle whose collision's death effect fires a projectile
+        // whose effect spawns the vehicle again, to respawn it), reads that collision model as having no regions yet,
+        // and stops. The loop broken: what spawns the object spawns a copy of it whose collision model is a copy too,
+        // which Invader can finish (the same object and collision, under other names).
+        if (std::regex_search(msg, m, region_counts) && !f.users.empty()) {
+            const std::string coll = norm_rel(m[2].str()) + ".model_collision_geometry";
+            static const std::regex user_tag(R"(^\w+::\w+ #\d+ in (.+)$)");
+            std::smatch um;
+            const std::string user = std::regex_match(f.users.front(), um, user_tag) ? norm_rel(um[1].str()) : std::string();
+            fs::path vo = owner(tag), co = owner(coll), uo = user.empty() ? fs::path() : owner(user);
+            std::vector<std::pair<std::string, std::string>> uf;
+            if (!vo.empty() && !co.empty() && !uo.empty() && tagedit::flatten(u8(uo / from_u8(user)), uf)) {
+                std::vector<std::string> keys;   // (the user's references to the object)
+                const std::string want = norm_rel(tag);
+                for (auto &[k, v] : uf)
+                    if (v.size() > 1 && v[0] == '@' && norm_rel(v.substr(1)) == want) keys.push_back(k);
+                auto copy_to = [&](const fs::path &from_dir, const std::string &t) {
+                    fs::path tp = from_u8(t);
+                    std::string c = (tp.parent_path() / (tp.stem().u8string() + "_spawned" + tp.extension().u8string())).generic_u8string();
+                    std::error_code e2;
+                    fs::create_directories((fixes / from_u8(c)).parent_path(), e2);
+                    fs::copy_file(from_dir / tp, fixes / from_u8(c), fs::copy_options::overwrite_existing, e2);
+                    return e2 ? std::string() : c;
+                };
+                std::string v2, c2;
+                if (!keys.empty() && !(c2 = copy_to(co, coll)).empty() && !(v2 = copy_to(vo, tag)).empty() &&
+                    edit(v2, "collision_model", c2) && (uo == fixes || to_fixes(user, uo))) {
+                    bool all = true;
+                    for (auto &k : keys) all &= edit(user, k, v2);
+                    if (all) {
+                        note("[fix]  " + user + " spawns " + tag + ", which spawns that again through its collision model's "
+                             "effects (Invader can't check an object while it's still making its collision model); it spawns a "
+                             "copy instead, the same object under another name (" + v2 + ")");
+                        return true;
+                    }
+                }
+            }
+        }
         if (std::regex_search(msg, m, region_counts)) {   // (none of the above could: why, for the log)
             const std::string model = norm_rel(m[1].str()) + ".model", coll = norm_rel(m[2].str()) + ".model_collision_geometry";
             fs::path mo = owner(model), co = owner(coll);
