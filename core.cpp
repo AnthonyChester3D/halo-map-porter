@@ -16931,6 +16931,30 @@ static void perfect_keep_gameplay(Job &job) {
         if (ext == "globals") continue;   // (below)
         if (pairs::gameplay_group(ext)) {
             if (job.keep_source.insert(rel).second) kept++;
+        } else if (ext == "material_effects" || ext == "effect") {
+            // (an effect that deals damage is gameplay: a vehicle's material effects that hurt whoever it runs
+            // over, through an effect of the map's own; kept when the map's version reaches damage the Xbox's doesn't)
+            auto damage = [&](const fs::path &root) {
+                std::set<std::string> found, seen;
+                std::vector<std::string> todo{rel};
+                while (!todo.empty() && seen.size() < 32) {
+                    std::string t = todo.back();
+                    todo.pop_back();
+                    if (!seen.insert(t).second) continue;
+                    std::vector<std::pair<std::string, std::string>> f;
+                    if (!tagedit::flatten(u8(root / from_u8(t)), f)) continue;
+                    for (auto &[k, v] : f) {
+                        if (v.size() < 2 || v[0] != '@') continue;
+                        std::string d = v.substr(1);
+                        std::replace(d.begin(), d.end(), '\\', '/');
+                        if (has_suffix(d, ".damage_effect") || has_suffix(d, ".continuous_damage_effect")) found.insert(d);
+                        else if (has_suffix(d, ".effect") && fs::exists(root / from_u8(d))) todo.push_back(d);
+                    }
+                }
+                return found;
+            };
+            std::set<std::string> mine = damage(job.source);
+            if (!mine.empty() && mine != damage(job.overlay) && job.keep_source.insert(rel).second) kept++;
         } else if (ext.rfind("shader", 0) == 0) {
             std::vector<std::pair<std::string, std::string>> a, b;
             if (!tagedit::flatten(u8(it->path()), a) || !tagedit::flatten(u8(job.overlay / from_u8(rel)), b)) continue;

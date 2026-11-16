@@ -384,6 +384,36 @@ void compare(const std::string &tag, const std::string &g, Flat a, Flat b, Resul
         sort_markers(a);
         sort_markers(b);
     }
+    if (g == "scenario") {
+        // Placements by what they place, not by their palette's numbering (the app drops a palette's empty entries
+        // and the placements of nothing: a placement whose type is no entry places nothing in Custom Edition either).
+        static const char *kinds[][2] = {{"scenery", "scenery_palette"}, {"bipeds", "biped_palette"}, {"vehicles", "vehicle_palette"},
+                                         {"equipment", "equipment_palette"}, {"weapons", "weapon_palette"}, {"machines", "machine_palette"},
+                                         {"controls", "control_palette"}, {"light_fixtures", "light_fixture_palette"},
+                                         {"sound_scenery", "sound_scenery_palette"}};
+        for (Flat *f : {&a, &b}) {
+            for (auto &kp : kinds) {
+                std::map<std::string, std::string> pal;   // index -> what it names
+                std::string pre = std::string(kp[1]) + "[";
+                for (auto &[k, v] : *f)
+                    if (starts(k, pre.c_str()) && ends(k, "].name")) pal[k.substr(pre.size(), k.find(']') - pre.size())] = dep_key(v);
+                auto names = [&](const std::string &v) {
+                    auto it = pal.find(v);
+                    return it == pal.end() || it->second.size() <= 1 ? std::string() : it->second;
+                };
+                drop_elements(*f, kp[0], "type", [&](const std::string &v) { return names(v).empty(); });
+                std::string where, rest;
+                size_t i;
+                Flat out;
+                for (auto &[k, v] : *f) {
+                    if (starts(k, kp[1])) continue;   // (the palette itself: what the placements name)
+                    if (element_of(k, kp[0], where, i, rest) && rest == ".type") { out.push_back({k, names(v)}); continue; }
+                    out.push_back({k, v});
+                }
+                f->swap(out);
+            }
+        }
+    }
     if (g == "scenario")   // (netgame flags of the kinds the game never uses: removed for the Xbox, as Invader needs)
         drop_elements(a, "netgame_flags", "type", [](const std::string &v) { return v == "vegas_bank" || v == "ctf_vehicle"; });
     if (g == "camera_track") unpad_camera_points(a, b);
@@ -425,6 +455,34 @@ void compare(const std::string &tag, const std::string &g, Flat a, Flat b, Resul
                 if (g_empty_collections.count(d)) continue;
             }
         } else if (va != vb) {
+            // An animation list's trailing "none" entries (Invader leaves them off): the same list.
+            if (g == "model_animations") {
+                if (ends(gk, "animations[].animation") && va == "65535" && vb == "(none)") continue;
+                if (ends(gk, "animations.size") && std::atol(va.c_str()) > std::atol(vb.c_str())) {
+                    const std::string base = k.substr(0, k.size() - 5);   // ("units[0].animations")
+                    bool none = true;
+                    for (long j = std::atol(vb.c_str()); j < std::atol(va.c_str()) && none; j++) {
+                        auto e = A.find(base + "[" + std::to_string(j) + "].animation");
+                        none = e != A.end() && e->second == "65535";
+                    }
+                    if (none) continue;
+                }
+                // a node's parent, child or sibling past the nodes there are (the game reads nothing there)
+                if ((ends(gk, "parent_node_index") || ends(gk, "first_child_node_index") || ends(gk, "next_sibling_node_index")) &&
+                    starts(gk, "nodes[")) {
+                    auto n = A.find("nodes.size");
+                    if (n != A.end() && std::atol(va.c_str()) >= std::atol(n->second.c_str())) continue;
+                }
+            }
+            // A marker's or a node's "none" written as the Xbox's 8-bit one.
+            if (ends(gk, "node_index") && va == "65535" && vb == "255") continue;
+            // An item collection whose items all weigh 0 (Custom Edition picks among them as if equal; Invader won't
+            // build it): given equal weights.
+            if (g == "item_collection" && gk == "permutations[].weight" && va == "0.000000") continue;
+            // The globals' weapon list padded to the 14 entries the Xbox needs (the map's first, then empty ones).
+            if (g == "globals" && (gk == "weapon_list.size" && std::atol(vb.c_str()) > std::atol(va.c_str()) ||
+                                   starts(gk, "weapon_list[") && va == "(none)"))
+                continue;
             // A mass point's powered mass point past the ones the physics has (the game reads nothing there): none
             // or the first, either way.
             if (g == "physics" && gk == "mass_points[].powered_mass_point") {
