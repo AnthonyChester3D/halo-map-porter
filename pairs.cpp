@@ -330,6 +330,46 @@ void sort_markers(Flat &f) {
 }
 
 // `ce_has`: whether the Custom Edition map's extraction has a tag ("path.group" as scan keys it).
+// (the Custom Edition map's item collections with no items, set by check: placing one is placing nothing)
+static thread_local std::set<std::string> g_empty_collections;
+// (both maps' tags, set by check, for a reference that moved to a copy)
+static thread_local const std::map<std::string, TagFile> *g_ce = nullptr, *g_xbox = nullptr;
+
+// A reference the app moved to a copy of what it named: the same for a match when the copy has the same skeleton
+// (a model's nodes, markers and regions; a collision model's nodes and regions, extra ones with nothing to hit
+// being the app's padding for the build).
+static bool same_copy(const std::string &va, const std::string &vb) {
+    if (!g_ce || !g_xbox || va.size() < 2 || vb.size() < 2) return false;
+    auto key = [](const std::string &v) {
+        std::string d = dep_key(v).substr(1);
+        std::replace(d.begin(), d.end(), '\\', '/');
+        return d;
+    };
+    auto ia = g_ce->find(key(va)), ib = g_xbox->find(key(vb));
+    if (ia == g_ce->end() || ib == g_xbox->end()) return false;
+    const std::string e = ia->second.ext;
+    if (e != "gbxmodel" && e != "model" && e != "model_collision_geometry") return false;
+    Flat a, b;
+    if (!tagedit::flatten(ia->second.file, a) || !tagedit::flatten(ib->second.file, b)) return false;
+    auto skeleton = [](const Flat &f, bool coll) {
+        std::vector<std::string> out;
+        for (auto &[k, v] : f)
+            if (starts(k, "nodes[") && (ends(k, ".name") || ends(k, ".parent_node_index")) ||
+                (!coll && starts(k, "markers[") && ends(k, ".name")) ||
+                (starts(k, "regions[") && ends(k, "].name") && k.find("permutations") == std::string::npos))
+                out.push_back(k + "=" + v);
+        return out;
+    };
+    std::vector<std::string> sa = skeleton(a, e == "model_collision_geometry"), sb = skeleton(b, e == "model_collision_geometry");
+    if (e == "model_collision_geometry" && sb.size() > sa.size()) {   // (padding: regions added at the end)
+        std::vector<std::string> keep;
+        for (auto &x : sb)
+            if (std::find(sa.begin(), sa.end(), x) != sa.end() || !starts(x, "regions[")) keep.push_back(x);
+        sb = keep;
+    }
+    return sa == sb;
+}
+
 void compare(const std::string &tag, const std::string &g, Flat a, Flat b, Result &r, std::set<std::string> &hit,
              const std::function<bool(const std::string &)> &ce_has) {
     if (object_group(g)) {
@@ -378,7 +418,19 @@ void compare(const std::string &tag, const std::string &g, Flat a, Flat b, Resul
             if (!keep_shader && ((va.size() > 1 && visual_group(dep_ext(va))) || (vb.size() > 1 && visual_group(dep_ext(vb)))))
                 continue;
             if (dep_key(va) == dep_key(vb)) continue;
+            if (same_copy(va, vb)) continue;
+            if (vb.size() <= 1 && va.size() > 1) {   // (an empty item collection placed: nothing, either way)
+                std::string d = dep_key(va).substr(1);
+                std::replace(d.begin(), d.end(), '\\', '/');
+                if (g_empty_collections.count(d)) continue;
+            }
         } else if (va != vb) {
+            // A mass point's powered mass point past the ones the physics has (the game reads nothing there): none
+            // or the first, either way.
+            if (g == "physics" && gk == "mass_points[].powered_mass_point") {
+                auto n = A.find("powered_mass_points.size");
+                if (n != A.end() && std::atol(va.c_str()) >= std::atol(n->second.c_str())) continue;
+            }
             // An animation's node checksum cleared (Invader then doesn't check it; the game never does).
             if (g == "model_animations" && gk == "animations[].node_list_checksum" && vb == "0") continue;
             // A spawn point's or item's gametype of a kind the game never uses ("stub", "ignored"): none, either way.
@@ -459,6 +511,34 @@ Result check(const std::string &ce_dir, const std::string &xbox_dir) {
         r.diffs.push_back({"unreadable", A.empty() ? ce_dir : xbox_dir, "", "(no tags there)", ""});
         return r;
     }
+    // The scenario under the Xbox map's name (a map's file and scenario are named alike for the Xbox: blockfort's
+    // scenario, in "block fort.map", is levels/test/blockfort/block fort there): compared as the same tag.
+    {
+        std::vector<std::string> sa, sb;
+        for (auto &[k, f] : A) if (ends(k, ".scenario")) sa.push_back(k);
+        for (auto &[k, f] : B) if (ends(k, ".scenario")) sb.push_back(k);
+        if (sa.size() == 1 && sb.size() == 1 && sa[0] != sb[0] && !A.count(sb[0])) {
+            A[sb[0]] = A[sa[0]];
+            A.erase(sa[0]);
+            r.notes.push_back({"renamed", sb[0], "", sa[0], sb[0] + " (named for the Xbox map's file)"});
+        }
+    }
+    // An item collection with no items (Custom Edition spawns nothing from it): left out of the Xbox map, and where
+    // the level placed it, nothing (Invader won't build one). The same as it was.
+    auto empty_collection = [&](const std::string &key) {
+        auto it = A.find(key);
+        if (it == A.end() || it->second.ext != "item_collection") return false;
+        Flat f;
+        if (!tagedit::flatten(it->second.file, f)) return false;
+        for (auto &[k, v] : f)
+            if (k == "permutations.size") return v == "0";
+        return false;
+    };
+    g_empty_collections.clear();
+    g_ce = &A;
+    g_xbox = &B;
+    for (auto &[k, f] : A)
+        if (f.ext == "item_collection" && empty_collection(k)) g_empty_collections.insert(k);
     // What the Custom Edition map's scenario and globals reach (worked out when something's missing): a tag nothing
     // reaches (left in the map by its author's tools) can't be in a match on either side.
     std::set<std::string> reach;
@@ -491,7 +571,9 @@ Result check(const std::string &ce_dir, const std::string &xbox_dir) {
         std::string g = key.substr(key.rfind('.') + 1);
         auto it = B.find(key);
         if (it == B.end()) {
-            if (named_group(g) && !reachable(key)) {
+            if (named_group(g) && empty_collection(key)) {
+                r.notes.push_back({"empty", key, "", "(no items: spawns nothing)", "(not in the map)"});
+            } else if (named_group(g) && !reachable(key)) {
                 r.notes.push_back({"unused", key, "", "(in the map, but nothing uses it)", "(not in the map)"});
             } else if (named_group(g)) {
                 r.diffs.push_back({"missing", key, "", "(in the map)", "(not in the map)"});
