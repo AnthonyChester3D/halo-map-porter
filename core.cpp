@@ -17568,6 +17568,26 @@ static void perfect_link(Job &job, const fs::path &output, const std::string &st
         r.warnings.push_back("WARNING: Perfect Conversion: couldn't extract the Xbox map to compare it, so no link file was written");
         return;
     }
+    // A level (BSP) Invader couldn't read back from the Xbox map ("data is out of bounds"): a map built with its
+    // optimize option stores data once where a BSP and other tags have the same, and Invader's extractor misreads a BSP
+    // pointing into the other tags' data (the game reads it fine). The tag it was built from stands in for it.
+    {
+        static const std::regex skipped(R"(Skipped (\S.*\.scenario_structure_bsp)\s*$)");
+        std::smatch sm;
+        for (auto &line : unwrap(out)) {
+            if (!std::regex_search(line, sm, skipped)) continue;
+            const std::string t = sm[1].str();
+            for (auto &d : job.dirs()) {
+                const fs::path from = d / from_u8(t);
+                if (!fs::is_regular_file(from, ec)) continue;
+                fs::create_directories((xdir / from_u8(t)).parent_path(), ec);
+                fs::copy_file(from, xdir / from_u8(t), fs::copy_options::overwrite_existing, ec);
+                if (!ec) job.note("[perfect] " + t + " couldn't be read back from the Xbox map (stored once with other tags' "
+                                  "data, which Invader's extractor misreads); compared as the tag it was built from");
+                break;
+            }
+        }
+    }
     pairs::Result pr = pairs::check(u8(job.original), u8(xdir));
     fs::path reports = cfg.cache_dir / "reports";
     fs::create_directories(reports, ec);

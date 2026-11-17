@@ -523,6 +523,47 @@ void compare(const std::string &tag, const std::string &g, Flat a, Flat b, Resul
                 note = true;
             }
         }
+        // An index past the entries it picks from (MCC lets it through and finds nothing there; Invader won't build it,
+        // so the app pointed it at the first entry or none): a command's point, a platoon's "happens to", a command
+        // list's BSP, an animation's key frame. Reported, not counted.
+        if (!dep) {
+            std::string count_key;
+            if (g == "scenario" && (ends(gk, "commands[].point_1") || ends(gk, "commands[].point_2")))
+                count_key = k.substr(0, k.find(".commands[")) + ".points.size";
+            else if (g == "scenario" && (ends(gk, "platoons[].happens_to") || ends(gk, "platoons[].happens_to_1")))
+                count_key = k.substr(0, k.find(".platoons[")) + ".platoons.size";
+            else if (g == "scenario" && gk == "command_lists[].manual_bsp_index")
+                count_key = "structure_bsps.size";
+            else if (g == "model_animations" && (gk == "animations[].key_frame_index" || gk == "animations[].second_key_frame_index"))
+                count_key = k.substr(0, k.rfind('.')) + ".frame_count";
+            if (!count_key.empty()) {
+                auto n = A.find(count_key);
+                if (n != A.end() && std::atol(va.c_str()) >= std::atol(n->second.c_str()) && va != "65535") {
+                    d.ce += " (past the " + n->second + " there are: nothing there)";
+                    note = true;
+                }
+            }
+        }
+        // A conversation's participant naming an encounter the map doesn't have (the line never plays): cleared, as
+        // Invader needs.
+        if (g == "scenario" && gk == "ai_conversations[].participants[].encounter_name" && vb == "(none)" || 
+            g == "scenario" && gk == "ai_conversations[].participants[].encounter_name" && vb.empty()) {
+            bool have = false;
+            for (auto &[ka, vv] : A)
+                if (generic(ka) == "encounters[].name" && vv == va) have = true;
+            if (!have) {
+                d.ce += " (no such encounter)";
+                note = true;
+            }
+        }
+        // An object's animation graph with no model (nothing for it to move; Invader won't build it): none.
+        if (object_group(g) && gk == "animation_graph" && (vb.size() <= 1 || vb == "(none)")) {
+            auto m = A.find("model");
+            if (m == A.end() || m->second.size() <= 1) {
+                d.ce += " (the object has no model: nothing to animate)";
+                note = true;
+            }
+        }
         // A value that's none of the field's choices (an enum out of range, as some of Gearbox's stock tags have):
         // Invader can't build it as it is (the first choice instead). Reported, not counted.
         if (va == "?") {
