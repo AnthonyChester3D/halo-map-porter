@@ -17,7 +17,7 @@ namespace {
 
 enum { IDC_INTRO = 400, IDC_STATS = 499, IDC_LIST, IDC_FIND, IDC_ADD, IDC_REMOVE, IDC_ALL, IDC_NONE, IDC_GO, IDC_STOP, IDC_CLOSE, IDC_STATUS,
        IDC_BROWSE, IDC_AT_ONCE_LBL, IDC_AT_ONCE, IDC_ROOT_LBL, IDC_ROOT, IDC_ROOT_BROWSE, IDC_PACKS_LBL, IDC_PACK_CROSS,
-       IDC_PACK_CE, IDC_PACK_XBOX, IDC_WORKSHOP };
+       IDC_PACK_CE, IDC_PACK_XBOX, IDC_WORKSHOP, IDC_PACK_MCC };
 struct Progress { std::wstring status, size, out; };
 const UINT WM_B_PROGRESS = WM_APP + 60, WM_B_DONE = WM_APP + 61;
 
@@ -159,14 +159,14 @@ std::wstring text_of(int id) {
 }
 void tell_layout() {
     if (St->hooks.layout_changed)
-        St->hooks.layout_changed(text_of(IDC_ROOT), text_of(IDC_PACK_CROSS), text_of(IDC_PACK_CE), text_of(IDC_PACK_XBOX));
+        St->hooks.layout_changed(text_of(IDC_ROOT), text_of(IDC_PACK_CROSS), text_of(IDC_PACK_CE), text_of(IDC_PACK_MCC), text_of(IDC_PACK_XBOX));
 }
 
 void update_buttons() {
     int ticked = 0;
     for (auto &it : St->items) ticked += it.on;
     for (int id : {IDC_FIND, IDC_ADD, IDC_BROWSE, IDC_WORKSHOP, IDC_REMOVE, IDC_ALL, IDC_NONE, IDC_CLOSE, IDC_AT_ONCE, IDC_ROOT, IDC_ROOT_BROWSE,
-                   IDC_PACK_CROSS, IDC_PACK_CE, IDC_PACK_XBOX})
+                   IDC_PACK_CROSS, IDC_PACK_CE, IDC_PACK_MCC, IDC_PACK_XBOX})
         EnableWindow(item(id), !St->running);
     EnableWindow(item(IDC_GO), !St->running && ticked > 0);
     ShowWindow(item(IDC_STOP), St->running ? SW_SHOW : SW_HIDE);
@@ -436,7 +436,7 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 }
             }
             return 0;
-        case IDC_ROOT: case IDC_PACK_CROSS: case IDC_PACK_CE: case IDC_PACK_XBOX:
+        case IDC_ROOT: case IDC_PACK_CROSS: case IDC_PACK_CE: case IDC_PACK_MCC: case IDC_PACK_XBOX:
             if (HIWORD(wp) == EN_KILLFOCUS) tell_layout();
             return 0;
         case IDC_STOP:
@@ -501,7 +501,7 @@ HWND add(const wchar_t *cls, const wchar_t *text, DWORD style, int x, int y, int
     // (the intro and status stretch; the bottom rows stay at the bottom, their right-hand controls at the right)
     int ax = 0, ay = y >= 470 ? 1 : 0;
     if (id == IDC_INTRO || id == IDC_STATUS || id == IDC_ROOT) ax = 2;   // (Save to grows; the packs stay right of it)
-    if (id == IDC_ROOT_BROWSE || id == IDC_PACKS_LBL || id == IDC_PACK_CROSS || id == IDC_PACK_CE || id == IDC_PACK_XBOX) ax = 1;
+    if (id == IDC_ROOT_BROWSE || id == IDC_PACKS_LBL || id == IDC_PACK_CROSS || id == IDC_PACK_CE || id == IDC_PACK_MCC || id == IDC_PACK_XBOX) ax = 1;
     if (id == IDC_AT_ONCE_LBL || id == IDC_AT_ONCE || id == IDC_STOP || id == IDC_GO || id == IDC_CLOSE) ax = 1;
     St->anchors.push_back({id, x, y, w, h, ax, ay});
     return c;
@@ -510,8 +510,9 @@ HWND add(const wchar_t *cls, const wchar_t *text, DWORD style, int x, int y, int
 void create_controls() {
     add(L"STATIC",
         L"Converts the ticked maps for the Xbox one after another, with the Xbox tab's options as they are now (Perfect "
-        L"Conversion included) and each map's own picks. With a \"Save to\" folder, linked pairs go in its first map pack "
-        L"(their Custom Edition maps copied into the second), maps that aren't linked in the third, protected maps' originals "
+        L"Conversion included) and each map's own picks. With a \"Save to\" folder, linked pairs go in its first pack "
+        L"folder (the Custom Edition maps they're linked to copied into the second, MCC maps into the third, laid out as OpenCE's "
+        L"mcc_maps), maps that aren't linked in the fourth, protected maps' originals "
         L"move into \"Map Protected (Fail)\" beside them, other failures leave nothing; \"Batch report.csv\" lists them all.",
         SS_NOPREFIX, 16, 12, 948, 52, IDC_INTRO);
     St->list = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS,
@@ -539,12 +540,13 @@ void create_controls() {
     add(L"BUTTON", L"Map stats", WS_TABSTOP, 882, 480, 82, 28, IDC_STATS);
     // Where the maps go: one folder, and the map pack folders in it
     add(L"STATIC", L"Save to:", SS_NOPREFIX, 16, 522, 60, 20, IDC_ROOT_LBL);
-    add(L"EDIT", St->hooks.root.c_str(), WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL, 78, 518, 206, 24, IDC_ROOT);
-    add(L"BUTTON", L"...", WS_TABSTOP, 288, 517, 30, 26, IDC_ROOT_BROWSE);
-    add(L"STATIC", L"Packs (linked, CE maps, not linked):", SS_NOPREFIX | SS_RIGHT, 322, 522, 206, 20, IDC_PACKS_LBL);
-    add(L"EDIT", St->hooks.crossplay.c_str(), WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL, 532, 518, 130, 24, IDC_PACK_CROSS);
-    add(L"EDIT", St->hooks.crossplay_ce.c_str(), WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL, 666, 518, 180, 24, IDC_PACK_CE);
-    add(L"EDIT", St->hooks.xbox.c_str(), WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL, 850, 518, 114, 24, IDC_PACK_XBOX);
+    add(L"EDIT", St->hooks.root.c_str(), WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL, 78, 518, 200, 24, IDC_ROOT);
+    add(L"BUTTON", L"...", WS_TABSTOP, 282, 517, 30, 26, IDC_ROOT_BROWSE);
+    add(L"STATIC", L"Pack folders:", SS_NOPREFIX | SS_RIGHT, 316, 522, 92, 20, IDC_PACKS_LBL);
+    add(L"EDIT", St->hooks.crossplay.c_str(), WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL, 412, 518, 130, 24, IDC_PACK_CROSS);
+    add(L"EDIT", St->hooks.crossplay_ce.c_str(), WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL, 546, 518, 160, 24, IDC_PACK_CE);
+    add(L"EDIT", St->hooks.crossplay_mcc.c_str(), WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL, 710, 518, 130, 24, IDC_PACK_MCC);
+    add(L"EDIT", St->hooks.xbox.c_str(), WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL, 844, 518, 120, 24, IDC_PACK_XBOX);
     add(L"STATIC", L"", SS_NOPREFIX | SS_ENDELLIPSIS, 16, 560, 390, 20, IDC_STATUS);
     // (each map at once is an Invader build of its own: about one per two processor cores)
     add(L"STATIC", L"Maps at once:", SS_NOPREFIX | SS_RIGHT, 410, 560, 96, 20, IDC_AT_ONCE_LBL);

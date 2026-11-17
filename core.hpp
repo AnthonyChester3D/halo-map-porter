@@ -335,6 +335,7 @@ struct Result {
     fs::path report;
     fs::path link;                     // Perfect Conversion: the link file written (empty: the pair didn't match)
     fs::path linked_ce;                // ...and the PC map it links to (the Custom Edition or MCC map converted)
+    std::vector<fs::path> linked_resources;   // ...an MCC map's: the bitmaps.map / sounds.map its link was hashed with
     std::string linked_pc_name;        // ...the name the link gives it: "custom_maps\x", or "mcc_maps\<package>\x"
     fs::path pair_check;               // Perfect Conversion: the comparison's report
     std::string campaign;              // a campaign level: its cutscenes, for the Campaign tab (campaign.hpp)

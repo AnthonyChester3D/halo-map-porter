@@ -17521,6 +17521,7 @@ static void perfect_link(Job &job, const fs::path &output, const std::string &st
     r.link = link;
     r.linked_ce = pc_file;
     r.linked_pc_name = l.ce_name;
+    for (auto &res : l.resources) r.linked_resources.push_back(res.file);
     job.note("[perfect] the Xbox map's gameplay matches the " + std::string(pc_game) + " map's (" + n("gameplay-tags") + " gameplay tags, " +
              n("models") + " models, " + n("shaders") + " shaders, the level's collision, placements and globals" +
              (pr.scripts_differ ? "; its scripts converted for the Xbox" : "") + "): wrote the link file " + u8(link));

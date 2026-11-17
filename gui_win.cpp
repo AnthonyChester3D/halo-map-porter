@@ -116,8 +116,8 @@ enum {
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new126.exe is 1.126).
-#define HMP_VERSION L"1.126"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new127.exe is 1.127).
+#define HMP_VERSION L"1.127"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -1903,7 +1903,7 @@ static size_t clear_batch_work(const fs::path &cache) {
 // Edition maps they're linked to, copied as they are, in another), maps that converted but aren't linked in a third.
 struct PackLayout {
     fs::path root;                        // (empty: conversions go where they're saved, as they are)
-    std::wstring crossplay, ce, xbox;     // the three folders' names
+    std::wstring crossplay, ce, mcc, xbox;   // the four folders' names
 };
 static PackLayout pack_layout() {
     PackLayout l;
@@ -1912,6 +1912,7 @@ static PackLayout pack_layout() {
     if (!l.root.empty() && !fs::is_directory(l.root, ec)) l.root.clear();
     l.crossplay = ini_get(L"pack_crossplay", L"H1U Crossplay");
     l.ce = ini_get(L"pack_crossplay_ce", L"H1U Crossplay (Custom Edition)");
+    l.mcc = ini_get(L"pack_crossplay_mcc", L"H1U Crossplay (MCC)");
     l.xbox = ini_get(L"pack_xbox", L"H1U Xbox");
     return l;
 }
@@ -1948,10 +1949,13 @@ static fs::path place_conversion(const PackLayout &l, const fs::path &in, const 
     if (!same_path(l.root / l.xbox / folder, built.parent_path())) return built;
     fs::path ce = l.root / l.ce / in.filename();
     const fs::path xbox = l.root / l.xbox / folder, cross = l.root / l.crossplay / folder;
-    // (an MCC map: where OpenCE has it, mcc_maps\<package>\<level>.map, under the crossplay folder's "(MCC)" twin)
+    // (an MCC map: in the MCC pack folder, laid out as OpenCE's mcc_maps folder: <package>\<level>.map)
+    // (the package's own bitmaps.map / sounds.map go beside it when its link was hashed with them; MCC's own sets are
+    // every OpenCE's)
     const std::string mcc_prefix = "mcc_maps\\";
-    if (r.linked_pc_name.rfind(mcc_prefix, 0) == 0) {
-        ce = l.root / (l.crossplay + L" (MCC)") / W(r.linked_pc_name.substr(mcc_prefix.size()));
+    const bool mcc = r.linked_pc_name.rfind(mcc_prefix, 0) == 0;
+    if (mcc) {
+        ce = l.root / l.mcc / W(r.linked_pc_name.substr(mcc_prefix.size()));
         ce += r.linked_ce.extension();
     }
     if (r.ok && !r.link.empty()) {
@@ -1959,6 +1963,19 @@ static fs::path place_conversion(const PackLayout &l, const fs::path &in, const 
         if (move_folder(xbox, cross)) {
             fs::create_directories(ce.parent_path(), ec);
             fs::copy_file(r.linked_ce.empty() ? in : r.linked_ce, ce, fs::copy_options::overwrite_existing, ec);   // (what the link names)
+            if (mcc) {
+                fs::path pkg = (r.linked_ce.empty() ? in : r.linked_ce).parent_path();
+                if (lower(pkg.filename().wstring()) == L"maps") pkg = pkg.parent_path();
+                for (auto &res : r.linked_resources) {
+                    const fs::path rel = res.lexically_relative(pkg);
+                    if (rel.empty() || *rel.begin() == "..") continue;   // (MCC's own: not the package's)
+                    const fs::path to = ce.parent_path() / res.filename();
+                    std::error_code e2;
+                    if (fs::exists(to, e2) && fs::file_size(to, e2) == fs::file_size(res, e2)) continue;
+                    fs::copy_file(res, to, fs::copy_options::overwrite_existing, e2);
+                    if (e2) log("Couldn't copy " + N(res.wstring()) + " beside the MCC map: " + e2.message());
+                }
+            }
             r.link = cross / r.link.filename();
             r.output = cross / built.filename();
             where = N(l.crossplay);
@@ -2567,13 +2584,16 @@ static void open_batch() {
         h.root = get_text(ID_B_XBOX_OUT);
         h.crossplay = l.crossplay;
         h.crossplay_ce = l.ce;
+        h.crossplay_mcc = l.mcc;
         h.xbox = l.xbox;
     }
     // (the Build tab's Xbox folder is the batch's "Save to")
-    h.layout_changed = [](const std::wstring &root, const std::wstring &cross, const std::wstring &ce, const std::wstring &xbox) {
+    h.layout_changed = [](const std::wstring &root, const std::wstring &cross, const std::wstring &ce, const std::wstring &mcc,
+                          const std::wstring &xbox) {
         set_text(ID_B_XBOX_OUT, root);
         ini_set(L"pack_crossplay", cross.empty() ? L"H1U Crossplay" : cross);
         ini_set(L"pack_crossplay_ce", ce.empty() ? L"H1U Crossplay (Custom Edition)" : ce);
+        ini_set(L"pack_crossplay_mcc", mcc.empty() ? L"H1U Crossplay (MCC)" : mcc);
         ini_set(L"pack_xbox", xbox.empty() ? L"H1U Xbox" : xbox);
         save_settings();
     };

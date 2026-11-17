@@ -44,12 +44,13 @@ struct Hooks {
     // "Maps at once" as the window opens (1 to kMaxAtOnce), and told when it's changed (to keep it).
     int at_once = 1;
     std::function<void(int)> at_once_changed;
-    // Where the batch's maps go (the Build tab's Xbox folder) and its three map pack folders' names: linked pairs
-    // (the Xbox maps), the Custom Edition maps they're linked to, and maps converted but not linked. Shown in the
+    // Where the batch's maps go (the Build tab's Xbox folder) and its four map pack folders' names: linked pairs
+    // (the Xbox maps), the Custom Edition maps they're linked to, the MCC maps they're linked to (laid out as OpenCE's
+    // mcc_maps folder), and maps converted but not linked. Shown in the
     // window; told when one's changed (and before converting), to keep them. Empty folder: each map where it's saved.
-    std::wstring root, crossplay, crossplay_ce, xbox;
+    std::wstring root, crossplay, crossplay_ce, crossplay_mcc, xbox;
     std::function<void(const std::wstring &root, const std::wstring &crossplay, const std::wstring &crossplay_ce,
-                       const std::wstring &xbox)> layout_changed;
+                       const std::wstring &crossplay_mcc, const std::wstring &xbox)> layout_changed;
     // A folder picked with the window's "Browse..." for it ("" cancelled).
     std::function<std::wstring(HWND owner, const std::wstring &start)> pick_folder;
     // "MCC Workshop...": the Halo 1 maps (Custom Edition or MCC, by their headers) in MCC's Steam Workshop folder, found
