@@ -1164,8 +1164,18 @@ int drop_bad_triangles(const fs::path &model) {
     std::vector<TagNode> *geos = tagfile::block(t.root(), "geometries");
     if (!geos) return -1;
     int changed = 0;
-    for (auto &g : *geos)
-        for (auto &part : *tagfile::block(g, "parts")) {
+    for (auto &g : *geos) {
+        // (a part with no vertices at all but triangles: nothing to draw; left out when the geometry has others)
+        auto &parts = *tagfile::block(g, "parts");
+        for (size_t i = parts.size(); i-- > 0 && parts.size() > 1;) {
+            auto *uv = tagfile::block(parts[i], "uncompressed vertices");
+            auto *cv = tagfile::block(parts[i], "compressed vertices");
+            if ((uv ? uv->size() : 0) + (cv ? cv->size() : 0) == 0 && !tagfile::block(parts[i], "triangles")->empty()) {
+                parts.erase(parts.begin() + (std::ptrdiff_t)i);
+                changed++;
+            }
+        }
+        for (auto &part : parts) {
             auto &T = *tagfile::block(part, "triangles");
             const size_t nv = tagfile::block(part, "uncompressed vertices")->size();
             bool bad = false;
@@ -1180,6 +1190,7 @@ int drop_bad_triangles(const fs::path &model) {
             T = list_to_strip(list, nv, tagfile::block_struct(part, "triangles"));
             changed++;
         }
+    }
     if (changed && !t.save(model)) return -1;
     return changed;
 }

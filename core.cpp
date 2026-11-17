@@ -3807,8 +3807,23 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
                 r.error += "\nFull log: " + u8(job.work / "build.log");
                 return r;
             }
-            r.error = "Build failed and no automatic fix applies.\nError: " + f.msg + "\nTag: " + f.tag +
-                      "\nFull log: " + u8(job.work / "build.log");
+            r.error = "Build failed and no automatic fix applies.\nError: " + f.msg + "\nTag: " + f.tag;
+            // (what the build said before its last error: a script compiler's own message, kept in the app's log
+            // once the work folder is cleared)
+            {
+                std::ifstream bl(job.work / "build.log", std::ios::binary);
+                std::vector<std::string> said;
+                for (std::string l; std::getline(bl, l);) {
+                    if (!l.empty() && l.back() == '\r') l.pop_back();
+                    const std::string ll = [](std::string x) { for (auto &c : x) c = (char)tolower((unsigned char)c); return x; }(l);
+                    if ((ll.find("error") != std::string::npos || ll.find("can't") != std::string::npos ||
+                         ll.find("invalid") != std::string::npos) && l.find(f.msg) == std::string::npos)
+                        said.push_back(l.substr(0, 300));
+                }
+                const size_t from = said.size() > 4 ? said.size() - 4 : 0;
+                for (size_t k = from; k < said.size(); k++) r.error += "\n  " + said[k];
+            }
+            r.error += "\nFull log: " + u8(job.work / "build.log");
             return r;
         }
     }
@@ -4449,6 +4464,18 @@ static bool reencode_sound_now(Job &job, const fs::path &tags, const std::string
         // (dialogue by invader-sound's reckoning, not this one's: kept whole)
         if (out.find("Split dialogue is unsupported") != std::string::npos && std::find(cmd.begin(), cmd.end(), "-s") != cmd.end()) {
             *std::find(cmd.begin(), cmd.end(), "-s") = "-S";
+            continue;
+        }
+        // (stopped with no word of why after "Processing sounds...", as on Windows with a few maps' dialogue that
+        // encodes on Linux: once more on one thread, then as 16-bit PCM, which the Xbox plays as well, only bigger)
+        if (std::find(cmd.begin(), cmd.end(), "-j") == cmd.end()) {
+            cmd.insert(cmd.end() - 1, {"-j", "1"});
+            continue;
+        }
+        auto fmt = std::find(cmd.begin(), cmd.end(), "xbox_adpcm");
+        if (fmt != cmd.end()) {
+            *fmt = "16-bit_pcm";
+            job.log("  [sound] invader-sound couldn't make Xbox ADPCM of " + rel + "; trying 16-bit PCM (bigger, plays the same)");
             continue;
         }
         why = "invader-sound failed: " + out.substr(out.size() > 400 ? out.size() - 400 : 0);
@@ -10993,8 +11020,8 @@ static bool fix_script_ai_as_unit(Job &job, const std::string &err, std::string 
     std::string s((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     in.close();
     const std::string ln = hsc::lower(name);
-    // (a name the scripts use as an AI: an encounter or squad, not an object the build lost)
-    if (!is_global && !std::regex_search(hsc::lower(s), std::regex("\\(ai_\\w+\\s+\"?" + std::regex_replace(ln, std::regex(R"([.^$|()\[\]{}*+?\\])"), R"(\$&)") + "\"?[\\s)]")))
+    // (an encounter or squad, "e_ai_bot_a/s_bot_01" too: a name that's neither fails the next build with its own error)
+    if (false && !is_global && !std::regex_search(hsc::lower(s), std::regex("\\(ai_\\w+\\s+\"?" + std::regex_replace(ln, std::regex(R"([.^$|()\[\]{}*+?\\])"), R"(\$&)") + "\"?[\\s)]")))
         return false;
     size_t off = 0;
     for (int l = 1; l < line && off < s.size(); off++) if (s[off] == '\n') l++;
@@ -11030,15 +11057,21 @@ static bool fix_script_number_global(Job &job, const std::string &err, std::stri
     if (!std::regex_search(err, m, re)) return false;
     const std::string name = hsc::lower(m[1].str()), to = m[3].str();
     if (!job.retyped_globals.insert(name).second) return false;
-    fs::path file;
+    fs::path at;
     int line = 0, col = 0;
-    if (!script_error_place(job, err, file, line, col)) return false;
+    if (!script_error_place(job, err, at, line, col)) return false;
+    // (declared in any of the map's script files: extracted_0000.hsc, while the error is in _0001)
+    std::vector<fs::path> files{at};
+    std::error_code ec;
+    for (auto &e : fs::directory_iterator(at.parent_path(), ec))
+        if (hsc::lower(e.path().extension().u8string()) == ".hsc" && e.path() != at) files.push_back(e.path());
+    for (auto &file : files) {
     std::ifstream in(file, std::ios::binary);
     std::string s((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     in.close();
     std::vector<hsc::Node> top;
     size_t i = 0;
-    if (!hsc::parse(s, i, top, false)) return false;
+    if (!hsc::parse(s, i, top, false)) continue;
     for (auto &n : top) {
         if (!n.list || n.kids.size() < 3 || n.kids[0].list || n.kids[1].list || n.kids[2].list) continue;
         if (hsc::lower(n.kids[0].atom) != "global" || hsc::lower(n.kids[2].atom) != name) continue;
@@ -11052,6 +11085,7 @@ static bool fix_script_number_global(Job &job, const std::string &err, std::stri
         what = "the global " + m[1].str() + " is a " + m[2].str() + " that the scripts use as a " + to +
                " (MCC converts it, the Xbox doesn't): declared as a " + to + " now";
         return true;
+    }
     }
     return false;
 }
