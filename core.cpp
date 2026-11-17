@@ -18172,10 +18172,10 @@ uint64_t clear_working_files(const Config &cfg, std::string &what) {
 Result convert_map(const Config &cfg, const fs::path &input, Game in_game, Game out_game,
                    const fs::path &output, bool share, const Log &log, ContentAnalysis *measure) {
     if (cfg.xbox_perfect && out_game == Game::Xbox) {
-        if (in_game != Game::CE) {
+        if (in_game != Game::CE && in_game != Game::MCC) {
             Result r;
-            r.error = "Perfect Conversion links a Custom Edition map with its Xbox port (Halo 1 Unlimited's games of PCs "
-                      "and Xboxes run on Custom Edition maps). Convert a Custom Edition map, or turn Perfect Conversion off.";
+            r.error = "Perfect Conversion links a PC map (Custom Edition or MCC) with its Xbox port, for Halo 1 Unlimited's "
+                      "games of PCs and Xboxes. Convert a Custom Edition or MCC map, or turn Perfect Conversion off.";
             return r;
         }
         Config pc = perfect_config(cfg);
@@ -18188,7 +18188,7 @@ Result build_from_tags(const Config &cfg, const fs::path &scenario_file, Game ou
     if (cfg.xbox_perfect) {   // (it links a Custom Edition map with its port: the Build tab's tags have no such map)
         Config c = cfg;
         c.xbox_perfect = false;
-        log("Note: Perfect Conversion is for converting a Custom Edition map (the Convert tab); building from your tags "
+        log("Note: Perfect Conversion is for converting a Custom Edition or MCC map (the Convert tab); building from your tags "
             "as usual.");
         return build_from_tags_impl(c, scenario_file, out_game, output, share, log, nullptr, measure);
     }
@@ -18802,8 +18802,9 @@ bool analyze_map_traits(const Config &cfg, const fs::path &map, MapTraits &t, st
 }
 
 bool analyze_level_shaders(const Config &cfg_in, const fs::path &input, Game in_game, fs::path &file, std::string &error, const Log &log) {
-    Config cfg = cfg_in.xbox_perfect && in_game == Game::CE ? perfect_config(cfg_in) : cfg_in;
-    if (in_game != Game::CE) cfg.xbox_perfect = false;
+    const bool pc_map = in_game == Game::CE || in_game == Game::MCC;   // (Perfect Conversion: a PC map's)
+    Config cfg = cfg_in.xbox_perfect && pc_map ? perfect_config(cfg_in) : cfg_in;
+    if (!pc_map) cfg.xbox_perfect = false;
     cfg.level_shaders_only = true;
     file.clear();
     fs::path dummy = cfg.cache_dir / "shaders" / (input.stem().u8string() + ".map");
@@ -18848,8 +18849,9 @@ bool measure_prepared(const Config &cfg_in, const fs::path &update, ContentAnaly
 }
 
 bool analyze_xbox_contents(const Config &cfg_in, const fs::path &input, Game in_game, ContentAnalysis &out, const Log &log) {
-    Config cfg = cfg_in.xbox_perfect && in_game == Game::CE ? perfect_config(cfg_in) : cfg_in;
-    if (in_game != Game::CE) cfg.xbox_perfect = false;
+    const bool pc_map = in_game == Game::CE || in_game == Game::MCC;   // (Perfect Conversion: a PC map's)
+    Config cfg = cfg_in.xbox_perfect && pc_map ? perfect_config(cfg_in) : cfg_in;
+    if (!pc_map) cfg.xbox_perfect = false;
     cfg.xbox_replace.clear();   // measure the map as it is, without the picks
     out = ContentAnalysis();
     fs::path dummy = cfg.cache_dir / "analyze" / (input.stem().u8string() + ".map");

@@ -102,7 +102,7 @@ enum {
     ID_UNPACK, ID_UNPACK_HINT,
     // the scripts window
     ID_X_SCRIPTS,
-    // Perfect Conversion (linked with the Custom Edition map)
+    // Perfect Conversion (linked with the PC map: Custom Edition or MCC)
     ID_X_PERFECT, ID_X_PERFECT_HINT,
     // the Convert tab's batch of conversions
     ID_BATCH, ID_BATCH_HINT,
@@ -116,8 +116,8 @@ enum {
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new127.exe is 1.127).
-#define HMP_VERSION L"1.127"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new128.exe is 1.128).
+#define HMP_VERSION L"1.128"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -3750,7 +3750,7 @@ static void create_controls() {
     list_combo(2, 484, y, 250, ID_X_LM, {L"Keep their size", L"Max 512", L"Max 256 (like stock maps)",
                                           L"Keep their size, compressed (DXT1)", L"Max 512, compressed (DXT1)"});
     y += 29;
-    check(2, L"Perfect Conversion: linked with the Custom Edition map (Halo 1 Unlimited: PCs and Xboxes in one game)",
+    check(2, L"Perfect Conversion: linked with the PC map (Halo 1 Unlimited: PCs and Xboxes in one game)",
           26, y, 708, ID_X_PERFECT);
     y += 20;
     add(2, L"STATIC", L"Gameplay stays exactly the Custom Edition map's; only what's drawn and heard gets lighter. Writes "
