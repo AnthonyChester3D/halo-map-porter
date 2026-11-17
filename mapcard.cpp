@@ -794,6 +794,20 @@ fs::path mod_file(const fs::path &root, std::string rel) {
 }
 }   // namespace
 
+fs::path mcc_mod_root(const fs::path &map_file) {
+    std::error_code ec;
+    if (lower8(map_file.parent_path().filename().u8string()) != "maps") return {};
+    fs::path root = map_file.parent_path().parent_path();
+    if (!fs::exists(root / "ModInfo.json", ec) && !fs::is_directory(root / "multiplayer", ec) && !fs::is_directory(root / "campaign", ec))
+        return {};
+    return root;
+}
+std::string mcc_mod_title(const fs::path &mod_root) {
+    JVal mod;
+    if (!read_json(mod_root / "ModInfo.json", mod)) return "";
+    return card_text(mod_text(mod.get("Title")), true, NAME_MAX);
+}
+
 bool import_mcc_mod_card(const fs::path &dir, const fs::path &map_file, const std::string &default_name, std::string &what) {
     std::error_code ec;
     if (lower8(map_file.parent_path().filename().u8string()) != "maps") return false;
@@ -839,7 +853,7 @@ bool import_mcc_mod_card(const fs::path &dir, const fs::path &map_file, const st
         if (!score) continue;
         fs::path pic;
         if (const JVal *im = j.get("Images"))
-            for (const char *k : {"Thumbnail", "Large", "LoadingScreen"})
+            for (const char *k : {"Large", "Thumbnail", "LoadingScreen"})   // (the largest picture first: the card's is 256 wide)
                 if (pic.empty() && im->get(k) && im->get(k)->t == JVal::STR) pic = mod_file(root, im->get(k)->s);
         score += (pic.empty() ? 0 : 2) + (mod_text(j.get("Title")).empty() ? 0 : 1) + (own_name ? 1 : 0) + (listed ? 1 : 0);
         if (score > best_score) { best_score = score; best = std::move(j); best_json = p; best_pic = pic; }

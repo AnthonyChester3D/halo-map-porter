@@ -117,6 +117,10 @@ bool import_card(const fs::path &card_dir, const fs::path &map_file, bool in_map
 // mod's own info: the map's title and description, and its thumbnail as the picture. The .json is the one whose
 // ScenarioFile names this map; its Images say which picture is the thumbnail. Only when the card doesn't exist
 // yet or still holds nothing but `default_name`. `what` gets a line for the log. True when it made the card.
+// An MCC mod's map (a Steam Workshop item: <item>\maps\<map>.map beside ModInfo.json, multiplayer\, campaign\): the
+// item's folder, else empty. mcc_mod_title: the item's own title (ModInfo.json), "" when it has none.
+fs::path mcc_mod_root(const fs::path &map_file);
+std::string mcc_mod_title(const fs::path &mod_root);
 bool import_mcc_mod_card(const fs::path &card_dir, const fs::path &map_file, const std::string &default_name,
                          std::string &what);
 // A map from a downloaded maps catalog: a .csv in the map's folder or one of the six above it, with the columns "Map

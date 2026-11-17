@@ -116,8 +116,8 @@ enum {
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new123.exe is 1.123).
-#define HMP_VERSION L"1.123"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new124.exe is 1.124).
+#define HMP_VERSION L"1.124"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -1937,9 +1937,12 @@ static bool move_folder(const fs::path &from, const fs::path &to) {
 static fs::path place_conversion(const PackLayout &l, const fs::path &in, const fs::path &built, Result &r, std::string &where,
                                  const Log &log) {
     where.clear();
-    if (l.root.empty() || !same_path(built.parent_path().parent_path(), l.root / l.xbox)) return built;
+    // (its folder under the Xbox pack, a pack's map folder too: CE Digsite Multiplayer\Albatross)
+    if (l.root.empty()) return built;
     std::error_code ec;
-    const fs::path folder = built.parent_path().filename();
+    const fs::path folder = built.parent_path().lexically_relative(l.root / l.xbox);
+    if (folder.empty() || folder == "." || *folder.begin() == "..") return built;
+    if (!same_path(l.root / l.xbox / folder, built.parent_path())) return built;
     fs::path ce = l.root / l.ce / in.filename();
     const fs::path xbox = l.root / l.xbox / folder, cross = l.root / l.crossplay / folder;
     // (an MCC map: where OpenCE has it, mcc_maps\<package>\<level>.map, under the crossplay folder's "(MCC)" twin)
@@ -2023,6 +2026,66 @@ static void draw_on_stock(const Config &cfg, const fs::path &map, const Log &log
     const fs::path cache = cfg.cache_dir / "shared";
     sharedfile::Result s = sharedfile::make(map.parent_path(), N(map.stem().wstring()), {map}, cfg.xbox_maps_dir, cache, cache, log);
     log(s.ok ? s.report : "Not drawn on stock.shared: " + s.error);
+}
+
+// ---- MCC Workshop items in the batch: a map's card from the item's own .json (its title, description, picture), its
+// file named for its title ("1.map" is Albatross: albatross.map), and an item with two or more Halo 1 maps a pack of its
+// own (CE Digsite Multiplayer\Albatross\albatross.map), whose maps store what they share once, in its file.
+struct MccItem { std::wstring title; int maps = 0; };
+static MccItem mcc_item(const fs::path &root) {
+    static std::mutex lock;
+    static std::map<std::wstring, MccItem> known;
+    {
+        std::lock_guard<std::mutex> g(lock);
+        auto it = known.find(lower(root.wstring()));
+        if (it != known.end()) return it->second;
+    }
+    MccItem m;
+    m.title = W(mapcard::mcc_mod_title(root));
+    std::error_code ec;
+    for (auto &e : fs::directory_iterator(root / L"maps", ec))
+        if (lower(e.path().extension().wstring()) == L".map") {
+            const Game g = detect_game(e.path());
+            if (g == Game::CE || g == Game::MCC) m.maps++;
+        }
+    std::lock_guard<std::mutex> g(lock);
+    return known[lower(root.wstring())] = m;
+}
+// The card's name as a map file's: "Blood Gulch 2.0" -> "blood_gulch_2_0" (letters, digits, _; 31 at most).
+static std::wstring file_name_for(const std::string &title) {
+    std::wstring o;
+    for (unsigned char c : title) {
+        if (isalnum(c)) o += (wchar_t)tolower(c);
+        else if (!o.empty() && o.back() != L'_') o += L'_';
+    }
+    while (!o.empty() && o.back() == L'_') o.pop_back();
+    if (o.size() > 31) o.resize(31);
+    while (!o.empty() && o.back() == L'_') o.pop_back();
+    return o;
+}
+// Where an MCC Workshop map goes under a folder of maps: [<pack>\]<card folder>\<file>.map, `pack` set for an item with
+// two or more Halo 1 maps. False for any other map. Starts the map's card from the item's .json when it has none.
+static bool mcc_place(const fs::path &in, const fs::path &card_dir, std::wstring &pack, fs::path &rel) {
+    const fs::path root = mapcard::mcc_mod_root(in);
+    if (root.empty()) return false;
+    const std::string stem = N(lower(in.stem().wstring()));
+    std::string what;
+    mapcard::import_mcc_mod_card(card_dir, in, stem, what);
+    mapcard::Card c = mapcard::load_card(card_dir, stem);
+    std::wstring file = file_name_for(c.name);
+    if (file.empty()) file = lower(in.stem().wstring());
+    const MccItem item = mcc_item(root);
+    pack.clear();
+    if (item.maps >= 2) pack = W(mapcard::sanitize_folder(item.title.empty() ? N(root.filename().wstring()) : N(item.title)));
+    rel = (pack.empty() ? fs::path() : fs::path(pack)) / W(c.folder.empty() ? stem : c.folder) / (file + L".map");
+    return true;
+}
+// A pack's file name (<name>-<version>.shared, 21 characters of name at most): its title, without spaces when too long.
+static std::wstring shared_name_for(const std::wstring &pack) {
+    if (pack.size() <= 21) return pack;
+    std::wstring o;
+    for (wchar_t c : pack) if (iswalnum(c)) o += c;
+    return o.empty() ? pack : o;
 }
 
 // A campaign's chapters converted in a batch (each in its own folder, a pack's way): what two or more of them use
@@ -2443,9 +2506,11 @@ static void open_batch() {
         if (!fs::exists(d / "card.txt", ec)) return L"";
         mapcard::Card c = mapcard::load_card(d, name_of(it));
         std::wstring s;   // (what you made: a conversion's own player counts, game types and genres don't count)
+        if (!c.name.empty() && lower(W(c.name)) != lower(fs::path(it.in).stem().wstring())) s = W(c.name) + L": ";
+        const size_t named = s.size();
         if (!c.image.empty()) s += L"Picture";
-        if (!c.desc.empty()) s += std::wstring(s.empty() ? L"" : L", ") + L"Description";
-        if (!c.edited.empty()) s += std::wstring(s.empty() ? L"" : L", ") + L"Details";
+        if (!c.desc.empty()) s += std::wstring(s.size() == named ? L"" : L", ") + L"Description";
+        if (!c.edited.empty()) s += std::wstring(s.size() == named ? L"" : L", ") + L"Details";
         return s;
     };
     h.use = [](const batchui::Item &it) {
@@ -2481,6 +2546,11 @@ static void open_batch() {
         if (e != earlier->end()) return e->second;
         fs::path save(get_text(ID_OUT));
         if (save.empty()) return L"";
+        // (an MCC Workshop map: named for its title, in its item's pack when the item has more maps)
+        std::wstring pack;
+        fs::path rel;
+        if (mcc_place(fs::path(in), mapcard::card_dir(cards_root(), fs::path(in)), pack, rel))
+            return (folder_mode() ? save.parent_path().parent_path() / rel : save.parent_path() / rel.filename()).wstring();
         std::wstring stem = fs::path(in).stem().wstring();
         if (folder_mode()) return (save.parent_path().parent_path() / stem / (lower(stem) + L".map")).wstring();
         return (save.parent_path() / (lower(stem) + L".map")).wstring();
@@ -2543,7 +2613,20 @@ static void open_batch() {
             const std::wstring n = lower(it->path().filename().wstring());
             if (n != L"bitmaps.map" && n != L"sounds.map" && n != L"loc.map" && g != Game::Xbox) other++;
         }
-        std::sort(files.begin(), files.end());
+        // (each item's maps together, in the order of their titles: the item's .json names "1.map" Albatross)
+        std::vector<std::pair<std::wstring, std::wstring>> keyed;
+        for (auto &f : files) {
+            const fs::path in(f);
+            std::wstring pack;
+            fs::path rel;
+            std::wstring key = lower(in.wstring());
+            if (mcc_place(in, mapcard::card_dir(cards_root(), in), pack, rel))
+                key = lower(mapcard::mcc_mod_root(in).wstring()) + L"\x01" + lower(rel.wstring());
+            keyed.push_back({key, f});
+        }
+        std::sort(keyed.begin(), keyed.end());
+        files.clear();
+        for (auto &k : keyed) files.push_back(k.second);
         if (files.empty()) {
             note = L"No Halo 1 maps in " + dir.wstring() + (other ? L" (" + std::to_wstring(other) + L" other games' maps)." : L".");
             return files;
@@ -2602,9 +2685,17 @@ static void open_batch() {
                 if (mapcard::import_catalog_card(j.card_dir, j.in, j.card_name, what))
                     post_log("[" + N(j.in.stem().wstring()) + "] " + what);
             }
+            // An MCC Workshop map: its card from the item's .json, named for its title, and an item with more maps a
+            // pack of its own (Job1::group: what they share stored once, in the pack's file).
+            std::wstring pack;
+            fs::path rel;
+            const bool mcc = mcc_place(j.in, j.card_dir.empty() ? mapcard::card_dir(cards_root(), j.in) : j.card_dir, pack, rel);
+            if (mcc && !pack.empty()) j.group = pack;
             // Built into the Xbox pack folder, in a folder of the card's name (else the map's), and put where it
             // belongs once it's done (place_conversion).
-            if (!layout.root.empty()) {
+            if (!layout.root.empty() && mcc) {
+                j.out = layout.root / layout.xbox / rel;
+            } else if (!layout.root.empty()) {
                 std::wstring folder = j.in.stem().wstring();
                 if (!j.card_dir.empty())
                     if (auto c = mapcard::load_card(j.card_dir, j.card_name); !c.folder.empty()) folder = W(c.folder);
@@ -2683,7 +2774,7 @@ static void open_batch() {
                     gr.finished = true;
                     maps = gr.maps;
                 }
-                if (stock_shared) finish_campaign(j.cfg, j.group, maps, log);
+                if (stock_shared) finish_campaign(j.cfg, shared_name_for(j.group), maps, log);
             };
             clear_batch_work(cache);   // (earlier batches' work folders: none in use; here, as it can take a while)
             std::atomic<int> ok{0}, linked{0}, failed{0}, done{0};

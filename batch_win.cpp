@@ -31,11 +31,17 @@ struct State {
     bool running = false, closing = false;
     int sort_col = -1;
     bool sort_up = true;
+    // (each control's place as laid out at the design size, 980 x 598, and how it follows the window's size: x 0 stays
+    // left, 1 stays right, 2 stretches; y 0 stays at the top, 1 at the bottom, 2 stretches)
+    struct Anchor { int id, x, y, w, h, ax, ay; };
+    std::vector<Anchor> anchors;
 };
 State *St = nullptr;
 HWND g_target = nullptr;   // (the open window, for progress from the worker)
 
 int S(int v) { return MulDiv(v, St->dpi, 96); }
+constexpr int kDesignW = 980, kDesignH = 598;
+void layout();
 HWND item(int id) { return GetDlgItem(St->wnd, id); }
 
 std::string N(const std::wstring &w) {
@@ -451,14 +457,52 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_CLOSE:
         if (!St->running) St->closing = true;
         return 0;
+    case WM_SIZE:
+        if (St && St->list && wp != SIZE_MINIMIZED) layout();
+        return 0;
+    case WM_GETMINMAXINFO: {
+        if (!St) break;
+        RECT m{0, 0, S(kDesignW), S(kDesignH)};
+        AdjustWindowRect(&m, (DWORD)GetWindowLongPtrW(h, GWL_STYLE), FALSE);
+        auto *mm = (MINMAXINFO *)lp;
+        mm->ptMinTrackSize = {m.right - m.left, m.bottom - m.top};
+        return 0;
+    }
     }
     return DefWindowProcW(h, msg, wp, lp);
+}
+
+// The controls placed for the window's size now; the list's columns share the width it gained.
+void layout() {
+    RECT rc;
+    GetClientRect(St->wnd, &rc);
+    const int dw = std::max(0, (int)rc.right - S(kDesignW)), dh = std::max(0, (int)rc.bottom - S(kDesignH));
+    HDWP d = BeginDeferWindowPos((int)St->anchors.size());
+    for (auto &a : St->anchors) {
+        HWND c = GetDlgItem(St->wnd, a.id);
+        if (!c) continue;
+        int x = S(a.x), y = S(a.y), w = S(a.w), h = S(a.h);
+        if (a.ax == 1) x += dw; else if (a.ax == 2) w += dw;
+        if (a.ay == 1) y += dh; else if (a.ay == 2) h += dh;
+        if (d) d = DeferWindowPos(d, c, nullptr, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    if (d) EndDeferWindowPos(d);
+    // (Map, Saved to and Last run widen with the window)
+    const int base[] = {170, 90, 236, 66, 252, 110};
+    const double share[] = {0.2, 0, 0.4, 0, 0.25, 0.15};
+    for (int i = 0; i < 6; i++) ListView_SetColumnWidth(St->list, i, S(base[i]) + (int)(dw * share[i]));
+    InvalidateRect(St->wnd, nullptr, TRUE);
 }
 
 HWND add(const wchar_t *cls, const wchar_t *text, DWORD style, int x, int y, int w, int h, int id) {
     HWND c = CreateWindowExW(0, cls, text, WS_CHILD | WS_VISIBLE | style, S(x), S(y), S(w), S(h), St->wnd,
                              (HMENU)(INT_PTR)id, GetModuleHandleW(nullptr), nullptr);
     SendMessageW(c, WM_SETFONT, (WPARAM)St->font, TRUE);
+    // (the intro and status stretch; the bottom rows stay at the bottom, their right-hand controls at the right)
+    int ax = 0, ay = y >= 470 ? 1 : 0;
+    if (id == IDC_INTRO || id == IDC_STATUS) ax = 2;
+    if (id == IDC_AT_ONCE_LBL || id == IDC_AT_ONCE || id == IDC_STOP || id == IDC_GO || id == IDC_CLOSE) ax = 1;
+    St->anchors.push_back({id, x, y, w, h, ax, ay});
     return c;
 }
 
@@ -472,6 +516,7 @@ void create_controls() {
     St->list = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS,
                                S(16), S(70), S(948), S(400), St->wnd, (HMENU)(INT_PTR)IDC_LIST, GetModuleHandleW(nullptr), nullptr);
     SendMessageW(St->list, WM_SETFONT, (WPARAM)St->font, TRUE);
+    St->anchors.push_back({IDC_LIST, 16, 70, 948, 400, 2, 2});
     ListView_SetExtendedListViewStyle(St->list, LVS_EX_FULLROWSELECT | LVS_EX_CHECKBOXES | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP);
     struct { const wchar_t *t; int w; } cols[] = {{L"Map", 170}, {L"From", 90}, {L"Saved to", 236}, {L"Size", 66}, {L"Last run", 252},
                                                   {L"Map card", 110}};
@@ -547,8 +592,9 @@ void open(HWND owner, const fs::path &list_file, Hooks hooks) {
     st.file = list_file;
     st.hooks = std::move(hooks);
     load();
-    RECT r{0, 0, S(980), S(598)};
-    DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
+    // (wider than its design size to start, as the monitor allows; any size down to that)
+    RECT r{0, 0, S(1280), S(700)};
+    DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN | WS_THICKFRAME | WS_MAXIMIZEBOX;
     AdjustWindowRect(&r, style, FALSE);
     RECT orc;
     GetWindowRect(owner, &orc);
@@ -557,12 +603,19 @@ void open(HWND owner, const fs::path &list_file, Hooks hooks) {
     HMONITOR mon = MonitorFromWindow(owner, MONITOR_DEFAULTTONEAREST);
     MONITORINFO mi{sizeof(mi)};
     if (GetMonitorInfoW(mon, &mi)) {
+        RECT m{0, 0, S(kDesignW), S(kDesignH)};
+        AdjustWindowRect(&m, style, FALSE);
+        w = std::max((int)(m.right - m.left), std::min(w, (int)(mi.rcWork.right - mi.rcWork.left)));
+        hgt = std::max((int)(m.bottom - m.top), std::min(hgt, (int)(mi.rcWork.bottom - mi.rcWork.top)));
+        x = orc.left + ((orc.right - orc.left) - w) / 2;
+        y = orc.top + ((orc.bottom - orc.top) - hgt) / 2;
         x = std::clamp(x, (int)mi.rcWork.left, std::max((int)mi.rcWork.left, (int)mi.rcWork.right - w));
         y = std::clamp(y, (int)mi.rcWork.top, std::max((int)mi.rcWork.top, (int)mi.rcWork.bottom - hgt));
     }
     st.wnd = CreateWindowExW(WS_EX_DLGMODALFRAME, L"HMPBatch", L"Batch convert for the Xbox", style, x, y, w, hgt, owner,
                              nullptr, inst, nullptr);
     create_controls();
+    layout();
     fill();
     update_buttons();
     if (st.items.empty()) SetWindowTextW(item(IDC_STATUS), L"Empty: \"Find my earlier conversions\" lists the maps you've converted.");
