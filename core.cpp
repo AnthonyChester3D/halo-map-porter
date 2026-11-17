@@ -466,6 +466,7 @@ struct Job {
     std::string xbox_slots[3]; // the vehicle each Xbox slot ends up with (restrict_to_xbox_mp)
     std::vector<std::string> kept_vehicles; // vehicles with no slot kept for the Halo Universal XBE
     std::set<std::string> switch_vehicles;  // vehicles that are a map's options (drop_dead_placements): kept as they are
+    std::set<std::string> retyped_globals;  // script globals given another number type (fix_script_number_global): once each
     std::map<std::string, int> fix_count;
     std::set<std::string> range_checked; // tag kinds (".sound"...) already scanned for out-of-range values
     Game from = Game::Unknown;            // the game the tags came from (convert), if known
@@ -2143,6 +2144,8 @@ static void tidy_weapon_list(Job &job);
 static bool fix_script_none(Job &job, const std::string &err, std::string &what);
 static bool fix_script_shadow(Job &job, const std::string &err, std::string &what);
 static bool fix_script_navpoint(Job &job, const std::string &err, std::string &what);
+static bool fix_script_ai_as_unit(Job &job, const std::string &err, std::string &what);
+static bool fix_script_number_global(Job &job, const std::string &err, std::string &what);
 static bool fix_script_missing_tag(Job &job, const std::string &err, std::string &what);
 static bool fix_script_unterminated(Job &job, const std::string &err, std::string &what);
 static bool fix_script_stray_statement(Job &job, const std::string &err, std::string &what);
@@ -3766,7 +3769,8 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
             if (!job.extra.empty() && none_fixes < 40 &&
                 (fix_script_none(job, f.script_error, what) || fix_script_shadow(job, f.script_error, what) ||
                  fix_script_missing_tag(job, f.script_error, what) || fix_script_unterminated(job, f.script_error, what) ||
-                 fix_script_stray_statement(job, f.script_error, what))) {
+                 fix_script_stray_statement(job, f.script_error, what) || fix_script_ai_as_unit(job, f.script_error, what) ||
+                 fix_script_number_global(job, f.script_error, what))) {
                 none_fixes++;
                 job.note("[scripts] " + what);
                 continue;
@@ -3788,7 +3792,8 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
             // A name in the map's scripts that the built map doesn't have (a nav point arrow its HUD lacks...).
             std::string what;
             if (!job.extra.empty() && none_fixes < 40 &&
-                (fix_script_navpoint(job, f.hsc_error, what) || fix_script_missing_tag(job, f.hsc_error, what))) {
+                (fix_script_navpoint(job, f.hsc_error, what) || fix_script_missing_tag(job, f.hsc_error, what) ||
+                 fix_script_ai_as_unit(job, f.hsc_error, what) || fix_script_number_global(job, f.hsc_error, what))) {
                 none_fixes++;
                 job.note("[scripts] " + what);
                 continue;
@@ -4368,9 +4373,10 @@ static bool reencode_sound_now(Job &job, const fs::path &tags, const std::string
     if (force_rate) rate = {"-r", std::to_string(force_rate)};
     if (force_mono) rate.insert(rate.end(), {"-C", "mono"});
     // -s: split into 227.5 KiB pieces; the original Halo engine crashes on longer unsplit sounds. invader-sound
-    // refuses to split dialogue, so dialogue stays whole (a line longer than that gets a note from the caller).
-    std::vector<std::string> split;
-    if (!sound_is_dialogue(t)) split = {"-s"};
+    // refuses to split dialogue, so dialogue stays whole (a line longer than that gets a note from the caller): -S,
+    // since left to itself it splits as the tag's "split long sound" flag says, and refuses dialogue with it set
+    // (Halo PC's tags have it on some dialogue).
+    std::vector<std::string> split{sound_is_dialogue(t) ? "-S" : "-s"};
     if (!job.user_data.empty() && fs::is_directory(job.user_data / from_u8(noext))) {
         std::vector<std::string> cmd{u8(tool(cfg, "invader-sound")), "-t", u8(tags), "-d", u8(job.user_data), "-F",
                                      "xbox_adpcm"};
@@ -4378,6 +4384,10 @@ static bool reencode_sound_now(Job &job, const fs::path &tags, const std::string
         cmd.insert(cmd.end(), rate.begin(), rate.end());
         cmd.push_back(noext);
         if (run_process(cmd, out) == 0) return true;
+        if (out.find("Split dialogue is unsupported") != std::string::npos && split[0] == "-s") {
+            *std::find(cmd.begin(), cmd.end(), "-s") = "-S";
+            if (run_process(cmd, out) == 0) return true;
+        }
     }
     // (a data folder of its own: another sound's tag can sit inside a folder named like this one, "sounds.sound"
     // beside "sounds/eng_start/...", and its data inside this one's made invader-sound refuse it; sounds are
@@ -4434,6 +4444,11 @@ static bool reencode_sound_now(Job &job, const fs::path &tags, const std::string
         if (run_process(cmd, out) == 0) return true;
         if (tries < 2 && out.find("hadn't finished after") != std::string::npos) {
             job.log("  [sound] invader-sound got stuck on " + rel + "; trying it again");
+            continue;
+        }
+        // (dialogue by invader-sound's reckoning, not this one's: kept whole)
+        if (out.find("Split dialogue is unsupported") != std::string::npos && std::find(cmd.begin(), cmd.end(), "-s") != cmd.end()) {
+            *std::find(cmd.begin(), cmd.end(), "-s") = "-S";
             continue;
         }
         why = "invader-sound failed: " + out.substr(out.size() > 400 ? out.size() - 400 : 0);
@@ -10957,6 +10972,88 @@ static bool fix_script_missing_tag(Job &job, const std::string &err, std::string
     what = "the map's scripts name the " + m[1].str() + " " + m[2].str() + ", which the map doesn't have (it does nothing in the "
            "game): " + std::to_string(spots.size()) + " place" + (spots.size() == 1 ? "" : "s") + " now say none, as the game reads it";
     return true;
+}
+
+// MCC's script compiler takes an AI where a unit or object goes (its first actor: (unit_get_health survivora),
+// (volume_test_object vol some_ai_global)); the original one doesn't. That spot now says so itself:
+// (unit (list_get (ai_actors survivora) 0)), (list_get (ai_actors x) 0) for an object, (ai_actors x) for a list.
+static bool fix_script_ai_as_unit(Job &job, const std::string &err, std::string &what) {
+    static const std::regex named(R"(can't find (unit|object) '([^']+)')");
+    static const std::regex global(R"(global '([^']+)' is 'ai' which cannot convert to '(unit|object|object_list)')");
+    std::smatch m;
+    std::string name, want;
+    bool is_global = false;
+    if (std::regex_search(err, m, named)) name = m[2].str(), want = m[1].str();
+    else if (std::regex_search(err, m, global)) name = m[1].str(), want = m[2].str(), is_global = true;
+    else return false;
+    fs::path file;
+    int line = 0, col = 0;
+    if (!script_error_place(job, err, file, line, col)) return false;
+    std::ifstream in(file, std::ios::binary);
+    std::string s((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+    const std::string ln = hsc::lower(name);
+    // (a name the scripts use as an AI: an encounter or squad, not an object the build lost)
+    if (!is_global && !std::regex_search(hsc::lower(s), std::regex("\\(ai_\\w+\\s+\"?" + std::regex_replace(ln, std::regex(R"([.^$|()\[\]{}*+?\\])"), R"(\$&)") + "\"?[\\s)]")))
+        return false;
+    size_t off = 0;
+    for (int l = 1; l < line && off < s.size(); off++) if (s[off] == '\n') l++;
+    off += col > 0 ? col - 1 : 0;
+    std::vector<hsc::Node> top;
+    size_t i = 0;
+    if (!hsc::parse(s, i, top, false)) return false;
+    size_t b = 0, len = 0;
+    std::function<void(const std::vector<hsc::Node> &)> walk = [&](const std::vector<hsc::Node> &ns) {
+        for (auto &n : ns) {
+            if (n.list) { walk(n.kids); continue; }
+            std::string t = n.atom;
+            if (n.str && t.size() >= 2) t = t.substr(1, t.size() - 2);
+            if (!len && n.b <= off && off < n.e && hsc::lower(t) == ln) b = n.b, len = n.e - n.b;
+        }
+    };
+    walk(top);
+    if (!len) return false;
+    const std::string ai = s.substr(b, len);
+    s.replace(b, len, want == "unit" ? "(unit (list_get (ai_actors " + ai + ") 0))"
+                      : want == "object" ? "(list_get (ai_actors " + ai + ") 0)" : "(ai_actors " + ai + ")");
+    std::ofstream(file, std::ios::binary) << s;
+    what = "the AI " + name + " stood for a" + std::string(want == "object_list" ? "n object list" : want == "unit" ? " unit" : "n object") +
+           " in the scripts (line " + std::to_string(line) + "), which MCC allows and the Xbox doesn't: now its first actor";
+    return true;
+}
+
+// MCC's script compiler takes one number type where another goes ((< race_time short_global)); the original one
+// doesn't. The global is declared as the type wanted there instead (once: a second clash leaves it as the error).
+static bool fix_script_number_global(Job &job, const std::string &err, std::string &what) {
+    static const std::regex re(R"(global '([^']+)' is '(short|long|real)' which cannot convert to '(short|long|real)')");
+    std::smatch m;
+    if (!std::regex_search(err, m, re)) return false;
+    const std::string name = hsc::lower(m[1].str()), to = m[3].str();
+    if (!job.retyped_globals.insert(name).second) return false;
+    fs::path file;
+    int line = 0, col = 0;
+    if (!script_error_place(job, err, file, line, col)) return false;
+    std::ifstream in(file, std::ios::binary);
+    std::string s((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+    std::vector<hsc::Node> top;
+    size_t i = 0;
+    if (!hsc::parse(s, i, top, false)) return false;
+    for (auto &n : top) {
+        if (!n.list || n.kids.size() < 3 || n.kids[0].list || n.kids[1].list || n.kids[2].list) continue;
+        if (hsc::lower(n.kids[0].atom) != "global" || hsc::lower(n.kids[2].atom) != name) continue;
+        // (a whole value stays whole: 30.5 as a short would be a compile error of its own)
+        if (to != "real" && n.kids.size() > 3 && !n.kids[3].list && n.kids[3].atom.find('.') != std::string::npos) {
+            const std::string v = n.kids[3].atom;
+            s.replace(n.kids[3].b, n.kids[3].e - n.kids[3].b, std::to_string((long long)std::llround(std::atof(v.c_str()))));
+        }
+        s.replace(n.kids[1].b, n.kids[1].e - n.kids[1].b, to);
+        std::ofstream(file, std::ios::binary) << s;
+        what = "the global " + m[1].str() + " is a " + m[2].str() + " that the scripts use as a " + to +
+               " (MCC converts it, the Xbox doesn't): declared as a " + to + " now";
+        return true;
+    }
+    return false;
 }
 
 // A nav point type (a waypoint arrow of the HUD globals, e.g. Coldsnap's "orange_landingpad") that the built map's

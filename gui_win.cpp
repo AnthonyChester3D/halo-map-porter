@@ -116,8 +116,8 @@ enum {
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new128.exe is 1.128).
-#define HMP_VERSION L"1.128"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new129.exe is 1.129).
+#define HMP_VERSION L"1.129"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -3753,7 +3753,7 @@ static void create_controls() {
     check(2, L"Perfect Conversion: linked with the PC map (Halo 1 Unlimited: PCs and Xboxes in one game)",
           26, y, 708, ID_X_PERFECT);
     y += 20;
-    add(2, L"STATIC", L"Gameplay stays exactly the Custom Edition map's; only what's drawn and heard gets lighter. Writes "
+    add(2, L"STATIC", L"Gameplay stays exactly the PC map's (Custom Edition or MCC); only what's drawn and heard gets lighter. Writes "
                       L"<map>.h1ulink beside the map when the two match, and the bots' waypoints to bots.txt.",
         0, 46, y, 688, 32, ID_X_PERFECT_HINT);
     y += 34;
