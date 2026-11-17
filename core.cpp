@@ -465,6 +465,7 @@ struct Job {
     std::set<std::string> swapped, borrowed;
     std::string xbox_slots[3]; // the vehicle each Xbox slot ends up with (restrict_to_xbox_mp)
     std::vector<std::string> kept_vehicles; // vehicles with no slot kept for the Halo Universal XBE
+    std::set<std::string> switch_vehicles;  // vehicles that are a map's options (drop_dead_placements): kept as they are
     std::map<std::string, int> fix_count;
     std::set<std::string> range_checked; // tag kinds (".sound"...) already scanned for out-of-range values
     Game from = Game::Unknown;            // the game the tags came from (convert), if known
@@ -15255,6 +15256,7 @@ void drop_dead_placements(Job &job, const fs::path &xsrc) {
                                        "slayer_allowed", "ctf_allowed", "king_allowed", "oddball_allowed"};
     std::vector<std::string> said, said_ics;
     int said_items = 0;
+    bool options_said = false;
     // The scenario's copies: the fixes' (which the build uses) and the prepared one (which the Xbox steps read).
     for (const fs::path &dir : {job.fixes, xsrc}) {
         if (dir.empty() || !fs::exists(dir / from_u8(scen))) continue;
@@ -15273,6 +15275,73 @@ void drop_dead_placements(Job &job, const fs::path &xsrc) {
         const int names = [&] { int n = 0; while (vals.count("object_names[" + std::to_string(n) + "].name")) n++; return n; }();
         const bool has_ai = vals.count("encounters[0].name") > 0;
         std::vector<std::string> edits, renumber, drop_palette;
+        // A map's options a custom vehicle set turns on (MCC maps): a named vehicle placement only a custom set spawns
+        // (an "allowed" flag, no "default" one), which the scripts look for. The Xbox has no custom sets and would spawn
+        // it in every game (every option on: CE Digsite's flycam, talking timer, taunts...), so it's left to the scripts
+        // ("not placed: automatically") unless Config::xbox_map_options names it: off, as in a game with the default
+        // vehicles. Not with Perfect Conversion: its placements stay the PC map's (Halo 1 Unlimited's to spawn by the
+        // game's vehicle set).
+        {
+            const int n = count("vehicles");
+            std::vector<std::pair<int, std::string>> cand;   // placement, its name
+            bool any_default = false;
+            for (int i = 0; i < n; i++)
+                for (const char *f : {"slayer_default", "ctf_default", "king_default", "oddball_default"})
+                    any_default |= vals["vehicles[" + std::to_string(i) + "].multiplayer_spawn_flags." + f] == "1";
+            for (int i = 0; i < n; i++) {
+                const std::string e = "vehicles[" + std::to_string(i) + "]";
+                const int nm = num(e + ".name");
+                if (nm < 0 || nm >= names) continue;
+                bool def = false, allowed = false;
+                for (const char *f : spawn_bits) {
+                    const bool on = vals[e + ".multiplayer_spawn_flags." + f] == "1";
+                    (std::string(f).find("_default") != std::string::npos ? def : allowed) |= on;
+                }
+                if (allowed && !def) cand.push_back({i, vals["object_names[" + std::to_string(nm) + "].name"]});
+            }
+            if (!cand.empty() && (any_default || cand.size() < (size_t)n)) {
+                const std::string text = lc(map_script_text(job, dir, scen));
+                std::set<std::string> on;
+                {
+                    std::string w;
+                    for (char c : job.cfg.xbox_map_options + " ") {
+                        if (c == ' ' || c == ',' || c == ';' || c == '\t') { if (!w.empty()) on.insert(lc(w)); w.clear(); }
+                        else w += c;
+                    }
+                }
+                std::vector<std::string> list_on, list_off;
+                for (auto &[i, name] : cand) {
+                    const std::string e = "vehicles[" + std::to_string(i) + "]", ln = lc(name);
+                    // (a whole word in the scripts: "timer_check" not "timer_check_biped")
+                    bool used = false;
+                    for (size_t at = text.find(ln); at != std::string::npos && !used; at = text.find(ln, at + 1)) {
+                        auto word = [](char c) { return isalnum((unsigned char)c) || c == '_'; };
+                        used = (at == 0 || !word(text[at - 1])) && (at + ln.size() >= text.size() || !word(text[at + ln.size()]));
+                    }
+                    if (!used) continue;
+                    const int t = num(e + ".type");
+                    const std::string raw = t >= 0 ? vals["vehicle_palette[" + std::to_string(t) + "].name"] : "", tag = norm_rel(raw);
+                    if (!raw.empty()) job.switch_vehicles.insert(raw), job.switch_vehicles.insert(tag);
+                    const std::string team = vals[e + ".multiplayer_team_index"] == "0" ? "red" : vals[e + ".multiplayer_team_index"] == "1" ? "blue" : "team " + vals[e + ".multiplayer_team_index"];
+                    const std::string label = name + " (" + team + ", " + fs::path(from_u8(tag)).stem().u8string() + ")";
+                    if (on.count(ln) || job.cfg.xbox_perfect) { list_on.push_back(label); continue; }
+                    list_off.push_back(label);
+                    if (vals[e + ".not_placed.automatically"] != "1")
+                        edits.insert(edits.end(), {"-S", e + ".not_placed.automatically", "1"});
+                }
+                if ((!list_on.empty() || !list_off.empty()) && !options_said) {
+                    options_said = true;
+                    auto join = [](const std::vector<std::string> &v) { std::string o; for (auto &x : v) o += (o.empty() ? "" : ", ") + x; return o; };
+                    job.note("[options] this map has options a custom vehicle set turns on in MCC (a vehicle only that set "
+                             "spawns, which its scripts look for; the Xbox has no custom sets). " +
+                             (job.cfg.xbox_perfect ? "Perfect Conversion keeps them as the PC map places them, so the "
+                                                     "Xbox spawns them in every game: " + join(list_on)
+                                                   : (list_on.empty() ? "" : "On (\"Map options on\", Xbox tab): " + join(list_on) + ". ") +
+                                                         (list_off.empty() ? "" : "Off, as in a game with the default vehicles: " + join(list_off) +
+                                                                                      ". To turn one on, put its name in the Xbox tab's \"Map options on\".")));
+                }
+            }
+        }
         std::map<std::string, int> gone;   // palette entry's tag -> placements taken out
         for (const Kind &k : kinds) {
             const std::string b = k.block, pal = k.palette;
@@ -15878,6 +15947,7 @@ void restrict_to_xbox_mp(Job &job, const fs::path &xsrc) {
         cfg.xbox_use_stock_versions && cfg.xbox_keep_all_vehicles ? script_bound_vehicles(job, xsrc) : std::set<std::string>{};
     for (auto &v : placed) {
         if (v == slots[0] || v == slots[1] || v == slots[2]) continue;
+        if (job.switch_vehicles.count(v)) continue;   // (a map's option: the scripts look for it as it is)
         // A custom vehicle: with "use the Xbox's own versions", treat it as the stock vehicle its name says
         // it is (on a stock XBE it can't spawn anyway unless it's in a slot); otherwise leave it alone.
         int type = mp_vehicle(v) ? vehicle_type(v) : cfg.xbox_use_stock_versions ? guess_vehicle_type(v) : -1;
@@ -17940,6 +18010,7 @@ std::string xbox_prepare_key(const Config &c) {
     k << "shrink=" << c.xbox_shrink << c.xbox_shrink_stock << " max=" << c.xbox_max_mb << " texmb=" << c.xbox_texture_target_mb << "\n";
     for (auto &v : c.xbox_vehicle_slots) k << "slot=" << v << "\n";
     k << "allveh=" << c.xbox_keep_all_vehicles << " stock=" << c.xbox_use_stock_versions << "\n";
+    if (!c.xbox_map_options.empty()) k << "options=" << c.xbox_map_options << "\n";
     for (auto &w : c.xbox_keep_weapons) k << "keep=" << w << "\n";
     for (auto &[w, r] : c.xbox_weapon_replacements) k << "repl=" << w << "=" << r << "\n";
     k << "other=" << c.xbox_other_weapons << "\n";

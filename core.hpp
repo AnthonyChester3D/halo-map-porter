@@ -160,6 +160,11 @@ struct Config {
     bool xbox_prepare_only = false;
     // Custom weapons with no Xbox original: empty = keep them, else an Xbox weapon name (e.g. "sniper rifle").
     std::string xbox_other_weapons;
+    // MCC maps' options a custom vehicle set turns on (a named vehicle only a custom set spawns, which the map's scripts
+    // look for: CE Digsite's timer_check is "Talking Timer"): the names to keep on, separated by spaces or commas. The
+    // Xbox has no custom vehicle sets and spawns such a vehicle in every game, so every other one is off, as in a game
+    // with the default vehicles.
+    std::string xbox_map_options;
     // Largest side for the map's own world textures (stock Xbox maps stay at 512) and for lightmaps.
     // 0 = no limit. HUD/menu textures and stock tags are never scaled.
     int xbox_max_texture = 512;
