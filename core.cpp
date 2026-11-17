@@ -17828,6 +17828,42 @@ static Result convert_map_impl(const Config &cfg, const fs::path &input_given, G
             return r;
         }
     }
+    // An MCC map read with MCC's own halo1\maps resources that are missing some of its textures or sounds: MCC (and
+    // OpenCE) use the multiplayer set in halo1\maps\custom_edition for a map whose references are all there. Read
+    // with that one instead when it finds more of them (Lumoria's HUD bitmaps).
+    if (in_game == Game::MCC && !mcc_ce.empty() && !job.resource_files.empty()) {
+        static const std::regex errors(R"(with (\d+) errors?)");
+        std::smatch em;
+        bool stock_only = true;
+        for (auto &f : job.resource_files) { std::error_code e3; stock_only &= fs::exists(mcc_dir, e3) && fs::equivalent(f.parent_path(), mcc_dir, e3); }
+        if (stock_only && std::regex_search(out, em, errors) && std::stoi(em[1]) > 0) {
+            std::vector<fs::path> files;
+            for (const char *n : {"bitmaps.map", "sounds.map"})
+                if (fs::is_regular_file(mcc_ce / n, ec)) files.push_back(mcc_ce / n);
+            if (!files.empty()) {
+                std::string key2 = "HaloMapPorter extracted 1\n" + std::string(game_name(in_game)) + "\n" + file_identity(input) + "\n" +
+                                   file_identity(tool(cfg, "invader-extract")) + "\n";
+                for (auto &f : files) key2 += file_identity(f) + "\n";
+                std::string out2;
+                fs::path ex2 = find_extracted(job, key2, out2);
+                if (ex2.empty()) {
+                    log("Some of the map's textures/sounds aren't in MCC's halo1\\maps resources; trying its multiplayer set (" +
+                        u8(mcc_ce) + ")...");
+                    ex2 = extract_kept(job, key2, {u8(tool(cfg, "invader-extract")), "-m", u8(mcc_ce), u8(input)}, out2);
+                }
+                std::smatch em2;
+                const int before = std::stoi(em[1]), after = std::regex_search(out2, em2, errors) ? std::stoi(em2[1]) : 0;
+                if (!ex2.empty() && after < before) {
+                    extracted = ex2;
+                    out = out2;
+                    job.resource_files = files;
+                    job.resources_from = u8(mcc_ce);
+                    log("Using MCC's multiplayer " + std::string(files.size() > 1 ? "bitmaps.map and sounds.map" : u8(files[0].filename())) +
+                        " (" + u8(mcc_ce) + "): " + std::to_string(before - after) + " more of the map's textures/sounds found there");
+                }
+            }
+        }
+    }
     // (the map stats: its weapons, vehicles, bipeds, skies and weather, against Bungie's when they're extracted)
     if (in_game == Game::CE || in_game == Game::MCC) {
         std::error_code se;
