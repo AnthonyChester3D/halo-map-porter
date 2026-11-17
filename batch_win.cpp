@@ -500,7 +500,8 @@ HWND add(const wchar_t *cls, const wchar_t *text, DWORD style, int x, int y, int
     SendMessageW(c, WM_SETFONT, (WPARAM)St->font, TRUE);
     // (the intro and status stretch; the bottom rows stay at the bottom, their right-hand controls at the right)
     int ax = 0, ay = y >= 470 ? 1 : 0;
-    if (id == IDC_INTRO || id == IDC_STATUS) ax = 2;
+    if (id == IDC_INTRO || id == IDC_STATUS || id == IDC_ROOT) ax = 2;   // (Save to grows; the packs stay right of it)
+    if (id == IDC_ROOT_BROWSE || id == IDC_PACKS_LBL || id == IDC_PACK_CROSS || id == IDC_PACK_CE || id == IDC_PACK_XBOX) ax = 1;
     if (id == IDC_AT_ONCE_LBL || id == IDC_AT_ONCE || id == IDC_STOP || id == IDC_GO || id == IDC_CLOSE) ax = 1;
     St->anchors.push_back({id, x, y, w, h, ax, ay});
     return c;
@@ -538,9 +539,9 @@ void create_controls() {
     add(L"BUTTON", L"Map stats", WS_TABSTOP, 882, 480, 82, 28, IDC_STATS);
     // Where the maps go: one folder, and the map pack folders in it
     add(L"STATIC", L"Save to:", SS_NOPREFIX, 16, 522, 60, 20, IDC_ROOT_LBL);
-    add(L"EDIT", St->hooks.root.c_str(), WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL, 78, 518, 270, 24, IDC_ROOT);
-    add(L"BUTTON", L"...", WS_TABSTOP, 352, 517, 30, 26, IDC_ROOT_BROWSE);
-    add(L"STATIC", L"Packs (linked, their CE maps, not linked):", SS_NOPREFIX | SS_RIGHT, 388, 522, 140, 20, IDC_PACKS_LBL);
+    add(L"EDIT", St->hooks.root.c_str(), WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL, 78, 518, 206, 24, IDC_ROOT);
+    add(L"BUTTON", L"...", WS_TABSTOP, 288, 517, 30, 26, IDC_ROOT_BROWSE);
+    add(L"STATIC", L"Packs (linked, CE maps, not linked):", SS_NOPREFIX | SS_RIGHT, 322, 522, 206, 20, IDC_PACKS_LBL);
     add(L"EDIT", St->hooks.crossplay.c_str(), WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL, 532, 518, 130, 24, IDC_PACK_CROSS);
     add(L"EDIT", St->hooks.crossplay_ce.c_str(), WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL, 666, 518, 180, 24, IDC_PACK_CE);
     add(L"EDIT", St->hooks.xbox.c_str(), WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL, 850, 518, 114, 24, IDC_PACK_XBOX);
