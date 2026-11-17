@@ -315,9 +315,11 @@ std::string sha256_hex(const std::string &bytes) {
 
 uint32_t map_version(const fs::path &map) {
     std::ifstream f(map, std::ios::binary);
-    unsigned char h[8] = {};
-    if (!f.read((char *)h, 8) || memcmp(h, "daeh", 4) != 0) return 0;
-    return h[4] | h[5] << 8 | h[6] << 16 | (uint32_t)h[7] << 24;
+    unsigned char h[0x800] = {};
+    if (!f.read((char *)h, sizeof h) || memcmp(h, "daeh", 4) != 0) return 0;
+    const uint32_t v = h[4] | h[5] << 8 | h[6] << 16 | (uint32_t)h[7] << 24;
+    if (v == 13 && memcmp(h + 0x7FC, "toof", 4) != 0) return 0;   // (a Halo 2, 3 or Reach map in MCC: not Halo 1)
+    return v;
 }
 
 bool mcc_ids(const fs::path &map, const std::vector<Resource> &resources, std::string &sha, std::string &checksum, std::string &why) {

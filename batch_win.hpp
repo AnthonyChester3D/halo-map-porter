@@ -52,6 +52,9 @@ struct Hooks {
                        const std::wstring &xbox)> layout_changed;
     // A folder picked with the window's "Browse..." for it ("" cancelled).
     std::function<std::wstring(HWND owner, const std::wstring &start)> pick_folder;
+    // "MCC Workshop...": the Halo 1 maps (Custom Edition or MCC, by their headers) in MCC's Steam Workshop folder, found
+    // or picked; `note` says what was left out (other games' maps) or why none ("" and an empty list: cancelled).
+    std::function<std::vector<std::wstring>(HWND owner, std::wstring &note)> workshop;
     // "Map stats": the report on the weapons, vehicles, bipeds, skies and weather of every map converted, opened.
     std::function<void(HWND owner)> stats;
 };

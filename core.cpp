@@ -314,7 +314,8 @@ Game detect_game(const fs::path &map, std::string *scenario_name) {
     case 5: return Game::Xbox;
     case 7:
     case 609: return Game::CE;
-    case 13: return Game::MCC;
+    case 13:   // (Halo 2, 3 and Reach maps in MCC are version 13 too: a Halo 1 header ends in "foot")
+        return std::memcmp(h + 0x7FC, "toof", 4) == 0 ? Game::MCC : Game::Unknown;
     default: return Game::Unknown;
     }
 }

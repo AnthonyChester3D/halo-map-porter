@@ -116,8 +116,8 @@ enum {
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new122.exe is 1.122).
-#define HMP_VERSION L"1.122"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new123.exe is 1.123).
+#define HMP_VERSION L"1.123"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -2505,6 +2505,53 @@ static void open_batch() {
         save_settings();
     };
     h.pick_folder = [](HWND, const std::wstring &start) { return pick_folder(start); };
+    // (MCC's Workshop items: steamapps\workshop\content\976730 in the Steam library MCC is in, else the folder picked
+    // before or now; every Halo 1 map in them, told from Halo 2, 3 and Reach maps by its header)
+    h.workshop = [](HWND, std::wstring &note) {
+        std::vector<std::wstring> files;
+        std::error_code ec;
+        fs::path dir(ini_get(L"mcc_workshop"));
+        if (dir.empty() || !fs::is_directory(dir, ec)) {
+            dir.clear();
+            Config cfg = make_config();
+            for (fs::path p = cfg.mcc_maps_dir; !p.empty() && p != p.parent_path(); p = p.parent_path())
+                if (lower(p.filename().wstring()) == L"steamapps") {
+                    fs::path w = p / L"workshop" / L"content" / L"976730";
+                    if (fs::is_directory(w, ec)) dir = w;
+                    break;
+                }
+        }
+        if (dir.empty()) {
+            dir = fs::path(pick_folder(L""));
+            if (dir.empty()) { note = L"Pick MCC's Workshop folder (steamapps\\workshop\\content\\976730) to add its maps."; return files; }
+        }
+        ini_set(L"mcc_workshop", dir.wstring());
+        save_settings();
+        int other = 0;
+        std::set<std::wstring> items;
+        for (auto it = fs::recursive_directory_iterator(dir, fs::directory_options::skip_permission_denied, ec);
+             !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+            if (!it->is_regular_file(ec) || lower(it->path().extension().wstring()) != L".map") continue;
+            const Game g = detect_game(it->path());
+            if (g == Game::CE || g == Game::MCC) {
+                files.push_back(it->path().wstring());
+                fs::path rel = fs::relative(it->path(), dir, ec);
+                items.insert(rel.empty() ? L"" : rel.begin()->wstring());
+                ec.clear();
+                continue;
+            }
+            const std::wstring n = lower(it->path().filename().wstring());
+            if (n != L"bitmaps.map" && n != L"sounds.map" && n != L"loc.map" && g != Game::Xbox) other++;
+        }
+        std::sort(files.begin(), files.end());
+        if (files.empty()) {
+            note = L"No Halo 1 maps in " + dir.wstring() + (other ? L" (" + std::to_wstring(other) + L" other games' maps)." : L".");
+            return files;
+        }
+        note = L" (" + std::to_wstring(items.size()) + L" items" +
+               (other ? L"; " + std::to_wstring(other) + L" Halo 2, 3 and Reach maps left out" : std::wstring()) + L")";
+        return files;
+    };
     // (the report on every map converted so far, written beside its records and opened in the browser)
     h.stats = [](HWND owner) {
         Config cfg = make_config();

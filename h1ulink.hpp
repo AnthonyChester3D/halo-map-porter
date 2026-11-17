@@ -42,7 +42,7 @@ struct Link {
 // The link file's text, or "" (and `why`) when a map can't be read.
 std::string link_text(const Link &l, std::string &why);
 
-// A map file's cache version (the u32 at 4): 13 an MCC map, 609 a Custom Edition map, 5 an Xbox map; 0 if not a map.
+// A map file's cache version (the u32 at 4): 13 an MCC map, 609 a Custom Edition map, 5 an Xbox map; 0 if not a Halo 1 map.
 // (MCC and Custom Edition maps are told apart by this alone, as OpenCE does: never by their folder.)
 uint32_t map_version(const std::filesystem::path &map);
 

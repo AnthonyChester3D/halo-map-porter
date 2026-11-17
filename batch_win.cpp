@@ -17,7 +17,7 @@ namespace {
 
 enum { IDC_INTRO = 400, IDC_STATS = 499, IDC_LIST, IDC_FIND, IDC_ADD, IDC_REMOVE, IDC_ALL, IDC_NONE, IDC_GO, IDC_STOP, IDC_CLOSE, IDC_STATUS,
        IDC_BROWSE, IDC_AT_ONCE_LBL, IDC_AT_ONCE, IDC_ROOT_LBL, IDC_ROOT, IDC_ROOT_BROWSE, IDC_PACKS_LBL, IDC_PACK_CROSS,
-       IDC_PACK_CE, IDC_PACK_XBOX };
+       IDC_PACK_CE, IDC_PACK_XBOX, IDC_WORKSHOP };
 struct Progress { std::wstring status, size, out; };
 const UINT WM_B_PROGRESS = WM_APP + 60, WM_B_DONE = WM_APP + 61;
 
@@ -159,7 +159,7 @@ void tell_layout() {
 void update_buttons() {
     int ticked = 0;
     for (auto &it : St->items) ticked += it.on;
-    for (int id : {IDC_FIND, IDC_ADD, IDC_BROWSE, IDC_REMOVE, IDC_ALL, IDC_NONE, IDC_CLOSE, IDC_AT_ONCE, IDC_ROOT, IDC_ROOT_BROWSE,
+    for (int id : {IDC_FIND, IDC_ADD, IDC_BROWSE, IDC_WORKSHOP, IDC_REMOVE, IDC_ALL, IDC_NONE, IDC_CLOSE, IDC_AT_ONCE, IDC_ROOT, IDC_ROOT_BROWSE,
                    IDC_PACK_CROSS, IDC_PACK_CE, IDC_PACK_XBOX})
         EnableWindow(item(id), !St->running);
     EnableWindow(item(IDC_GO), !St->running && ticked > 0);
@@ -173,13 +173,50 @@ void update_buttons() {
 }
 
 void add_items(const std::vector<Item> &found, int &added) {
-    std::set<std::wstring> have;
-    for (auto &it : St->items) have.insert(lower(it.out));
-    for (auto &f : found)
-        if (have.insert(lower(f.out)).second) {
-            St->items.push_back(f);
-            added++;
+    std::set<std::wstring> have, ins;
+    for (auto &it : St->items) have.insert(lower(it.out)), ins.insert(lower(it.in));
+    for (Item f : found) {
+        if (have.count(lower(f.out))) {
+            if (ins.count(lower(f.in))) continue;   // (the same map: already in the list)
+            // another map of the same name (two Workshop items' "precipice.map"): <name>_2, in a folder of its own
+            // when it was to have one
+            const fs::path o(f.out);
+            const std::wstring stem = o.stem().wstring();
+            const bool own = lower(o.parent_path().filename().wstring()) == lower(stem);
+            for (int n = 2;; n++) {
+                const std::wstring s = stem + L"_" + std::to_wstring(n);
+                const fs::path c = own ? o.parent_path().parent_path() / s / (s + o.extension().wstring()) : o.parent_path() / (s + o.extension().wstring());
+                if (!have.count(lower(c.wstring()))) { f.out = c.wstring(); break; }
+            }
         }
+        have.insert(lower(f.out));
+        ins.insert(lower(f.in));
+        St->items.push_back(f);
+        added++;
+    }
+}
+
+// Maps added from files (Browse..., MCC Workshop...), each where default_out puts it; the status says how many. `what`:
+// what they are for the status (" maps" when empty), with what was left out after it.
+void add_files(const std::vector<std::wstring> &files, const std::wstring &what) {
+    std::vector<Item> found;
+    int unknown = 0;
+    HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
+    for (auto &f : files) {
+        std::wstring out = St->hooks.default_out ? St->hooks.default_out(f) : L"";
+        if (out.empty()) { unknown++; continue; }
+        found.push_back({f, out, true, L""});
+    }
+    SetCursor(old);
+    int added = 0;
+    add_items(found, added);
+    save();
+    fill();
+    update_buttons();
+    std::wstring t = L"Added " + std::to_wstring(added) + L" of " + std::to_wstring(files.size()) + (what.empty() ? L" maps" : what);
+    if (added < (int)found.size()) t += L" (" + std::to_wstring(found.size() - added) + L" already in the list)";
+    if (unknown) t += L"; " + std::to_wstring(unknown) + L" left out: set \"Save as\" on the Convert tab first (new maps go beside it, each in a folder of its own)";
+    SetWindowTextW(item(IDC_STATUS), (t + L".").c_str());
 }
 
 LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
@@ -302,10 +339,10 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 return 0;
             }
             int added = 0;
-            add_items({it}, added);
-            if (!added)
-                for (auto &e : St->items)
-                    if (lower(e.out) == lower(it.out)) e.in = it.in;   // (the same output: from this map now)
+            bool same_out = false;
+            for (auto &e : St->items)
+                if (lower(e.out) == lower(it.out)) e.in = it.in, same_out = true;   // (the same output: from this map now)
+            if (!same_out) add_items({it}, added);
             save();
             fill();
             update_buttons();
@@ -327,24 +364,21 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             const wchar_t *p = buf.data() + first.size() + 1;
             if (!*p) files.push_back(first);   // (one file: its full path)
             for (; *p; p += wcslen(p) + 1) files.push_back((fs::path(first) / p).wstring());
-            std::vector<Item> found;
-            int unknown = 0;
+            add_files(files, L"");
+            return 0;
+        }
+        case IDC_WORKSHOP: {
+            if (!St->hooks.workshop) return 0;
+            std::wstring note;
             HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
-            for (auto &f : files) {
-                std::wstring out = St->hooks.default_out ? St->hooks.default_out(f) : L"";
-                if (out.empty()) { unknown++; continue; }
-                found.push_back({f, out, true, L""});
-            }
+            SetWindowTextW(item(IDC_STATUS), L"Looking through the MCC Workshop's maps...");
+            std::vector<std::wstring> files = St->hooks.workshop(h, note);
             SetCursor(old);
-            int added = 0;
-            add_items(found, added);
-            save();
-            fill();
-            update_buttons();
-            std::wstring t = L"Added " + std::to_wstring(added) + L" of " + std::to_wstring(files.size()) + L" maps";
-            if (added < (int)found.size()) t += L" (" + std::to_wstring(found.size() - added) + L" already in the list)";
-            if (unknown) t += L"; " + std::to_wstring(unknown) + L" left out: set \"Save as\" on the Convert tab first (new maps go beside it, each in a folder of its own)";
-            SetWindowTextW(item(IDC_STATUS), (t + L".").c_str());
+            if (files.empty()) {
+                SetWindowTextW(item(IDC_STATUS), note.c_str());
+                return 0;
+            }
+            add_files(files, L" Halo 1 maps from the MCC Workshop" + note);
             return 0;
         }
         case IDC_REMOVE: {
@@ -449,13 +483,14 @@ void create_controls() {
         c.cx = S(cols[i].w);
         ListView_InsertColumn(St->list, i, &c);
     }
-    add(L"BUTTON", L"Find my earlier conversions", WS_TABSTOP, 16, 480, 210, 28, IDC_FIND);
-    add(L"BUTTON", L"Add the Convert tab's map", WS_TABSTOP, 234, 480, 190, 28, IDC_ADD);
-    add(L"BUTTON", L"Browse...", WS_TABSTOP, 432, 480, 100, 28, IDC_BROWSE);
-    add(L"BUTTON", L"Remove selected", WS_TABSTOP, 540, 480, 130, 28, IDC_REMOVE);
-    add(L"BUTTON", L"Tick all", WS_TABSTOP, 678, 480, 90, 28, IDC_ALL);
-    add(L"BUTTON", L"Tick none", WS_TABSTOP, 776, 480, 90, 28, IDC_NONE);
-    add(L"BUTTON", L"Map stats", WS_TABSTOP, 874, 480, 90, 28, IDC_STATS);
+    add(L"BUTTON", L"Find my earlier conversions", WS_TABSTOP, 16, 480, 180, 28, IDC_FIND);
+    add(L"BUTTON", L"Add the Convert tab's map", WS_TABSTOP, 204, 480, 170, 28, IDC_ADD);
+    add(L"BUTTON", L"Browse...", WS_TABSTOP, 382, 480, 80, 28, IDC_BROWSE);
+    add(L"BUTTON", L"MCC Workshop...", WS_TABSTOP, 470, 480, 116, 28, IDC_WORKSHOP);
+    add(L"BUTTON", L"Remove selected", WS_TABSTOP, 594, 480, 116, 28, IDC_REMOVE);
+    add(L"BUTTON", L"Tick all", WS_TABSTOP, 718, 480, 70, 28, IDC_ALL);
+    add(L"BUTTON", L"Tick none", WS_TABSTOP, 796, 480, 78, 28, IDC_NONE);
+    add(L"BUTTON", L"Map stats", WS_TABSTOP, 882, 480, 82, 28, IDC_STATS);
     // Where the maps go: one folder, and the map pack folders in it
     add(L"STATIC", L"Save to:", SS_NOPREFIX, 16, 522, 60, 20, IDC_ROOT_LBL);
     add(L"EDIT", St->hooks.root.c_str(), WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL, 78, 518, 270, 24, IDC_ROOT);
