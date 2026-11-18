@@ -2,6 +2,7 @@
 #include "batch_win.hpp"
 #include "dark.hpp"
 
+#include <map>
 #include <commctrl.h>
 #include <commdlg.h>
 
@@ -31,6 +32,7 @@ struct State {
     bool running = false, closing = false;
     int sort_col = -1;
     bool sort_up = true;
+    std::vector<std::wstring> packs;   // (each item's pack, as the hook says: refreshed by fill)
     // (each control's place as laid out at the design size, 980 x 598, and how it follows the window's size: x 0 stays
     // left, 1 stays right, 2 stretches; y 0 stays at the top, 1 at the bottom, 2 stretches)
     struct Anchor { int id, x, y, w, h, ax, ay; };
@@ -100,6 +102,11 @@ bool filling = false;   // (ticks set while filling aren't the user's)
 
 void fill() {
     filling = true;
+    St->packs = St->hooks.packs ? St->hooks.packs(St->items) : std::vector<std::wstring>();
+    St->packs.resize(St->items.size());
+    // (a pack's size beside its name, so the column says how many belong together)
+    std::map<std::wstring, int> pack_n;
+    for (auto &p : St->packs) if (!p.empty()) pack_n[lower(p)]++;
     SendMessageW(St->list, WM_SETREDRAW, FALSE, 0);
     ListView_DeleteAllItems(St->list);
     for (size_t i = 0; i < St->items.size(); i++) {
@@ -116,6 +123,8 @@ void fill() {
         ListView_SetItemText(St->list, row, 4, (LPWSTR)it.status.c_str());
         std::wstring card = St->hooks.card_of ? St->hooks.card_of(it) : L"";
         ListView_SetItemText(St->list, row, 5, (LPWSTR)card.c_str());
+        std::wstring pack = St->packs[i].empty() ? L"" : St->packs[i] + L" (" + std::to_wstring(pack_n[lower(St->packs[i])]) + L")";
+        ListView_SetItemText(St->list, row, 6, (LPWSTR)pack.c_str());
         ListView_SetCheckState(St->list, row, it.on);
     }
     SendMessageW(St->list, WM_SETREDRAW, TRUE, 0);
@@ -128,8 +137,10 @@ void sort_by(int col) {
     St->sort_up = col == St->sort_col ? !St->sort_up : true;
     St->sort_col = col;
     std::vector<std::wstring> keys;
-    for (auto &it : St->items) {
-        std::wstring k = col == 0 ? fs::path(it.in).filename().wstring()
+    for (size_t i = 0; i < St->items.size(); i++) {
+        auto &it = St->items[i];
+        std::wstring k = col == 6 ? (i < St->packs.size() ? St->packs[i] : L"")
+                         : col == 0 ? fs::path(it.in).filename().wstring()
                          : col == 1 ? (St->hooks.game_of ? St->hooks.game_of(it.in) : L"")
                          : col == 2 ? it.out : col == 4 ? it.status
                          : col == 5 ? (St->hooks.card_of ? St->hooks.card_of(it) : L"") : L"";
@@ -280,6 +291,16 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 if (St->hooks.use)
                     AppendMenuW(m, MF_STRING | (St->running ? MF_GRAYED : 0), 2, L"Use on the Convert tab");
                 if (St->hooks.open_card) AppendMenuW(m, MF_STRING, 1, L"Open map card...");
+                // (its pack's maps: ticked alone, or as well as what's ticked)
+                const std::wstring pack = (size_t)r < St->packs.size() ? St->packs[(size_t)r] : L"";
+                int pn = 0;
+                for (auto &p : St->packs) pn += !pack.empty() && lower(p) == lower(pack);
+                if (!pack.empty()) {
+                    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+                    AppendMenuW(m, MF_STRING | (St->running ? MF_GRAYED : 0), 3,
+                                (L"Tick only " + pack + L"'s " + std::to_wstring(pn) + L" maps").c_str());
+                    AppendMenuW(m, MF_STRING | (St->running ? MF_GRAYED : 0), 4, (L"Tick " + pack + L"'s maps too").c_str());
+                }
                 POINT pt;
                 GetCursorPos(&pt);
                 int pick = (int)TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, h, nullptr);
@@ -291,6 +312,19 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 } else if (pick == 2 && !St->running) {
                     St->hooks.use(it);
                     St->closing = true;
+                } else if ((pick == 3 || pick == 4) && !St->running) {
+                    filling = true;
+                    for (size_t i = 0; i < St->items.size(); i++) {
+                        const bool in_pack = i < St->packs.size() && lower(St->packs[i]) == lower(pack);
+                        if (pick == 3) St->items[i].on = in_pack;
+                        else if (in_pack) St->items[i].on = true;
+                        ListView_SetCheckState(St->list, (int)i, St->items[i].on);
+                    }
+                    filling = false;
+                    save();
+                    update_buttons();
+                    SetWindowTextW(item(IDC_STATUS), (L"Ticked " + pack + L"'s " + std::to_wstring(pn) + L" maps" +
+                                                      (pick == 3 ? L" (and only them)." : L".")).c_str());
                 }
                 DestroyMenu(m);
             }
@@ -488,9 +522,9 @@ void layout() {
     }
     if (d) EndDeferWindowPos(d);
     // (Map, Saved to and Last run widen with the window)
-    const int base[] = {170, 90, 236, 66, 252, 110};
-    const double share[] = {0.2, 0, 0.4, 0, 0.25, 0.15};
-    for (int i = 0; i < 6; i++) ListView_SetColumnWidth(St->list, i, S(base[i]) + (int)(dw * share[i]));
+    const int base[] = {170, 90, 236, 66, 252, 110, 140};
+    const double share[] = {0.15, 0, 0.35, 0, 0.2, 0.15, 0.15};
+    for (int i = 0; i < 7; i++) ListView_SetColumnWidth(St->list, i, S(base[i]) + (int)(dw * share[i]));
     InvalidateRect(St->wnd, nullptr, TRUE);
 }
 
@@ -521,8 +555,8 @@ void create_controls() {
     St->anchors.push_back({IDC_LIST, 16, 70, 948, 400, 2, 2});
     ListView_SetExtendedListViewStyle(St->list, LVS_EX_FULLROWSELECT | LVS_EX_CHECKBOXES | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP);
     struct { const wchar_t *t; int w; } cols[] = {{L"Map", 170}, {L"From", 90}, {L"Saved to", 236}, {L"Size", 66}, {L"Last run", 252},
-                                                  {L"Map card", 110}};
-    for (int i = 0; i < 6; i++) {
+                                                  {L"Map card", 110}, {L"Pack", 140}};
+    for (int i = 0; i < 7; i++) {
         LVCOLUMNW c{};
         c.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT;
         c.fmt = i == 3 ? LVCFMT_RIGHT : LVCFMT_LEFT;
@@ -530,6 +564,9 @@ void create_controls() {
         c.cx = S(cols[i].w);
         ListView_InsertColumn(St->list, i, &c);
     }
+    // (the pack shown second, beside the map's name)
+    int order[] = {0, 6, 1, 2, 3, 4, 5};
+    ListView_SetColumnOrderArray(St->list, 7, order);
     add(L"BUTTON", L"Find my earlier conversions", WS_TABSTOP, 16, 480, 180, 28, IDC_FIND);
     add(L"BUTTON", L"Add the Convert tab's map", WS_TABSTOP, 204, 480, 170, 28, IDC_ADD);
     add(L"BUTTON", L"Browse...", WS_TABSTOP, 382, 480, 80, 28, IDC_BROWSE);

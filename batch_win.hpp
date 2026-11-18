@@ -37,6 +37,9 @@ struct Hooks {
     // The map card you made for a map ("Picture, description"; "" none: what a conversion fills in itself doesn't
     // count), and the card editor for it (modal).
     std::function<std::wstring(const Item &)> card_of;
+    // Each map's pack, the batch's way ("" for none): an MCC Workshop item's maps when it has two or more, or maps
+    // whose map cards share a folder (a campaign's chapters). One per item, in order.
+    std::function<std::vector<std::wstring>(const std::vector<Item> &)> packs;
     std::function<void(HWND owner, const Item &)> open_card;
     // A map put on the Convert tab (its map and where it's saved): double-click, or right-click "Use on the Convert
     // tab". The window closes after it (not while converting).

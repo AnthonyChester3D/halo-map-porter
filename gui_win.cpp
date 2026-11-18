@@ -116,8 +116,8 @@ enum {
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new135.exe is 1.135).
-#define HMP_VERSION L"1.135"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new136.exe is 1.136).
+#define HMP_VERSION L"1.136"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -2520,6 +2520,36 @@ static void open_batch() {
         return c != by_out->end() ? c->second : mapcard::card_dir(cards_root(), fs::path(it.in));
     };
     auto name_of = [](const batchui::Item &it) { return N(lower(fs::path(it.in).stem().wstring())); };
+    // (the batch's packs: an MCC Workshop item with two or more Halo 1 maps; or maps whose cards name the same folder,
+    // which the batch builds as one campaign)
+    h.packs = [dir_of, name_of](const std::vector<batchui::Item> &items) {
+        std::vector<std::wstring> out(items.size());
+        std::map<std::wstring, std::set<std::wstring>> by_folder;   // card folder -> the maps naming it
+        std::vector<std::wstring> folder(items.size());
+        for (size_t i = 0; i < items.size(); i++) {
+            const fs::path in(items[i].in);
+            const fs::path root = mapcard::mcc_mod_root(in);
+            if (!root.empty()) {
+                const MccItem m = mcc_item(root);
+                if (m.maps >= 2)
+                    out[i] = W(mapcard::sanitize_folder(m.title.empty() ? N(root.filename().wstring()) : N(m.title)));
+                continue;
+            }
+            std::error_code ec;
+            const fs::path d = dir_of(items[i]);
+            if (!fs::exists(d / "card.txt", ec)) continue;
+            const mapcard::Card c = mapcard::load_card(d, name_of(items[i]));
+            if (c.folder.empty()) continue;
+            folder[i] = lower(W(c.folder));
+            by_folder[folder[i]].insert(lower(in.filename().wstring()));
+        }
+        for (size_t i = 0; i < items.size(); i++)
+            if (out[i].empty() && !folder[i].empty() && by_folder[folder[i]].size() >= 2) {
+                const mapcard::Card c = mapcard::load_card(dir_of(items[i]), name_of(items[i]));
+                out[i] = W(c.folder);
+            }
+        return out;
+    };
     h.card_of = [dir_of, name_of](const batchui::Item &it) -> std::wstring {
         fs::path d = dir_of(it);
         std::error_code ec;
