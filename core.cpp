@@ -11355,6 +11355,16 @@ static bool fix_script_navpoint(Job &job, const std::string &err, std::string &w
 }
 
 struct ScriptConverter {
+    // (objects_distance_to_flag compared with a number, which the Xbox doesn't have: the level's flags (lowercase name
+    // -> position), its trigger volumes' names and room for more; each distance tested becomes a box about the flag,
+    // made once per flag and distance and tested by volume_test_objects)
+    std::map<std::string, std::array<double, 3>> flag_at;
+    std::set<std::string> volume_names;
+    int volume_room = 0;
+    struct DistanceVolume { std::string name, flag; double distance; };
+    std::map<std::string, std::string> distance_volume_of;   // "flag|distance" -> its volume's name
+    std::vector<DistanceVolume> distance_volumes;
+    int distance_tests = 0;
     Game target;
     unsigned bit;
     std::set<std::string> user;                        // the map's own scripts and globals
@@ -12209,6 +12219,39 @@ struct ScriptConverter {
                 return r + s.substr(b.e, n.e - b.e);
             }
         }
+        // (< (objects_distance_to_flag objects flag) 5), as the Xbox can ask it: is one of them in a box about the flag
+        // that size (each way out from it 0.89 times the distance: the box's square has the circle's area, so it's
+        // never off by more than about a quarter of the distance)
+        if ((head == "<" || head == "<=" || head == ">" || head == ">=") && n.kids.size() == 3 && !flag_at.empty() &&
+            missing.count("objects_distance_to_flag") && !missing.count("volume_test_objects")) {
+            for (int side = 1; side <= 2; side++) {
+                const hsc::Node &d = n.kids[(size_t)side], &v = n.kids[(size_t)(3 - side)];
+                if (!d.list || d.kids.size() != 3 || d.kids[0].list || hsc::lower(d.kids[0].atom) != "objects_distance_to_flag") continue;
+                if (v.list || v.str || d.kids[2].list) continue;
+                const std::string num = v.atom, flag = hsc::lower(d.kids[2].atom);
+                if (num.empty() || num.find_first_not_of("0123456789.") != std::string::npos || !flag_at.count(flag)) continue;
+                const double dist = std::atof(num.c_str());
+                if (dist <= 0) continue;
+                const std::string key = flag + "|" + num;
+                auto it = distance_volume_of.find(key);
+                if (it == distance_volume_of.end()) {
+                    if (volume_room <= 0) break;
+                    std::string name = "d_" + flag.substr(0, 20) + "_" + num;
+                    std::replace(name.begin(), name.end(), '.', 'p');
+                    for (int k = 2; volume_names.count(name); k++) name = name.substr(0, 28) + std::to_string(k);
+                    volume_names.insert(name);
+                    volume_room--;
+                    distance_volumes.push_back({name, d.kids[2].atom, dist});
+                    it = distance_volume_of.emplace(key, name).first;
+                }
+                // (inside for "less than"; with the distance on the right, or "more than", not inside)
+                const bool less = head[0] == '<';
+                const bool inside = side == 1 ? less : !less;
+                distance_tests++;
+                const std::string test = "(volume_test_objects " + it->second + " " + emit(s, d.kids[1]) + ")";
+                return inside ? test : "(not " + test + ")";
+            }
+        }
         // (set <global the target doesn't have> value) -> no-op
         if (head == "set" && n.kids.size() >= 2 && !n.kids[1].list) {
             const ScriptName *g = lookup(n.kids[1].atom);
@@ -12430,6 +12473,7 @@ struct ScriptConverter {
     // Before converting the files again (convert_texts' tries): as planned
     void restart() {
         changes.clear();
+        distance_tests = 0;   // (the volumes made stay: the next try makes the same ones)
         fixes = fixes0;
         user = user0;
         param_globals = param_globals0;
@@ -12992,6 +13036,20 @@ static void convert_scripts(Job &job, const fs::path &dir, Game target) {
     for (auto &e : fs::recursive_directory_iterator(dir))
         if (e.path().extension() == ".hsc") files.push_back(e.path());
     ScriptConverter conv(target);
+    // (the level's cutscene flags and trigger volumes, for distance tests made trigger volumes: the engine takes 256)
+    const std::string scen_tag = job.scenario + ".scenario";
+    if (target == Game::Xbox) {
+        tagfile::Tag st;
+        fs::path so = job.owner(scen_tag);
+        if (!so.empty() && st.load(so / from_u8(scen_tag))) {
+            auto fl = st.root().block("cutscene flags");
+            for (size_t i = 0; i < fl.size(); i++)
+                conv.flag_at[hsc::lower(fl[i].str("name"))] = {fl[i].num("position", 0), fl[i].num("position", 1), fl[i].num("position", 2)};
+            auto tv = st.root().block("trigger volumes");
+            for (size_t i = 0; i < tv.size(); i++) conv.volume_names.insert(hsc::lower(tv[i].str("name")));
+            conv.volume_room = 256 - (int)tv.size();
+        }
+    }
     conv.rider_ai_off = target == Game::Xbox && job.cfg.xbox_rider_ai_off;
     conv.poll_volumes = target == Game::Xbox;
     conv.switches = target == Game::Xbox;
@@ -13189,6 +13247,40 @@ static void convert_scripts(Job &job, const fs::path &dir, Game target) {
             continue;
         }
         if (texts[i] != made[i] || was_recoded[i]) std::ofstream(files[i], std::ios::binary) << texts[i];
+    }
+    // (the boxes the distance tests became, added to the level: from the flag, the distance each way)
+    if (!conv.distance_volumes.empty() && std::find(ok.begin(), ok.end(), false) == ok.end()) {
+        fs::path so = job.owner(scen_tag);
+        if (!so.empty() && (so == job.fixes || job.to_fixes(scen_tag, so))) {
+            tagfile::Tag st;
+            const int have = st.load(job.fixes / from_u8(scen_tag)) ? (int)st.root().block("trigger volumes").size() : -1;
+            std::vector<std::string> cmd{u8(tool(job.cfg, "invader-edit")), "-t", u8(job.fixes), scen_tag, "-I", "trigger_volumes",
+                                         std::to_string(conv.distance_volumes.size()), "end"};
+            char b[96];
+            for (size_t i = 0; i < conv.distance_volumes.size() && have >= 0; i++) {
+                const auto &dv = conv.distance_volumes[i];
+                const auto &p = conv.flag_at[hsc::lower(dv.flag)];
+                const double h = dv.distance * 0.886;
+                const std::string tv = "trigger_volumes[" + std::to_string(have + (int)i) + "].";
+                snprintf(b, sizeof b, "%f,%f,%f", p[0] - h, p[1] - h, p[2] - h);
+                std::string corner = b;
+                snprintf(b, sizeof b, "%f,%f,%f", 2 * h, 2 * h, 2 * h);
+                cmd.insert(cmd.end(), {"-S", tv + "name", dv.name, "-S", tv + "rotation_vector_forward", "1,0,0", "-S",
+                                       tv + "rotation_vector_up", "0,0,1", "-S", tv + "starting_corner", corner, "-S",
+                                       tv + "ending_corner_offset", b});
+            }
+            std::string out;
+            if (have >= 0 && run_process(cmd, out) == 0) {
+                job.note("[scripts] objects_distance_to_flag (not in Xbox): " + std::to_string(conv.distance_tests) +
+                         " distance test" + (conv.distance_tests == 1 ? "" : "s") + " against a number now ask whether the objects "
+                         "are in a box about the flag that size (" + std::to_string(conv.distance_volumes.size()) + " trigger volume" +
+                         (conv.distance_volumes.size() == 1 ? "" : "s") + " added, one a flag and distance; within about a quarter "
+                         "of the distance where a circle and the box part)");
+            } else {
+                // (the scripts name volumes that aren't there: the build says so; nothing else to do here)
+                job.note("[scripts] couldn't add the trigger volumes the distance tests became: " + out.substr(0, 300));
+            }
+        }
     }
     for (auto &[name, c] : conv.changes)
         job.note("[scripts] " + name + " (not in " + game_name(target) + "): " + c.second + " (" +
@@ -18779,12 +18871,25 @@ std::string convert_script_text(Game target, const std::string &text, std::vecto
     ScriptConverter conv(target);
     conv.poll_volumes = target == Game::Xbox;
     conv.switches = target == Game::Xbox;
+    // (for a test: the level's flags, "name x y z;..." in HMP_TEST_FLAGS)
+    if (const char *fl = std::getenv("HMP_TEST_FLAGS")) {
+        std::istringstream in(fl);
+        std::string one;
+        while (std::getline(in, one, ';')) {
+            std::istringstream f(one);
+            std::string name;
+            double x = 0, y = 0, z = 0;
+            if (f >> name >> x >> y >> z) conv.flag_at[hsc::lower(name)] = {x, y, z};
+        }
+        conv.volume_room = 256;
+    }
     conv.collect_user_names(text);
     std::vector<std::string> t{text};
     if (!convert_texts(conv, t)[0] && notes) notes->push_back("could not parse");
     if (notes) {
         for (auto &[name, c] : conv.changes) notes->push_back(name + ": " + c.second + " (" + std::to_string(c.first) + "x)");
         for (auto &[name, c] : conv.fixes) notes->push_back(name + ": " + c.second);
+        for (auto &dv : conv.distance_volumes) notes->push_back("volume " + dv.name + " at " + dv.flag + " " + std::to_string(dv.distance));
         if (target != Game::MCC)
             for (auto &l : script_stack_notes(t)) notes->push_back(l);
         if (target == Game::Xbox)

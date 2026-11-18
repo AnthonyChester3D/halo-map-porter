@@ -580,6 +580,19 @@ void compare(const std::string &tag, const std::string &g, Flat a, Flat b, Resul
                 }
             }
         }
+        // Trigger volumes added after the level's own: the distance tests Xbox scripts ask as boxes (no
+        // objects_distance_to_flag there).
+        if (g == "scenario" && starts(gk, "trigger_volumes")) {
+            auto ca = A.find("trigger_volumes.size");
+            const long own = ca == A.end() ? 0 : std::atol(ca->second.c_str());
+            static const std::regex tvi(R"(^trigger_volumes\[(\d+)\])");
+            std::smatch tm;
+            if ((gk == "trigger_volumes.size" && std::atol(vb.c_str()) > own) ||
+                (std::regex_search(k, tm, tvi) && std::stol(tm[1].str()) >= own)) {
+                d.ce += " (the Xbox's distance tests as boxes)";
+                note = true;
+            }
+        }
         // A unit seat's animations past the 30 the engine has names for (Invader builds no more; nothing plays them).
         if (g == "model_animations" && (gk == "units[].animations.size" || gk == "units[].weapons[].animations.size") && vb == "30" &&
             std::atol(va.c_str()) > 30) {
