@@ -12877,7 +12877,7 @@ static void convert_scripts(Job &job, const fs::path &dir, Game target) {
     conv.switches = target == Game::Xbox;
     std::sort(files.begin(), files.end());
     std::vector<std::string> texts, made;
-    int recoded = 0;
+    int recoded = 0, cond_fixed = 0;
     std::vector<char> was_recoded;
     for (auto &f : files) {
         std::ifstream in(f, std::ios::binary);
@@ -12904,11 +12904,26 @@ static void convert_scripts(Job &job, const fs::path &dir, Game target) {
             i++;
         }
         if (changed) { t = o; recoded++; }
+        // A (cond ...) the PC map's compiler turned into (if ...)s ends in a placeholder node; for a string-typed
+        // (cond) Invader's extractor writes that node's text, "(cond", as a value, which reads as an open bracket that
+        // never closes ("unterminated block": The Silent Cartographer Evolved, The Truth & Reconciliation Revisited).
+        // The placeholder is the last (if)'s "else", which is nothing: left out.
+        {
+            static const std::regex placeholder(R"(\s*\(cond\))");
+            const auto n = std::distance(std::sregex_iterator(t.begin(), t.end(), placeholder), std::sregex_iterator());
+            if (n > 0) {
+                cond_fixed += (int)n;
+                t = std::regex_replace(t, placeholder, ")");
+                changed = true;
+            }
+        }
         was_recoded.push_back(changed);
         conv.collect_user_names(texts.back());
     }
     if (recoded) job.note("[scripts] " + std::to_string(recoded) + " script file" + (recoded > 1 ? "s" : "") +
                           " had text that isn't UTF-8 (Windows-1252 dashes or quotes), which the compiler can't read: as plain text now");
+    if (cond_fixed) job.note("[scripts] " + std::to_string(cond_fixed) + " (cond ...) block" + (cond_fixed > 1 ? "s" : "") +
+                             " the extractor wrote with an unclosed \"(cond\" at the end (its compiled placeholder): closed");
     made = texts;
     std::vector<bool> ok = convert_texts(conv, texts);
     if (target == Game::Xbox && std::find(ok.begin(), ok.end(), false) == ok.end()) {
