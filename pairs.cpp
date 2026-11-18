@@ -559,7 +559,14 @@ void compare(const std::string &tag, const std::string &g, Flat a, Flat b, Resul
         // An object's animation graph with no model (nothing for it to move; Invader won't build it): none.
         if (object_group(g) && gk == "animation_graph" && (vb.size() <= 1 || vb == "(none)")) {
             auto m = A.find("model");
-            if (m == A.end() || m->second.size() <= 1) {
+            // (or one that couldn't be read from the PC map: left empty in the Xbox's, its graph with it)
+            bool unreadable = false;
+            if (m != A.end() && m->second.size() > 1) {
+                std::string t = dep_key(m->second).substr(1);
+                std::replace(t.begin(), t.end(), '\\', '/');
+                unreadable = !ce_has(t);
+            }
+            if (m == A.end() || m->second.size() <= 1 || unreadable) {
                 d.ce += " (the object has no model: nothing to animate)";
                 note = true;
             }

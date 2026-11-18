@@ -1559,6 +1559,19 @@ struct Job {
             (fs::path(from_u8(tag)).extension() == ".model" || fs::path(from_u8(tag)).extension() == ".gbxmodel")) {
             fs::path own = owner(tag);
             if (!own.empty() && (own == fixes || to_fixes(tag, own))) {
+                // (an Xbox model reads its compressed vertices, and a part may have only uncompressed ones: "...this
+                // is because there are no compressed vertices". invader-bludgeon makes them from the others.)
+                {
+                    auto read = [](const fs::path &p) { std::ifstream f(p, std::ios::binary); return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>()); };
+                    const fs::path tp = fixes / from_u8(tag);
+                    const std::string before = read(tp);
+                    std::string out;
+                    if (run_process({u8(tool(cfg, "invader-bludgeon")), "-t", u8(fixes), "-T", "missing-vertices", tag}, out) == 0 &&
+                        read(tp) != before) {
+                        note("[fix]  " + tag + ": a part had no compressed vertices, which an Xbox model draws from; made from its others");
+                        return true;
+                    }
+                }
                 const int n = lod::drop_bad_triangles(fixes / from_u8(tag));
                 if (n > 0) {
                     note("[fix]  " + tag + ": " + std::to_string(n) + (n == 1 ? " part had" : " parts had") +
@@ -3766,7 +3779,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
         if (!f.script_error.empty()) {
             // MCC's "none" team (no team): the original engine can't parse it.
             std::string what;
-            if (!job.extra.empty() && none_fixes < 40 &&
+            if (!job.extra.empty() && none_fixes < 120 &&
                 (fix_script_none(job, f.script_error, what) || fix_script_shadow(job, f.script_error, what) ||
                  fix_script_missing_tag(job, f.script_error, what) || fix_script_unterminated(job, f.script_error, what) ||
                  fix_script_stray_statement(job, f.script_error, what) || fix_script_ai_as_unit(job, f.script_error, what) ||
@@ -3791,7 +3804,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
         if (!f.hsc_error.empty()) {
             // A name in the map's scripts that the built map doesn't have (a nav point arrow its HUD lacks...).
             std::string what;
-            if (!job.extra.empty() && none_fixes < 40 &&
+            if (!job.extra.empty() && none_fixes < 120 &&
                 (fix_script_navpoint(job, f.hsc_error, what) || fix_script_missing_tag(job, f.hsc_error, what) ||
                  fix_script_ai_as_unit(job, f.hsc_error, what) || fix_script_number_global(job, f.hsc_error, what))) {
                 none_fixes++;
@@ -4435,7 +4448,14 @@ static bool reencode_sound_now(Job &job, const fs::path &tags, const std::string
         for (int j = 0; j < actual; j++) {
             std::vector<int16_t> pcm;
             int ch, rate;
-            if (!decode_chain(t, r, j, pcm, ch, rate)) { why = "unsupported sample format"; return false; }
+            if (!decode_chain(t, r, j, pcm, ch, rate)) {
+                // (data that isn't sound in any format the tag names: damaged in the map, so the PC game plays nothing
+                // or noise there; a moment of silence, said in the log)
+                pcm.clear();
+                ch = std::max(1, (int)t.channels);
+                rate = t.rate > 0 ? (int)t.rate : 22050;
+                job.log("  [sound] " + rel + ": a permutation's data couldn't be read as sound (damaged in the map); silent on the Xbox");
+            }
             // (no sound at all, which Custom Edition plays as nothing and invader-sound stops on: a moment of silence)
             if (pcm.empty()) pcm.assign((size_t)64 * std::max(1, ch), 0);
             std::string pn = plain(r.perms[j].name);
@@ -11009,9 +11029,8 @@ static bool fix_script_ai_as_unit(Job &job, const std::string &err, std::string 
     static const std::regex global(R"(global '([^']+)' is 'ai' which cannot convert to '(unit|object|object_list)')");
     std::smatch m;
     std::string name, want;
-    bool is_global = false;
     if (std::regex_search(err, m, named)) name = m[2].str(), want = m[1].str();
-    else if (std::regex_search(err, m, global)) name = m[1].str(), want = m[2].str(), is_global = true;
+    else if (std::regex_search(err, m, global)) name = m[1].str(), want = m[2].str();
     else return false;
     fs::path file;
     int line = 0, col = 0;
@@ -11020,32 +11039,82 @@ static bool fix_script_ai_as_unit(Job &job, const std::string &err, std::string 
     std::string s((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     in.close();
     const std::string ln = hsc::lower(name);
-    // (an encounter or squad, "e_ai_bot_a/s_bot_01" too: a name that's neither fails the next build with its own error)
-    if (false && !is_global && !std::regex_search(hsc::lower(s), std::regex("\\(ai_\\w+\\s+\"?" + std::regex_replace(ln, std::regex(R"([.^$|()\[\]{}*+?\\])"), R"(\$&)") + "\"?[\\s)]")))
-        return false;
     size_t off = 0;
     for (int l = 1; l < line && off < s.size(); off++) if (s[off] == '\n') l++;
     off += col > 0 ? col - 1 : 0;
     std::vector<hsc::Node> top;
     size_t i = 0;
     if (!hsc::parse(s, i, top, false)) return false;
-    size_t b = 0, len = 0;
-    std::function<void(const std::vector<hsc::Node> &)> walk = [&](const std::vector<hsc::Node> &ns) {
+    auto text_of = [&](const hsc::Node &n) {
+        std::string t = n.atom;
+        if (n.str && t.size() >= 2) t = t.substr(1, t.size() - 2);
+        return hsc::lower(t);
+    };
+    // The call the name is an argument of: its function and the argument's place.
+    std::string fn;
+    size_t at = 0;
+    bool found = false;
+    std::function<void(const std::vector<hsc::Node> &)> find = [&](const std::vector<hsc::Node> &ns) {
         for (auto &n : ns) {
-            if (n.list) { walk(n.kids); continue; }
-            std::string t = n.atom;
-            if (n.str && t.size() >= 2) t = t.substr(1, t.size() - 2);
-            if (!len && n.b <= off && off < n.e && hsc::lower(t) == ln) b = n.b, len = n.e - n.b;
+            if (found || !n.list) continue;
+            for (size_t k = 1; k < n.kids.size() && !found; k++)
+                if (!n.kids[k].list && n.kids[k].b <= off && off < n.kids[k].e && text_of(n.kids[k]) == ln && !n.kids[0].list)
+                    fn = hsc::lower(n.kids[0].atom), at = k, found = true;
+            if (!found) find(n.kids);
         }
     };
-    walk(top);
-    if (!len) return false;
-    const std::string ai = s.substr(b, len);
-    s.replace(b, len, want == "unit" ? "(unit (list_get (ai_actors " + ai + ") 0))"
-                      : want == "object" ? "(list_get (ai_actors " + ai + ") 0)" : "(ai_actors " + ai + ")");
+    find(top);
+    if (!found) return false;
+    // The map's AI (encounters and squads, "encounter/squad" too) and objects' names, so every other call of the same
+    // function with an AI in that place is done at once (Bot Bootcamp's maps have dozens).
+    std::set<std::string> ai{ln}, objects;
+    if (!job.scenario.empty()) {
+        const std::string scen = job.scenario + ".scenario";
+        const fs::path own = job.owner(scen);
+        if (!own.empty()) {
+            std::map<std::string, std::string> enc;   // encounters[i] -> its name
+            auto generic_key = [](const std::string &k) {
+                std::string o;
+                for (size_t q = 0; q < k.size(); q++) {
+                    if (k[q] == '[') { const size_t j = k.find(']', q); if (j != std::string::npos) { o += "[]"; q = j; continue; } }
+                    o += k[q];
+                }
+                return o;
+            };
+            for (auto &[k, v] : list_values(job.cfg, own, scen)) {
+                const std::string g = generic_key(k);
+                if (g == "object_names[].name") objects.insert(hsc::lower(v));
+                else if (g == "encounters[].name") enc[k.substr(0, k.find(']') + 1)] = hsc::lower(v), ai.insert(hsc::lower(v));
+                else if (g == "encounters[].squads[].name" || g == "encounters[].platoons[].name") {
+                    auto e = enc.find(k.substr(0, k.find(']') + 1));
+                    if (e != enc.end()) ai.insert(e->second + "/" + hsc::lower(v));
+                }
+            }
+        }
+    }
+    std::vector<std::pair<size_t, size_t>> spots;   // (start, length), last first
+    std::function<void(const std::vector<hsc::Node> &)> collect = [&](const std::vector<hsc::Node> &ns) {
+        for (auto &n : ns) {
+            if (!n.list) continue;
+            if (n.kids.size() > at && !n.kids[0].list && hsc::lower(n.kids[0].atom) == fn && !n.kids[at].list) {
+                const std::string t = text_of(n.kids[at]);
+                if (t == ln || (ai.count(t) && !objects.count(t))) spots.push_back({n.kids[at].b, n.kids[at].e - n.kids[at].b});
+            }
+            collect(n.kids);
+        }
+    };
+    collect(top);
+    std::sort(spots.begin(), spots.end(), [](auto &a, auto &b) { return a.first > b.first; });
+    for (auto &[b, len] : spots) {
+        const std::string a = s.substr(b, len);
+        s.replace(b, len, want == "unit" ? "(unit (list_get (ai_actors " + a + ") 0))"
+                          : want == "object" ? "(list_get (ai_actors " + a + ") 0)" : "(ai_actors " + a + ")");
+    }
+    if (spots.empty()) return false;
     std::ofstream(file, std::ios::binary) << s;
-    what = "the AI " + name + " stood for a" + std::string(want == "object_list" ? "n object list" : want == "unit" ? " unit" : "n object") +
-           " in the scripts (line " + std::to_string(line) + "), which MCC allows and the Xbox doesn't: now its first actor";
+    what = "AI stood for a" + std::string(want == "object_list" ? "n object list" : want == "unit" ? " unit" : "n object") + " in " +
+           std::to_string(spots.size()) + " call" + (spots.size() > 1 ? "s" : "") + " of " + fn + " (" + name +
+           (spots.size() > 1 ? " and others" : "") + "), which MCC allows and the Xbox doesn't: now each AI's first actor";
     return true;
 }
 
