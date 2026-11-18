@@ -18,7 +18,14 @@ namespace {
 
 enum { IDC_INTRO = 400, IDC_STATS = 499, IDC_LIST, IDC_FIND, IDC_ADD, IDC_REMOVE, IDC_ALL, IDC_NONE, IDC_GO, IDC_STOP, IDC_CLOSE, IDC_STATUS,
        IDC_BROWSE, IDC_AT_ONCE_LBL, IDC_AT_ONCE, IDC_ROOT_LBL, IDC_ROOT, IDC_ROOT_BROWSE, IDC_PACKS_LBL, IDC_PACK_CROSS,
-       IDC_PACK_CE, IDC_PACK_XBOX, IDC_WORKSHOP, IDC_PACK_MCC };
+       IDC_PACK_CE, IDC_PACK_XBOX, IDC_WORKSHOP, IDC_PACK_MCC, IDC_SHOW_LBL, IDC_SHOW, IDC_SHOWN };
+// What the list shows ("Show:"), by each map's last run, game and kind
+enum Show { SHOW_ALL, SHOW_TICKED, SHOW_UNTICKED, SHOW_DONE, SHOW_LINKED, SHOW_NOT_LINKED, SHOW_FAILED, SHOW_HEAVY, SHOW_FIXABLE,
+            SHOW_NOT_RUN, SHOW_MCC, SHOW_CE, SHOW_MP, SHOW_CAMPAIGN, SHOW_COUNT };
+const wchar_t *kShow[SHOW_COUNT] = {L"All maps", L"Ticked", L"Not ticked", L"Done (all)", L"Done, linked", L"Done, not linked",
+                                    L"Failed (all)", L"Failed: too heavy for the Xbox", L"Failed: everything else",
+                                    L"Not run yet (or stopped)", L"MCC maps", L"Custom Edition maps", L"Multiplayer", L"Campaign"};
+const int kCols = 8;
 struct Progress { std::wstring status, size, out; };
 const UINT WM_B_PROGRESS = WM_APP + 60, WM_B_DONE = WM_APP + 61;
 
@@ -33,6 +40,10 @@ struct State {
     int sort_col = -1;
     bool sort_up = true;
     std::vector<std::wstring> packs;   // (each item's pack, as the hook says: refreshed by fill)
+    std::vector<std::wstring> games, kinds;   // (each item's game and kind, read once a map)
+    std::map<std::wstring, std::pair<std::wstring, std::wstring>> known;   // (by map: its game and kind)
+    int show = SHOW_ALL;
+    std::vector<int> rows, row_of;   // (the list's rows: each one's item; each item's row, -1 when it isn't shown)
     // (each control's place as laid out at the design size, 980 x 598, and how it follows the window's size: x 0 stays
     // left, 1 stays right, 2 stretches; y 0 stays at the top, 1 at the bottom, 2 stretches)
     struct Anchor { int id, x, y, w, h, ax, ay; };
@@ -100,23 +111,79 @@ void save() {
 
 bool filling = false;   // (ticks set while filling aren't the user's)
 
+// A last run's result, sorted: what the "Show:" filters go by.
+enum Outcome { NOT_RUN, LINKED, NOT_LINKED, HEAVY, FIXABLE, SKIPPED };
+Outcome outcome(const std::wstring &status) {
+    const std::wstring s = lower(status);
+    if (s.rfind(L"done, linked", 0) == 0) return LINKED;
+    if (s.rfind(L"done", 0) == 0) return NOT_LINKED;
+    if (s.rfind(L"skipped", 0) == 0) return SKIPPED;
+    if (s.rfind(L"failed", 0) == 0 || s.rfind(L"protected", 0) == 0) {
+        // (what no fix of the app's can bring under the Xbox's limits: its memory, its map size, its script nodes)
+        for (const wchar_t *h : {L"needs more memory", L"too big for", L"script node"})
+            if (s.find(h) != std::wstring::npos) return HEAVY;
+        return FIXABLE;
+    }
+    return NOT_RUN;   // (never run, or waiting / converting when a run stopped)
+}
+bool shown(size_t i) {
+    const Item &it = St->items[i];
+    const Outcome o = outcome(it.status);
+    switch (St->show) {
+    case SHOW_TICKED: return it.on;
+    case SHOW_UNTICKED: return !it.on;
+    case SHOW_DONE: return o == LINKED || o == NOT_LINKED;
+    case SHOW_LINKED: return o == LINKED;
+    case SHOW_NOT_LINKED: return o == NOT_LINKED;
+    case SHOW_FAILED: return o == HEAVY || o == FIXABLE;
+    case SHOW_HEAVY: return o == HEAVY;
+    case SHOW_FIXABLE: return o == FIXABLE;
+    case SHOW_NOT_RUN: return o == NOT_RUN;
+    case SHOW_MCC: return St->games[i] == L"MCC";
+    case SHOW_CE: return St->games[i] == L"Custom Edition";
+    case SHOW_MP: return St->kinds[i] == L"Multiplayer";
+    case SHOW_CAMPAIGN: return St->kinds[i] == L"Campaign";
+    default: return true;
+    }
+}
+// Each item's game and kind (each map's header read once while the window's open).
+void read_kinds() {
+    St->games.resize(St->items.size());
+    St->kinds.resize(St->items.size());
+    for (size_t i = 0; i < St->items.size(); i++) {
+        const std::wstring &in = St->items[i].in;
+        auto k = St->known.find(in);
+        if (k == St->known.end())
+            k = St->known.emplace(in, std::make_pair(St->hooks.game_of ? St->hooks.game_of(in) : L"",
+                                                     St->hooks.kind_of ? St->hooks.kind_of(in) : L"")).first;
+        St->games[i] = k->second.first;
+        St->kinds[i] = k->second.second;
+    }
+}
+
 void fill() {
     filling = true;
     St->packs = St->hooks.packs ? St->hooks.packs(St->items) : std::vector<std::wstring>();
     St->packs.resize(St->items.size());
+    read_kinds();
+    St->rows.clear();
+    St->row_of.assign(St->items.size(), -1);
     // (a pack's size beside its name, so the column says how many belong together)
     std::map<std::wstring, int> pack_n;
     for (auto &p : St->packs) if (!p.empty()) pack_n[lower(p)]++;
     SendMessageW(St->list, WM_SETREDRAW, FALSE, 0);
     ListView_DeleteAllItems(St->list);
     for (size_t i = 0; i < St->items.size(); i++) {
+        if (!shown(i)) continue;
         auto &it = St->items[i];
-        std::wstring name = fs::path(it.in).filename().wstring(), game = St->hooks.game_of ? St->hooks.game_of(it.in) : L"";
+        std::wstring name = fs::path(it.in).filename().wstring(), game = St->games[i];
         LVITEMW lv{};
         lv.mask = LVIF_TEXT;
-        lv.iItem = (int)i;
+        lv.iItem = (int)St->rows.size();
         lv.pszText = (LPWSTR)name.c_str();
         int row = ListView_InsertItem(St->list, &lv);
+        St->row_of[i] = row;
+        St->rows.push_back((int)i);
         ListView_SetItemText(St->list, row, 1, (LPWSTR)game.c_str());
         ListView_SetItemText(St->list, row, 2, (LPWSTR)it.out.c_str());
         ListView_SetItemText(St->list, row, 3, (LPWSTR)it.size.c_str());
@@ -125,13 +192,36 @@ void fill() {
         ListView_SetItemText(St->list, row, 5, (LPWSTR)card.c_str());
         std::wstring pack = St->packs[i].empty() ? L"" : St->packs[i] + L" (" + std::to_wstring(pack_n[lower(St->packs[i])]) + L")";
         ListView_SetItemText(St->list, row, 6, (LPWSTR)pack.c_str());
+        ListView_SetItemText(St->list, row, 7, (LPWSTR)St->kinds[i].c_str());
         ListView_SetCheckState(St->list, row, it.on);
     }
     SendMessageW(St->list, WM_SETREDRAW, TRUE, 0);
     filling = false;
+    if (St->items.empty()) SetWindowTextW(item(IDC_SHOWN), L"");
+    else SetWindowTextW(item(IDC_SHOWN), (St->show == SHOW_ALL ? L"" : L"Showing " + std::to_wstring(St->rows.size()) + L" of " +
+                                          std::to_wstring(St->items.size()) + L" (\"Tick all\" and \"Tick none\": these)").c_str());
+}
+// The item a row shows (-1 none).
+int item_at(int row) { return row >= 0 && row < (int)St->rows.size() ? St->rows[(size_t)row] : -1; }
+
+// A name's key with its numbers padded, so map2 comes before map10 (and a10, a30, b30... in order).
+std::wstring natural(const std::wstring &s) {
+    std::wstring k;
+    for (size_t i = 0; i < s.size();) {
+        if (iswdigit(s[i])) {
+            size_t j = i;
+            while (j < s.size() && iswdigit(s[j])) j++;
+            std::wstring n = s.substr(i, j - i);
+            while (n.size() > 1 && n[0] == L'0') n.erase(0, 1);
+            k += std::wstring(n.size() < 12 ? 12 - n.size() : 0, L'0') + n;
+            i = j;
+        } else k += (wchar_t)towlower(s[i++]);
+    }
+    return k;
 }
 
-// Sorted by a column (clicked again: the other way): map, game, where it's saved, last run.
+// Sorted by a column (clicked again: the other way): map, game, where it's saved, last run. By Type: multiplayer maps,
+// then campaigns (each pack's chapters together, in order), then the rest.
 void sort_by(int col) {
     if (St->running) return;
     St->sort_up = col == St->sort_col ? !St->sort_up : true;
@@ -139,9 +229,11 @@ void sort_by(int col) {
     std::vector<std::wstring> keys;
     for (size_t i = 0; i < St->items.size(); i++) {
         auto &it = St->items[i];
-        std::wstring k = col == 6 ? (i < St->packs.size() ? St->packs[i] : L"")
+        std::wstring k = col == 7 ? std::wstring(St->kinds[i] == L"Multiplayer" ? L"1" : St->kinds[i] == L"Campaign" ? L"2" : L"3") +
+                                        L"\x01" + natural(i < St->packs.size() ? St->packs[i] : L"")
+                         : col == 6 ? (i < St->packs.size() ? St->packs[i] : L"")
                          : col == 0 ? fs::path(it.in).filename().wstring()
-                         : col == 1 ? (St->hooks.game_of ? St->hooks.game_of(it.in) : L"")
+                         : col == 1 ? St->games[i]
                          : col == 2 ? it.out : col == 4 ? it.status
                          : col == 5 ? (St->hooks.card_of ? St->hooks.card_of(it) : L"") : L"";
         if (col == 3) {   // (by size: as a number, padded)
@@ -149,7 +241,7 @@ void sort_by(int col) {
             swprintf(b, 32, L"%012.2f", _wtof(it.size.c_str()));
             k = b;
         }
-        keys.push_back(lower(k) + L"\x01" + lower(fs::path(it.in).filename().wstring()));
+        keys.push_back(lower(k) + L"\x01" + natural(fs::path(it.in).filename().wstring()));
     }
     std::vector<size_t> order(St->items.size());
     for (size_t i = 0; i < order.size(); i++) order[i] = i;
@@ -157,6 +249,7 @@ void sort_by(int col) {
     std::vector<Item> sorted;
     for (size_t i : order) sorted.push_back(St->items[i]);
     St->items.swap(sorted);
+    read_kinds();
     save();
 }
 
@@ -183,7 +276,12 @@ void update_buttons() {
     ShowWindow(item(IDC_STOP), St->running ? SW_SHOW : SW_HIDE);
     wchar_t b[200];
     if (!St->running)
-        swprintf(b, 200, L"%d maps in the list, %d ticked.", (int)St->items.size(), ticked);
+    {
+        int hidden = 0;
+        for (size_t i = 0; i < St->items.size(); i++) hidden += St->items[i].on && i < St->row_of.size() && St->row_of[i] < 0;
+        if (hidden) swprintf(b, 200, L"%d maps in the list, %d ticked (%d of them not shown).", (int)St->items.size(), ticked, hidden);
+        else swprintf(b, 200, L"%d maps in the list, %d ticked.", (int)St->items.size(), ticked);
+    }
     else
         b[0] = 0;
     if (!St->running) SetWindowTextW(item(IDC_STATUS), b);
@@ -245,14 +343,16 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (St && i >= 0 && i < (int)St->items.size()) {
             St->items[(size_t)i].status = *s;
             if (m->size != L"\x01") St->items[(size_t)i].size = m->size;
-            if (m->out != L"\x01") {
-                St->items[(size_t)i].out = m->out;
-                ListView_SetItemText(St->list, i, 2, (LPWSTR)St->items[(size_t)i].out.c_str());
-            }
+            if (m->out != L"\x01") St->items[(size_t)i].out = m->out;
             save();
-            ListView_SetItemText(St->list, i, 3, (LPWSTR)St->items[(size_t)i].size.c_str());
-            ListView_SetItemText(St->list, i, 4, (LPWSTR)St->items[(size_t)i].status.c_str());
-            ListView_EnsureVisible(St->list, i, FALSE);
+            // (in its row when it's shown: the list isn't filtered again while it runs)
+            const int r = i < (int)St->row_of.size() ? St->row_of[(size_t)i] : -1;
+            if (r >= 0) {
+                ListView_SetItemText(St->list, r, 2, (LPWSTR)St->items[(size_t)i].out.c_str());
+                ListView_SetItemText(St->list, r, 3, (LPWSTR)St->items[(size_t)i].size.c_str());
+                ListView_SetItemText(St->list, r, 4, (LPWSTR)St->items[(size_t)i].status.c_str());
+                ListView_EnsureVisible(St->list, r, FALSE);
+            }
             SetWindowTextW(item(IDC_STATUS), (fs::path(St->items[(size_t)i].in).filename().wstring() + L": " + *s).c_str());
         }
         return 0;
@@ -260,6 +360,7 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_B_DONE: {
         std::unique_ptr<std::wstring> s((std::wstring *)lp);
         St->running = false;
+        if (St->show != SHOW_ALL) fill();   // (what "Show:" picked, by the results now)
         update_buttons();
         SetWindowTextW(item(IDC_STATUS), s->c_str());
         FLASHWINFO fi{sizeof fi, GetAncestor(h, GA_ROOTOWNER), FLASHW_ALL | FLASHW_TIMERNOFG, 0, 0};
@@ -277,16 +378,16 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         if (n->idFrom == IDC_LIST && n->code == NM_DBLCLK && St->hooks.use && !St->running) {   // (double click: use it)
-            int r = ((NMITEMACTIVATE *)lp)->iItem;
-            if (r >= 0 && r < (int)St->items.size()) {
+            int r = item_at(((NMITEMACTIVATE *)lp)->iItem);
+            if (r >= 0) {
                 St->hooks.use(St->items[(size_t)r]);
                 St->closing = true;
             }
             return 0;
         }
         if (n->idFrom == IDC_LIST && n->code == NM_RCLICK) {   // (right click: its map card, or use it)
-            int r = ((NMITEMACTIVATE *)lp)->iItem;
-            if (r >= 0 && r < (int)St->items.size()) {
+            const int row = ((NMITEMACTIVATE *)lp)->iItem, r = item_at(row);
+            if (r >= 0) {
                 HMENU m = CreatePopupMenu();
                 if (St->hooks.use)
                     AppendMenuW(m, MF_STRING | (St->running ? MF_GRAYED : 0), 2, L"Use on the Convert tab");
@@ -308,7 +409,7 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 if (pick == 1) {
                     St->hooks.open_card(h, it);
                     std::wstring card = St->hooks.card_of ? St->hooks.card_of(it) : L"";
-                    if (r < (int)St->items.size()) ListView_SetItemText(St->list, r, 5, (LPWSTR)card.c_str());
+                    ListView_SetItemText(St->list, row, 5, (LPWSTR)card.c_str());
                 } else if (pick == 2 && !St->running) {
                     St->hooks.use(it);
                     St->closing = true;
@@ -318,7 +419,7 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                         const bool in_pack = i < St->packs.size() && lower(St->packs[i]) == lower(pack);
                         if (pick == 3) St->items[i].on = in_pack;
                         else if (in_pack) St->items[i].on = true;
-                        ListView_SetCheckState(St->list, (int)i, St->items[i].on);
+                        if (St->row_of[i] >= 0) ListView_SetCheckState(St->list, St->row_of[i], St->items[i].on);
                     }
                     filling = false;
                     save();
@@ -332,16 +433,17 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         if (n->idFrom == IDC_LIST && n->code == LVN_ITEMCHANGED && !filling) {
             NMLISTVIEW *v = (NMLISTVIEW *)lp;
-            if ((v->uChanged & LVIF_STATE) && v->iItem >= 0 && v->iItem < (int)St->items.size()) {
+            const int vi = item_at(v->iItem);
+            if ((v->uChanged & LVIF_STATE) && vi >= 0) {
                 bool on = ListView_GetCheckState(St->list, v->iItem) != 0;
-                if (St->items[(size_t)v->iItem].on != on) {
-                    St->items[(size_t)v->iItem].on = on;
+                if (St->items[(size_t)vi].on != on) {
+                    St->items[(size_t)vi].on = on;
                     // A tick box of one of several rows selected: every selected row the same way.
                     if (ListView_GetItemState(St->list, v->iItem, LVIS_SELECTED) & LVIS_SELECTED) {
                         filling = true;
                         for (int r = -1; (r = ListView_GetNextItem(St->list, r, LVNI_SELECTED)) >= 0;)
-                            if (r != v->iItem && r < (int)St->items.size()) {
-                                St->items[(size_t)r].on = on;
+                            if (r != v->iItem && item_at(r) >= 0) {
+                                St->items[(size_t)item_at(r)].on = on;
                                 ListView_SetCheckState(St->list, r, on);
                             }
                         filling = false;
@@ -422,9 +524,12 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case IDC_REMOVE: {
+            std::vector<char> gone(St->items.size(), 0);
+            for (int r = -1; (r = ListView_GetNextItem(St->list, r, LVNI_SELECTED)) >= 0;)
+                if (item_at(r) >= 0) gone[(size_t)item_at(r)] = 1;
             std::vector<Item> keep;
-            for (int i = 0; i < (int)St->items.size(); i++)
-                if (!(ListView_GetItemState(St->list, i, LVIS_SELECTED) & LVIS_SELECTED)) keep.push_back(St->items[(size_t)i]);
+            for (size_t i = 0; i < St->items.size(); i++)
+                if (!gone[i]) keep.push_back(St->items[i]);
             St->items = keep;
             save();
             fill();
@@ -433,7 +538,8 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case IDC_ALL:
         case IDC_NONE:
-            for (auto &it : St->items) it.on = LOWORD(wp) == IDC_ALL;
+            // (the maps shown: all of them, or what "Show:" picked)
+            for (int i : St->rows) St->items[(size_t)i].on = LOWORD(wp) == IDC_ALL;
             save();
             fill();
             update_buttons();
@@ -449,7 +555,9 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                     St->items[(size_t)i].status = L"Waiting";
                 }   // (the others keep their last result)
             if (which.empty() || !St->hooks.start) return 0;
-            fill();
+            // (the rows as they are: what "Show:" picked stays in the list while it runs, "Waiting" or not)
+            for (int i : which)
+                if (St->row_of[(size_t)i] >= 0) ListView_SetItemText(St->list, St->row_of[(size_t)i], 4, (LPWSTR)St->items[(size_t)i].status.c_str());
             St->running = true;
             update_buttons();
             int at_once = (int)SendMessageW(item(IDC_AT_ONCE), CB_GETCURSEL, 0, 0) + 1;
@@ -477,6 +585,13 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (St->hooks.stop) St->hooks.stop();
             SetWindowTextW(item(IDC_STATUS), L"Stopping once the maps being converted are done...");
             EnableWindow(item(IDC_STOP), FALSE);
+            return 0;
+        case IDC_SHOW:
+            if (HIWORD(wp) == CBN_SELCHANGE) {
+                St->show = std::clamp((int)SendMessageW(item(IDC_SHOW), CB_GETCURSEL, 0, 0), 0, SHOW_COUNT - 1);
+                fill();
+                update_buttons();
+            }
             return 0;
         case IDC_AT_ONCE:
             if (HIWORD(wp) == CBN_SELCHANGE && St->hooks.at_once_changed)
@@ -522,9 +637,9 @@ void layout() {
     }
     if (d) EndDeferWindowPos(d);
     // (Map, Saved to and Last run widen with the window)
-    const int base[] = {170, 90, 236, 66, 252, 110, 140};
-    const double share[] = {0.15, 0, 0.35, 0, 0.2, 0.15, 0.15};
-    for (int i = 0; i < 7; i++) ListView_SetColumnWidth(St->list, i, S(base[i]) + (int)(dw * share[i]));
+    const int base[] = {170, 90, 236, 66, 252, 110, 140, 84};
+    const double share[] = {0.15, 0, 0.35, 0, 0.2, 0.15, 0.15, 0};
+    for (int i = 0; i < kCols; i++) ListView_SetColumnWidth(St->list, i, S(base[i]) + (int)(dw * share[i]));
     InvalidateRect(St->wnd, nullptr, TRUE);
 }
 
@@ -534,7 +649,7 @@ HWND add(const wchar_t *cls, const wchar_t *text, DWORD style, int x, int y, int
     SendMessageW(c, WM_SETFONT, (WPARAM)St->font, TRUE);
     // (the intro and status stretch; the bottom rows stay at the bottom, their right-hand controls at the right)
     int ax = 0, ay = y >= 470 ? 1 : 0;
-    if (id == IDC_INTRO || id == IDC_STATUS || id == IDC_ROOT) ax = 2;   // (Save to grows; the packs stay right of it)
+    if (id == IDC_INTRO || id == IDC_STATUS || id == IDC_ROOT || id == IDC_SHOWN) ax = 2;   // (Save to grows; the packs stay right of it)
     if (id == IDC_ROOT_BROWSE || id == IDC_PACKS_LBL || id == IDC_PACK_CROSS || id == IDC_PACK_CE || id == IDC_PACK_MCC || id == IDC_PACK_XBOX) ax = 1;
     if (id == IDC_AT_ONCE_LBL || id == IDC_AT_ONCE || id == IDC_STOP || id == IDC_GO || id == IDC_CLOSE) ax = 1;
     St->anchors.push_back({id, x, y, w, h, ax, ay});
@@ -550,13 +665,18 @@ void create_controls() {
         L"move into \"Map Protected (Fail)\" beside them (not ones in Steam's folders), other failures leave nothing; \"Batch report.csv\" lists them all.",
         SS_NOPREFIX, 16, 12, 948, 52, IDC_INTRO);
     St->list = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS,
-                               S(16), S(70), S(948), S(400), St->wnd, (HMENU)(INT_PTR)IDC_LIST, GetModuleHandleW(nullptr), nullptr);
+                               S(16), S(102), S(948), S(368), St->wnd, (HMENU)(INT_PTR)IDC_LIST, GetModuleHandleW(nullptr), nullptr);
     SendMessageW(St->list, WM_SETFONT, (WPARAM)St->font, TRUE);
-    St->anchors.push_back({IDC_LIST, 16, 70, 948, 400, 2, 2});
+    St->anchors.push_back({IDC_LIST, 16, 102, 948, 368, 2, 2});
+    add(L"STATIC", L"Show:", SS_NOPREFIX, 16, 74, 44, 20, IDC_SHOW_LBL);
+    HWND show = add(L"COMBOBOX", L"", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 62, 70, 220, 400, IDC_SHOW);
+    for (auto *t : kShow) SendMessageW(show, CB_ADDSTRING, 0, (LPARAM)t);
+    SendMessageW(show, CB_SETCURSEL, (WPARAM)St->show, 0);
+    add(L"STATIC", L"", SS_NOPREFIX | SS_ENDELLIPSIS, 294, 74, 670, 20, IDC_SHOWN);
     ListView_SetExtendedListViewStyle(St->list, LVS_EX_FULLROWSELECT | LVS_EX_CHECKBOXES | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP);
     struct { const wchar_t *t; int w; } cols[] = {{L"Map", 170}, {L"From", 90}, {L"Saved to", 236}, {L"Size", 66}, {L"Last run", 252},
-                                                  {L"Map card", 110}, {L"Pack", 140}};
-    for (int i = 0; i < 7; i++) {
+                                                  {L"Map card", 110}, {L"Pack", 140}, {L"Type", 84}};
+    for (int i = 0; i < kCols; i++) {
         LVCOLUMNW c{};
         c.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT;
         c.fmt = i == 3 ? LVCFMT_RIGHT : LVCFMT_LEFT;
@@ -565,8 +685,8 @@ void create_controls() {
         ListView_InsertColumn(St->list, i, &c);
     }
     // (the pack shown second, beside the map's name)
-    int order[] = {0, 6, 1, 2, 3, 4, 5};
-    ListView_SetColumnOrderArray(St->list, 7, order);
+    int order[] = {0, 6, 7, 1, 2, 3, 4, 5};
+    ListView_SetColumnOrderArray(St->list, kCols, order);
     add(L"BUTTON", L"Find my earlier conversions", WS_TABSTOP, 16, 480, 180, 28, IDC_FIND);
     add(L"BUTTON", L"Add the Convert tab's map", WS_TABSTOP, 204, 480, 170, 28, IDC_ADD);
     add(L"BUTTON", L"Browse...", WS_TABSTOP, 382, 480, 80, 28, IDC_BROWSE);

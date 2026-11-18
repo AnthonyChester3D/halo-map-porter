@@ -116,8 +116,8 @@ enum {
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new141.exe is 1.141).
-#define HMP_VERSION L"1.141"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new142.exe is 1.142).
+#define HMP_VERSION L"1.142"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -2520,6 +2520,14 @@ static void open_batch() {
     h.game_of = [](const std::wstring &in) {
         Game g = detect_game(fs::path(in));
         return g == Game::Unknown ? std::wstring(L"?") : W(game_name(g));
+    };
+    // (the map's kind, from its header: Custom Edition's and MCC's keep it at 0x60)
+    h.kind_of = [](const std::wstring &in) {
+        std::ifstream f(fs::path(in), std::ios::binary);
+        char hd[0x64] = {};
+        if (!f.read(hd, sizeof hd) || std::memcmp(hd, "daeh", 4) != 0) return std::wstring();
+        const uint16_t t = (uint16_t)((unsigned char)hd[0x60] | (unsigned char)hd[0x61] << 8);
+        return std::wstring(t == 0 ? L"Campaign" : t == 1 ? L"Multiplayer" : t == 2 ? L"UI" : L"");
     };
     h.stop = [] { g_batch_stop = true; };
     // (each map's card: the one last written beside its Xbox map, else its own; every card read once, again after an edit)

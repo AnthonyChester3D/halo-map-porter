@@ -26,6 +26,8 @@ struct Hooks {
     std::function<bool(Item &)> current;
     // "Custom Edition", "MCC"... for the list.
     std::function<std::wstring(const std::wstring &in)> game_of;
+    // "Multiplayer", "Campaign" or "UI", from the map's header ("" if it can't be read).
+    std::function<std::wstring(const std::wstring &in)> kind_of;
     // Converts these (the ticked ones, by their index in the list) in a worker thread; it reports with progress()
     // and done(). False (after telling the user) if it can't start.
     // `at_once`: how many maps are converted at the same time (each in its own thread and work folder).
