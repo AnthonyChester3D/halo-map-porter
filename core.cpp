@@ -2207,6 +2207,7 @@ size_t drop_dialogue(Job &job, std::vector<std::string> &names);
 void restrict_to_xbox_mp(Job &job, const fs::path &xsrc);
 void drop_dead_placements(Job &job, const fs::path &xsrc);
 static void pin_encounter_bsps(Job &job, const fs::path &xsrc);
+static void settle_boat_physics(Job &job, const fs::path &xsrc);
 void bot_route_points(Job &job, const fs::path &xsrc);
 void trim_machines(Job &job, const fs::path &xsrc);
 bool drop_kept_vehicles(Job &job);
@@ -14638,6 +14639,7 @@ bool prepare_for_xbox(Job &job, std::string &err) {
     // globals' gameplay): the map's own, as Custom Edition has it (perfect_keep_gameplay).
     const bool perfect = cfg.xbox_perfect;
     pin_encounter_bsps(job, xsrc);
+    settle_boat_physics(job, xsrc);
     if (!perfect) {
         use_stock_versions(job, xsrc);
         drop_dead_placements(job, xsrc);
@@ -15757,6 +15759,56 @@ static void pin_encounter_bsps(Job &job, const fs::path &xsrc) {
     }
     if (pinned) job.note("[ai] kept " + std::to_string(pinned) + " encounter" + (pinned > 1 ? "s" : "") +
                          " in the BSP the PC map has them in (\"manual bsp index specified\" set: Invader would choose again)");
+}
+
+// A boat's powered mass points (the "human boat" vehicle type, with its three): the boat's code sets only the first
+// one's water friction speed and water lift, and the other two's water lift. Every other value a set flag reads is
+// left as it was on the stack: on the Xbox whatever came before, which can push the boat with hundreds of times its
+// weight (out of the water to the top of the sky, Splash Site's). A zero there is no push at all, so those flags go
+// off: what the flag does with a zero, every time. (Measured with Halo 1 Unlimited's physics on Splash Site's boat:
+// it floats at rest either way; driving, a speed of 4 left there throws it 11 units up, 20 past the sky.)
+static void settle_boat_physics(Job &job, const fs::path &xsrc) {
+    const Config &cfg = job.cfg;
+    std::set<std::string> done;
+    std::vector<std::string> boats;
+    std::error_code ec;
+    for (auto it = fs::recursive_directory_iterator(xsrc, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        if (!it->is_regular_file(ec) || it->path().extension() != ".vehicle") continue;
+        const std::string tag = fs::relative(it->path(), xsrc, ec).generic_u8string();
+        fs::path own = job.owner(tag);
+        if (own.empty()) continue;
+        auto kv = list_values(cfg, own, tag);
+        std::map<std::string, std::string> v(kv.begin(), kv.end());
+        if (v["vehicle_type.human_boat"] != "*") continue;
+        const std::string phys = v["physics"];
+        if (phys.empty() || !done.insert(phys).second) continue;
+        fs::path po = job.owner(phys);
+        if (po.empty() || (po != job.fixes && !job.to_fixes(phys, po))) continue;
+        auto pk = list_values(cfg, job.fixes, phys);
+        std::map<std::string, std::string> p(pk.begin(), pk.end());
+        if (!p.count("powered_mass_points[2].flags.water_lift") || p.count("powered_mass_points[3].flags.water_lift"))
+            continue;   // (not three: the boat's code leaves them all out)
+        std::vector<std::string> edits;
+        for (int i = 0; i < 3; i++)
+            for (const char *f : {"ground_friction", "water_friction", "air_friction", "water_lift", "air_lift", "thrust", "antigrav"}) {
+                const bool set_by_code = std::string(f) == "water_lift" || (i == 0 && std::string(f) == "water_friction");
+                const std::string k = "powered_mass_points[" + std::to_string(i) + "].flags." + f;
+                if (!set_by_code && p[k] == "1") edits.insert(edits.end(), {"-S", k, "0"});
+            }
+        if (edits.empty()) continue;
+        std::vector<std::string> cmd{u8(tool(cfg, "invader-edit")), "-t", u8(job.fixes), phys};
+        cmd.insert(cmd.end(), edits.begin(), edits.end());
+        std::string out;
+        if (run_process(cmd, out) == 0) boats.push_back(fs::path(from_u8(tag)).stem().u8string() + " (" + std::to_string(edits.size() / 3) + ")");
+    }
+    if (!boats.empty())
+        job.note("[xbox] boats: turned off the powered mass point flags their code reads without setting (the Xbox "
+                 "reads whatever was left there, which can throw a boat out of the water to the top of the sky; off, "
+                 "they do what a zero does): " + [&] {
+                     std::string l;
+                     for (auto &b : boats) l += (l.empty() ? "" : ", ") + b;
+                     return l;
+                 }());
 }
 
 void drop_dead_placements(Job &job, const fs::path &xsrc) {

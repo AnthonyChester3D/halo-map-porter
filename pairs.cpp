@@ -577,6 +577,12 @@ void compare(const std::string &tag, const std::string &g, Flat a, Flat b, Resul
                 note = true;
             }
         }
+        // A boat's powered mass point flag whose value the boat's code never sets (the Xbox reads what's left on its
+        // stack there, and the boat can launch): off, which is what a zero there does.
+        if (g == "physics" && gk.rfind("powered_mass_points[].flags.", 0) == 0 && va == "1" && vb == "0") {
+            d.ce += " (a boat's: its code never sets that value)";
+            note = true;
+        }
         // A conversation's participant naming an encounter the map doesn't have (the line never plays): cleared, as
         // Invader needs.
         if (g == "scenario" && gk == "ai_conversations[].participants[].encounter_name" && vb == "(none)" || 
