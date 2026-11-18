@@ -4432,7 +4432,11 @@ static bool reencode_sound_now(Job &job, const fs::path &tags, const std::string
         // (a name is a folder or a file name for invader-sound: one with a slash in it made a folder it refused)
         auto plain = [](std::string n) {
             for (auto &c : n)
-                if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|') c = '_';
+                // (and a byte that isn't plain ASCII: a tag's names aren't always UTF-8, and a file name from one that
+                // isn't stopped the whole batch)
+                if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|' ||
+                    (unsigned char)c < 0x20 || (unsigned char)c >= 0x80)
+                    c = '_';
             while (!n.empty() && (n.back() == ' ' || n.back() == '.')) n.pop_back();
             return n;
         };
@@ -14641,8 +14645,14 @@ bool prepare_for_xbox(Job &job, std::string &err) {
         std::atomic<size_t> next{0};
         auto work = [&] {
             for (size_t i; (i = next++) < list.size();) {
-                reasons[i] = sound_reencode_reason(xsrc / from_u8(list[i]));
-                ok[i] = reencode_sound_for_xbox(job, xsrc, list[i], whys[i]);
+                // (an error no step expected fails this sound, and so the map, not the whole app: it's a thread of its own)
+                try {
+                    reasons[i] = sound_reencode_reason(xsrc / from_u8(list[i]));
+                    ok[i] = reencode_sound_for_xbox(job, xsrc, list[i], whys[i]);
+                } catch (const std::exception &e) {
+                    ok[i] = false;
+                    whys[i] = std::string("an error it didn't expect: ") + e.what();
+                }
             }
         };
         unsigned n = std::clamp(std::thread::hardware_concurrency(), 1u, 6u);
@@ -18577,8 +18587,24 @@ uint64_t clear_working_files(const Config &cfg, std::string &what) {
     return freed;
 }
 
+static Result convert_map_checked(const Config &cfg, const fs::path &input, Game in_game, Game out_game,
+                                  const fs::path &output, bool share, const Log &log, ContentAnalysis *measure);
+
+// (an error no step expected, such as a name that isn't valid text, fails this map instead of the whole app and batch)
 Result convert_map(const Config &cfg, const fs::path &input, Game in_game, Game out_game,
                    const fs::path &output, bool share, const Log &log, ContentAnalysis *measure) {
+    try {
+        return convert_map_checked(cfg, input, in_game, out_game, output, share, log, measure);
+    } catch (const std::exception &e) {
+        Result r;
+        r.error = std::string("Halo Map Porter hit an error it didn't expect converting this map: ") + e.what() +
+                  " (the map is left out; the rest of the batch goes on)";
+        return r;
+    }
+}
+
+static Result convert_map_checked(const Config &cfg, const fs::path &input, Game in_game, Game out_game,
+                                  const fs::path &output, bool share, const Log &log, ContentAnalysis *measure) {
     if (cfg.xbox_perfect && out_game == Game::Xbox) {
         if (in_game != Game::CE && in_game != Game::MCC) {
             Result r;

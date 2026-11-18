@@ -116,8 +116,8 @@ enum {
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new136.exe is 1.136).
-#define HMP_VERSION L"1.136"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new137.exe is 1.137).
+#define HMP_VERSION L"1.137"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
