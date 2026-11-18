@@ -547,7 +547,7 @@ void create_controls() {
         L"Conversion included) and each map's own picks. With a \"Save to\" folder, linked pairs go in its first pack "
         L"folder (the Custom Edition maps they're linked to copied into the second, MCC maps into the third, laid out as OpenCE's "
         L"mcc_maps), maps that aren't linked in the fourth, protected maps' originals "
-        L"move into \"Map Protected (Fail)\" beside them, other failures leave nothing; \"Batch report.csv\" lists them all.",
+        L"move into \"Map Protected (Fail)\" beside them (not ones in Steam's folders), other failures leave nothing; \"Batch report.csv\" lists them all.",
         SS_NOPREFIX, 16, 12, 948, 52, IDC_INTRO);
     St->list = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS,
                                S(16), S(70), S(948), S(400), St->wnd, (HMENU)(INT_PTR)IDC_LIST, GetModuleHandleW(nullptr), nullptr);

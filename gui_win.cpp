@@ -116,8 +116,8 @@ enum {
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new140.exe is 1.140).
-#define HMP_VERSION L"1.140"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new141.exe is 1.141).
+#define HMP_VERSION L"1.141"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -1936,7 +1936,8 @@ static bool move_folder(const fs::path &from, const fs::path &to) {
 // A conversion built into the Xbox pack folder (<root>\<xbox>\<map folder>\), put where it belongs once it's done:
 // linked, its folder moves to the crossplay pack and the Custom Edition map it's linked to is copied beside the
 // others; converted but not linked, it stays; failed, nothing of it is left (and none of an earlier run's, in any of
-// the three), and a protected map's original moves into "Map Protected (Fail)" beside it. Returns where the map is
+// the three), and a protected map's original moves into "Map Protected (Fail)" beside it (not one in Steam's or the
+// Xbox app's folders, which the game reads it from). Returns where the map is
 // now (`built` when it isn't under the layout). `where` says which, for the report.
 static fs::path place_conversion(const PackLayout &l, const fs::path &in, const fs::path &built, Result &r, std::string &where,
                                  const Log &log) {
@@ -1992,7 +1993,15 @@ static fs::path place_conversion(const PackLayout &l, const fs::path &in, const 
         return built;
     }
     fs::remove_all(xbox, ec);
-    if (r.error.rfind("This map is protected", 0) == 0) {
+    // (not a map in a game's install or the Workshop's folder, which the game reads it from: Steam's, the Xbox app's)
+    bool installed = false;
+    for (auto &part : in) {
+        const std::wstring p = lower(part.wstring());
+        if (p == L"steamapps" || p == L"xboxgames" || p == L"windowsapps") installed = true;
+    }
+    if (installed && r.error.rfind("This map is protected", 0) == 0)
+        log("Protected: the map stays where it is (it's in the game's or the Workshop's own folder, which moving it would break)");
+    else if (r.error.rfind("This map is protected", 0) == 0) {
         const fs::path jail = in.parent_path() / "Map Protected (Fail)" / in.filename();
         fs::create_directories(jail.parent_path(), ec);
         fs::remove(jail, ec);
