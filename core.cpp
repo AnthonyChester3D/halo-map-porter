@@ -12889,6 +12889,54 @@ static bool ends_with(const std::string &s, const std::string &suf) {
 // The HUD tags' canvas sizes, read from an MCC map itself (Invader's extraction leaves the field out: it's unused on
 // Halo PC). Each HUD tag (unit, weapon and grenade HUD interfaces, HUD globals) has one: 960p (1) lays it out on a
 // canvas twice the Xbox's screen size, 480p (0) on one the Xbox's size. Nothing is known if the map can't be read.
+// A PC map's bitmaps whose data is DXT without the "compressed" flag (or flagged compressed and not DXT): the game
+// goes by the format, but Invader won't extract such a bitmap ("tag is corrupt"; Lumoria's HUD wraith). The file
+// offsets of the flags to flip, read from an uncompressed Custom Edition or MCC map's tag data.
+static std::vector<std::pair<uint64_t, uint16_t>> bitmap_flag_repairs(const fs::path &map) {
+    std::vector<std::pair<uint64_t, uint16_t>> fix;   // (file offset of the flags, the flags it should have)
+    std::ifstream f(map, std::ios::binary);
+    std::string h(0x800, '\0');
+    if (!f.read(&h[0], (std::streamsize)h.size())) return fix;
+    auto u32 = [](const std::string &b, size_t o) -> uint32_t {
+        if (o + 4 > b.size()) return 0;
+        const unsigned char *p = (const unsigned char *)b.data() + o;
+        return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24;
+    };
+    auto u16 = [](const std::string &b, size_t o) -> uint16_t {
+        if (o + 2 > b.size()) return 0;
+        const unsigned char *p = (const unsigned char *)b.data() + o;
+        return (uint16_t)(p[0] | p[1] << 8);
+    };
+    std::error_code ec;
+    const uint32_t version = u32(h, 4);
+    if (h.compare(0, 4, "daeh") != 0 || (version != 13 && version != 609) || u32(h, 8) != fs::file_size(map, ec)) return fix;
+    const uint32_t tdo = u32(h, 0x10), tds = u32(h, 0x14);
+    if (tds < 0x28 || tds > (256u << 20)) return fix;
+    std::string d(tds, '\0');
+    f.seekg(tdo);
+    if (!f.read(&d[0], (std::streamsize)d.size())) return fix;
+    const uint32_t base = u32(d, 0) - 0x28, count = u32(d, 12);
+    auto at = [&](uint32_t p) -> size_t { return p >= base && p - base < tds ? p - base : std::string::npos; };
+    const size_t arr = at(u32(d, 0));
+    if (arr == std::string::npos || count > 65535 || arr + (size_t)count * 32 > d.size()) return fix;
+    for (uint32_t i = 0; i < count; i++) {
+        const size_t e = arr + (size_t)i * 32;
+        if (d.compare(e, 4, "mtib") != 0 || u32(d, e + 24) != 0) continue;   // (a bitmap, its tag in this map)
+        const size_t st = at(u32(d, e + 20));
+        if (st == std::string::npos || st + 0x6C > d.size()) continue;
+        const uint32_t n = u32(d, st + 0x60);
+        const size_t bd = at(u32(d, st + 0x64));
+        if (bd == std::string::npos || n > 2048 || bd + (size_t)n * 0x30 > d.size()) continue;
+        for (uint32_t k = 0; k < n; k++) {
+            const size_t el = bd + (size_t)k * 0x30;
+            const uint16_t fmt = u16(d, el + 0xC), flags = u16(d, el + 0xE);
+            const bool dxt = fmt == 14 || fmt == 15 || fmt == 16 || fmt == 18, comp = flags & 2;
+            if (dxt != comp) fix.push_back({(uint64_t)tdo + el + 0xE, (uint16_t)(dxt ? flags | 2 : flags & ~2)});
+        }
+    }
+    return fix;
+}
+
 void read_hud_canvases(Job &job, const fs::path &map) {
     std::ifstream f(map, std::ios::binary);
     std::string h(0x800, '\0');
@@ -17959,6 +18007,9 @@ static Result convert_map_impl(const Config &cfg, const fs::path &input_given, G
     std::string key = "HaloMapPorter extracted 1\n" + std::string(game_name(in_game)) + "\n" + file_identity(input) + "\n" +
                       file_identity(tool(cfg, "invader-extract")) + "\n";
     for (auto &f : job.resource_files) key += file_identity(f) + "\n";
+    const auto flag_repairs = in_game == Game::CE || in_game == Game::MCC ? bitmap_flag_repairs(input)
+                                                                           : std::vector<std::pair<uint64_t, uint16_t>>{};
+    if (!flag_repairs.empty()) key += "bitmap flags repaired 1\n";
     // Protected maps have their tag names scrambled, so there's nothing usable to extract. (Asked at the same time
     // as the extraction runs: reading the map for it takes seconds of its own.)
     std::string info_tool = u8(tool(cfg, "invader-info")), info_in = u8(input);
@@ -17988,8 +18039,28 @@ static Result convert_map_impl(const Config &cfg, const fs::path &input_given, G
         log("Extracting tags from " + input.filename().u8string() + "...");
         std::vector<std::string> cmd{u8(tool(cfg, "invader-extract"))};
         if (!res_dir.empty()) cmd.insert(cmd.end(), {"-m", u8(res_dir)});
-        cmd.push_back(u8(input));
+        // (bitmaps flagged against their format: extracted from a copy with the flag as the format says)
+        fs::path from = input;
+        if (!flag_repairs.empty()) {
+            const fs::path copy = job.work / "repaired" / input.filename();
+            fs::create_directories(copy.parent_path(), ec);
+            fs::copy_file(input, copy, fs::copy_options::overwrite_existing, ec);
+            std::fstream w(copy, std::ios::binary | std::ios::in | std::ios::out);
+            for (auto &[o, v] : flag_repairs) {
+                w.seekp((std::streamoff)o);
+                const char b[2] = {(char)(v & 0xFF), (char)(v >> 8)};
+                w.write(b, 2);
+            }
+            if (!ec && w) {
+                from = copy;
+                job.note("[fix]  " + std::to_string(flag_repairs.size()) + " of the map's bitmaps were DXT without the "
+                         "\"compressed\" flag (or the other way round), which the game ignores and Invader won't extract; "
+                         "extracted with the flag as their format says");
+            }
+        }
+        cmd.push_back(u8(from));
         extracted = extract_kept(job, key, cmd, out);
+        if (from != input) fs::remove(from, ec);
         if (is_protected()) return r;
         if (extracted.empty()) {
             r.error = "Couldn't extract tags from the map:\n" + out.substr(out.size() > 2000 ? out.size() - 2000 : 0);
