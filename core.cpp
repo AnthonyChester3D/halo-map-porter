@@ -12761,6 +12761,76 @@ static std::vector<bool> convert_texts(ScriptConverter &conv, std::vector<std::s
     return ok;
 }
 
+// Scripts and globals nothing ever runs or reads, left out of the map's script files (every file at once: a name in
+// one may be used in another). Startup and continuous scripts run by themselves, stubs are kept, and from those on, a
+// script or global any kept one names is kept too. MCC lets a map's scripts be far bigger than the Xbox's 19,001 node
+// limit (Bot Bootcamp's maps: 25,000-30,000); what's never run costs nodes all the same. Returns (scripts, globals)
+// left out and their names in `names`.
+static std::pair<int, int> drop_unused_scripts(std::vector<std::string> &texts, std::vector<std::string> &names) {
+    struct Item { size_t file, b, e; bool script, root; std::string name; std::set<std::string> uses; };
+    std::vector<Item> items;
+    std::function<void(const hsc::Node &, std::set<std::string> &)> atoms = [&](const hsc::Node &n, std::set<std::string> &out) {
+        if (!n.list) { if (!n.str) out.insert(hsc::lower(n.atom)); return; }
+        for (auto &k : n.kids) atoms(k, out);
+    };
+    for (size_t f = 0; f < texts.size(); f++) {
+        std::vector<hsc::Node> top;
+        size_t i = 0;
+        if (!hsc::parse(texts[f], i, top, false)) return {0, 0};   // (a file it can't read: nothing left out anywhere)
+        for (auto &n : top) {
+            Item it{f, n.b, n.e, false, true, "", {}};
+            atoms(n, it.uses);
+            if (n.list && n.kids.size() >= 3 && !n.kids[0].list) {
+                const std::string head = hsc::lower(n.kids[0].atom);
+                if (head == "script" && !n.kids[1].list) {
+                    const std::string type = hsc::lower(n.kids[1].atom);
+                    // (static and stub scripts name their return type first; a script with parameters, (name (type p)))
+                    const size_t at = (type == "static" || type == "stub") && n.kids.size() >= 4 ? 3 : 2;
+                    const hsc::Node &nm = n.kids[at];
+                    it.name = hsc::lower(nm.list ? (nm.kids.empty() || nm.kids[0].list ? "" : nm.kids[0].atom) : nm.atom);
+                    it.script = true;
+                    it.root = type == "startup" || type == "continuous" || type == "stub" || it.name.empty();
+                } else if (head == "global" && n.kids.size() >= 3 && !n.kids[2].list) {
+                    it.name = hsc::lower(n.kids[2].atom);
+                    it.root = false;
+                }
+            }
+            it.uses.erase(it.name);
+            items.push_back(std::move(it));
+        }
+    }
+    std::map<std::string, std::vector<size_t>> by_name;
+    for (size_t k = 0; k < items.size(); k++)
+        if (!items[k].name.empty()) by_name[items[k].name].push_back(k);
+    std::vector<bool> keep(items.size(), false);
+    std::vector<size_t> todo;
+    for (size_t k = 0; k < items.size(); k++)
+        if (items[k].root) keep[k] = true, todo.push_back(k);
+    while (!todo.empty()) {
+        const size_t k = todo.back();
+        todo.pop_back();
+        for (auto &u : items[k].uses) {
+            auto it = by_name.find(u);
+            if (it == by_name.end()) continue;
+            for (size_t j : it->second)
+                if (!keep[j]) keep[j] = true, todo.push_back(j);
+        }
+    }
+    int scripts = 0, globals = 0;
+    std::vector<std::vector<std::pair<size_t, size_t>>> cut(texts.size());
+    for (size_t k = 0; k < items.size(); k++) {
+        if (keep[k]) continue;
+        cut[items[k].file].push_back({items[k].b, items[k].e});
+        (items[k].script ? scripts : globals)++;
+        names.push_back(items[k].name);
+    }
+    for (size_t f = 0; f < texts.size(); f++) {
+        std::sort(cut[f].begin(), cut[f].end(), [](auto &a, auto &b) { return a.first > b.first; });
+        for (auto &[b, e] : cut[f]) texts[f].erase(b, e - b);
+    }
+    return {scripts, globals};
+}
+
 // Convert every .hsc under `dir` for the target game; notes what changed.
 static void convert_scripts(Job &job, const fs::path &dir, Game target) {
     if (!fs::exists(dir)) return;
@@ -12780,6 +12850,17 @@ static void convert_scripts(Job &job, const fs::path &dir, Game target) {
     }
     made = texts;
     std::vector<bool> ok = convert_texts(conv, texts);
+    if (target == Game::Xbox && std::find(ok.begin(), ok.end(), false) == ok.end()) {
+        std::vector<std::string> gone;
+        auto [ns, ng] = drop_unused_scripts(texts, gone);
+        if (ns || ng) {
+            std::string list;
+            for (size_t i = 0; i < gone.size() && i < 12; i++) list += (i ? ", " : "") + gone[i];
+            if (gone.size() > 12) list += ", and " + std::to_string(gone.size() - 12) + " more";
+            job.note("[scripts] left out " + std::to_string(ns) + " script" + (ns == 1 ? "" : "s") + " and " + std::to_string(ng) +
+                     " global" + (ng == 1 ? "" : "s") + " nothing ever runs or reads (fewer of the Xbox's 19,001 script nodes): " + list);
+        }
+    }
     for (size_t i = 0; i < files.size(); i++) {
         if (!ok[i]) {
             job.note("[scripts] couldn't read " + files[i].filename().u8string() + " to check it for " + game_name(target));
