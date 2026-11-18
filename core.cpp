@@ -14859,6 +14859,46 @@ bool prepare_for_xbox(Job &job, std::string &err) {
 // Over the size limit: the map's own long stereo sounds (music, ambience) re-encoded at 22.05 kHz, the biggest first,
 // until `needed` bytes are saved (`mono` true: its stereo 22 kHz ones made mono instead). Each halves. Short ones
 // (under 1 MB: effects, dialogue) stay as they are. The ones changed go in `names`.
+// The other sounds of each looping sound's track `tag` is in (its start, loop, end and alternates): the Xbox plays a
+// track's sounds one after another on the same voice, set up for the first one's channels and rate, so they have to
+// share them. (Splash Site's music: its loop made mono 22 kHz to fit, its stereo 44.1 kHz start left as it was,
+// and the loop played as loud noise.)
+static std::vector<std::string> track_partners(Job &job, const std::vector<std::string> &deps, const std::string &tag) {
+    std::set<std::string> out;
+    for (auto &dep : deps) {
+        if (!has_suffix(dep, ".sound_looping")) continue;
+        fs::path own = job.owner(dep);
+        if (own.empty()) continue;
+        auto kv = list_values(job.cfg, own, dep);
+        std::map<int, std::vector<std::string>> tracks;
+        static const std::regex tk(R"(^tracks\[(\d+)\]\.(start|loop|end|alternate_loop|alternate_end)$)");
+        for (auto &[k, v] : kv) {
+            std::smatch m;
+            if (!v.empty() && std::regex_match(k, m, tk)) tracks[std::stoi(m[1].str())].push_back(v + (has_suffix(v, ".sound") ? "" : ".sound"));
+        }
+        for (auto &[i, sounds] : tracks)
+            if (std::find(sounds.begin(), sounds.end(), tag) != sounds.end())
+                for (auto &o : sounds)
+                    if (o != tag) out.insert(o);
+    }
+    return {out.begin(), out.end()};
+}
+
+// A track's other sounds re-encoded as `tag` now is (22.05 kHz, mono or not), those that aren't already.
+static void match_track_partners(Job &job, const std::vector<std::string> &deps, const std::string &tag, bool mono,
+                                 std::vector<std::string> &names) {
+    for (auto &o : track_partners(job, deps, tag)) {
+        fs::path own = job.owner(o);
+        SndTag t;
+        if (own.empty() || !read_sound_tag(own / from_u8(o), t)) continue;
+        if (t.rate == 22050 && (t.channels == 1 || !mono)) continue;
+        fs::path ed = own == job.overlay ? editable_owner(job, o, true) : own;   // (Bungie's: an edited copy)
+        std::string why;
+        if (!ed.empty() && reencode_sound_now(job, ed, o, why, 22050, mono || t.channels == 1))
+            names.push_back(o);
+    }
+}
+
 size_t shrink_sounds_to_fit(Job &job, size_t needed, bool mono, std::vector<std::string> &names) {
     std::vector<std::string> deps = content_dependencies(job);
     struct Cand { size_t bytes; std::string tag; };
@@ -14883,6 +14923,7 @@ size_t shrink_sounds_to_fit(Job &job, size_t needed, bool mono, std::vector<std:
         if (!reencode_sound_now(job, job.source, c.tag, why, 22050, mono)) continue;
         saved += c.bytes / 2;
         names.push_back(c.tag);
+        match_track_partners(job, deps, c.tag, mono, names);
     }
     return saved;
 }
@@ -14972,6 +15013,7 @@ size_t shrink_stock_to_fit(Job &job, size_t needed, int round, std::vector<std::
             std::string why;
             if (!reencode_sound_now(job, ed, c.tag, why, 22050, mono)) continue;
             saved += c.saves;
+            match_track_partners(job, deps, c.tag, mono, names);
         } else {
             size_t s = shrink_bitmap_tag(ed / from_u8(c.tag), true, job.alpha_tested.count(c.tag) > 0);
             if (!s) continue;
