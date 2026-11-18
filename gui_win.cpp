@@ -116,8 +116,8 @@ enum {
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new146.exe is 1.146).
-#define HMP_VERSION L"1.146"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new147.exe is 1.147).
+#define HMP_VERSION L"1.147"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -2955,7 +2955,8 @@ static void open_batch() {
                     remember_conversion(j.in, j.out);
                     if (!r.link.empty()) { linked++; st = L"Done, linked"; }
                     else if (j.cfg.xbox_perfect && !r.pair_check.empty()) st = L"Done, not linked: see its pair check";
-                    else st = L"Done";
+                    else if (!j.cfg.xbox_perfect) st = L"Done, not linked: Perfect Conversion is off";
+                    else st = L"Done, not linked";
                     for (auto &c : r.changes)
                         if (c.rfind("[size]", 0) == 0) st += L" (big-map limit: over 47 MB)";
                     log("Done: " + N(j.out.wstring()) + (r.link.empty() ? "" : " (linked: " + N(r.link.wstring()) + ")"));
