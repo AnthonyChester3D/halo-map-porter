@@ -2,14 +2,18 @@
 #include "portals.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <chrono>
 #include <cstring>
 #include <functional>
 #include <map>
+#include <set>
+#include <thread>
 #include <tuple>
 #include <unordered_map>
 
@@ -1475,7 +1479,8 @@ namespace {
 // ones whose stamp is `frame`). `max_views`: how many (6 directions from each spot). `triangles`: the level's.
 bool sample(const fs::path &bsp_file, Arrangement which, const std::vector<int> *cl_in, const std::vector<ClusterPortal> *portals_in,
             const PlayArea &area, int max_views, int *triangles,
-            const std::function<void(const View &, int, const std::vector<int> &, int)> &each) {
+            const std::function<void(const View &, int, const std::vector<int> &, int)> &each,
+            const std::vector<std::vector<char>> *pvs_in = nullptr) {
     tagfile::Tag t;
     if (!t.load(bsp_file)) return false;
     tagfile::Elem r = t.root();
@@ -1540,6 +1545,7 @@ bool sample(const fs::path &bsp_file, Arrangement which, const std::vector<int> 
                 }
         }
     }
+    if (which == Arrangement::Given && pvs_in && (int)pvs_in->size() == nc) pvs = *pvs_in;
     // Where a player's eyes can be: above floors (weighted by area).
     std::vector<int> floors;
     std::vector<double> cum;
@@ -1581,12 +1587,12 @@ bool sample(const fs::path &bsp_file, Arrangement which, const std::vector<int> 
 }   // namespace
 
 bool estimate(const fs::path &bsp_file, Arrangement which, const std::vector<int> *cl_in, const std::vector<ClusterPortal> *portals_in,
-              Drawn &out, const PlayArea &area) {
+              Drawn &out, const PlayArea &area, const std::vector<std::vector<char>> *pvs) {
     out = Drawn();
     std::vector<int> counts;
     int triangles = 0;
     if (!sample(bsp_file, which, cl_in, portals_in, area, 2400, &triangles,
-                [&](const View &, int n, const std::vector<int> &, int) { counts.push_back(n); }))
+                [&](const View &, int n, const std::vector<int> &, int) { counts.push_back(n); }, pvs))
         return false;
     std::sort(counts.begin(), counts.end());
     out.samples = (int)counts.size();
@@ -1658,6 +1664,524 @@ bool inside_level(const fs::path &bsp_file, const std::vector<V3> &points, std::
     return true;
 }
 
+namespace {
+
+// Occlusion: which clusters can be seen at all from each one (the visibility data the engine checks before it goes
+// through a portal, and before it draws, wakes or hears what's in a cluster). Rays from where an eye can be in one
+// cluster (above floors, at heights a player, a vehicle's camera or a jump reaches; cutscene cameras; anywhere when
+// something flies) to what can be seen of another (its surfaces, the open space objects can be in): a cluster is
+// hidden only when every ray meets a drawn, solid-looking level triangle face on. Glass, grates, water and walls only
+// the collision has don't hide anything; a triangle seen from behind (not drawn) doesn't either.
+struct TriGrid {
+    const std::vector<std::array<V3, 3>> *tri = nullptr;
+    std::vector<V3> nf;      // each triangle's front normal (zero: not a blocker)
+    V3 lo{}, hi{};
+    double cell = 1;
+    int n[3] = {1, 1, 1};
+    std::vector<int> start, items;
+
+    void build(const std::vector<std::array<V3, 3>> &t, const std::vector<V3> &front, const std::vector<char> &blocker) {
+        tri = &t;
+        nf = front;
+        lo = {1e30, 1e30, 1e30};
+        hi = {-1e30, -1e30, -1e30};
+        size_t used = 0;
+        for (size_t i = 0; i < t.size(); i++) {
+            if (!blocker[i]) { nf[i] = {0, 0, 0}; continue; }
+            used++;
+            for (auto &p : t[i])
+                for (int k = 0; k < 3; k++) { lo[k] = std::min(lo[k], p[k]); hi[k] = std::max(hi[k], p[k]); }
+        }
+        if (!used) { lo = hi = {0, 0, 0}; }
+        for (int k = 0; k < 3; k++) { lo[k] -= 0.01; hi[k] += 0.01; }
+        double vol = (hi[0] - lo[0]) * (hi[1] - lo[1]) * (hi[2] - lo[2]);
+        cell = std::max(0.05, std::cbrt(vol / std::min(262144.0, std::max(64.0, (double)used * 2))));
+        for (int k = 0; k < 3; k++) n[k] = std::clamp((int)std::ceil((hi[k] - lo[k]) / cell), 1, 512);
+        size_t cells = (size_t)n[0] * n[1] * n[2];
+        std::vector<std::vector<int>> per(cells);
+        for (size_t i = 0; i < t.size(); i++) {
+            if (len(nf[i]) == 0) continue;
+            int a[3], b[3];
+            for (int k = 0; k < 3; k++) {
+                double mn = std::min({t[i][0][k], t[i][1][k], t[i][2][k]}), mx = std::max({t[i][0][k], t[i][1][k], t[i][2][k]});
+                a[k] = std::clamp((int)((mn - lo[k]) / cell), 0, n[k] - 1);
+                b[k] = std::clamp((int)((mx - lo[k]) / cell), 0, n[k] - 1);
+            }
+            for (int x = a[0]; x <= b[0]; x++)
+                for (int y = a[1]; y <= b[1]; y++)
+                    for (int z = a[2]; z <= b[2]; z++) per[((size_t)z * n[1] + y) * n[0] + x].push_back((int)i);
+        }
+        start.assign(cells + 1, 0);
+        for (size_t c = 0; c < cells; c++) start[c + 1] = start[c] + (int)per[c].size();
+        items.reserve((size_t)start[cells]);
+        for (auto &v : per) items.insert(items.end(), v.begin(), v.end());
+    }
+
+    // Does a solid-looking triangle face `a` across the segment a-c? (`seen`/`stamp`: each triangle tested once.)
+    bool blocked(const V3 &a, const V3 &c, std::vector<int> &seen, int stamp) const {
+        V3 d = c - a;
+        double L = len(d);
+        if (L < 1e-6) return false;
+        // The segment within the grid's box.
+        double t0 = 0, t1 = 1;
+        for (int k = 0; k < 3; k++) {
+            if (std::fabs(d[k]) < 1e-12) {
+                if (a[k] < lo[k] || a[k] > hi[k]) return false;
+                continue;
+            }
+            double u = (lo[k] - a[k]) / d[k], v = (hi[k] - a[k]) / d[k];
+            if (u > v) std::swap(u, v);
+            t0 = std::max(t0, u);
+            t1 = std::min(t1, v);
+        }
+        if (t0 > t1) return false;
+        V3 p = a + d * t0;
+        int ix[3], step[3];
+        double tmax[3], tdelta[3];
+        for (int k = 0; k < 3; k++) {
+            ix[k] = std::clamp((int)((p[k] - lo[k]) / cell), 0, n[k] - 1);
+            if (d[k] > 0) { step[k] = 1; tmax[k] = (lo[k] + (ix[k] + 1) * cell - a[k]) / d[k]; tdelta[k] = cell / d[k]; }
+            else if (d[k] < 0) { step[k] = -1; tmax[k] = (lo[k] + ix[k] * cell - a[k]) / d[k]; tdelta[k] = -cell / d[k]; }
+            else { step[k] = 0; tmax[k] = 1e30; tdelta[k] = 1e30; }
+        }
+        const double margin = 0.004 / L;   // (not the very ends: a target on a surface, an eye against a wall)
+        for (int guard = 0; guard < 4096; guard++) {
+            size_t c0 = ((size_t)ix[2] * n[1] + ix[1]) * n[0] + ix[0];
+            for (int j = start[c0]; j < start[c0 + 1]; j++) {
+                int i = items[(size_t)j];
+                if (seen[(size_t)i] == stamp) continue;
+                seen[(size_t)i] = stamp;
+                const V3 &nrm = nf[(size_t)i];
+                if (dot(nrm, d) >= 0) continue;   // (seen from behind: not drawn)
+                const auto &T = (*tri)[(size_t)i];
+                V3 e1 = T[1] - T[0], e2 = T[2] - T[0], pv = cross(d, e2);
+                double det = dot(e1, pv);
+                if (std::fabs(det) < 1e-14) continue;
+                double inv = 1 / det;
+                V3 s = a - T[0];
+                double u = dot(s, pv) * inv;
+                if (u < 1e-7 || u > 1 - 1e-7) continue;
+                V3 q = cross(s, e1);
+                double v = dot(d, q) * inv;
+                if (v < 1e-7 || u + v > 1 - 1e-7) continue;   // (just inside the edges: a ray along a seam gets through)
+                double t = dot(e2, q) * inv;
+                if (t > margin && t < 1 - margin) return true;
+            }
+            int k = tmax[0] < tmax[1] ? (tmax[0] < tmax[2] ? 0 : 2) : (tmax[1] < tmax[2] ? 1 : 2);
+            if (tmax[k] > t1) break;
+            ix[k] += step[k];
+            if (ix[k] < 0 || ix[k] >= n[k]) break;
+            tmax[k] += tdelta[k];
+        }
+        return false;
+    }
+};
+
+// Each leaf's box (from its portals' corners).
+std::vector<std::pair<V3, V3>> leaf_boxes(const Leaves &L) {
+    std::vector<std::pair<V3, V3>> box((size_t)L.count, {V3{1e30, 1e30, 1e30}, V3{-1e30, -1e30, -1e30}});
+    for (auto &p : L.portals)
+        for (int side : {p.front, p.back}) {
+            if (side < 0 || side >= L.count) continue;
+            for (auto &q : p.points)
+                for (int k = 0; k < 3; k++) {
+                    box[(size_t)side].first[k] = std::min(box[(size_t)side].first[k], q[k]);
+                    box[(size_t)side].second[k] = std::max(box[(size_t)side].second[k], q[k]);
+                }
+        }
+    return box;
+}
+
+// Each triangle's front normal: Halo winds them one way; which way, by where the open space is.
+std::vector<V3> front_normals(const Bsp &b, const std::vector<std::array<V3, 3>> &tri) {
+    std::vector<V3> n(tri.size(), V3{0, 0, 0});
+    long long vote = 0;
+    for (size_t i = 0; i < tri.size(); i++) {
+        V3 c = cross(tri[i][1] - tri[i][0], tri[i][2] - tri[i][0]);
+        double l = len(c);
+        if (l < 1e-12) continue;
+        n[i] = c * (1 / l);
+        if (i % 7) continue;
+        V3 m = (tri[i][0] + tri[i][1] + tri[i][2]) * (1.0 / 3);
+        bool plus = b.leaf_at(m + n[i] * 0.02) >= 0, minus = b.leaf_at(m - n[i] * 0.02) >= 0;
+        if (plus != minus) vote += plus ? 1 : -1;
+    }
+    if (vote < 0)
+        for (auto &v : n) v = v * -1.0;
+    return n;
+}
+
+struct Rng {
+    uint64_t s;
+    explicit Rng(uint64_t seed) : s(seed * 0x9E3779B97F4A7C15ull + 0x2545F4914F6CDD1Dull) {}
+    double operator()() {
+        s ^= s << 13; s ^= s >> 7; s ^= s << 17;
+        return (double)(s >> 11) / 9007199254740992.0;
+    }
+};
+
+V3 random_in_triangle(const std::array<V3, 3> &T, Rng &rnd) {
+    double u = rnd(), v = rnd();
+    if (u + v > 1) { u = 1 - u; v = 1 - v; }
+    return T[0] + (T[1] - T[0]) * u + (T[2] - T[0]) * v;
+}
+
+// Does the segment stay in open space (no solid on the way)?
+bool open_between(const Bsp &b, const V3 &a, const V3 &c) {
+    bool solid = false;
+    trace(b, 0, a, c, 0, 1, [&](int leaf, double) { if (leaf == kSolid) { solid = true; return true; } return false; });
+    return !solid;
+}
+
+// The clusters a clear sight line goes through (`mark`), or false if it goes through more solid than a seen-through
+// opening's (kSeeDepth: outside the level beyond its sky, into rock behind a wall only the collision has).
+bool sight_line(const Bsp &b, const std::vector<int> &cl, const V3 &a, const V3 &c, const std::function<void(int)> &mark) {
+    double L = len(c - a), solid_from = -1;
+    bool ok = true;
+    std::vector<int> through;
+    trace(b, 0, a, c, 0, 1, [&](int leaf, double t) {
+        if (solid_from >= 0 && (t - solid_from) * L > kSeeDepth) { ok = false; return true; }
+        if (leaf == kSolid) {
+            if (solid_from < 0) solid_from = t;
+            return false;
+        }
+        solid_from = -1;
+        if (leaf >= 0 && leaf < (int)cl.size()) through.push_back(cl[(size_t)leaf]);
+        return false;
+    });
+    if (ok && solid_from >= 0 && (1 - solid_from) * L > kSeeDepth) ok = false;
+    if (ok)
+        for (int k : through) mark(k);
+    return ok;
+}
+
+}   // namespace
+
+std::vector<std::vector<char>> occlusion(const fs::path &bsp_file, const Leaves &L, const std::vector<int> &cl,
+                                         const std::vector<ClusterPortal> &ps, const Occlusion &o, OcclusionStats *stats) {
+    tagfile::Tag t;
+    int nc = 0;
+    for (int c : cl) nc = std::max(nc, c + 1);
+    std::vector<std::vector<char>> sees((size_t)nc, std::vector<char>((size_t)nc, 1));
+    if (nc < 2 || !t.load(bsp_file)) return sees;
+    tagfile::Elem r = t.root();
+    Bsp b;
+    std::vector<std::array<V3, 3>> tri;
+    if (!load_bsp(r, b, nullptr) || !load_triangles(r, tri) || (int)cl.size() < b.leaves) return sees;
+    auto cluster_of = [&](const V3 &p) {
+        int leaf = b.leaf_at(p);
+        return leaf >= 0 && leaf < (int)cl.size() ? cl[(size_t)leaf] : -1;
+    };
+    std::vector<V3> nf = front_normals(b, tri);
+    std::vector<char> st = see_through_triangles(r, tri.size(), o.see_through), blocker(tri.size(), 0);
+    for (size_t i = 0; i < tri.size(); i++) blocker[i] = !st[i] && len(nf[i]) > 0;
+    TriGrid grid;
+    grid.build(tri, nf, blocker);
+
+    // Each cluster's surfaces.
+    std::vector<std::vector<int>> surfaces((size_t)nc);
+    {
+        tagfile::Block sl = r.block("leaves"), ls = r.block("leaf surfaces");
+        std::vector<int> last(tri.size(), -1);
+        for (int i = 0; i < b.leaves && (size_t)i < sl.size(); i++) {
+            int c = cl[(size_t)i];
+            if (c < 0 || c >= nc) continue;
+            long long first = sl[(size_t)i].integer("surface references"), n = sl[(size_t)i].integer("surface reference count");
+            for (long long k = first; k < first + n && k >= 0 && k < (long long)ls.size(); k++) {
+                long long sfc = ls[(size_t)k].integer("surface");
+                if (sfc < 0 || sfc >= (long long)tri.size()) continue;
+                // (a surface in more than one cluster's leaves: listed by each)
+                if (last[(size_t)sfc] == c) continue;
+                last[(size_t)sfc] = c;
+                surfaces[(size_t)c].push_back((int)sfc);
+            }
+        }
+    }
+    auto boxes = leaf_boxes(L);
+    std::vector<std::vector<int>> leaves_of((size_t)nc);
+    for (int i = 0; i < b.leaves; i++)
+        if (cl[(size_t)i] >= 0 && cl[(size_t)i] < nc && boxes[(size_t)i].first[0] <= boxes[(size_t)i].second[0]) leaves_of[(size_t)cl[(size_t)i]].push_back(i);
+
+    const int kEyes = 64, kTargets = 96;
+    std::vector<std::vector<V3>> eyes((size_t)nc), targets((size_t)nc);
+    Rng rnd(0x51ED);
+    // Eyes above floors (anything a player or a vehicle could stand on), up to a jump's or a camera's height.
+    {
+        std::vector<std::vector<int>> floors((size_t)nc);
+        for (size_t i = 0; i < tri.size(); i++) {
+            if (nf[i][2] < 0.35) continue;
+            V3 m = (tri[i][0] + tri[i][1] + tri[i][2]) * (1.0 / 3);
+            int c = cluster_of(m + V3{0, 0, 0.3});
+            if (c >= 0) floors[(size_t)c].push_back((int)i);
+        }
+        for (int c = 0; c < nc; c++) {
+            auto &f = floors[(size_t)c];
+            if (f.empty()) continue;
+            std::vector<double> cum;
+            double total = 0;
+            for (int i : f) { total += len(cross(tri[(size_t)i][1] - tri[(size_t)i][0], tri[(size_t)i][2] - tri[(size_t)i][0])); cum.push_back(total); }
+            for (int tries = 0; tries < kEyes * 6 && (int)eyes[(size_t)c].size() < kEyes; tries++) {
+                size_t k = std::min((size_t)(std::lower_bound(cum.begin(), cum.end(), rnd() * total) - cum.begin()), f.size() - 1);
+                V3 foot = random_in_triangle(tri[(size_t)f[k]], rnd) + V3{0, 0, 0.02};
+                V3 eye = foot + V3{0, 0, 0.15 + rnd() * (o.eye_height - 0.15)};
+                int ce = cluster_of(eye);
+                if (ce < 0 || cluster_of(foot) < 0 || !open_between(b, foot, eye)) continue;
+                if ((int)eyes[(size_t)ce].size() < kEyes * 2) eyes[(size_t)ce].push_back(eye);
+            }
+        }
+    }
+    // Eyes where a cluster meets another (just inside it), near a floor: the farthest a view into the next one reaches.
+    for (auto &p : ps) {
+        if (p.points.size() < 3) continue;
+        V3 nrm = cross(p.points[1] - p.points[0], p.points[2] - p.points[0]);
+        if (len(nrm) < 1e-12) continue;
+        nrm = nrm * (1 / len(nrm));
+        for (int k = 0; k < 24; k++) {
+            size_t j = 1 + (size_t)(rnd() * (p.points.size() - 2));
+            j = std::min(j, p.points.size() - 2);
+            V3 q = random_in_triangle({p.points[0], p.points[j], p.points[j + 1]}, rnd);
+            for (double side : {0.05, -0.05}) {
+                V3 e = q + nrm * side;
+                int c = cluster_of(e);
+                if (c < 0 || (c != p.front && c != p.back)) continue;
+                if (open_between(b, e, e - V3{0, 0, o.eye_height + 0.1})) continue;   // (no floor below)
+                eyes[(size_t)c].push_back(e);
+            }
+        }
+    }
+    for (auto &e : o.cameras) {
+        int c = cluster_of(e);
+        if (c >= 0) eyes[(size_t)c].push_back(e);
+    }
+    // Open space (objects can be anywhere in it: flying, thrown, falling), and eyes there too when something flies.
+    std::vector<std::vector<V3>> air((size_t)nc);
+    for (int c = 0; c < nc; c++) {
+        auto &lv = leaves_of[(size_t)c];
+        if (lv.empty()) continue;
+        std::vector<double> cum;
+        double total = 0;
+        for (int i : lv) {
+            auto &bx = boxes[(size_t)i];
+            double v = std::max(1e-6, (bx.second[0] - bx.first[0]) * (bx.second[1] - bx.first[1]) * (bx.second[2] - bx.first[2]));
+            total += std::cbrt(v);   // (big leaves don't take every sample)
+            cum.push_back(total);
+        }
+        for (int tries = 0; tries < 256 && (int)air[(size_t)c].size() < 32; tries++) {
+            size_t k = std::min((size_t)(std::lower_bound(cum.begin(), cum.end(), rnd() * total) - cum.begin()), lv.size() - 1);
+            auto &bx = boxes[(size_t)lv[k]];
+            V3 p{bx.first[0] + rnd() * (bx.second[0] - bx.first[0]), bx.first[1] + rnd() * (bx.second[1] - bx.first[1]),
+                 bx.first[2] + rnd() * (bx.second[2] - bx.first[2])};
+            if (cluster_of(p) == c) air[(size_t)c].push_back(p);
+        }
+    }
+    for (int c = 0; c < nc; c++) {
+        auto &e = eyes[(size_t)c];
+        if (o.flying) e.insert(e.end(), air[(size_t)c].begin(), air[(size_t)c].end());
+        // (at most so many, spread: every other one dropped until they fit)
+        while ((int)e.size() > kEyes * 2) {
+            std::vector<V3> half;
+            for (size_t i = 0; i < e.size(); i += 2) half.push_back(e[i]);
+            e.swap(half);
+        }
+        // What can be seen: points on its surfaces (just in front of them), its eyes (players, what they stand on), its air.
+        auto &tg = targets[(size_t)c];
+        auto &sf = surfaces[(size_t)c];
+        if (!sf.empty()) {
+            std::vector<double> cum;
+            double total = 0;
+            for (int i : sf) { total += std::sqrt(len(cross(tri[(size_t)i][1] - tri[(size_t)i][0], tri[(size_t)i][2] - tri[(size_t)i][0]))) + 1e-6; cum.push_back(total); }
+            for (int k = 0; k < kTargets; k++) {
+                size_t j = std::min((size_t)(std::lower_bound(cum.begin(), cum.end(), rnd() * total) - cum.begin()), sf.size() - 1);
+                int i = sf[j];
+                V3 nrm = len(nf[(size_t)i]) > 0 ? nf[(size_t)i] : V3{0, 0, 1};
+                tg.push_back(random_in_triangle(tri[(size_t)i], rnd) + nrm * 0.03);
+            }
+        }
+        tg.insert(tg.end(), e.begin(), e.end());
+        tg.insert(tg.end(), air[(size_t)c].begin(), air[(size_t)c].end());
+    }
+    // And its portals, just inside it: whatever of it is seen is seen through one of them (from a cluster not next to
+    // it), so a ray to them finds a narrow opening that rays to points beyond it rarely line up with.
+    std::vector<std::vector<V3>> gates((size_t)nc);
+    for (auto &p : ps) {
+        if (p.points.size() < 3) continue;
+        V3 nrm{0, 0, 0}, mid{0, 0, 0};
+        for (size_t i = 0; i < p.points.size(); i++) {
+            const V3 &u = p.points[i], &v = p.points[(i + 1) % p.points.size()];
+            nrm = nrm + V3{(u[1] - v[1]) * (u[2] + v[2]), (u[2] - v[2]) * (u[0] + v[0]), (u[0] - v[0]) * (u[1] + v[1])};
+            mid = mid + u;
+        }
+        if (len(nrm) < 1e-12) continue;
+        nrm = nrm * (1 / len(nrm));
+        mid = mid * (1.0 / p.points.size());
+        std::vector<V3> on;
+        for (size_t i = 0; i < p.points.size(); i++) {
+            const V3 &u = p.points[i], &v = p.points[(i + 1) % p.points.size()];
+            for (double f : {0.02, 0.5}) on.push_back(u + (v - u) * f + (mid - u) * 0.02);   // (corners and edges, just in)
+        }
+        for (int k = 0; k < 40; k++) {
+            size_t j = std::min(1 + (size_t)(rnd() * (p.points.size() - 2)), p.points.size() - 2);
+            on.push_back(random_in_triangle({p.points[0], p.points[j], p.points[j + 1]}, rnd));
+        }
+        for (auto &q : on)
+            for (double side : {0.03, -0.03}) {
+                V3 x = q + nrm * side;
+                int c = cluster_of(x);
+                if (c >= 0 && (c == p.front || c == p.back)) gates[(size_t)c].push_back(x);
+            }
+    }
+
+    std::vector<std::vector<char>> next((size_t)nc, std::vector<char>((size_t)nc, 0));
+    for (auto &p : ps)
+        if (p.front >= 0 && p.back >= 0 && p.front < nc && p.back < nc) next[(size_t)p.front][(size_t)p.back] = next[(size_t)p.back][(size_t)p.front] = 1;
+    for (auto &row : sees) std::fill(row.begin(), row.end(), 0);
+    std::atomic<int> row_next{0};
+    std::atomic<long long> rays{0};
+    auto work = [&]() {
+        std::vector<int> seen(tri.size(), 0);
+        int stamp = 0;
+        for (int a; (a = row_next++) < nc;) {
+            auto &row = sees[(size_t)a];
+            row[(size_t)a] = 1;
+            if (eyes[(size_t)a].empty()) {   // (nowhere an eye can be found: it may see anything)
+                std::fill(row.begin(), row.end(), 1);
+                continue;
+            }
+            for (int c = 0; c < nc; c++) {
+                if (c == a || next[(size_t)a][(size_t)c]) { row[(size_t)c] = 1; continue; }
+                if (row[(size_t)c]) continue;   // (on the way to another already)
+                auto &E = eyes[(size_t)a], &T = targets[(size_t)c], &G = gates[(size_t)c];
+                if (T.empty() && G.empty()) { row[(size_t)c] = 1; continue; }
+                Rng pr((uint64_t)a * 131071 + (uint64_t)c);
+                long long tries = std::min<long long>((long long)E.size() * (long long)(T.size() + G.size()), o.rays_per_pair);
+                for (long long k = 0; k < tries; k++) {
+                    // (every other ray to a portal)
+                    const std::vector<V3> &to = G.empty() || (!T.empty() && (k & 1)) ? T : G;
+                    const V3 &e = E[(size_t)(pr() * E.size()) % E.size()], &q = to[(size_t)(pr() * to.size()) % to.size()];
+                    if (++stamp == 0x7FFFFFFF) { std::fill(seen.begin(), seen.end(), 0); stamp = 1; }
+                    rays++;
+                    if (grid.blocked(e, q, seen, stamp)) continue;
+                    // Seen: so is every cluster on the way (the engine goes through each to get there).
+                    if (!sight_line(b, cl, e, q, [&](int k) { if (k >= 0 && k < nc) row[(size_t)k] = 1; })) continue;
+                    row[(size_t)c] = 1;
+                    break;
+                }
+            }
+        }
+    };
+    unsigned threads = std::max(1u, std::min(16u, std::thread::hardware_concurrency()));
+    std::vector<std::thread> pool;
+    for (unsigned i = 1; i < threads; i++) pool.emplace_back(work);
+    work();
+    for (auto &th : pool) th.join();
+    // A margin: what's next to a seen cluster is seen too (a narrow line of sight the rays didn't find, at the edge
+    // of what they did).
+    for (int ring = 0; ring < o.margin; ring++) {
+        std::vector<std::vector<char>> grown = sees;
+        for (int a = 0; a < nc; a++)
+            for (int c = 0; c < nc; c++)
+                if (sees[(size_t)a][(size_t)c])
+                    for (int d = 0; d < nc; d++)
+                        if (next[(size_t)c][(size_t)d]) grown[(size_t)a][(size_t)d] = 1;
+        sees.swap(grown);
+    }
+    if (getenv("HMP_OCC_CHECK")) {   // (test: fresh eyes and surface points; a clear ray between clusters marked hidden)
+        Rng q(77);
+        std::vector<int> seen(tri.size(), 0);
+        int stamp = 0, clear = 0, bad = 0;
+        std::set<std::pair<int, int>> badpairs;
+        std::vector<int> floors;
+        for (size_t i = 0; i < tri.size(); i++) if (nf[i][2] >= 0.35) floors.push_back((int)i);
+        int checks = atoi(getenv("HMP_OCC_CHECK"));
+        for (int k = 0; k < checks && !floors.empty(); k++) {
+            V3 foot = random_in_triangle(tri[(size_t)floors[(size_t)(q() * floors.size()) % floors.size()]], q) + V3{0, 0, 0.02};
+            V3 e = foot + V3{0, 0, 0.15 + q() * (o.eye_height - 0.15)};
+            int ce = cluster_of(e);
+            if (ce < 0 || !open_between(b, foot, e)) continue;
+            size_t ti = (size_t)(q() * tri.size()) % tri.size();
+            if (len(nf[ti]) == 0) continue;
+            V3 t = random_in_triangle(tri[ti], q) + nf[ti] * 0.03;
+            int ct = cluster_of(t);
+            if (ct < 0 || ct == ce) continue;
+            if (grid.blocked(e, t, seen, ++stamp) || !sight_line(b, cl, e, t, [](int) {})) continue;
+            clear++;
+            if (!sees[(size_t)ce][(size_t)ct]) {
+                bad++; badpairs.insert({ce, ct});
+                if (bad <= 12) fprintf(stderr, "  %d->%d eye (%.2f %.2f %.2f) to (%.2f %.2f %.2f) open %d len %.1f eyes %zu targets %zu gates %zu\n", ce, ct, e[0], e[1], e[2], t[0], t[1], t[2],
+                                       (int)open_between(b, e, t), len(t - e), eyes[(size_t)ce].size(), targets[(size_t)ct].size(), gates[(size_t)ct].size());
+            }
+        }
+        fprintf(stderr, "occlusion check: %d clear rays between clusters, %d to a hidden one (%zu pairs)\n", clear, bad, badpairs.size());
+    }
+    if (stats) {
+        stats->pairs = nc * (nc - 1);
+        stats->hidden = 0;
+        for (int a = 0; a < nc; a++)
+            for (int c = 0; c < nc; c++)
+                if (a != c && !sees[(size_t)a][(size_t)c]) stats->hidden++;
+        stats->rays = rays;
+    }
+    return sees;
+}
+
+// Grid portals for open space with no rooms to find: each leaf goes to the square of a grid over the ground its
+// middle is in (within its own cluster with keep), the squares as big as they need to be to stay in the engine's
+// limits. The boundaries are the leaves' own faces (the level's geometry and collision stay as they are).
+static bool grid_clusters(const Leaves &L, const std::vector<std::array<V3, 3>> &tri, const std::vector<V3> &nf, bool keep, int want,
+                   std::vector<int> &cl, double *cell_out) {
+    std::vector<V3> mid((size_t)L.count, V3{0, 0, 0});
+    std::vector<int> cnt((size_t)L.count, 0);
+    for (auto &p : L.portals) {
+        V3 m{0, 0, 0};
+        for (auto &q : p.points) m = m + q;
+        if (p.points.empty()) continue;
+        m = m * (1.0 / p.points.size());
+        for (int s : {p.front, p.back})
+            if (s >= 0 && s < L.count) { mid[(size_t)s] = mid[(size_t)s] + m; cnt[(size_t)s]++; }
+    }
+    for (int i = 0; i < L.count; i++)
+        if (cnt[(size_t)i]) mid[(size_t)i] = mid[(size_t)i] * (1.0 / cnt[(size_t)i]);
+    // The ground: where the floors are.
+    double lo[2] = {1e30, 1e30}, hi[2] = {-1e30, -1e30};
+    for (size_t i = 0; i < tri.size(); i++) {
+        if (nf[i][2] < 0.35) continue;
+        for (auto &p : tri[i])
+            for (int k = 0; k < 2; k++) { lo[k] = std::min(lo[k], p[k]); hi[k] = std::max(hi[k], p[k]); }
+    }
+    if (lo[0] >= hi[0] || lo[1] >= hi[1]) return false;
+    double w = hi[0] - lo[0], h = hi[1] - lo[1];
+    double cell = std::max(3.0, std::sqrt(w * h / std::max(2, want)));
+    for (int round = 0; round < 40; round++, cell *= 1.2) {
+        int nx = std::max(1, (int)std::ceil(w / cell)), ny = std::max(1, (int)std::ceil(h / cell));
+        if (nx * ny < 2) return false;
+        std::map<std::tuple<int, int, int>, int> id;
+        cl.assign((size_t)L.count, -1);
+        for (int i = 0; i < L.count; i++) {
+            int own = i < (int)L.cluster.size() ? L.cluster[(size_t)i] : 0;
+            if (own < 0) continue;
+            int x = cnt[(size_t)i] ? std::clamp((int)((mid[(size_t)i][0] - lo[0]) / cell), 0, nx - 1) : 0;
+            int y = cnt[(size_t)i] ? std::clamp((int)((mid[(size_t)i][1] - lo[1]) / cell), 0, ny - 1) : 0;
+            auto key = std::make_tuple(keep ? own : 0, x, y);
+            auto it = id.find(key);
+            if (it == id.end()) it = id.emplace(key, (int)id.size()).first;
+            cl[(size_t)i] = it->second;
+        }
+        int clusters = (int)id.size();
+        if (clusters > 120) continue;
+        std::vector<ClusterPortal> ps;
+        cluster_portals(L, cl, ps);
+        std::vector<int> per((size_t)clusters, 0);
+        for (auto &p : ps) { per[(size_t)p.front]++; per[(size_t)p.back]++; }
+        int most = 0;
+        for (int c : per) most = std::max(most, c);
+        if (ps.size() > 480 || most > 120) continue;
+        if (clusters < 2 || ps.empty()) return false;
+        if (cell_out) *cell_out = cell;
+        return true;
+    }
+    return false;
+}
+
 Result add_portals(const fs::path &file, const Options &options) {
     using tagfile::TagNode;
     Result r;
@@ -1674,23 +2198,8 @@ Result add_portals(const fs::path &file, const Options &options) {
     r.portals_before = (int)cportals->size();
     if (clusters->empty()) { r.why = "has no clusters"; return r; }
     const bool replan = clusters->size() > 1;
-    if (replan && !options.replan) { r.why = "already has portals"; return r; }
     Options o = options;
     o.keep_clusters = replan;
-    Leaves L;
-    std::vector<int> cl;
-    std::string rep;
-    if (!plan(file, o, L, cl, &rep)) { r.why = rep; return r; }
-    int nc = 0;
-    for (int c : cl) nc = std::max(nc, c + 1);
-    if (nc < 2) { r.why = "has no rooms worth keeping apart"; return r; }
-    if (replan && nc <= (int)clusters->size()) { r.why = "has no clusters worth dividing further"; return r; }
-    if (nc > 120) { r.why = "would need more clusters than the engine draws"; return r; }
-    // Each new cluster's own (the map's) cluster: its settings, and which clusters it can see.
-    std::vector<int> parent((size_t)nc, 0);
-    for (size_t i = 0; i < cl.size() && i < L.cluster.size(); i++)
-        if (cl[i] >= 0 && cl[i] < nc) parent[(size_t)cl[i]] = std::clamp(L.cluster[i], 0, (int)clusters->size() - 1);
-
     tagfile::Tag rt;
     Bsp b;
     std::vector<std::array<V3, 3>> tri;
@@ -1698,39 +2207,116 @@ Result add_portals(const fs::path &file, const Options &options) {
     std::vector<V3> pn;
     std::vector<double> pd;
     for (auto &p : b.planes) { pn.push_back(p.n); pd.push_back(p.d); }
-    std::vector<ClusterPortal> ps;
-    cluster_portals(L, cl, ps, &pn, &pd);
-    if (ps.empty()) { r.why = "has no rooms worth keeping apart"; return r; }
-    // Each portal's sides as the tree has them just off its middle (a sliver of a portal can come out turned around).
-    for (auto &p : ps) {
-        if (p.plane < 0 || p.plane >= (int)b.planes.size() || p.points.empty()) continue;
-        V3 c{0, 0, 0};
-        for (auto &q : p.points) c = c + q;
-        c = c * (1.0 / p.points.size());
-        const V3 &n = b.planes[(size_t)p.plane].n;
-        for (double e : {0.01, 0.03, 0.1}) {
-            int lm = b.leaf_at(c - n * e), lp = b.leaf_at(c + n * e);
-            int cm = lm >= 0 && lm < (int)cl.size() ? cl[(size_t)lm] : -1, cp = lp >= 0 && lp < (int)cl.size() ? cl[(size_t)lp] : -1;
-            if (cm == p.front && cp == p.back) break;
-            if (cm == p.back && cp == p.front) { std::swap(p.front, p.back); break; }
-        }
-    }
-
+    // What the map's own visibility data says (divided clusters: a new one sees what its own cluster saw).
+    std::string old_pvs = tagfile::data(root, "cluster data") ? *tagfile::data(root, "cluster data") : std::string();
+    size_t old_n = clusters->size(), old_row = (old_n + 31) / 32 * 4;
+    auto old_sees = [&](int a, int c) {
+        if (!replan || old_pvs.size() < old_n * old_row) return true;
+        return ((unsigned char)old_pvs[(size_t)a * old_row + (size_t)c / 8] >> (c % 8) & 1) != 0;
+    };
+    Occlusion occ;
+    occ.see_through = options.see_through;
+    occ.cameras = options.cameras;
+    occ.flying = options.flying;
     // Worth it? What the engine would draw from where players are, as it is and with.
     Drawn before, after;
-    if (!estimate(file, replan ? Arrangement::Own : Arrangement::None, nullptr, nullptr, before, options.area) ||
-        !estimate(file, Arrangement::Given, &cl, &ps, after, options.area)) {
+    if (!estimate(file, replan ? Arrangement::Own : Arrangement::None, nullptr, nullptr, before, options.area)) {
         r.why = "couldn't be measured";
         return r;
     }
     r.drawn_before = before.median;
-    r.drawn_after = after.median;
     r.drawn_high_before = before.high;
-    r.drawn_high_after = after.high;
-    if (after.median > before.median * (1 - options.min_gain) && after.mean > before.mean * (1 - options.min_gain)) {
-        r.why = replan ? "draws about as little with its own portals" : "is open enough that portals wouldn't save much";
-        return r;
+
+    Leaves L;
+    std::vector<int> cl;
+    std::vector<ClusterPortal> ps;
+    std::vector<int> parent;
+    std::vector<std::vector<char>> sees;
+    int nc = 0;
+    // One arrangement (each leaf's cluster): its portals, visibility and what it draws. "": it's worth it.
+    auto attempt = [&](const Leaves &LL, const std::vector<int> &c_in) -> std::string {
+        int n = 0;
+        for (int c : c_in) n = std::max(n, c + 1);
+        if (n < 2) return "has no rooms worth keeping apart";
+        if (replan && n <= (int)old_n) return "has no clusters worth dividing further";
+        if (n > 120) return "would need more clusters than the engine draws";
+        // Each new cluster's own (the map's) cluster: its settings, and which clusters it can see.
+        std::vector<int> par((size_t)n, 0);
+        for (size_t i = 0; i < c_in.size() && i < LL.cluster.size(); i++)
+            if (c_in[i] >= 0 && c_in[i] < n) par[(size_t)c_in[i]] = std::clamp(LL.cluster[i], 0, (int)old_n - 1);
+        std::vector<ClusterPortal> pl;
+        cluster_portals(LL, c_in, pl, &pn, &pd);
+        if (pl.empty()) return "has no rooms worth keeping apart";
+        // Each portal's sides as the tree has them just off its middle (a sliver of a portal can come out turned around).
+        for (auto &p : pl) {
+            if (p.plane < 0 || p.plane >= (int)b.planes.size() || p.points.empty()) continue;
+            V3 c{0, 0, 0};
+            for (auto &q : p.points) c = c + q;
+            c = c * (1.0 / p.points.size());
+            const V3 &nn = b.planes[(size_t)p.plane].n;
+            for (double e : {0.01, 0.03, 0.1}) {
+                int lm = b.leaf_at(c - nn * e), lp = b.leaf_at(c + nn * e);
+                int cm = lm >= 0 && lm < (int)c_in.size() ? c_in[(size_t)lm] : -1, cp = lp >= 0 && lp < (int)c_in.size() ? c_in[(size_t)lp] : -1;
+                if (cm == p.front && cp == p.back) break;
+                if (cm == p.back && cp == p.front) { std::swap(p.front, p.back); break; }
+            }
+        }
+        std::vector<std::vector<char>> sv((size_t)n, std::vector<char>((size_t)n, 1));
+        OcclusionStats stats;
+        if (options.occlude) sv = occlusion(file, LL, c_in, pl, occ, &stats);
+        int hidden = 0;
+        for (int a = 0; a < n; a++)
+            for (int c = 0; c < n; c++) {
+                if (!old_sees(par[(size_t)a], par[(size_t)c])) sv[(size_t)a][(size_t)c] = 0;
+                if (a != c && !sv[(size_t)a][(size_t)c]) hidden++;
+            }
+        Drawn d;
+        if (!estimate(file, Arrangement::Given, &c_in, &pl, d, options.area, &sv)) return "couldn't be measured";
+        if (getenv("HMP_PORTALS_DEBUG"))
+            fprintf(stderr, "arrangement: %d clusters, %zu portals, %d of %d pairs hidden; drawn %.0f (mean %.0f, high %.0f) against %.0f (%.0f, %.0f)\n", n,
+                    pl.size(), hidden, n * (n - 1), d.median, d.mean, d.high, before.median, before.mean, before.high);
+        r.drawn_after = d.median;
+        r.drawn_high_after = d.high;
+        if (d.median > before.median * (1 - options.min_gain) && d.mean > before.mean * (1 - options.min_gain))
+            return replan ? "draws about as little with its own portals" : "is open enough that portals wouldn't save much";
+        L = LL;
+        cl = c_in;
+        ps = std::move(pl);
+        parent = std::move(par);
+        sees = std::move(sv);
+        nc = n;
+        after = d;
+        r.pairs = n * (n - 1);
+        r.hidden = hidden;
+        return "";
+    };
+    std::string why = "already has portals";
+    if (!replan || options.replan) {
+        Leaves LL;
+        std::vector<int> c_in;
+        std::string rep;
+        why = plan(file, o, LL, c_in, &rep) ? attempt(LL, c_in) : rep;
     }
+    // No rooms (or none worth it): a grid.
+    if (!why.empty() && options.grid && (!replan || old_n <= 8 || options.replan)) {   // (a level of many clusters: portaled already)
+        Leaves LL;
+        std::vector<int> g;
+        double cell = 0;
+        std::string w;
+        if (!leaf_portals(file, LL, &w, options.see_through)) w = "couldn't be read";
+        else if (!grid_clusters(LL, tri, front_normals(b, tri), replan, options.grid_cells + (replan ? (int)old_n : 0), g, &cell))
+            w = "has no ground to divide into squares";
+        else w = attempt(LL, g);
+        if (w.empty()) {
+            r.grid = true;
+            r.grid_cell = cell;
+            r.rooms_why = why;
+            why.clear();
+        } else {
+            why += "; nor squares of open ground: it " + w;
+        }
+    }
+    if (!why.empty()) { r.why = why; return r; }
 
     // Each cluster's surfaces: those its leaves list.
     std::vector<std::vector<int>> surf((size_t)nc);
@@ -1890,21 +2476,15 @@ Result add_portals(const fs::path &file, const Options &options) {
         new_portals.push_back(std::move(x));
     }
 
-    // Leaves, visibility (every cluster may see every other: the portals do the work), and sound: how far apart
-    // two clusters are through the portals (a byte each pair: 1/127 of 256 units a step; 0xFF can't be reached).
-    // (Divided clusters: a new one sees what its own cluster saw.)
+    // Leaves, visibility (which clusters each can see at all: occlusion(), and its own cluster's say), and sound:
+    // how far apart two clusters are through the portals (a byte each pair: 1/127 of 256 units a step; 0xFF can't be
+    // reached).
     for (size_t i = 0; i < leaves->size() && i < cl.size(); i++) tagfile::set_num((*leaves)[i], "cluster", cl[i]);
-    std::string old_pvs = tagfile::data(root, "cluster data") ? *tagfile::data(root, "cluster data") : std::string();
-    size_t old_n = old_clusters.size(), old_row = (old_n + 31) / 32 * 4;
-    auto old_sees = [&](int a, int c) {
-        if (!replan || old_pvs.size() < old_n * old_row) return true;
-        return ((unsigned char)old_pvs[(size_t)a * old_row + (size_t)c / 8] >> (c % 8) & 1) != 0;
-    };
     size_t row = ((size_t)nc + 31) / 32 * 4;
     std::string pvs((size_t)nc * row, '\0');
     for (int a = 0; a < nc; a++)
         for (int c = 0; c < nc; c++)
-            if (old_sees(parent[(size_t)a], parent[(size_t)c]))
+            if (sees[(size_t)a][(size_t)c])
                 pvs[(size_t)a * row + (size_t)c / 8] |= (char)(1 << (c % 8));   // (little-endian words)
     std::vector<std::vector<int>> of((size_t)nc);
     for (size_t k = 0; k < ps.size(); k++) { of[(size_t)ps[k].front].push_back((int)k); of[(size_t)ps[k].back].push_back((int)k); }

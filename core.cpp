@@ -8822,7 +8822,9 @@ void xbox_materials(Job &job, const std::vector<std::string> &deps) {
 
 // A level made without portals is one cluster: the Xbox draws everything of it in view, walls or not. Its rooms and
 // the openings between them (doorways, corridors) become clusters and portals (portals.hpp), when that draws less
-// from where players are. Levels with clusters of their own, and the Xbox's own levels, are left as they are.
+// from where players are; open ground with no rooms, a grid of squares. A level with clusters of its own: its rooms
+// divided further with xbox_replan_portals, else only squares of its open ground (when they draw less than its own
+// portals). The Xbox's own levels are left as they are.
 void xbox_portals(Job &job) {
     if (!job.cfg.xbox_add_portals || job.analysis) return;
     std::string scen = job.scenario + ".scenario";
@@ -8830,6 +8832,27 @@ void xbox_portals(Job &job) {
     tagfile::Tag stag;
     if (sdir.empty() || !stag.load(sdir / from_u8(scen))) return;
     tagfile::Block bsps = stag.root().block("structure bsps");
+    // For which clusters can be seen from which: where cutscene cameras are, and whether anything flies (then an eye
+    // can be anywhere in the open).
+    std::vector<std::array<double, 3>> cameras;
+    {
+        tagfile::Block pts = stag.root().block("cutscene camera points");
+        for (size_t i = 0; i < pts.size(); i++) cameras.push_back({pts[i].num("position", 0), pts[i].num("position", 1), pts[i].num("position", 2)});
+    }
+    bool flying = false;
+    {
+        tagfile::Block pal = stag.root().block("vehicle palette");
+        for (size_t i = 0; i < pal.size() && !flying; i++) {
+            std::string v = pal[i].ref("name");
+            if (v.empty()) continue;
+            if (!has_suffix(v, ".vehicle")) v += ".vehicle";
+            fs::path own = job.owner(v);
+            if (own.empty()) continue;
+            auto kv = list_values(job.cfg, own, v);
+            std::map<std::string, std::string> m(kv.begin(), kv.end());
+            flying = m["vehicle_type.human_plane"] == "*" || m["vehicle_type.alien_fighter"] == "*";
+        }
+    }
     std::set<std::string> done;
     for (size_t i = 0; i < bsps.size(); i++) {
         std::string b = bsps[i].ref("structure bsp");
@@ -8841,7 +8864,7 @@ void xbox_portals(Job &job) {
             tagfile::Tag t;
             if (!t.load(own / from_u8(b))) continue;
             own_clusters = t.root().block("clusters").size();
-            if (own_clusters == 0 || (own_clusters > 1 && !job.cfg.xbox_replan_portals)) continue;
+            if (own_clusters == 0) continue;
         }
         std::string name = bsps.size() > 1 ? " (" + fs::path(from_u8(b)).stem().u8string() + ")" : "";
         job.log("Finding the level's rooms and doorways" + name + "...");
@@ -8866,30 +8889,43 @@ void xbox_portals(Job &job) {
             return ((long long)st.root().num("shader environment flags") & 1) != 0;   // alpha tested
         };
         po.replan = job.cfg.xbox_replan_portals;
+        po.cameras = cameras;
+        po.flying = flying;
         portals::Result pr = portals::add_portals(file, po);
         auto drawn = [&](const portals::Result &x) {
             return "about " + thousands((long long)x.drawn_after) + " of its triangles drawn in a typical view (was " +
                    thousands((long long)x.drawn_before) + "), " + thousands((long long)x.drawn_high_after) + " in a busy one (was " +
                    thousands((long long)x.drawn_high_before) + ")";
         };
+        auto hidden = [&](const portals::Result &x) {
+            if (!x.hidden) return std::string("; every cluster can see every other one");
+            return "; " + thousands(x.hidden) + " of its " + thousands(x.pairs) +
+                   " cluster pairs can't see each other (what's in them isn't drawn, heard as clearly or woken from there)";
+        };
+        auto grid = [&](const portals::Result &x) {
+            char c[32];
+            snprintf(c, sizeof c, "%.0f", x.grid_cell * 10);
+            return x.grid ? " (no rooms worth it: it " + x.rooms_why + "; squares of open ground about " + c + " feet across instead)" : std::string();
+        };
         if (pr.changed && own_clusters == 1) {
             job.portal_backups.push_back({file, before});
             std::string note = "[portals] the level" + name + " had no portals, so the Xbox drew everything of it in view, walls or not. Its " +
-                               std::to_string(pr.clusters_after) + " rooms are now clusters with " + std::to_string(pr.portals_after) +
-                               " portals between them: " + drawn(pr);
+                               std::to_string(pr.clusters_after) + (pr.grid ? " squares" : " rooms") + " are now clusters with " +
+                               std::to_string(pr.portals_after) + " portals between them" + grid(pr) + ": " + drawn(pr) + hidden(pr);
             // (and, re-planning, its new clusters divided further when that draws less again)
             if (po.replan) {
                 portals::Result again = portals::add_portals(file, po);
                 if (again.changed)
                     note += "; divided further into " + std::to_string(again.clusters_after) + " clusters with " +
-                            std::to_string(again.portals_after) + " portals: " + drawn(again);
+                            std::to_string(again.portals_after) + " portals: " + drawn(again) + hidden(again);
             }
             job.note(note);
         } else if (pr.changed) {
             job.portal_backups.push_back({file, before});
             job.note("[portals] divided the level" + name + "'s own " + std::to_string(pr.clusters_before) + " clusters further, into " +
-                     std::to_string(pr.clusters_after) + " (each keeps its cluster's sky, fog, sound and weather) with " +
-                     std::to_string(pr.portals_after) + " portals (it had " + std::to_string(pr.portals_before) + "): " + drawn(pr));
+                     std::to_string(pr.clusters_after) + (pr.grid ? " squares of open ground" : "") +
+                     " (each keeps its cluster's sky, fog, sound and weather) with " + std::to_string(pr.portals_after) + " portals (it had " +
+                     std::to_string(pr.portals_before) + ")" + grid(pr) + ": " + drawn(pr) + hidden(pr));
         } else if (own_clusters == 1) {
             job.log("  [portals] the level" + name + " has no portals; none added: it " + pr.why);
         } else {

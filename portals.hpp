@@ -87,6 +87,14 @@ struct Options {
     // sound and weather, and which clusters it can see), when that draws at least 15% less than its own portals.
     bool replan = false;
     double min_gain = 0.15;    // what they must cut from what's drawn (a typical view's and on average) to be added
+    // No rooms to find (open ground) or none worth it: a grid of squares over the ground instead (grid_cells of
+    // them, about), within the level's own clusters when it has them.
+    bool grid = true;
+    int grid_cells = 48;
+    // Which clusters can be seen at all from each (occlusion()), for the visibility data: else every one sees every other.
+    bool occlude = true;
+    std::vector<std::array<double, 3>> cameras;   // where cutscene cameras are (eyes too)
+    bool flying = false;                          // something flies (an eye can be anywhere in the open)
 };
 
 // A portal between two clusters as Halo stores it: the "front" cluster is behind its plane (a collision BSP plane),
@@ -107,7 +115,7 @@ void cluster_portals(const Leaves &leaves, const std::vector<int> &cl, std::vect
 enum class Arrangement { Own, None, Given };
 struct Drawn { double median = 0, high = 0, mean = 0; int samples = 0, triangles = 0; };   // high: 9 in 10 views draw fewer
 bool estimate(const std::filesystem::path &bsp, Arrangement which, const std::vector<int> *cl, const std::vector<ClusterPortal> *portals,
-              Drawn &out, const PlayArea &area = PlayArea());
+              Drawn &out, const PlayArea &area = PlayArea(), const std::vector<std::vector<char>> *pvs = nullptr);
 
 // Views from where players play (as estimate() samples them, with the tag's own clusters and portals): where the
 // eyes are, which way they look (level), and the level's surfaces the engine draws.
@@ -130,6 +138,10 @@ struct Result {
     int clusters_before = 0, clusters_after = 0, portals_before = 0, portals_after = 0;
     double drawn_before = 0, drawn_after = 0;             // level triangles drawn from a typical spot (estimate)
     double drawn_high_before = 0, drawn_high_after = 0;   // and the most in 9 views out of 10
+    bool grid = false;                     // the clusters are a grid's squares (no rooms found worth it)
+    double grid_cell = 0;                  // their size (world units)
+    std::string rooms_why;                 // grid: why not rooms
+    int pairs = 0, hidden = 0;             // cluster pairs, and how many of them the visibility data says can't see
 };
 
 // A level's triangles, for measuring how much of it a light reaches (the Xbox draws every level triangle a dynamic
@@ -153,6 +165,23 @@ struct LevelChunks {
     bool load(const std::filesystem::path &bsp);
     int gathered(const V3 &p, double r) const;   // the level triangles a light of radius r at p takes
 };
+
+// Which clusters each cluster can see at all (sees[a][c]), by rays from where eyes can be in `a` (above floors, up
+// to eye_height; near its portals; cameras; anywhere open when something flies) to `c`'s surfaces and open space:
+// hidden only when every ray meets a drawn, solid-looking level triangle face on (glass, grates, water and walls
+// only the collision has hide nothing). Neighbours (a portal between them) and every cluster a seen ray goes
+// through are seen. `cl`: each leaf's cluster; `ps`: the portals between them.
+struct Occlusion {
+    SeeThrough see_through;
+    std::vector<std::array<double, 3>> cameras;
+    bool flying = false;
+    double eye_height = 3.0;          // world units above a floor (a jump, a vehicle's camera)
+    long long rays_per_pair = 2048;   // at most, before a cluster is called hidden from another
+    int margin = 1;                   // and then what's this many portals from a seen cluster is seen too
+};
+struct OcclusionStats { int pairs = 0, hidden = 0; long long rays = 0; };
+std::vector<std::vector<char>> occlusion(const std::filesystem::path &bsp, const Leaves &leaves, const std::vector<int> &cl,
+                                         const std::vector<ClusterPortal> &ps, const Occlusion &o, OcclusionStats *stats = nullptr);
 
 // Adds portals to a structure BSP tag with one cluster (saved in place), when they'd cut what's drawn by at least
 // 15% (estimate()). Its clusters get the one cluster's settings; every cluster may see every other (the portals do
