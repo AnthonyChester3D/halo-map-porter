@@ -1165,8 +1165,18 @@ int drop_bad_triangles(const fs::path &model) {
     if (!geos) return -1;
     int changed = 0;
     for (auto &g : *geos) {
-        // (a part with no vertices at all but triangles: nothing to draw; left out when the geometry has others)
+        // (a part with no vertices at all but triangles: nothing to draw; left out when the geometry has others, and
+        // its triangles cleared when it's the only one)
         auto &parts = *tagfile::block(g, "parts");
+        if (parts.size() == 1) {
+            auto *uv = tagfile::block(parts[0], "uncompressed vertices");
+            auto *cv = tagfile::block(parts[0], "compressed vertices");
+            auto *tr = tagfile::block(parts[0], "triangles");
+            if ((uv ? uv->size() : 0) + (cv ? cv->size() : 0) == 0 && tr && !tr->empty()) {
+                tr->clear();
+                changed++;
+            }
+        }
         for (size_t i = parts.size(); i-- > 0 && parts.size() > 1;) {
             auto *uv = tagfile::block(parts[i], "uncompressed vertices");
             auto *cv = tagfile::block(parts[i], "compressed vertices");

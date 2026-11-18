@@ -7,6 +7,7 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <set>
 #include <sstream>
 
 namespace h1ulink {
@@ -154,10 +155,32 @@ bool read_tags(const fs::path &map, std::vector<TagEntry> &tags, std::string &sc
     return true;
 }
 
+int unique_names(std::vector<TagEntry> &tags) {
+    auto lower = [](std::string s) { for (auto &c : s) c = (char)tolower((unsigned char)c); return s; };
+    std::set<std::string> have;
+    for (auto &t : tags) have.insert(t.group + "|" + lower(t.path));
+    std::set<std::string> seen;
+    int n = 0;
+    for (auto &t : tags) {
+        if (t.path.empty() || seen.insert(t.group + "|" + lower(t.path)).second) continue;
+        for (int k = 2;; k++) {
+            const std::string p = t.path + "_" + std::to_string(k);
+            if (have.insert(t.group + "|" + lower(p)).second) {
+                t.path = p;
+                seen.insert(t.group + "|" + lower(p));
+                break;
+            }
+        }
+        n++;
+    }
+    return n;
+}
+
 std::string link_text(const Link &l, std::string &why) {
     std::vector<TagEntry> ce, xb;
     std::string ce_scen, xb_scen;
     if (!read_tags(l.ce_map, ce, ce_scen)) { why = l.mcc ? "couldn't read the MCC map's tags" : "couldn't read the Custom Edition map's tags"; return ""; }
+    unique_names(ce);   // (as extracted: the Xbox map has them by these names)
     if (!read_tags(l.xbox_map, xb, xb_scen)) { why = "couldn't read the Xbox map's tags"; return ""; }
     const fs::path &pc = l.pc_file.empty() ? l.ce_map : l.pc_file;
     uint64_t ce_size = 0, xb_size = 0;

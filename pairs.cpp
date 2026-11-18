@@ -544,6 +544,13 @@ void compare(const std::string &tag, const std::string &g, Flat a, Flat b, Resul
                 }
             }
         }
+        // A trigger volume named as a BSP switch between BSPs the level doesn't have, renamed so it isn't one (MCC
+        // switches nothing with it either).
+        if (g == "scenario" && gk == "trigger_volumes[].name" && va.rfind("bsp", 0) == 0 && vb.size() > 1 && vb[0] == 'x' &&
+            va.compare(0, vb.size() - 1, vb, 1) == 0) {
+            d.ce += " (switches between BSPs the level doesn't have)";
+            note = true;
+        }
         // A conversation's participant naming an encounter the map doesn't have (the line never plays): cleared, as
         // Invader needs.
         if (g == "scenario" && gk == "ai_conversations[].participants[].encounter_name" && vb == "(none)" || 

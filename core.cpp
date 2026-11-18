@@ -1553,6 +1553,21 @@ struct Job {
                 }
             }
         }
+        // A trigger volume named as a BSP switch ("bsp3,4") between BSPs the level doesn't have (MCC switches nothing;
+        // Invader refuses it): renamed so it isn't one ("xbsp3,4").
+        {
+            static const std::regex tv(R"(Trigger volume #(\d+) \((bsp[^)]*)\) references an invalid BSP index)");
+            std::smatch m;
+            if (std::regex_search(msg, m, tv)) {
+                std::string to = "x" + m[2].str();
+                if (to.size() > 31) to.resize(31);
+                if (edit(tag, "trigger_volumes[" + m[1].str() + "].name", to)) {
+                    note("[fix]  " + tag + ": trigger volume " + m[2].str() + " switches between BSPs the level doesn't have "
+                         "(MCC does nothing with it); renamed " + to + ", so it switches nothing here either");
+                    return true;
+                }
+            }
+        }
         // A model's triangle naming a vertex its part doesn't have (the author's tools let it through; the game
         // skips it): such triangles left out.
         if (msg.find("in triangle indices is invalid") != std::string::npos &&
@@ -12847,11 +12862,38 @@ static void convert_scripts(Job &job, const fs::path &dir, Game target) {
     conv.switches = target == Game::Xbox;
     std::sort(files.begin(), files.end());
     std::vector<std::string> texts, made;
+    int recoded = 0;
+    std::vector<char> was_recoded;
     for (auto &f : files) {
         std::ifstream in(f, std::ios::binary);
         texts.push_back(std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>()));
+        // (text that isn't UTF-8, which Invader's compiler stops on: "failed to decode token". A Windows-1252
+        // dash or quote in a line of dialogue, d20's "explosive—very powerful", as its plain-text look-alike; any
+        // other such byte "?")
+        std::string &t = texts.back(), o;
+        bool changed = false;
+        for (size_t i = 0; i < t.size();) {
+            const unsigned char c = (unsigned char)t[i];
+            size_t n = c < 0x80 ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : (c >> 3) == 30 ? 4 : 0;
+            bool ok = n > 0 && i + n <= t.size();
+            for (size_t k = 1; ok && k < n; k++) ok = ((unsigned char)t[i + k] >> 6) == 2;
+            if (ok) { o.append(t, i, n); i += n; continue; }
+            switch (c) {
+            case 0x91: case 0x92: o += '\''; break;
+            case 0x93: case 0x94: o += '"'; break;
+            case 0x96: case 0x97: o += '-'; break;
+            case 0x85: o += "..."; break;
+            default: o += '?';
+            }
+            changed = true;
+            i++;
+        }
+        if (changed) { t = o; recoded++; }
+        was_recoded.push_back(changed);
         conv.collect_user_names(texts.back());
     }
+    if (recoded) job.note("[scripts] " + std::to_string(recoded) + " script file" + (recoded > 1 ? "s" : "") +
+                          " had text that isn't UTF-8 (Windows-1252 dashes or quotes), which the compiler can't read: as plain text now");
     made = texts;
     std::vector<bool> ok = convert_texts(conv, texts);
     if (target == Game::Xbox && std::find(ok.begin(), ok.end(), false) == ok.end()) {
@@ -12870,7 +12912,7 @@ static void convert_scripts(Job &job, const fs::path &dir, Game target) {
             job.note("[scripts] couldn't read " + files[i].filename().u8string() + " to check it for " + game_name(target));
             continue;
         }
-        if (texts[i] != made[i]) std::ofstream(files[i], std::ios::binary) << texts[i];
+        if (texts[i] != made[i] || was_recoded[i]) std::ofstream(files[i], std::ios::binary) << texts[i];
     }
     for (auto &[name, c] : conv.changes)
         job.note("[scripts] " + name + " (not in " + game_name(target) + "): " + c.second + " (" +
@@ -12935,7 +12977,22 @@ static std::vector<std::pair<uint64_t, uint16_t>> bitmap_flag_repairs(const fs::
             const size_t el = bd + (size_t)k * 0x30;
             const uint16_t fmt = u16(d, el + 0xC), flags = u16(d, el + 0xE);
             const bool dxt = fmt == 14 || fmt == 15 || fmt == 16 || fmt == 18, comp = flags & 2;
-            if (dxt != comp) fix.push_back({(uint64_t)tdo + el + 0xE, (uint16_t)(dxt ? flags | 2 : flags & ~2)});
+            if (dxt == comp) continue;
+            if (!dxt) { fix.push_back({(uint64_t)tdo + el + 0xE, (uint16_t)(flags & ~2)}); continue; }
+            // DXT without the flag: its data's size says which it is. DXT's size: set the flag. A plain format's
+            // (1, 2 or 4 bytes a pixel, mipmaps and all; MCC's HUD wraith is 1): that format, the flag left off.
+            const uint32_t w = u16(d, el + 4), hh = u16(d, el + 6), mips = u16(d, el + 0x14), size = u32(d, el + 0x1C);
+            uint64_t dxt_size = 0, px = 0;
+            for (uint32_t mm = 0; mm <= mips && mm < 16; mm++) {
+                const uint32_t mw = std::max(1u, w >> mm), mh = std::max(1u, hh >> mm);
+                dxt_size += (uint64_t)((mw + 3) / 4) * ((mh + 3) / 4) * (fmt == 14 ? 8 : 16);
+                px += (uint64_t)mw * mh;
+            }
+            if (size == dxt_size || px == 0) fix.push_back({(uint64_t)tdo + el + 0xE, (uint16_t)(flags | 2)});
+            else if (size == px) fix.push_back({(uint64_t)tdo + el + 0xC, (uint16_t)2});        // (ay8)
+            else if (size == px * 2) fix.push_back({(uint64_t)tdo + el + 0xC, (uint16_t)3});    // (a8y8)
+            else if (size == px * 4) fix.push_back({(uint64_t)tdo + el + 0xC, (uint16_t)11});   // (a8r8g8b8)
+            else fix.push_back({(uint64_t)tdo + el + 0xE, (uint16_t)(flags | 2)});
         }
     }
     return fix;
@@ -18019,11 +18076,28 @@ static Result convert_map_impl(const Config &cfg, const fs::path &input_given, G
     for (auto &f : job.resource_files) key += file_identity(f) + "\n";
     const auto flag_repairs = in_game == Game::CE || in_game == Game::MCC ? bitmap_flag_repairs(input)
                                                                            : std::vector<std::pair<uint64_t, uint16_t>>{};
-    if (!flag_repairs.empty()) key += "bitmap flags repaired 1\n";
+    if (!flag_repairs.empty()) key += "bitmap flags repaired 2\n";
+    // Tags sharing a group and path (MCC maps have a few: CE Digsite's several stock-named sniper rifles, which MCC's
+    // weapon names go by), which can't be extracted apart: the second and later renamed "_2", "_3"... (as the link file
+    // names them too). Many more than a few is a protected map's scrambling, left to the check for that.
+    std::vector<std::pair<uint32_t, std::string>> name_repairs;   // (tag index, its new path)
+    if (in_game == Game::CE || in_game == Game::MCC) {
+        std::vector<h1ulink::TagEntry> tg;
+        std::string sc;
+        if (h1ulink::read_tags(input, tg, sc)) {
+            auto orig = tg;
+            const int n = h1ulink::unique_names(tg);
+            if (n > 0 && n <= 64)
+                for (size_t i = 0; i < tg.size(); i++)
+                    if (tg[i].path != orig[i].path) name_repairs.push_back({(uint32_t)i, tg[i].path});
+        }
+    }
+    if (!name_repairs.empty()) key += "names made unique 1\n";
     // Protected maps have their tag names scrambled, so there's nothing usable to extract. (Asked at the same time
     // as the extraction runs: reading the map for it takes seconds of its own.)
     std::string info_tool = u8(tool(cfg, "invader-info")), info_in = u8(input);
-    auto info = std::async(std::launch::async, [info_tool, info_in] {
+    const size_t renamed = name_repairs.size();
+    auto info = std::async(std::launch::async, [info_tool, info_in, renamed] {
         std::string path, issues;
         run_process({info_tool, "-T", "scenario_path", info_in}, path);
         // (or its tags given the same names: many share a path with a tag of their kind, which a map built from
@@ -18031,7 +18105,7 @@ static Result convert_map_impl(const Config &cfg, const fs::path &input_given, G
         run_process({info_tool, "-T", "protection_issues", info_in}, issues);
         size_t same = 0;
         for (size_t at = 0; (at = issues.find("shares a path and fourCC", at)) != std::string::npos; at++) same++;
-        return same >= 10 ? std::string("<protected>") : path;
+        return same >= 10 + renamed ? std::string("<protected>") : path;
     });
     std::string out;
     fs::path extracted = find_extracted(job, key, out);
@@ -18051,7 +18125,7 @@ static Result convert_map_impl(const Config &cfg, const fs::path &input_given, G
         if (!res_dir.empty()) cmd.insert(cmd.end(), {"-m", u8(res_dir)});
         // (bitmaps flagged against their format: extracted from a copy with the flag as the format says)
         fs::path from = input;
-        if (!flag_repairs.empty()) {
+        if (!flag_repairs.empty() || !name_repairs.empty()) {
             const fs::path copy = job.work / "repaired" / input.filename();
             fs::create_directories(copy.parent_path(), ec);
             fs::copy_file(input, copy, fs::copy_options::overwrite_existing, ec);
@@ -18061,11 +18135,47 @@ static Result convert_map_impl(const Config &cfg, const fs::path &input_given, G
                 const char b[2] = {(char)(v & 0xFF), (char)(v >> 8)};
                 w.write(b, 2);
             }
+            // (the new names after the tag data, which ends the file: the tags pointed at them, the sizes grown)
+            if (!name_repairs.empty()) {
+                auto rd32 = [&](uint64_t o) {
+                    unsigned char b[4] = {};
+                    w.seekg((std::streamoff)o);
+                    w.read((char *)b, 4);
+                    return (uint32_t)(b[0] | b[1] << 8 | b[2] << 16 | (uint32_t)b[3] << 24);
+                };
+                auto wr32 = [&](uint64_t o, uint32_t v) {
+                    const char b[4] = {(char)(v & 0xFF), (char)(v >> 8 & 0xFF), (char)(v >> 16 & 0xFF), (char)(v >> 24)};
+                    w.seekp((std::streamoff)o);
+                    w.write(b, 4);
+                };
+                const uint64_t size = fs::file_size(copy, ec);
+                const uint32_t tdo = rd32(0x10), tds = rd32(0x14), arr_ptr = rd32(tdo), base = arr_ptr - 0x28;
+                if (!ec && (uint64_t)tdo + tds == size && rd32(8) == size) {
+                    std::string block;
+                    for (auto &[i, p] : name_repairs) {
+                        wr32(tdo + (arr_ptr - base) + (uint64_t)i * 32 + 16, base + tds + (uint32_t)block.size());
+                        block += p;
+                        block += '\0';
+                    }
+                    while (block.size() % 4) block += '\0';
+                    w.seekp((std::streamoff)size);
+                    w.write(block.data(), (std::streamsize)block.size());
+                    wr32(0x14, tds + (uint32_t)block.size());
+                    wr32(8, (uint32_t)(size + block.size()));
+                    std::string list;
+                    for (size_t k = 0; k < name_repairs.size() && k < 4; k++) list += (k ? ", " : "") + name_repairs[k].second;
+                    job.note("[fix]  " + std::to_string(name_repairs.size()) + " of the map's tags shared a path with another of " +
+                             "their kind (which MCC allows; they can't be extracted apart): renamed " + list +
+                             (name_repairs.size() > 4 ? ", ..." : ""));
+                } else {
+                    job.note("[fix]  the map's tags that share a path couldn't be renamed (its tag data doesn't end the file)");
+                }
+            }
             if (!ec && w) {
                 from = copy;
                 job.note("[fix]  " + std::to_string(flag_repairs.size()) + " of the map's bitmaps were DXT without the "
                          "\"compressed\" flag (or the other way round), which the game ignores and Invader won't extract; "
-                         "extracted with the flag as their format says");
+                         "extracted with the flag (or, where the data's size says it isn't DXT, the format) set to match");
             }
         }
         cmd.push_back(u8(from));

@@ -22,6 +22,11 @@ struct TagEntry { std::string group; uint32_t id = 0; std::string path; };   // 
 // and the scenario's path. False if it can't be read.
 bool read_tags(const std::filesystem::path &map, std::vector<TagEntry> &tags, std::string &scenario);
 
+// Tags sharing a group and path in one map (MCC maps have them: CE Digsite's several "weapons\sniper rifle\sniper
+// rifle" weapons): the second and later get "_2", "_3"... in tag array order (never a path the map already has), as the
+// app extracts them. How many were renamed.
+int unique_names(std::vector<TagEntry> &tags);
+
 // A resource file an MCC map reads: type 1 its bitmaps.map, 2 its sounds.map.
 struct Resource { uint8_t type = 0; std::filesystem::path file; };
 
