@@ -1744,11 +1744,14 @@ struct Job {
             if (m[1] == "EffectParticle" || m[1] == "EffectPart")
                 if (fix_effect_locations() > 0) return true;
             std::string key = join(m[2]);
-            // (to the first entry; with none to point at, to none: the 65535 / -1 an index holds for none, or "null")
-            if (std::stoi(m[4]) > 0 ? edit(tag, key, "0")
+            // (to the first entry; with none to point at, to none: the 65535 / -1 an index holds for none, or "null").
+            // An AI command's index goes to none: MCC finds nothing past the end and the AI carries on, where the first
+            // entry would be somewhere else (a "go to" command back to the list's first one loops it forever).
+            const bool to_none = std::stoi(m[4]) == 0 || m[1] == "ScenarioCommand";
+            if (!to_none ? edit(tag, key, "0")
                                     : edit(tag, key, "65535") || edit(tag, key, "-1") || edit(tag, key, "null")) {
                 note("[fix]  " + tag + ": " + key + " pointed at missing entry #" + m[3].str() +
-                     (std::stoi(m[4]) > 0 ? "; reset to 0" : "; now none (there are none)"));
+                     (!to_none ? "; reset to 0" : std::stoi(m[4]) > 0 ? "; now none (MCC finds nothing there)" : "; now none (there are none)"));
                 return true;
             }
         }
@@ -2152,6 +2155,7 @@ size_t shrink_stock_to_fit(Job &job, size_t needed, int round, std::vector<std::
 size_t drop_dialogue(Job &job, std::vector<std::string> &names);
 void restrict_to_xbox_mp(Job &job, const fs::path &xsrc);
 void drop_dead_placements(Job &job, const fs::path &xsrc);
+static void pin_encounter_bsps(Job &job, const fs::path &xsrc);
 void bot_route_points(Job &job, const fs::path &xsrc);
 void trim_machines(Job &job, const fs::path &xsrc);
 bool drop_kept_vehicles(Job &job);
@@ -12784,8 +12788,18 @@ static std::vector<bool> convert_texts(ScriptConverter &conv, std::vector<std::s
 // one may be used in another). Startup and continuous scripts run by themselves, stubs are kept, and from those on, a
 // script or global any kept one names is kept too. MCC lets a map's scripts be far bigger than the Xbox's 19,001 node
 // limit (Bot Bootcamp's maps: 25,000-30,000); what's never run costs nodes all the same. Returns (scripts, globals)
-// left out and their names in `names`.
-static std::pair<int, int> drop_unused_scripts(std::vector<std::string> &texts, std::vector<std::string> &names) {
+// left out and their names in `names`. With `keep_tags` (Perfect Conversion), one that names a tag (a global of a tag's
+// type, a tag path in quotes) is kept: the compiled scripts are what put those tags in the map, and the linked map has
+// to have every tag the PC map has (Landslide's w_mp_needler, w_plasma_cannon and w_flag globals).
+static std::pair<int, int> drop_unused_scripts(std::vector<std::string> &texts, std::vector<std::string> &names,
+                                               bool keep_tags = false) {
+    static const std::set<std::string> tag_types{"sound", "effect", "damage", "looping_sound", "animation_graph",
+                                                 "actor_variant", "damage_effect", "object_definition"};
+    std::function<bool(const hsc::Node &)> names_tag = [&](const hsc::Node &n) {
+        if (!n.list) return n.str && (n.atom.find('\\') != std::string::npos || n.atom.find('/') != std::string::npos);
+        for (auto &k : n.kids) if (names_tag(k)) return true;
+        return false;
+    };
     struct Item { size_t file, b, e; bool script, root; std::string name; std::set<std::string> uses; };
     std::vector<Item> items;
     std::function<void(const hsc::Node &, std::set<std::string> &)> atoms = [&](const hsc::Node &n, std::set<std::string> &out) {
@@ -12808,10 +12822,11 @@ static std::pair<int, int> drop_unused_scripts(std::vector<std::string> &texts, 
                     const hsc::Node &nm = n.kids[at];
                     it.name = hsc::lower(nm.list ? (nm.kids.empty() || nm.kids[0].list ? "" : nm.kids[0].atom) : nm.atom);
                     it.script = true;
-                    it.root = type == "startup" || type == "continuous" || type == "stub" || it.name.empty();
+                    it.root = type == "startup" || type == "continuous" || type == "stub" || it.name.empty() ||
+                              keep_tags && names_tag(n);
                 } else if (head == "global" && n.kids.size() >= 3 && !n.kids[2].list) {
                     it.name = hsc::lower(n.kids[2].atom);
-                    it.root = false;
+                    it.root = keep_tags && (!n.kids[1].list && tag_types.count(hsc::lower(n.kids[1].atom)) || names_tag(n));
                 }
             }
             it.uses.erase(it.name);
@@ -12898,7 +12913,7 @@ static void convert_scripts(Job &job, const fs::path &dir, Game target) {
     std::vector<bool> ok = convert_texts(conv, texts);
     if (target == Game::Xbox && std::find(ok.begin(), ok.end(), false) == ok.end()) {
         std::vector<std::string> gone;
-        auto [ns, ng] = drop_unused_scripts(texts, gone);
+        auto [ns, ng] = drop_unused_scripts(texts, gone, job.cfg.xbox_perfect);
         if (ns || ng) {
             std::string list;
             for (size_t i = 0; i < gone.size() && i < 12; i++) list += (i ? ", " : "") + gone[i];
@@ -14556,6 +14571,7 @@ bool prepare_for_xbox(Job &job, std::string &err) {
     // Perfect Conversion: none of what changes gameplay (which objects there are, which versions, what's placed, the
     // globals' gameplay): the map's own, as Custom Edition has it (perfect_keep_gameplay).
     const bool perfect = cfg.xbox_perfect;
+    pin_encounter_bsps(job, xsrc);
     if (!perfect) {
         use_stock_versions(job, xsrc);
         drop_dead_placements(job, xsrc);
@@ -15643,6 +15659,40 @@ static void remove_scenario_vehicle(Job &job, const fs::path &xsrc, const std::s
 // use them). An item spawn point (netgame equipment) whose four game types are all "none" spawns nothing (no game type
 // matches it: match_game_type) but stays, for Halo 1 Unlimited's bots: every one is a route point to them. It takes
 // an item collection a spot that spawns uses, so whatever only it named drops out of the build.
+// An encounter's BSP without "manual bsp index specified": the PC map's tool chose it, and Invader chooses again
+// (not always the same: danger_canyon's and bloodgulch's moved from BSP 1 or 2 to 0, where their AI never spawn).
+// The flag set, so the encounter stays in the BSP the PC map has it in.
+static void pin_encounter_bsps(Job &job, const fs::path &xsrc) {
+    const Config &cfg = job.cfg;
+    const std::string scen = job.scenario + ".scenario";
+    int pinned = 0;
+    for (const fs::path &dir : {job.fixes, xsrc}) {
+        if (dir.empty() || !fs::exists(dir / from_u8(scen))) continue;
+        auto kv = list_values(cfg, dir, scen);
+        std::map<std::string, std::string> vals(kv.begin(), kv.end());
+        int bsps = 0;
+        while (vals.count("structure_bsps[" + std::to_string(bsps) + "].structure_bsp")) bsps++;
+        if (bsps < 2) continue;
+        std::vector<std::string> edits;
+        int n = 0;
+        for (int i = 0; vals.count("encounters[" + std::to_string(i) + "].name"); i++) {
+            const std::string e = "encounters[" + std::to_string(i) + "]";
+            const std::string v = vals[e + ".manual_bsp_index"];
+            if (vals[e + ".flags.manual_bsp_index_specified"] == "1" || v.empty() || !isdigit((unsigned char)v[0])) continue;
+            if (std::atoi(v.c_str()) >= bsps) continue;
+            edits.insert(edits.end(), {"-S", e + ".flags.manual_bsp_index_specified", "1"});
+            n++;
+        }
+        if (edits.empty()) continue;
+        std::string out;
+        std::vector<std::string> cmd{u8(tool(cfg, "invader-edit")), "-t", u8(dir), scen};
+        cmd.insert(cmd.end(), edits.begin(), edits.end());
+        if (run_process(cmd, out) == 0 && dir == job.fixes) pinned = n;
+    }
+    if (pinned) job.note("[ai] kept " + std::to_string(pinned) + " encounter" + (pinned > 1 ? "s" : "") +
+                         " in the BSP the PC map has them in (\"manual bsp index specified\" set: Invader would choose again)");
+}
+
 void drop_dead_placements(Job &job, const fs::path &xsrc) {
     const Config &cfg = job.cfg;
     const std::string scen = job.scenario + ".scenario";

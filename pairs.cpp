@@ -491,6 +491,8 @@ void compare(const std::string &tag, const std::string &g, Flat a, Flat b, Resul
             }
             // An animation's node checksum cleared (Invader then doesn't check it; the game never does).
             if (g == "model_animations" && gk == "animations[].node_list_checksum" && vb == "0") continue;
+            // An encounter pinned to the BSP the PC map has it in (so Invader doesn't choose again): the same BSP, either way.
+            if (g == "scenario" && gk == "encounters[].flags.manual_bsp_index_specified" && va == "0" && vb == "1") continue;
             // A spawn point's or item's gametype of a kind the game never uses ("stub", "ignored"): none, either way.
             if (g == "scenario" && vb == "none" && (starts(va, "ignored") || starts(va, "stub")) &&
                 (under(gk, "player_starting_locations") || under(gk, "netgame_equipment") || under(gk, "starting_equipment")))
@@ -530,6 +532,8 @@ void compare(const std::string &tag, const std::string &g, Flat a, Flat b, Resul
             std::string count_key;
             if (g == "scenario" && (ends(gk, "commands[].point_1") || ends(gk, "commands[].point_2")))
                 count_key = k.substr(0, k.find(".commands[")) + ".points.size";
+            else if (g == "scenario" && ends(gk, "commands[].command"))
+                count_key = k.substr(0, k.find(".commands[")) + ".commands.size";
             else if (g == "scenario" && (ends(gk, "platoons[].happens_to") || ends(gk, "platoons[].happens_to_1")))
                 count_key = k.substr(0, k.find(".platoons[")) + ".platoons.size";
             else if (g == "scenario" && gk == "command_lists[].manual_bsp_index")
@@ -550,6 +554,19 @@ void compare(const std::string &tag, const std::string &g, Flat a, Flat b, Resul
             va.compare(0, vb.size() - 1, vb, 1) == 0) {
             d.ce += " (switches between BSPs the level doesn't have)";
             note = true;
+        }
+        // An object sharing its name with another (Invader needs each name on one object; the scripts reach one of
+        // them either way): unnamed.
+        static const std::set<std::string> placed{"scenery[].name", "bipeds[].name", "vehicles[].name", "equipment[].name",
+            "weapons[].name", "machines[].name", "controls[].name", "light_fixtures[].name", "sound_scenery[].name"};
+        if (g == "scenario" && placed.count(gk) && vb == "65535" && va != "65535") {
+            bool shared = false;
+            for (auto &[ka, vv] : A)
+                if (vv == va && ka != k && placed.count(generic(ka))) { shared = true; break; }
+            if (shared) {
+                d.ce += " (another object has the same name)";
+                note = true;
+            }
         }
         // A conversation's participant naming an encounter the map doesn't have (the line never plays): cleared, as
         // Invader needs.
