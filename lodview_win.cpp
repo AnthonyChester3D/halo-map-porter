@@ -486,7 +486,15 @@ void start_update() {
     HWND wnd = St->wnd;
     std::function<Result()> fn = St->update;
     std::thread([wnd, fn] {
-        Result *r = new Result(fn());
+        ULONG guarantee = 64 * 1024;
+        SetThreadStackGuarantee(&guarantee);
+        Result *r = new Result();
+        try {
+            *r = fn();
+        } catch (const std::exception &e) {
+            r->ok = false;
+            r->error = std::string("it stopped on an error: ") + e.what();
+        }
         if (!PostMessageW(wnd, WM_UPDATED, 0, (LPARAM)r)) delete r;
     }).detach();
 }
@@ -546,7 +554,15 @@ void start_redo() {
     std::function<Result(const std::string &)> fn = St->redo;
     std::string tag = m.tag;
     std::thread([wnd, fn, tag] {
-        Result *r = new Result(fn(tag));
+        ULONG guarantee = 64 * 1024;   // (room left to write down a stack overflow)
+        SetThreadStackGuarantee(&guarantee);
+        Result *r = new Result();
+        try {
+            *r = fn(tag);
+        } catch (const std::exception &e) {
+            r->ok = false;
+            r->error = std::string("it stopped on an error: ") + e.what();
+        }
         if (!PostMessageW(wnd, WM_REDONE, 0, (LPARAM)r)) delete r;
     }).detach();
 }

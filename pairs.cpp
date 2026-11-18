@@ -449,6 +449,15 @@ void compare(const std::string &tag, const std::string &g, Flat a, Flat b, Resul
                 continue;
             if (dep_key(va) == dep_key(vb)) continue;
             if (same_copy(va, vb)) continue;
+            // The globals' weapon list laid out in the Xbox's order (which it reads by place): the same weapons.
+            if (g == "globals" && gk == "weapon_list[].weapon") {
+                auto listed = [&](const auto &M, const std::string &v) {
+                    for (auto &[kk, vv] : M)
+                        if (generic(kk) == gk && dep_key(vv) == dep_key(v)) return true;
+                    return false;
+                };
+                if ((va == "(none)" || listed(B, va)) && (vb == "(none)" || listed(A, vb))) continue;
+            }
             if (vb.size() <= 1 && va.size() > 1) {   // (an empty item collection placed: nothing, either way)
                 std::string d = dep_key(va).substr(1);
                 std::replace(d.begin(), d.end(), '\\', '/');

@@ -956,16 +956,31 @@ Result make(const fs::path &folder, const std::string &base_name, const std::vec
                 r.error = "Couldn't write " + temp(o.path).u8string() + " (is the disk full?). Nothing was changed.";
                 return r;
             }
+        // (a file Windows holds open for a moment, a virus scan's or the search indexer's, is tried again for a few
+        // seconds; one still held keeps its old version, and the others go on: each map as it was or as it is now,
+        // never one drawing on a shared file that moved under it)
+        std::set<fs::path> stuck;
         for (auto &o : outs) {
             std::error_code ec;
-            fs::remove(o.path, ec);
-            fs::rename(temp(o.path), o.path, ec);
-            if (ec) { r.error = "Couldn't put " + o.path.u8string() + " in place (" + ec.message() + "): its new copy is " + temp(o.path).u8string() + "."; return r; }
+            for (int attempt = 0; attempt < 20; attempt++) {
+                ec.clear();
+                fs::remove(o.path, ec);
+                ec.clear();
+                fs::rename(temp(o.path), o.path, ec);
+                if (!ec) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            }
+            if (ec) {
+                stuck.insert(o.path);
+                r.error += (r.error.empty() ? "" : " ") + std::string("Couldn't put ") + o.path.u8string() + " in place (" + ec.message() +
+                           ", tried for 10 seconds: is it open in another program?): its new copy is " + temp(o.path).u8string() + ".";
+            }
         }
+        if (!r.error.empty() && (stuck.count(pack_path) || stuck.count(stock_path))) return r;   // (the maps need them)
         // ---- the link files beside a map rewritten: its xbox line (size and hash) and Xbox tag IDs are for the file as it is now
         std::string relinked;
         for (auto &m : maps) {
-            if (!m->rewrite) continue;
+            if (!m->rewrite || stuck.count(m->path)) continue;
             std::string why;
             const int n = h1ulink::refresh_xbox(m->path, why);
             if (n) relinked += (relinked.empty() ? "" : ", ") + name_of(m->path);
@@ -1035,6 +1050,7 @@ Result make(const fs::path &folder, const std::string &base_name, const std::vec
                                      " (no map draws on " + (removed.find(',') != std::string::npos ? "them" : "it") + " now): " + removed + "\n";
         if (!relinked.empty()) rep += "Link files updated for the rewritten maps (their Xbox size and hash): " + relinked + "\n";
         r.used_stock = stock_used;
+        if (!stuck.empty()) rep += r.error + " Those stay as they were (whole maps, not drawing on the shared files), with their link files.\n";
         if (!any) rep += "Nothing in these maps is in two of them" + std::string(use_stock ? " or in stock.shared" : "") + ".\n";
         else rep += "In all: " + mb(before) + " -> " + mb(after) + ". Every texture, sound, BSP and the tag data were read back through the new files and match.\n";
         r.ok = true;

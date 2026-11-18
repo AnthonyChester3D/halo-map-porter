@@ -116,8 +116,8 @@ enum {
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new142.exe is 1.142).
-#define HMP_VERSION L"1.142"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new143.exe is 1.143).
+#define HMP_VERSION L"1.143"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -422,6 +422,47 @@ static LONG WINAPI on_crash(EXCEPTION_POINTERS *ep) {
         text += t;
     }
     write_crash(text + crash_stack());
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+// The crashes the filter above never hears of: one inside a window's message handling (Windows ends the app there
+// without it), a stack overflow, heap corruption. Seen first, as they happen (a few programs' own code handles some
+// access violations itself, so this one says it may not have been the end).
+static LONG WINAPI on_fault(EXCEPTION_POINTERS *ep) {
+    const DWORD c = ep->ExceptionRecord->ExceptionCode;
+    if (c != EXCEPTION_ACCESS_VIOLATION && c != EXCEPTION_STACK_OVERFLOW && c != EXCEPTION_ILLEGAL_INSTRUCTION &&
+        c != EXCEPTION_INT_DIVIDE_BY_ZERO && c != 0xC0000374 /* heap corruption */ && c != 0xC0000409 /* stack buffer overrun */)
+        return EXCEPTION_CONTINUE_SEARCH;
+    static std::atomic<int> times{0};
+    if (times.fetch_add(1) >= 3) return EXCEPTION_CONTINUE_SEARCH;
+    const EXCEPTION_RECORD *r = ep->ExceptionRecord;
+    char what[300];
+    snprintf(what, sizeof what, "exception 0x%08lX at %s (seen as it happened; if the app went on, it wasn't the end)", r->ExceptionCode,
+             crash_place(r->ExceptionAddress).c_str());
+    std::string text = crash_header(what);
+    if (c == EXCEPTION_ACCESS_VIOLATION && r->NumberParameters >= 2) {
+        char t[96];
+        snprintf(t, sizeof t, "    (%s address 0x%llx)\r\n", r->ExceptionInformation[0] == 1 ? "writing" : "reading",
+                 (unsigned long long)r->ExceptionInformation[1]);
+        text += t;
+    }
+    // (where it happened: from the faulting context, the stack walked by its frames)
+    CONTEXT ctx = *ep->ContextRecord;
+    for (int i = 0; i < 48; i++) {
+        text += "    at " + crash_place((void *)ctx.Rip) + "\r\n";
+        DWORD64 base = 0;
+        PRUNTIME_FUNCTION f = RtlLookupFunctionEntry(ctx.Rip, &base, nullptr);
+        if (!f) {   // (a leaf function: its return address is on top of the stack)
+            if (!ctx.Rsp) break;
+            ctx.Rip = *(DWORD64 *)ctx.Rsp;
+            ctx.Rsp += 8;
+        } else {
+            void *handler_data = nullptr;
+            DWORD64 frame = 0;
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, ctx.Rip, f, &ctx, &handler_data, &frame, nullptr);
+        }
+        if (!ctx.Rip) break;
+    }
+    write_crash(text);
     return EXCEPTION_CONTINUE_SEARCH;
 }
 static void on_terminate() {
@@ -4332,6 +4373,11 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     SetUnhandledExceptionFilter(on_crash);
+    AddVectoredExceptionHandler(1, on_fault);
+    {   // (room left to write down a stack overflow)
+        ULONG guarantee = 64 * 1024;
+        SetThreadStackGuarantee(&guarantee);
+    }
     std::set_terminate(on_terminate);
     SetProcessDPIAware();
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);

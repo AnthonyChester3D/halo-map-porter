@@ -1487,21 +1487,72 @@ struct Job {
             note("[fix]  " + tag + ": " + prefix + " named a tag that isn't a vehicle or biped; taken off");
             return true;
         }
-        // Multiplayer globals with fewer weapons than the engine's list has (14 on the Xbox): the list filled out with
-        // its first weapon (the entries past the map's own aren't used).
+        // Multiplayer globals with fewer weapons than the engine's list has (14 on the Xbox; MCC has no such list, so its
+        // maps can have any). The engine reads the list by place, the Xbox's own order: the ten weapons a gametype can
+        // start players with, the oddball, the flag, then the frag and plasma grenades' equipment. So it's laid out that
+        // way: each place the map's own tag when it has that one, the ball and flag its multiplayer ones, the grenades
+        // its equipment, the rest of the weapons its own; only what's past them filled out with its first weapon.
+        // (Filled out as it came, Splash Site's list had a grenade's equipment where the Xbox reads a weapon and the
+        // ball where it reads the grenades.)
         static const std::regex few_weapons(R"(Globals tag does not have at least (\d+) weapons blocks)");
         if (std::regex_search(msg, m, few_weapons)) {
             const int need = std::stoi(m[1].str()), have = std::atoi(ask(tag, "-C", "weapon_list").c_str());
             fs::path own = owner(tag);
             if (have > 0 && have < need && !own.empty() && (own == fixes || to_fixes(tag, own))) {
-                const std::string first = ask(tag, "-G", "weapon_list[0].weapon");
+                static const char *const kXboxList[14] = {
+                    "weapons/assault rifle/assault rifle.weapon", "weapons/flamethrower/flamethrower.weapon",
+                    "weapons/gravity rifle/gravity rifle.weapon", "weapons/needler/needler.weapon", "weapons/pistol/pistol.weapon",
+                    "weapons/plasma pistol/plasma pistol.weapon", "weapons/plasma rifle/plasma rifle.weapon",
+                    "weapons/rocket launcher/rocket launcher.weapon", "weapons/shotgun/shotgun.weapon",
+                    "weapons/sniper rifle/sniper rifle.weapon", "weapons/ball/ball.weapon", "weapons/flag/flag.weapon",
+                    "weapons/frag grenade/frag grenade.equipment", "weapons/plasma grenade/plasma grenade.equipment"};
+                auto norm = [](std::string t) {
+                    for (auto &c : t) c = c == '\\' ? '/' : (char)std::tolower((unsigned char)c);
+                    return t;
+                };
+                std::vector<std::string> list;
+                for (int i = 0; i < have; i++) list.push_back(norm(ask(tag, "-G", "weapon_list[" + std::to_string(i) + "].weapon")));
+                const std::string ball = norm(ask(tag, "-G", "multiplayer_information[0].ball")),
+                                  flag = norm(ask(tag, "-G", "multiplayer_information[0].flag"));
+                auto ext = [](const std::string &t) { return fs::path(t).extension().u8string(); };
+                std::vector<std::string> placed((size_t)need);
+                std::set<std::string> used;
+                for (int i = 0; i < need && i < 14; i++)   // (its own copy of the Xbox's tag for that place)
+                    for (auto &w : list)
+                        if (w == kXboxList[i]) { placed[(size_t)i] = w, used.insert(w); break; }
+                if (need >= 12) {
+                    if (placed[10].empty() && !ball.empty()) placed[10] = ball, used.insert(ball);
+                    if (placed[11].empty() && !flag.empty()) placed[11] = flag, used.insert(flag);
+                }
+                std::vector<std::string> equipment, weapons;
+                for (auto &w : list) {
+                    if (used.count(w) || w.empty()) continue;
+                    (ext(w) == ".equipment" ? equipment : weapons).push_back(w);
+                }
+                for (int i = 12; i < need && i < 14; i++)
+                    if (placed[(size_t)i].empty() && !equipment.empty()) placed[(size_t)i] = equipment.front(), equipment.erase(equipment.begin());
+                for (int i = 0; i < need && i < 10; i++)
+                    if (placed[(size_t)i].empty() && !weapons.empty()) placed[(size_t)i] = weapons.front(), weapons.erase(weapons.begin());
+                // (what's left: its first weapon that isn't the ball or flag, else the ball)
+                std::string fill;
+                for (auto &w : list)
+                    if (ext(w) == ".weapon" && w != ball && w != flag) { fill = w; break; }
+                if (fill.empty()) fill = !ball.empty() ? ball : list[0];
+                int filled = 0;
+                for (int i = 0; i < need; i++)
+                    if (placed[(size_t)i].empty()) {
+                        placed[(size_t)i] = i == 12 || i == 13 ? (equipment.empty() ? fill : equipment.front()) : fill;
+                        filled++;
+                    }
                 std::vector<std::string> cmd{u8(tool(cfg, "invader-edit")), "-n", "-t", u8(fixes), tag, "-I", "weapon_list",
                                              std::to_string(need - have), "end"};
-                for (int i = have; i < need; i++) cmd.insert(cmd.end(), {"-S", "weapon_list[" + std::to_string(i) + "].weapon", first});
+                for (int i = 0; i < need; i++) cmd.insert(cmd.end(), {"-S", "weapon_list[" + std::to_string(i) + "].weapon", placed[(size_t)i]});
                 std::string out;
                 if (run_process(cmd, out) == 0) {
                     note("[fix]  " + tag + ": its weapon list had " + std::to_string(have) + " of the " + m[1].str() +
-                         " the Xbox needs; filled out with its first weapon (" + first + ")");
+                         " the Xbox needs, which it reads by place; laid out in the Xbox's order (the ball and flag, the grenades' "
+                         "equipment and its weapons where the Xbox reads them; " + std::to_string(filled) +
+                         " place" + (filled == 1 ? "" : "s") + " filled out with " + fill + ")");
                     return true;
                 }
             }
