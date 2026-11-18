@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <functional>
 #include <set>
+#include <regex>
 
 namespace pairs {
 namespace {
@@ -449,6 +450,11 @@ void compare(const std::string &tag, const std::string &g, Flat a, Flat b, Resul
                 continue;
             if (dep_key(va) == dep_key(vb)) continue;
             if (same_copy(va, vb)) continue;
+            {   // (the "_spawned" copy of an object that spawns itself again, above)
+                std::string ka = dep_key(va), kb = dep_key(vb);
+                const size_t da = ka.rfind('.');
+                if (da != std::string::npos && kb == ka.substr(0, da) + "_spawned" + ka.substr(da)) continue;
+            }
             // The globals' weapon list laid out in the Xbox's order (which it reads by place): the same weapons.
             if (g == "globals" && gk == "weapon_list[].weapon") {
                 auto listed = [&](const auto &M, const std::string &v) {
@@ -456,7 +462,14 @@ void compare(const std::string &tag, const std::string &g, Flat a, Flat b, Resul
                         if (generic(kk) == gk && dep_key(vv) == dep_key(v)) return true;
                     return false;
                 };
-                if ((va == "(none)" || listed(B, va)) && (vb == "(none)" || listed(A, vb))) continue;
+                auto mp = [&](const std::string &v) {   // (the map's own multiplayer ball or flag, which the Xbox reads there)
+                    for (const char *f : {"multiplayer_information[0].ball", "multiplayer_information[0].flag"}) {
+                        auto it = A.find(f);
+                        if (it != A.end() && dep_key(it->second) == dep_key(v)) return true;
+                    }
+                    return false;
+                };
+                if ((va == "(none)" || listed(B, va)) && (vb == "(none)" || listed(A, vb) || mp(vb))) continue;
             }
             if (vb.size() <= 1 && va.size() > 1) {   // (an empty item collection placed: nothing, either way)
                 std::string d = dep_key(va).substr(1);
@@ -501,7 +514,9 @@ void compare(const std::string &tag, const std::string &g, Flat a, Flat b, Resul
             // An animation's node checksum cleared (Invader then doesn't check it; the game never does).
             if (g == "model_animations" && gk == "animations[].node_list_checksum" && vb == "0") continue;
             // An encounter pinned to the BSP the PC map has it in (so Invader doesn't choose again): the same BSP, either way.
-            if (g == "scenario" && gk == "encounters[].flags.manual_bsp_index_specified" && va == "0" && vb == "1") continue;
+            if (g == "scenario" && gk == "encounters[].flags" && va.find("manual_bsp_index_specified") == std::string::npos &&
+                strip_word(vb, "manual_bsp_index_specified") == strip_word(va, "manual_bsp_index_specified"))
+                continue;
             // A spawn point's or item's gametype of a kind the game never uses ("stub", "ignored"): none, either way.
             if (g == "scenario" && vb == "none" && (starts(va, "ignored") || starts(va, "stub")) &&
                 (under(gk, "player_starting_locations") || under(gk, "netgame_equipment") || under(gk, "starting_equipment")))
@@ -545,8 +560,16 @@ void compare(const std::string &tag, const std::string &g, Flat a, Flat b, Resul
                 count_key = k.substr(0, k.find(".commands[")) + ".commands.size";
             else if (g == "scenario" && (ends(gk, "platoons[].happens_to") || ends(gk, "platoons[].happens_to_1")))
                 count_key = k.substr(0, k.find(".platoons[")) + ".platoons.size";
-            else if (g == "scenario" && gk == "command_lists[].manual_bsp_index")
+            else if (g == "scenario" && (gk == "command_lists[].manual_bsp_index" || gk == "encounters[].manual_bsp_index"))
                 count_key = "structure_bsps.size";
+            else if (g == "scenario" && ends(gk, "squads[].platoon"))
+                count_key = k.substr(0, k.find(".squads[")) + ".platoons.size";
+            else if ((g == "model" || g == "gbxmodel") && (ends(gk, "nodes[].next_sibling_node_index") ||
+                                                          ends(gk, "nodes[].first_child_node_index") ||
+                                                          ends(gk, "nodes[].parent_node_index")))
+                count_key = k.substr(0, k.find("nodes[")) + "nodes.size";
+            else if (g == "model_animations" && gk == "animations[].sound_frame_index")
+                count_key = k.substr(0, k.rfind('.')) + ".frame_count";
             else if (g == "model_animations" && (gk == "animations[].key_frame_index" || gk == "animations[].second_key_frame_index"))
                 count_key = k.substr(0, k.rfind('.')) + ".frame_count";
             if (!count_key.empty()) {
@@ -556,6 +579,32 @@ void compare(const std::string &tag, const std::string &g, Flat a, Flat b, Resul
                     note = true;
                 }
             }
+        }
+        // A unit seat's animations past the 30 the engine has names for (Invader builds no more; nothing plays them).
+        if (g == "model_animations" && (gk == "units[].animations.size" || gk == "units[].weapons[].animations.size") && vb == "30" &&
+            std::atol(va.c_str()) > 30) {
+            d.ce += " (past the 30 the engine plays)";
+            note = true;
+        }
+        {
+            static const std::regex past30(R"(animations\[(\d+)\]\.animation$)");
+            std::smatch pm;
+            if (g == "model_animations" && starts(gk, "units[]") && std::regex_search(k, pm, past30) && std::stoi(pm[1].str()) >= 30) {
+                d.ce += " (past the 30 the engine plays)";
+                note = true;
+            }
+        }
+        // A collision edge's side with no surface (past the ones there are) given its other side's (Invader won't build
+        // it otherwise): the same edge between the same faces.
+        if ((ends(gk, "edges[].right_surface") || ends(gk, "edges[].left_surface")) && va == "4294967295") {
+            d.ce += " (none)";
+            note = true;
+        }
+        // A multiplayer vehicle in the globals' list that nothing in a match spawns (the map places none of it and has no
+        // race spawns), left out.
+        if (g == "globals" && gk == "multiplayer_information[].vehicles[].vehicle" && (vb.size() <= 1 || vb == "(none)")) {
+            d.ce += " (nothing in a match spawns it)";
+            note = true;
         }
         // A trigger volume named as a BSP switch between BSPs the level doesn't have, renamed so it isn't one (MCC
         // switches nothing with it either).
@@ -720,6 +769,10 @@ Result check(const std::string &ce_dir, const std::string &xbox_dir) {
                 r.notes.push_back({"empty", key, "", "(no items: spawns nothing)", "(not in the map)"});
             } else if (named_group(g) && !reachable(key)) {
                 r.notes.push_back({"unused", key, "", "(in the map, but nothing uses it)", "(not in the map)"});
+            } else if (named_group(g) && B.count(key.substr(0, key.rfind('.')) + "_spawned" + key.substr(key.rfind('.')))) {
+                // (an object that spawns itself again through its collision's effects, which Invader can't build:
+                // spawned as a copy, the same object under another name)
+                r.notes.push_back({"copy", key, "", "(in the map)", "(as " + key.substr(0, key.rfind('.')) + "_spawned)"});
             } else if (named_group(g)) {
                 r.diffs.push_back({"missing", key, "", "(in the map)", "(not in the map)"});
                 r.failed["missing"]++;

@@ -1557,6 +1557,62 @@ struct Job {
                 }
             }
         }
+        // A bitmap's data a few bytes short of what its size and format make (MCC counts a DXT texture's smallest
+        // mipmaps by their pixels, Invader by whole 4x4 blocks; Lumoria's HUD wraith once fitted to the Xbox): padded out
+        // to it with nothing (the last mipmaps, a few pixels each).
+        static const std::regex short_data(R"(Bitmap data #(\d+) range \(0x([0-9A-Fa-f]+) - 0x([0-9A-Fa-f]+)\) exceeds the\s+processed pixel data size \(0x([0-9A-Fa-f]+)\))");
+        if (std::regex_search(msg, m, short_data)) {
+            const size_t end = std::stoul(m[3].str(), nullptr, 16), have = std::stoul(m[4].str(), nullptr, 16);
+            fs::path own = owner(tag);
+            if (end > have && end - have <= 65536 && !own.empty() && (own == fixes || to_fixes(tag, own))) {
+                tagfile::EditTag et;
+                std::string *pp = nullptr;
+                if (et.load(fixes / from_u8(tag)) && (pp = tagfile::data(et.root(), "processed pixel data")) && pp->size() == have) {
+                    pp->resize(end, '\0');
+                    if (et.save(fixes / from_u8(tag))) {
+                        note("[fix]  " + tag + ": its data was " + std::to_string(end - have) + " bytes short of what its size and "
+                             "format make (MCC counts a compressed texture's smallest mipmaps by their pixels); padded out");
+                        return true;
+                    }
+                }
+            }
+        }
+        // A bitmap marked swizzled (laid out the original Xbox's way), which no Custom Edition or MCC map's are: the mark
+        // taken off. (MCC ignores it: CE Digsite's Hotbox.)
+        static const std::regex swizzled(R"(Bitmap data #(\d+) is marked as swizzled)");
+        if (std::regex_search(msg, m, swizzled)) {   // (invader-edit won't set bitmap data flags: edited here)
+            fs::path own = owner(tag);
+            const size_t k = std::stoul(m[1].str());
+            tagfile::EditTag et;
+            if (!own.empty() && (own == fixes || to_fixes(tag, own)) && et.load(fixes / from_u8(tag)))
+                if (auto *bd = tagfile::block(et.root(), "bitmap data"); bd && k < bd->size()) {
+                    auto &e = (*bd)[k];
+                    tagfile::set_num(e, "flags", (double)((long long)tagfile::get_num(e, "flags") & ~8LL));
+                    if (et.save(fixes / from_u8(tag))) {
+                        note("[fix]  " + tag + ": bitmap #" + m[1].str() + " was marked swizzled (the original Xbox's layout), "
+                             "which MCC ignores; the mark taken off");
+                        return true;
+                    }
+                }
+        }
+        // A bitmap with sprites that isn't a sprite sheet: the game draws it as the textures its sequences name, never
+        // its sprites, so they go.
+        if (msg.find("Bitmap has sprites but is not a sprites bitmap type") != std::string::npos) {
+            fs::path own = owner(tag);
+            if (!own.empty() && (own == fixes || to_fixes(tag, own))) {
+                tagfile::EditTag et;
+                int cleared = 0;
+                if (et.load(fixes / from_u8(tag)))
+                    if (auto *seqs = tagfile::block(et.root(), "bitmap group sequence"))
+                        for (auto &sq : *seqs)
+                            if (auto *sp = tagfile::block(sq, "sprites"); sp && !sp->empty()) { sp->clear(); cleared++; }
+                if (cleared && et.save(fixes / from_u8(tag))) {
+                    note("[fix]  " + tag + ": isn't a sprite sheet but had sprites in " + std::to_string(cleared) +
+                         " sequence" + (cleared == 1 ? "" : "s") + " (never drawn: the game draws its textures); they go");
+                    return true;
+                }
+            }
+        }
         // A sound permutation whose samples aren't a whole number of blocks (Xbox ADPCM: 36 bytes; 16-bit PCM: 2): the
         // part block at the end taken off, in each permutation.
         if (msg.find("has an invalid size") != std::string::npos && msg.find("Sound permutation") != std::string::npos) {
@@ -1625,6 +1681,16 @@ struct Job {
             (fs::path(from_u8(tag)).extension() == ".model" || fs::path(from_u8(tag)).extension() == ".gbxmodel")) {
             fs::path own = owner(tag);
             if (!own.empty() && (own == fixes || to_fixes(tag, own))) {
+                // (a part with no vertices at all, or triangles past them, first: invader-bludgeon resaves such a model
+                // without making it any better, which counted as a fix and stopped there, arb's brute)
+                {
+                    const int n = lod::drop_bad_triangles(fixes / from_u8(tag));
+                    if (n > 0) {
+                        note("[fix]  " + tag + ": " + std::to_string(n) + (n == 1 ? " part had" : " parts had") +
+                             " triangles naming vertices it doesn't have (the game skips them); left out");
+                        return true;
+                    }
+                }
                 // (an Xbox model reads its compressed vertices, and a part may have only uncompressed ones: "...this
                 // is because there are no compressed vertices". invader-bludgeon makes them from the others.)
                 {
@@ -1818,7 +1884,7 @@ struct Job {
         // An object whose model and collision model have different numbers of regions (Custom Edition's tools let
         // that through; its game draws and damages each by its own): the one with fewer gets more. A collision model's
         // added regions have nothing to hit; a model's added regions draw nothing (one point of its first piece).
-        static const std::regex region_counts(R"('([^']+)\.(?:gbx)?model' and '([^']+)\.model_collision_geometry' have mismatched region counts)");
+        static const std::regex region_counts(R"('([^']+)\.(?:gbx)?model'\s+and\s+'([^']+)\.model_collision_geometry'\s+have mismatched region counts)");
         if (std::regex_search(msg, m, region_counts)) {
             const std::string model = norm_rel(m[1].str()) + ".model", coll = norm_rel(m[2].str()) + ".model_collision_geometry";
             fs::path mo = owner(model), co = owner(coll);
@@ -3840,8 +3906,9 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
             static const std::regex missing(R"(Failed to find ([^\r\n]+))");
             std::smatch mm;
             if (std::regex_search(out, mm, missing))
-                r.error = "Build failed: the map uses the tag " + mm[1].str() + ", which isn't among the tags taken out of it "
-                          "(a map with tags of the same name can't be taken apart: use an unprotected copy).\nFull log: " +
+                r.error = "Build failed: the map uses the tag " + mm[1].str() + ", which isn't among the tags taken out of it: "
+                          "Invader's extractor refused it (damaged in the map, as protection tools leave a few: a reference "
+                          "that names no tag of its kind), or another tag has the same name.\nFull log: " +
                           u8(job.work / "build.log");
             else
                 r.error = "Build failed:\n" + out.substr(out.size() > 3000 ? out.size() - 3000 : 0);
@@ -12848,7 +12915,8 @@ static std::pair<int, int> drop_unused_scripts(std::vector<std::string> &texts, 
     static const std::set<std::string> tag_types{"sound", "effect", "damage", "looping_sound", "animation_graph",
                                                  "actor_variant", "damage_effect", "object_definition"};
     std::function<bool(const hsc::Node &)> names_tag = [&](const hsc::Node &n) {
-        if (!n.list) return n.str && (n.atom.find('\\') != std::string::npos || n.atom.find('/') != std::string::npos);
+        // (quoted or not: an object definition is written bare, huge\weapons\nuke\nuke)
+        if (!n.list) return n.atom.find('\\') != std::string::npos || (n.atom.size() > 1 && n.atom.find('/') != std::string::npos);
         for (auto &k : n.kids) if (names_tag(k)) return true;
         return false;
     };
@@ -12929,8 +12997,36 @@ static void convert_scripts(Job &job, const fs::path &dir, Game target) {
     conv.switches = target == Game::Xbox;
     std::sort(files.begin(), files.end());
     std::vector<std::string> texts, made;
-    int recoded = 0, cond_fixed = 0;
+    int recoded = 0, cond_fixed = 0, explicit_fixed = 0, header_fixed = 0, stub_fixed = 0;
     std::vector<char> was_recoded;
+    // (the objects the PC map's scripts name, as its compiler resolved them: its scenario's references; those Invader
+    // would resolve to another group, by path alone, get theirs written out)
+    std::vector<std::pair<std::string, std::string>> explicit_objects;
+    if (!job.original.empty()) {
+        static const char *const kObjectOrder[] = {"biped", "vehicle", "weapon", "projectile", "equipment", "garbage", "scenery",
+                                                   "placeholder", "sound_scenery", "device_control", "device_machine",
+                                                   "device_light_fixture"};
+        tagfile::Tag st;
+        if (st.load(job.original / from_u8(job.scenario + ".scenario"))) {
+            auto refs = st.root().block("references");
+            for (size_t i = 0; i < refs.size(); i++) {
+                std::string r = refs[i].ref("reference");
+                const std::string ext = fs::path(r).extension().u8string();
+                if (ext.size() < 2) continue;
+                const std::string group = ext.substr(1), path = r.substr(0, r.size() - ext.size());
+                if (std::find(std::begin(kObjectOrder), std::end(kObjectOrder), group) == std::end(kObjectOrder)) continue;
+                std::string pick;
+                for (const char *g : kObjectOrder)
+                    if (!job.owner(path + "." + g).empty()) { pick = g; break; }
+                if (pick.empty() || pick == group) continue;
+                std::string bare = path, full = path + ext;
+                std::replace(bare.begin(), bare.end(), '/', '\\');
+                std::replace(full.begin(), full.end(), '/', '\\');
+                for (auto &c : bare) c = (char)std::tolower((unsigned char)c);
+                explicit_objects.push_back({bare, full});
+            }
+        }
+    }
     for (auto &f : files) {
         std::ifstream in(f, std::ios::binary);
         texts.push_back(std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>()));
@@ -12956,6 +13052,92 @@ static void convert_scripts(Job &job, const fs::path &dir, Game target) {
             i++;
         }
         if (changed) { t = o; recoded++; }
+        // A stub (a forward declaration) whose return type isn't the one of the script that later replaces it (MCC's
+        // compiler lets it through; Invader won't: The Silent Cartographer Evolved's x_wpn_find_object_player0, a stub
+        // void and a static object): given that script's type, and a value of it to return.
+        {
+            static const std::regex static_def(R"(\(script static (\w+) \(?([^\s()]+))");
+            std::map<std::string, std::string> types;
+            for (auto it = std::sregex_iterator(t.begin(), t.end(), static_def); it != std::sregex_iterator(); ++it)
+                types[(*it)[2].str()] = (*it)[1].str();
+            static const std::regex stub_def(R"(\(script stub (\w+) ([^\s()]+) (\(print "[^"]*"\))\))");
+            std::string out;
+            size_t last = 0;
+            for (auto it = std::sregex_iterator(t.begin(), t.end(), stub_def); it != std::sregex_iterator(); ++it) {
+                const auto &mm = *it;
+                auto ty = types.find(mm[2].str());
+                if (ty == types.end() || ty->second == mm[1].str()) continue;
+                const std::string &r = ty->second;
+                const std::string value = r == "void" ? "" : r == "boolean" ? " false" : r == "string" ? " \"\"" :
+                                          (r == "short" || r == "long" || r == "real") ? " 0" : " none";
+                out += t.substr(last, (size_t)mm.position(0) - last) + "(script stub " + r + " " + mm[2].str() + " " + mm[3].str() +
+                       value + ")";
+                last = (size_t)(mm.position(0) + mm.length(0));
+                stub_fixed++;
+            }
+            if (last) {
+                t = out + t.substr(last);
+                changed = true;
+            }
+        }
+        // A script whose header the extractor wrote with an open bracket before its name that never closes ("(script
+        // startup (sound_impulse_start", a parameters block MCC's tools left on a script that takes none: Area 56's):
+        // the bracket left out. A startup or continuous one (never called by name) gets an "x_" in front, in case its
+        // name is a function's.
+        {
+            static const std::regex open_name(R"((^|\n)\(script (startup|continuous|dormant|static \w+|stub \w+) \(([^\s()]+)[ \t]*(?=\r?\n))");
+            std::string out;
+            size_t last = 0;
+            int fixed_here = 0;
+            for (auto it = std::sregex_iterator(t.begin(), t.end(), open_name); it != std::sregex_iterator(); ++it) {
+                const auto &mm = *it;
+                const std::string type = mm[2].str(), name = mm[3].str();
+                out += t.substr(last, (size_t)mm.position(0) - last) + mm[1].str() + "(script " + type + " " +
+                       (type == "startup" || type == "continuous" ? "x_" : "") + name;
+                last = (size_t)(mm.position(0) + mm.length(0));
+                fixed_here++;
+            }
+            if (fixed_here) {
+                // (only where the file is a bracket short, which it then isn't)
+                std::string cand = out + t.substr(last);
+                auto balance = [](const std::string &x) {
+                    long b = 0;
+                    bool q = false;
+                    for (char c : x) {
+                        if (c == '"') q = !q;
+                        else if (!q && c == '(') b++;
+                        else if (!q && c == ')') b--;
+                    }
+                    return b;
+                };
+                if (balance(t) == fixed_here && balance(cand) == 0) {
+                    t = cand;
+                    changed = true;
+                    header_fixed += fixed_here;
+                }
+            }
+        }
+        // An object written by its path alone where the PC map's compiler picked one group and Invader would pick another
+        // (it tries biped, vehicle, weapon, projectile...): written with the group the PC map has in its references, as
+        // Invader allows. (Cairo Station: huge\weapons\nuke\nuke, the projectile there, the weapon to Invader.)
+        for (auto &[bare, full] : explicit_objects) {
+            std::string lt;
+            lt.reserve(t.size());
+            for (char c : t) lt += (char)std::tolower((unsigned char)c);
+            std::string out;
+            size_t from = 0;
+            for (size_t at = lt.find(bare); at != std::string::npos; at = lt.find(bare, at + bare.size())) {
+                const char before = at ? t[at - 1] : ' ', after = at + bare.size() < t.size() ? t[at + bare.size()] : ' ';
+                if (!(std::isspace((unsigned char)before) || before == '(') || !(std::isspace((unsigned char)after) || after == ')')) continue;
+                out += t.substr(from, at - from) + full;
+                from = at + bare.size();
+                explicit_fixed++;
+            }
+            if (from) {
+                t = out + t.substr(from);
+                changed = true;
+            }
+        }
         // A (cond ...) the PC map's compiler turned into (if ...)s ends in a placeholder node; for a string-typed
         // (cond) Invader's extractor writes that node's text, "(cond", as a value, which reads as an open bracket that
         // never closes ("unterminated block": The Silent Cartographer Evolved, The Truth & Reconciliation Revisited).
@@ -12974,7 +13156,19 @@ static void convert_scripts(Job &job, const fs::path &dir, Game target) {
     }
     if (recoded) job.note("[scripts] " + std::to_string(recoded) + " script file" + (recoded > 1 ? "s" : "") +
                           " had text that isn't UTF-8 (Windows-1252 dashes or quotes), which the compiler can't read: as plain text now");
-    if (cond_fixed) job.note("[scripts] " + std::to_string(cond_fixed) + " (cond ...) block" + (cond_fixed > 1 ? "s" : "") +
+    if (stub_fixed) job.note("[scripts] " + std::to_string(stub_fixed) + " stub" + (stub_fixed > 1 ? "s" : "") +
+                             " (a script declared ahead) given the return type of the script that replaces it, which MCC lets differ");
+        if (header_fixed) job.note("[scripts] " + std::to_string(header_fixed) + " script header" + (header_fixed > 1 ? "s" : "") +
+                               " the extractor wrote with a bracket before the name that never closes (a parameters block on a "
+                               "script that takes none): the bracket left out");
+        if (explicit_fixed) job.note("[scripts] " + std::to_string(explicit_fixed) + " object" + (explicit_fixed > 1 ? "s" : "") +
+                                 " written by path alone, which Invader would take for another kind of object than the PC map's compiler "
+                                 "did: written with their kind (" + [&] {
+                                     std::string l;
+                                     for (auto &e : explicit_objects) l += (l.empty() ? "" : ", ") + e.second;
+                                     return l;
+                                 }() + ")");
+        if (cond_fixed) job.note("[scripts] " + std::to_string(cond_fixed) + " (cond ...) block" + (cond_fixed > 1 ? "s" : "") +
                              " the extractor wrote with an unclosed \"(cond\" at the end (its compiled placeholder): closed");
     made = texts;
     std::vector<bool> ok = convert_texts(conv, texts);
@@ -15785,7 +15979,8 @@ static void pin_encounter_bsps(Job &job, const fs::path &xsrc) {
         if (bsps < 2) continue;
         std::vector<std::string> edits;
         int n = 0;
-        for (int i = 0; vals.count("encounters[" + std::to_string(i) + "].name"); i++) {
+        // (by its BSP index, which every encounter has: an empty name isn't listed)
+        for (int i = 0; vals.count("encounters[" + std::to_string(i) + "].manual_bsp_index"); i++) {
             const std::string e = "encounters[" + std::to_string(i) + "]";
             const std::string v = vals[e + ".manual_bsp_index"];
             if (vals[e + ".flags.manual_bsp_index_specified"] == "1" || v.empty() || !isdigit((unsigned char)v[0])) continue;
@@ -17609,7 +17804,30 @@ static void perfect_keep_gameplay(Job &job) {
         if (!it->is_regular_file()) continue;
         std::string rel = fs::relative(it->path(), job.source).generic_u8string();
         std::string ext = it->path().extension().u8string();
-        if (ext.size() < 2 || !fs::exists(job.overlay / from_u8(rel))) continue;
+        if (ext.size() < 2) continue;
+        // (a shader the Xbox has at the same path as another kind of shader, which the map then draws with: Halo PC's
+        // flag_red.shader_model, the Xbox's flag_red.shader_transparent_generic; its material type is the map's too)
+        if (ext.rfind(".shader", 0) == 0 && !fs::exists(job.overlay / from_u8(rel))) {
+            const std::string stem = rel.substr(0, rel.size() - ext.size());
+            std::string ma;
+            std::vector<std::pair<std::string, std::string>> a;
+            if (tagedit::flatten(u8(it->path()), a))
+                for (auto &kv : a) if (kv.first == "material_type") ma = kv.second;
+            for (const char *x : {".shader_environment", ".shader_model", ".shader_transparent_chicago",
+                                  ".shader_transparent_chicago_extended", ".shader_transparent_generic", ".shader_transparent_glass",
+                                  ".shader_transparent_meter", ".shader_transparent_plasma", ".shader_transparent_water"}) {
+                const std::string other = stem + x;
+                if (other == rel || !fs::exists(job.overlay / from_u8(other))) continue;
+                std::vector<std::pair<std::string, std::string>> b;
+                std::string mb;
+                if (tagedit::flatten(u8(job.overlay / from_u8(other)), b))
+                    for (auto &kv : b) if (kv.first == "material_type") mb = kv.second;
+                if (!ma.empty() && !mb.empty() && ma != mb && job.edit(other, "material_type", ma))
+                    materials.push_back(other + " (" + mb + " -> " + ma + ")");
+            }
+            continue;
+        }
+        if (!fs::exists(job.overlay / from_u8(rel))) continue;
         ext = ext.substr(1);
         if (ext == "globals") continue;   // (below)
         if (pairs::gameplay_group(ext)) {
@@ -17784,6 +18002,25 @@ static void perfect_ghosts(Job &job) {
             todo.push_back(d);
         }
     }
+    // (a look that deals damage or makes an object stays: a vehicle's material effects whose effect hurts whoever it
+    // runs over is gameplay, as the pair check has it; Paradoxical's and Iron Tomb's "-35 health")
+    std::map<std::string, bool> hurts;
+    std::function<bool(const std::string &, int)> deals_damage = [&](const std::string &t, int depth) {
+        auto f = hurts.find(t);
+        if (f != hurts.end()) return f->second;
+        hurts[t] = false;
+        if (depth > 6 || job.owner(t).empty()) return false;
+        bool any = false;
+        for (auto &[k, v] : flat(t)) {
+            std::string d = dep_of(v), de = ext_of(d);
+            if (d.empty()) continue;
+            // (damage, or an object it makes: an effect firing a projectile, Cairo Station's nuke)
+            if (de == "damage_effect" || de == "continuous_damage_effect" || (pairs::gameplay_group(de) && de != "physics")) any = true;
+            else if ((de == "effect" || de == "material_effects") && deals_damage(d, depth + 1)) any = true;
+            if (any) break;
+        }
+        return hurts[t] = any;
+    };
     int edited = 0, models = 0, dropped = 0;
     for (auto &t : only) {
         std::string e = ext_of(t);
@@ -17793,6 +18030,7 @@ static void perfect_ghosts(Job &job) {
         for (auto &[k, v] : flat(t)) {
             std::string d = dep_of(v), de = ext_of(d);
             if (d.empty() || !pairs::look_or_sound_group(de) || de.rfind("shader", 0) == 0) continue;
+            if ((de == "material_effects" || de == "effect") && deals_damage(d, 0)) continue;
             std::string g = generic(k);
             if (g == "attachments[].type" || g == "events[].parts[].type" || g == "events[].particles[].particle_type" ||
                 g == "widgets[].reference" || g == "predicted_resources[].tag") {
@@ -18381,8 +18619,8 @@ static Result convert_map_impl(const Config &cfg, const fs::path &input_given, G
                     job.note("[fix]  the map's tags that share a path couldn't be renamed (its tag data doesn't end the file)");
                 }
             }
-            if (!ec && w) {
-                from = copy;
+            if (!ec && w) from = copy;
+            if (!ec && w && !flag_repairs.empty()) {
                 job.note("[fix]  " + std::to_string(flag_repairs.size()) + " of the map's bitmaps were DXT without the "
                          "\"compressed\" flag (or the other way round), which the game ignores and Invader won't extract; "
                          "extracted with the flag (or, where the data's size says it isn't DXT, the format) set to match");
