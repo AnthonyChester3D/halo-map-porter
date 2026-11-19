@@ -2998,8 +2998,12 @@ static std::string campaign_halves(Job &job, std::vector<std::string> cmd) {
         tagfile::Elem r = t.root();
         tagfile::Block b = r.block("structure bsps");
         for (size_t i = 0; i < b.size(); i++) bsp_tags.push_back(b[i].ref("structure bsp"));
-        tagfile::Block sw = r.block("bsp switch trigger volumes");
-        for (size_t i = 0; i < sw.size(); i++) edges.push_back({(int)sw[i].integer("source"), (int)sw[i].integer("destination")});
+        // (the switches: trigger volumes named "bspA,B", made the scenario's switch volumes when it's built)
+        tagfile::Block tv = r.block("trigger volumes");
+        for (size_t i = 0; i < tv.size(); i++) {
+            unsigned from = 0, to = 0;
+            if (std::sscanf(tv[i].str("name").c_str(), "bsp%u,%u", &from, &to) == 2 || std::sscanf(tv[i].str("name").c_str(), "BSP%u,%u", &from, &to) == 2) edges.push_back({(int)from, (int)to});
+        }
         tagfile::Block ps = r.block("player starting locations");
         if (ps.size()) start = (int)ps[0].integer("bsp index");
     }
@@ -15157,12 +15161,13 @@ static void campaign_apply(Job &job) {
     const bool dry = cfg.xbox_prepare_only && cfg.campaign_split == 0;
     const bool opening_on = (cfg.campaign_split & 1) && a.opening.found, closing_on = (cfg.campaign_split & 2) && a.closing.found;
     const int this_piece = cfg.campaign_piece;
-    if (!dry && ((this_piece == 0 && !opening_on && !closing_on) || (this_piece == 1 && !a.opening.found) || (this_piece == 2 && !a.closing.found))) {
+    if (!dry && ((this_piece == 0 && !opening_on && !closing_on && cfg.campaign_parts < 2) || (this_piece == 1 && !a.opening.found) ||
+                 (this_piece == 2 && !a.closing.found))) {
         // (a cutscene piece the level hasn't: nothing to build; the Campaign tab goes on without it)
         if (this_piece != 0) job.no_piece = true;
         return;
     }
-    if (dry && !a.opening.found && !a.closing.found) return;
+    if (dry && !a.opening.found && !a.closing.found && cfg.campaign_parts < 2) return;
     const std::string scen = job.scenario + ".scenario";
     fs::path sdir = job.owner(scen);
     if (sdir.empty()) return;
@@ -15180,8 +15185,14 @@ static void campaign_apply(Job &job) {
         for (size_t i = 0; i < b.size(); i++) bsp_tags.push_back(b[i].ref("structure bsp"));
         tagfile::Block ps = r.block("player starting locations");
         for (size_t i = 0; i < ps.size(); i++) start_bsps.push_back((int)ps[i].integer("bsp index"));
-        tagfile::Block sw = r.block("bsp switch trigger volumes");
-        for (size_t i = 0; i < sw.size(); i++) { trigger_bsps.push_back((int)sw[i].integer("source")); trigger_bsps.push_back((int)sw[i].integer("destination")); }
+        // (the switches: trigger volumes named "bspA,B", made the scenario's switch volumes when it's built)
+        tagfile::Block tvs = r.block("trigger volumes");
+        for (size_t i = 0; i < tvs.size(); i++) {
+            unsigned from = 0, to = 0;
+            std::string n = tvs[i].str("name");
+            for (auto &c : n) c = (char)tolower((unsigned char)c);
+            if (std::sscanf(n.c_str(), "bsp%u,%u", &from, &to) == 2) { trigger_bsps.push_back((int)from); trigger_bsps.push_back((int)to); }
+        }
         tagfile::Block cp = r.block("cutscene camera points");
         for (size_t i = 0; i < cp.size(); i++) {
             std::string n = cp[i].str("name");
@@ -15196,9 +15207,231 @@ static void campaign_apply(Job &job) {
     std::map<int, int> to;
     auto keep_list = [&](const std::set<int> &keep) {
         st.keep_bsps.assign(keep.begin(), keep.end());
+        to.clear();
         for (size_t i = 0; i < st.keep_bsps.size(); i++) to[st.keep_bsps[i]] = (int)i;
     };
     std::string what;
+    // ---- A gameplay part (Config::campaign_parts): which BSPs each part has, this one's scripts, and (finish_part,
+    // once the scenario is cut down) its way on, where it starts and what it can be carried into.
+    std::string part_what;
+    std::vector<int> part_of(nbsp, -1);
+    std::map<std::string, std::string> exit_names;          // "bspA,B" volumes leading on -> their names in the part
+    std::vector<campaign::Switch> entries;                  // the switches from the part before into this one
+    std::array<double, 3> came_from{0, 0, 0};               // where the player was coming from (for which way to face)
+    bool came_from_set = false;
+    auto bsps_at = [&](const std::vector<std::array<double, 3>> &pts) {
+        std::vector<unsigned> w(pts.size(), 0);
+        std::vector<portals::V3> q(pts.begin(), pts.end());
+        for (size_t b = 0; b < nbsp && b < 32; b++) {
+            fs::path bo = bsp_tags[b].empty() ? fs::path() : job.owner(bsp_tags[b]);
+            std::vector<char> in;
+            if (bo.empty() || !portals::inside_level(bo / from_u8(bsp_tags[b]), q, in)) continue;
+            for (size_t i = 0; i < in.size(); i++) if (in[i]) w[i] |= 1u << b;
+        }
+        return w;
+    };
+    auto make_part = [&](const std::set<int> &level_bsps, const std::vector<std::pair<fs::path, std::string>> &texts,
+                         std::string &why) -> std::vector<std::pair<fs::path, std::string>> {
+        const int parts = cfg.campaign_parts, p = cfg.campaign_part;
+        std::map<std::string, unsigned> bsps_of;
+        std::vector<campaign::Switch> sw;
+        if (!campaign::locate(scen_original, bsps_at, bsps_of, sw)) { why = "the scenario couldn't be read"; return texts; }
+        campaign::Analysis la;
+        for (auto &t : texts) {
+            campaign::File f;
+            f.path = t.first;
+            f.text = t.second;
+            f.forms = campaign::parse(f.text);
+            la.files.push_back(std::move(f));
+        }
+        campaign::analyze(la);
+        // The order a player reaches the BSPs: the first statement of the level's main script (its longest startup
+        // one) naming something standing in each; a BSP it never names comes just after the one switching to it.
+        std::vector<double> first(nbsp, 1e9);
+        {
+            size_t best = 0;
+            const campaign::Node *main = nullptr;
+            for (auto &d : la.defs) {
+                if (d.kind != "script" || d.type != "startup") continue;
+                const campaign::Node &f = la.files[d.file].forms[d.form];
+                if (!main || f.kids.size() > best) { main = &f; best = f.kids.size(); }
+            }
+            for (int b : start_bsps) if (b >= 0 && (size_t)b < nbsp) first[(size_t)b] = -1;
+            if (main)
+                for (size_t k = 3; k < main->kids.size(); k++) {
+                    std::function<void(const campaign::Node &)> look = [&](const campaign::Node &n) {
+                        if (!n.list) {
+                            auto it = bsps_of.find(n.atom.substr(0, n.atom.find('/')));
+                            if (it != bsps_of.end())
+                                for (size_t b = 0; b < nbsp && b < 32; b++)
+                                    if (it->second >> b & 1) first[b] = std::min(first[b], (double)k);
+                            return;
+                        }
+                        for (auto &c : n.kids) look(c);
+                    };
+                    look(main->kids[k]);
+                }
+            for (int round = 0; round < (int)nbsp; round++)
+                for (auto &x : sw)
+                    if (x.source >= 0 && x.destination >= 0 && (size_t)x.source < nbsp && (size_t)x.destination < nbsp &&
+                        first[(size_t)x.source] < 1e9 && first[(size_t)x.destination] >= 1e9)
+                        first[(size_t)x.destination] = first[(size_t)x.source] + 0.5;
+        }
+        std::vector<int> order(level_bsps.begin(), level_bsps.end());
+        std::stable_sort(order.begin(), order.end(), [&](int x, int y) { return first[(size_t)x] < first[(size_t)y]; });
+        if ((int)order.size() < parts) { why = "the level has " + std::to_string(order.size()) + " BSPs, too few for " + std::to_string(parts) + " parts"; return texts; }
+        // Into `parts` runs of that order, the biggest as small as can be (by the BSPs' tag sizes).
+        std::vector<double> w;
+        for (int b : order) {
+            fs::path bo = job.owner(bsp_tags[(size_t)b]);
+            std::error_code e2;
+            w.push_back(bo.empty() ? 1.0 : (double)fs::file_size(bo / from_u8(bsp_tags[(size_t)b]), e2) + 1.0);
+        }
+        const size_t n = order.size();
+        std::vector<double> pre(n + 1, 0);
+        for (size_t i = 0; i < n; i++) pre[i + 1] = pre[i] + w[i];
+        std::vector<std::vector<double>> cost((size_t)parts + 1, std::vector<double>(n + 1, 1e300));
+        std::vector<std::vector<size_t>> cut((size_t)parts + 1, std::vector<size_t>(n + 1, 0));
+        cost[0][0] = 0;
+        for (int k = 1; k <= parts; k++)
+            for (size_t i = (size_t)k; i <= n; i++)
+                for (size_t j = (size_t)k - 1; j < i; j++) {
+                    const double c = std::max(cost[(size_t)k - 1][j], pre[i] - pre[j]);
+                    if (c < cost[(size_t)k][i]) { cost[(size_t)k][i] = c; cut[(size_t)k][i] = j; }
+                }
+        for (size_t i = n, k = (size_t)parts; k > 0; k--) {
+            const size_t j = cut[k][i];
+            for (size_t x = j; x < i; x++) part_of[(size_t)order[x]] = (int)k - 1;
+            i = j;
+        }
+        std::set<int> mine;
+        for (size_t b = 0; b < nbsp; b++) if (part_of[b] == p) mine.insert((int)b);
+        keep_list(mine);
+        // The way on, and the way in.
+        campaign::PartPlan plan;
+        plan.part_of = part_of;
+        for (auto &[name, bits] : bsps_of)
+            for (size_t b = 0; b < nbsp && b < 32; b++)
+                if (bits >> b & 1 && part_of[b] >= 0) plan.where[name].insert(part_of[b]);
+        for (auto &x : sw) {
+            if (x.source < 0 || x.destination < 0 || (size_t)x.source >= nbsp || (size_t)x.destination >= nbsp) continue;
+            if (part_of[(size_t)x.source] == p && part_of[(size_t)x.destination] == p + 1 && !exit_names.count(x.volume)) {
+                std::string nm = "hmp_exit_" + std::to_string(exit_names.size());
+                exit_names[x.volume] = nm;
+                plan.exits.push_back(nm);
+            }
+            if (part_of[(size_t)x.source] == p - 1 && part_of[(size_t)x.destination] == p) entries.push_back(x);
+        }
+        if (p + 1 < parts) plan.next = "+./" + (p + 1 < (int)cfg.campaign_part_folders.size() ? cfg.campaign_part_folders[(size_t)p + 1] : std::string());
+        plan.renumber = to;
+        campaign::PartStats ps;
+        auto out = campaign::part_texts(la, plan, p, ps);
+        if (p + 1 < parts && plan.exits.empty() && !ps.scripted_exits) {
+            why = "no switch leads on from its BSPs to the next part's (its scripts don't switch there either)";
+            return texts;
+        }
+        if (p > 0 && entries.empty()) { why = "no switch leads into it from the part before (nowhere to start it)"; return texts; }
+        // (which way to face where it starts: from where the part before started, or the level did)
+        {
+            tagfile::Tag t;
+            if (t.load(scen_original)) {
+                tagfile::Block sl = t.root().block("player starting locations");
+                if (sl.size()) { came_from = {sl[0].num("position", 0), sl[0].num("position", 1), sl[0].num("position", 2)}; came_from_set = true; }
+            }
+            for (int q = 1; q < p; q++)
+                for (auto &x : sw)
+                    if (x.source >= 0 && x.destination >= 0 && (size_t)x.source < nbsp && (size_t)x.destination < nbsp &&
+                        part_of[(size_t)x.source] == q - 1 && part_of[(size_t)x.destination] == q) { came_from = x.middle; came_from_set = true; break; }
+        }
+        std::string list;
+        for (int b : mine) list += (list.empty() ? "" : ", ") + fs::path(from_u8(bsp_tags[(size_t)b])).stem().u8string();
+        part_what = "part " + std::to_string(p + 1) + " of " + std::to_string(parts) + " of the level (" + std::to_string(ps.kept) +
+                    " script statements kept, " + std::to_string(ps.caught_up) + " done at once to catch up on the parts before, " +
+                    std::to_string(ps.dropped) + " left to other parts; " +
+                    (p + 1 < parts ? std::to_string(plan.exits.size()) + " switch volume" + (plan.exits.size() == 1 ? "" : "s") +
+                                         (ps.scripted_exits ? " and " + std::to_string(ps.scripted_exits) + " scripted switch" + (ps.scripted_exits == 1 ? "" : "es") : "") +
+                                         " lead on to part " + std::to_string(p + 2)
+                                   : std::string("the last part")) + ")";
+        return out;
+    };
+    auto finish_part = [&](const fs::path &file) -> std::string {
+        const int p = cfg.campaign_part;
+        tagfile::EditTag ed, orig;
+        if (!ed.load(file) || !orig.load(scen_original)) return "the scenario couldn't be read";
+        using tagfile::TagNode;
+        // Switch volumes: the ways on renamed for the scripts (no longer switches); the others' BSPs renumbered, or
+        // no longer switches where a BSP isn't in the part.
+        int renamed = 0;
+        if (auto *tv = tagfile::block(ed.root(), "trigger volumes"))
+            for (auto &v : *tv) {
+                std::string n = tagfile::get_str(v, "name"), l = n;
+                for (auto &c : l) c = (char)tolower((unsigned char)c);
+                unsigned from = 0, dest = 0;
+                if (std::sscanf(l.c_str(), "bsp%u,%u", &from, &dest) != 2) continue;
+                auto ex = exit_names.find(l);
+                if (ex != exit_names.end()) { tagfile::set_str(v, "name", ex->second); renamed++; continue; }
+                if (to.count((int)from) && to.count((int)dest))
+                    tagfile::set_str(v, "name", "bsp" + std::to_string(to[(int)from]) + "," + std::to_string(to[(int)dest]));
+                else
+                    tagfile::set_str(v, "name", "x" + n);
+            }
+        if (p > 0) {
+            // Where it starts: in the switch volumes from the part before (as many places as the level had), facing on.
+            std::vector<TagNode> *sl = tagfile::block(ed.root(), "player starting locations");
+            std::vector<TagNode> *osl = tagfile::block(orig.root(), "player starting locations");
+            if (!sl || !osl || osl->empty()) return "the level has no player starting location to copy";
+            const size_t count = std::max<size_t>(1, osl->size());
+            std::vector<TagNode> made;
+            for (size_t i = 0; i < count; i++) {
+                const campaign::Switch &x = entries[i % entries.size()];
+                TagNode n = (*osl)[0];
+                double dx = x.middle[0] - came_from[0], dy = x.middle[1] - came_from[1];
+                if (!came_from_set || std::hypot(dx, dy) < 0.01) { dx = x.forward[0]; dy = x.forward[1]; }
+                const double facing = std::atan2(dy, dx), side = ((double)(i / entries.size()) - (count / entries.size() - 1) / 2.0) * 0.6;
+                tagfile::set_num(n, "position", x.middle[0] - std::sin(facing) * side, 0);
+                tagfile::set_num(n, "position", x.middle[1] + std::cos(facing) * side, 1);
+                tagfile::set_num(n, "position", x.middle[2], 2);
+                tagfile::set_num(n, "facing", facing);
+                tagfile::set_num(n, "bsp index", to.count(x.destination) ? to[x.destination] : 0);
+                made.push_back(n);
+            }
+            *sl = made;
+            // What the player had: carried over (Halo 1 Unlimited) with a starting profile of this name; without it (the
+            // part loaded on its own) the level's own starting weapons.
+            if (std::vector<TagNode> *pr = tagfile::block(ed.root(), "player starting profile"))
+                if (!pr->empty()) tagfile::set_str((*pr)[0], "name", "hmp_carry");
+            // Every weapon of the level (and the vehicles of the part before) in the map, for what's carried over.
+            for (auto [palette, placements, all] : {std::tuple<const char *, const char *, bool>{"weapon palette", "weapons", true},
+                                                     {"vehicle palette", "vehicles", false}}) {
+                std::vector<TagNode> *pal = tagfile::block(ed.root(), palette), *opal = tagfile::block(orig.root(), palette),
+                                     *opl = tagfile::block(orig.root(), placements);
+                if (!pal || !opal) continue;
+                std::set<std::string> have;
+                for (auto &e : *pal) if (std::string *r = tagfile::ref_path(e, "name")) have.insert(*r);
+                std::vector<char> wanted(opal->size(), all ? 1 : 0);
+                if (!all && opl) {
+                    std::vector<std::array<double, 3>> pts;
+                    for (auto &e : *opl) pts.push_back({tagfile::get_num(e, "position", 0), tagfile::get_num(e, "position", 1), tagfile::get_num(e, "position", 2) + 0.1});
+                    std::vector<unsigned> in = bsps_at(pts);
+                    for (size_t i = 0; i < opl->size() && i < in.size(); i++) {
+                        int ty = (int)tagfile::get_num((*opl)[i], "type");
+                        bool before = false;
+                        for (size_t b = 0; b < nbsp && b < 32; b++) if (in[i] >> b & 1 && part_of[b] == p - 1) before = true;
+                        if (before && ty >= 0 && (size_t)ty < wanted.size()) wanted[(size_t)ty] = 1;
+                    }
+                }
+                for (size_t i = 0; i < opal->size(); i++) {
+                    std::string *r = tagfile::ref_path((*opal)[i], "name");
+                    if (!wanted[i] || !r || r->empty() || have.count(*r)) continue;
+                    pal->push_back((*opal)[i]);
+                    have.insert(*r);
+                }
+            }
+        }
+        if (!ed.save(file)) return "the scenario couldn't be saved";
+        part_what += "; " + std::to_string(renamed) + " switch volume" + (renamed == 1 ? "" : "s") + " made its way on";
+        return "";
+    };
     if (piece == 0) {
         // The level, without the pieces: the scripts as a skip (and the closing piece's map_name) leave them.
         std::set<std::string> removed, kept;
@@ -15213,15 +15446,29 @@ static void campaign_apply(Job &job) {
         for (size_t i = 0; i < nbsp; i++)
             if (used.count((int)i) || !gone.count((int)i)) keep.insert((int)i);   // (what only the pieces switch to goes)
         keep_list(keep);
+        if (cfg.campaign_parts > 1) {
+            // One gameplay part of the level (campaign.hpp PartPlan): its BSPs, its scripts from where it starts to
+            // where it leads on.
+            std::string why;
+            texts = make_part(keep, texts, why);
+            if (!why.empty()) return "part " + std::to_string(cfg.campaign_part + 1) + " couldn't be made: " + why;
+            all_after.clear();
+            for (auto &t : texts) all_after += t.second + "\n";
+            kept = campaign::atoms(all_after);
+            st.by_place = true;
+            st.keep_named = true;   // (a statement of this part naming another part's encounter too)
+        }
         if (write)
             for (auto &t : texts) {
                 std::ofstream f(t.first, std::ios::binary | std::ios::trunc);
-                f << campaign::renumber_bsps(t.second, to);
+                f << (cfg.campaign_parts > 1 ? t.second : campaign::renumber_bsps(t.second, to));   // (a part's: renumbered already)
             }
         st.names = kept;
         st.drop = removed;
         st.patterns = campaign::containing_patterns(all_after);
-        what = std::string("the level without its ") + (opening && closing ? "opening and closing cutscenes" : opening ? "opening cutscene" : "closing cutscene");
+        what = cfg.campaign_parts > 1 ? part_what
+                                      : std::string("the level without its ") +
+                                            (opening && closing ? "opening and closing cutscenes" : opening ? "opening cutscene" : "closing cutscene");
     } else {
         // A cutscene on its own: its scripts, and a startup script playing it, then the next map.
         int start = 0;
@@ -15271,6 +15518,10 @@ static void campaign_apply(Job &job) {
     };
     campaign::Stripped out;
     if (!campaign::strip_scenario(scen_file, st, out)) return "the scenario couldn't be cut down: " + out.why;
+    if (piece == 0 && cfg.campaign_parts > 1) {
+        std::string why = finish_part(scen_file);
+        if (!why.empty()) return "part " + std::to_string(cfg.campaign_part + 1) + ": " + why;
+    }
     std::string bsps;
     for (size_t i = 0; i < st.keep_bsps.size(); i++) bsps += (i ? ", " : "") + fs::path(from_u8(bsp_tags[(size_t)st.keep_bsps[i]])).stem().u8string();
     return what + ": BSPs " + bsps + (out.bsps ? " (" + std::to_string(out.bsps) + " left out)" : "") + "; " +

@@ -110,14 +110,14 @@ enum {
     ID_S_KEEP_LBL, ID_S_KEEP, ID_S_CLEAR, ID_S_THEME_LBL, ID_S_THEME,
     // the Campaign tab: a campaign level's cutscenes, split off into maps of their own
     ID_CA_HINT, ID_CA_MAP, ID_CA_FIND, ID_CA_OPEN, ID_CA_CLOSE, ID_CA_CONVERT, ID_CA_REPORT, ID_CA_HALVES,
-    ID_CA_SHARED, ID_CA_STOCK,
+    ID_CA_SHARED, ID_CA_STOCK, ID_CA_PARTS_LBL, ID_CA_PARTS,
 };
 
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new151.exe is 1.151).
-#define HMP_VERSION L"1.151"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new152.exe is 1.152).
+#define HMP_VERSION L"1.152"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -216,6 +216,7 @@ static void save_settings() {
     ini_set(L"ca_close", checked(ID_CA_CLOSE) ? L"1" : L"0");
     ini_set(L"ca_shared", checked(ID_CA_SHARED) ? L"1" : L"0");
     ini_set(L"ca_stock", checked(ID_CA_STOCK) ? L"1" : L"0");
+    ini_set(L"ca_parts", std::to_wstring(std::max(0, (int)sel(ID_CA_PARTS)) + 1));
     ini_set(L"x_anim", std::to_wstring(std::max(0, sel(ID_X_ANIM))));
     ini_set(L"x_portals", std::to_wstring(std::max(0, sel(ID_X_PORTALS))));
     ini_set(L"x_tex2", std::to_wstring(sel(ID_X_TEX)));
@@ -2275,6 +2276,11 @@ static void create_campaign_page() {
     y += 26;
     check(P, L"Split off the closing cutscene (the level's last stretch, through the end), as a map that plays after it", 26, y, 708, ID_CA_CLOSE);
     y += 26;
+    label(P, L"Gameplay parts:", 26, y, 110, ID_CA_PARTS_LBL);
+    add(P, L"COMBOBOX", L"", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 140, y, 360, 200, ID_CA_PARTS);
+    for (auto t : {L"1 (the level as one map)", L"2 (split at a BSP switch)", L"3", L"4"})
+        SendDlgItemMessageW(g_wnd, ID_CA_PARTS, CB_ADDSTRING, 0, (LPARAM)t);
+    y += 30;
     check(P, L"Store the textures and sounds the pieces share once, in <level>-<version>.shared beside their folders (Halo 1 Unlimited v1.102)", 26, y, 708, ID_CA_SHARED);
     y += 26;
     check(P, L"And draw on stock.shared: what's in the stock maps and campaign (needs the Xbox maps folder in Settings)", 46, y, 688, ID_CA_STOCK);
@@ -2298,6 +2304,15 @@ static std::array<fs::path, 3> campaign_outputs(const fs::path &out) {
     const fs::path folder = out.parent_path(), root = folder.parent_path();
     const std::wstring name = folder.filename().wstring(), stem = out.stem().wstring();
     return {out, root / (name + L" - Opening") / (stem + L"_opening.map"), root / (name + L" - Ending") / (stem + L"_ending.map")};
+}
+// The gameplay parts' maps: part 1 is the level's (the Convert tab's output), part k "<folder> - Part k".
+static std::vector<fs::path> campaign_part_outputs(const fs::path &out, int parts) {
+    const fs::path folder = out.parent_path(), root = folder.parent_path();
+    const std::wstring name = folder.filename().wstring(), stem = out.stem().wstring();
+    std::vector<fs::path> v{out};
+    for (int k = 2; k <= parts; k++)
+        v.push_back(root / (name + L" - Part " + std::to_wstring(k)) / (stem + L"_part" + std::to_wstring(k) + L".map"));
+    return v;
 }
 static bool campaign_ready(fs::path &in, fs::path &out, Game &from) {
     in = fs::path(get_text(ID_IN));
@@ -2373,7 +2388,12 @@ static void start_campaign_convert() {
     Game from;
     if (!campaign_ready(in, out, from)) return;
     const bool opening = checked(ID_CA_OPEN), closing = checked(ID_CA_CLOSE);
-    if (!opening && !closing) { MessageBoxW(g_wnd, L"Tick the cutscenes to split off (or convert the whole level on the Convert tab).", L"Halo Map Porter", MB_ICONINFORMATION); return; }
+    const int parts = std::max(0, (int)sel(ID_CA_PARTS)) + 1;
+    if (!opening && !closing && parts < 2) {
+        MessageBoxW(g_wnd, L"Tick the cutscenes to split off, or choose gameplay parts (or convert the whole level on the Convert tab).",
+                    L"Halo Map Porter", MB_ICONINFORMATION);
+        return;
+    }
     if (!check_card_folder(conv_card())) return;
     std::wstring card_note;
     if (!write_card(conv_card_dir(), conv_card_name(), out, card_note)) return;
@@ -2383,12 +2403,18 @@ static void start_campaign_convert() {
     cfg.campaign_split = (opening ? 1 : 0) | (closing ? 2 : 0);
     cfg.campaign_level_folder = N(out.parent_path().filename().wstring());
     cfg.campaign_closing_folder = N(outs[2].parent_path().filename().wstring());
+    const auto part_outs = campaign_part_outputs(out, parts);
+    Config cfg2 = cfg;
+    cfg2.campaign_parts = parts;
+    // (a level in parts isn't the Custom Edition map any more: no Perfect Conversion, nothing linked to play with it)
+    if (parts > 1) cfg2.xbox_perfect = false;
+    for (auto &po : part_outs) cfg2.campaign_part_folders.push_back(N(po.parent_path().filename().wstring()));
     const std::string title = mapcard::load_card(conv_card_dir(), N(conv_card_name())).name;
     const bool share = checked(ID_SHARE), store_shared = checked(ID_CA_SHARED), use_stock = checked(ID_CA_STOCK);
     set_busy(true);
     SetWindowTextW(g_log, L"");
-    append_log(L"Converting " + in.filename().wstring() + L" as pieces: " + (opening ? L"its opening cutscene, " : L"") + L"the level" +
-               (closing ? L", its closing cutscene" : L""));
+    append_log(L"Converting " + in.filename().wstring() + L" as pieces: " + (opening ? L"its opening cutscene, " : L"") +
+               (parts > 1 ? L"the level in " + std::to_wstring(parts) + L" parts" : L"the level") + (closing ? L", its closing cutscene" : L""));
     if (!card_note.empty()) append_log(card_note);
     std::thread([=] {
         // the pieces first (each its own map folder, with an info.txt naming it), then the level
@@ -2419,15 +2445,35 @@ static void start_campaign_convert() {
             std::string err;
             if (!mapcard::write_info_txt(card, o.parent_path(), err)) post_log("Map card: " + err);
         }
-        post_log("");
-        post_log("==== The level -> " + N(out.wstring()));
-        Config c = cfg;
-        c.campaign_piece = 0;
-        Result r = convert_map(c, in, from, Game::Xbox, out, share, post_log, nullptr);
-        if (r.ok) {
-            std::string t = card_traits(c, conv_card_dir(), N(conv_card_name()), out, out.parent_path());
-            if (!t.empty()) post_log(t);
-            remember_conversion(in, out);
+        // The level, or its gameplay parts one after another (the first in the level's folder, each loading the next).
+        Result r;
+        for (int part = parts - 1; part >= 0; part--) {
+            const fs::path o = part_outs[(size_t)part];
+            post_log("");
+            post_log(parts > 1 ? "==== Part " + std::to_string(part + 1) + " of " + std::to_string(parts) + " of the level -> " + N(o.wstring())
+                               : "==== The level -> " + N(out.wstring()));
+            Config c = cfg2;
+            c.campaign_piece = 0;
+            c.campaign_part = part;
+            if (part > 0) c.work_tag = "part" + std::to_string(part + 1);
+            std::error_code ec;
+            fs::create_directories(o.parent_path(), ec);
+            Result pr = convert_map(c, in, from, Game::Xbox, o, share, post_log, nullptr);
+            if (part > 0) {
+                if (!pr.ok) { failed += "part " + std::to_string(part + 1) + ": " + pr.error + "\n"; continue; }
+                mapcard::Card card;
+                card.name = (title.empty() ? N(out.parent_path().filename().wstring()) : title) + " (part " + std::to_string(part + 1) + ")";
+                card.desc = "Part " + std::to_string(part + 1) + " of the level: the part before loads it, carrying the player over.";
+                std::string err;
+                if (!mapcard::write_info_txt(card, o.parent_path(), err)) post_log("Map card: " + err);
+                continue;
+            }
+            r = pr;
+            if (r.ok) {
+                std::string t = card_traits(c, conv_card_dir(), N(conv_card_name()), out, out.parent_path());
+                if (!t.empty()) post_log(t);
+                remember_conversion(in, out);
+            }
         }
         if (!failed.empty()) {
             r.ok = false;
@@ -2442,6 +2488,8 @@ static void start_campaign_convert() {
             std::error_code ec;
             for (size_t k : {1, 0, 2})
                 if (fs::exists(outs[k], ec)) pieces.push_back(outs[k]);
+            for (size_t k = 1; k < part_outs.size(); k++)
+                if (fs::exists(part_outs[k], ec)) pieces.push_back(part_outs[k]);
             const fs::path folder = out.parent_path().parent_path();
             post_log("");
             post_log("==== Storing what the pieces share once, in " + N(folder.wstring()));
@@ -3991,6 +4039,7 @@ static void create_controls() {
     set_check(ID_CA_CLOSE, ini_get(L"ca_close", L"1") == L"1");
     set_check(ID_CA_SHARED, ini_get(L"ca_shared", L"0") == L"1");
     set_check(ID_CA_STOCK, ini_get(L"ca_stock", L"0") == L"1");
+    SendDlgItemMessageW(g_wnd, ID_CA_PARTS, CB_SETCURSEL, std::clamp(_wtoi(ini_get(L"ca_parts", L"1").c_str()), 1, 4) - 1, 0);
     set_check(ID_X_ALLVEH, ini_get(L"x_allveh", L"1") == L"1");
     set_check(ID_X_LODSTOCK, ini_get(L"x_lodstock", L"0") == L"1");
     set_check(ID_X_MAKELOD, ini_get(L"x_makelod", L"1") == L"1");

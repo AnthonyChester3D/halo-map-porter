@@ -414,6 +414,15 @@ std::string get_str(const TagNode &n, const char *name) {
     return s.substr(0, s.find('\0'));
 }
 
+bool set_str(TagNode &n, const char *name, const std::string &v) {
+    int i = field_of(n.sid, name, 0);
+    if (i < 0 || kTagFields[i].type != 's' || kTagFields[i].offset + 32 > n.fixed.size()) return false;
+    std::string b(32, '\0');
+    b.replace(0, std::min<size_t>(v.size(), 31), v.substr(0, 31));
+    n.fixed.replace(kTagFields[i].offset, 32, b);
+    return true;
+}
+
 bool set_num(TagNode &n, const char *name, double v, int k) {
     int i = field_of(n.sid, name, 0);
     if (i < 0 || k < 0 || k >= kTagFields[i].count) return false;

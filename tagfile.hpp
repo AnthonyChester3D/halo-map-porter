@@ -109,6 +109,7 @@ private:
 double get_num(const TagNode &n, const char *field, int k = 0);
 std::string get_str(const TagNode &n, const char *field);   // a 32-character string
 bool set_num(TagNode &n, const char *field, double v, int k = 0);
+bool set_str(TagNode &n, const char *field, const std::string &v);   // (31 characters at most)
 // A block's elements (nullptr if the struct has no such block). Elements added must be of the block's struct:
 // copies of its elements, or new_node(block_struct(...)).
 std::vector<TagNode> *block(TagNode &n, const char *field);

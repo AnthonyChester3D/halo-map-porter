@@ -202,6 +202,11 @@ struct Config {
     // The Campaign tab's "Estimate halves": the level (its cutscenes split off as ticked) prepared, then built quickly
     // as two halves at each place its BSPs switch, for each half's tag memory; nothing is kept (Result::campaign).
     bool campaign_halves = false;
+    // Campaign levels split into gameplay parts at their BSP switches (campaign.hpp PartPlan): how many (0, 1: none),
+    // which this conversion makes (with campaign_piece 0), and each part's folder (part 0's is campaign_level_folder):
+    // a part ends by loading the next ("+./folder"), the last one the closing cutscene's as the level did.
+    int campaign_parts = 0, campaign_part = 0;
+    std::vector<std::string> campaign_part_folders;
 };
 
 // A model to show in the weapons & vehicles window: its most detailed version (each region's first permutation),

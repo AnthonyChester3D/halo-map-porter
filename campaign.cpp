@@ -2,6 +2,7 @@
 #include "campaign.hpp"
 #include "tagfile.hpp"
 #include <algorithm>
+#include <cstdio>
 #include <cctype>
 #include <fstream>
 #include <functional>
@@ -136,7 +137,8 @@ void find_defs(Analysis &a) {
                 d.type = f.kids[1].atom;
                 size_t at = d.type == "static" || d.type == "stub" ? 3 : 2;
                 if (at >= f.kids.size()) continue;
-                d.name = f.kids[at].atom;
+                // (MCC: a static script's parameters, (name (type param)...))
+                d.name = f.kids[at].list ? (f.kids[at].kids.empty() ? std::string() : f.kids[at].kids[0].atom) : f.kids[at].atom;
             } else if (head(f) == "global") {
                 d.kind = "global";
                 d.type = f.kids[1].atom;
@@ -466,6 +468,284 @@ std::string piece_text(const Analysis &a, bool opening, const std::string &next,
     return out;
 }
 
+// ---------------------------------------------------------------- gameplay parts
+namespace {
+// Calls that set state (kept, done at once, when a part catches up on what earlier parts did).
+bool sets_state(const Node &s) {
+    static const std::set<std::string> keep = {
+        "set", "wake", "ai_allegiance", "ai_allegiance_remove", "show_hud", "show_hud_help_text", "hud_show_motion_sensor",
+        "hud_show_health", "hud_show_shield", "hud_show_crosshair", "player_enable_input", "player_camera_control",
+        "cinematic_show_letterbox", "game_can_use_flashlights", "ai_dialogue_triggers", "ai_grenades", "player_add_equipment",
+        "objects_predict", "deactivate_team_nav_point_flag", "deactivate_team_nav_point_object", "deactivate_nav_point_flag",
+        "deactivate_nav_point_object", "device_set_position_immediate", "device_set_power", "device_group_set_immediate",
+        "object_destroy", "object_destroy_containing", "ai_erase", "ai_erase_all", "ai_kill_silent"};
+    const std::string &h = head(s);
+    if (keep.count(h)) return true;
+    // (sleep -1 script: that script stopped for good)
+    return h == "sleep" && s.kids.size() == 3 && s.kids[1].atom == "-1";
+}
+}   // namespace
+
+std::vector<std::pair<fs::path, std::string>> part_texts(const Analysis &a, const PartPlan &plan, int part, PartStats &stats) {
+    stats = PartStats();
+    // Where each script is: what it names, and what the scripts it wakes and calls name, until nothing changes.
+    std::map<std::string, std::set<int>> where = plan.where;
+    auto part_of_bsp = [&](int b) { return b >= 0 && b < (int)plan.part_of.size() ? plan.part_of[(size_t)b] : -1; };
+    std::map<std::string, std::set<std::string>> names_in;
+    for (auto &d : a.defs) {
+        if (d.kind != "script") continue;
+        const Node &f = a.files[d.file].forms[d.form];
+        names_in[d.name] = atoms(slice(a.files[d.file].text, f.b, f.e));
+        names_in[d.name].erase(d.name);
+    }
+    for (bool more = true; more;) {
+        more = false;
+        for (auto &[name, ns] : names_in) {
+            std::set<int> &w = where[name];
+            const size_t before = w.size();
+            for (auto &x : ns) {
+                std::string k = x.substr(0, x.find('/'));
+                auto it = where.find(k);
+                if (it != where.end() && it->first != name) w.insert(it->second.begin(), it->second.end());
+            }
+            if (w.size() != before) more = true;
+        }
+        for (auto it = where.begin(); it != where.end();) it = it->second.empty() ? where.erase(it) : std::next(it);
+    }
+    // A statement's parts: what it names, and the BSPs it switches to or tests.
+    // (`direct`: only what stands somewhere, not the scripts it wakes or calls)
+    auto parts_of = [&](const std::string &text, const Node &n, bool direct = false) {
+        const std::map<std::string, std::set<int>> &m = direct ? plan.where : where;
+        std::set<int> ps;
+        walk(n, [&](const Node &k) {
+            if (k.list) return;
+            auto it = m.find(k.atom.substr(0, k.atom.find('/')));
+            if (it != m.end()) ps.insert(it->second.begin(), it->second.end());
+        });
+        for (int b : bsps_used(slice(text, n.b, n.e))) if (part_of_bsp(b) >= 0) ps.insert(part_of_bsp(b));
+        return ps;
+    };
+    std::vector<std::string> texts;
+    for (auto &f : a.files) texts.push_back(f.text);
+    struct Edit { size_t file, b, e; std::string with; };
+    std::vector<Edit> edits;
+    const std::string leave = "(begin (fade_out 0 0 0 0) (map_name \"" + plan.next + "\"))";
+    // A list of statements (a script's body, a begin's, an if's branches): each kept, caught up on, or left out.
+    bool sequence_loops = false;   // (the script being gone through is a continuous one: it loops)
+    std::function<void(size_t, const std::vector<const Node *> &, bool &)> statements = [&](size_t fi, const std::vector<const Node *> &list,
+                                                                                         bool &reached) {
+        const std::string &text = a.files[fi].text;
+        bool ended = false;
+        for (const Node *s : list) {
+            if (ended) {   // (after a wait for a later part: the part is over by then)
+                edits.push_back({fi, s->b, s->e, ""});
+                stats.dropped++;
+                continue;
+            }
+            std::set<int> ps = parts_of(text, *s);
+            const bool here = ps.count(part) > 0;
+            // (a switch to the next part's BSP: the part ends there)
+            if (!plan.next.empty() && head(*s) == "switch_bsp" && s->kids.size() >= 2 && is_int(s->kids[1].atom) &&
+                part_of_bsp(std::stoi(s->kids[1].atom)) == part + 1) {
+                edits.push_back({fi, s->b, s->e, leave});
+                stats.scripted_exits++;
+                continue;
+            }
+            // (reached: the first statement naming something that stands in this part (not a script that does))
+            if (!reached && parts_of(text, *s, true).count(part)) reached = true;
+            if (!reached) {
+                // Catching up: what earlier parts did, at once.
+                // (what it names standing elsewhere (an earlier part's encounter): not here any more)
+                const std::set<int> direct = parts_of(text, *s, true);
+                if (sets_state(*s) && (direct.empty() || direct.count(part))) {
+                    stats.caught_up++;
+                    continue;
+                }
+                edits.push_back({fi, s->b, s->e, ""});
+                stats.dropped++;
+                continue;
+            }
+            if (ps.empty() || here) {
+                // Kept; inside a begin or an if's branches, the same for its statements.
+                if (head(*s) == "begin" && !ps.empty()) {
+                    std::vector<const Node *> inner;
+                    for (size_t k = 1; k < s->kids.size(); k++) inner.push_back(&s->kids[k]);
+                    bool r2 = true;
+                    statements(fi, inner, r2);
+                } else if (head(*s) == "if" && s->kids.size() >= 3 && !ps.empty()) {
+                    for (size_t k = 2; k < s->kids.size(); k++) {
+                        std::set<int> bp = parts_of(text, s->kids[k]);
+                        if (!bp.empty() && !bp.count(part)) { edits.push_back({fi, s->kids[k].b, s->kids[k].e, "(begin)"}); stats.dropped++; }
+                        else if (head(s->kids[k]) == "begin") {
+                            std::vector<const Node *> inner;
+                            for (size_t j = 1; j < s->kids[k].kids.size(); j++) inner.push_back(&s->kids[k].kids[j]);
+                            bool r2 = true;
+                            statements(fi, inner, r2);
+                        }
+                    }
+                }
+                stats.kept++;
+                continue;
+            }
+            // Only other parts' things: out of reach here. Waiting for a later part's: this part is over by then (the
+            // rest of this list goes too; the way on loads the next).
+            if (!sequence_loops && *ps.begin() > part && head(*s) == "sleep_until") ended = true;
+            edits.push_back({fi, s->b, s->e, ""});
+            stats.dropped++;
+        }
+    };
+    for (auto &d : a.defs) {
+        if (d.kind != "script") continue;
+        const Node &f = a.files[d.file].forms[d.form];
+        std::vector<const Node *> body;
+        for (size_t k = body_start(f); k < f.kids.size(); k++) body.push_back(&f.kids[k]);
+        // (a part's first: nothing to catch up on; a script looping or called (not run through once): kept where it
+        // names this part, else only its statements of no part)
+        if (d.type == "stub") continue;
+        sequence_loops = d.type == "continuous";
+        bool reached = part == 0 || d.type == "continuous" || d.type == "static";
+        // (only a script that did something in an earlier part has catching up to do)
+        if (!reached) {
+            auto it = where.find(d.name);
+            reached = it == where.end() || *it->second.begin() >= part;
+        }
+        statements(d.file, body, reached);
+    }
+    std::sort(edits.begin(), edits.end(), [](const Edit &x, const Edit &y) { return x.file != y.file ? x.file < y.file : x.b > y.b; });
+    // (nested edits: an outer one wins)
+    std::vector<Edit> keep;
+    for (auto &e : edits) {
+        bool inside = false;
+        for (auto &k : keep) if (k.file == e.file && e.b >= k.b && e.e <= k.e) inside = true;
+        if (!inside) keep.push_back(e);
+    }
+    std::sort(keep.begin(), keep.end(), [](const Edit &x, const Edit &y) { return x.file != y.file ? x.file < y.file : x.b > y.b; });
+    for (auto &e : keep) texts[e.file].replace(e.b, e.e - e.b, e.with);
+    // (a script left with nothing to do: one statement that does nothing, as a script needs one)
+    for (auto &t : texts) {
+        std::vector<std::pair<size_t, std::string>> fill;
+        for (auto &f : parse(t)) {
+            if (head(f) != "script" || f.kids.size() < 3 || body_start(f) < f.kids.size() || body_start(f) > f.kids.size()) continue;
+            const std::string &ty = f.kids[1].atom;
+            if (ty == "stub") continue;
+            if (ty == "static" && (f.kids.size() < 3 || f.kids[2].atom != "void")) continue;
+            fill.push_back({f.e - 1, ty == "static" ? " (sleep 0)" : " (sleep -1)"});
+        }
+        for (size_t k = fill.size(); k-- > 0;) t.insert(fill[k].first, fill[k].second);
+    }
+    // The way on: a player in a switch volume to the next part.
+    if (!plan.next.empty() && !plan.exits.empty() && !texts.empty()) {
+        std::string test;
+        for (auto &v : plan.exits) test += " (volume_test_objects " + v + " (players))";
+        if (plan.exits.size() > 1) test = " (or" + test + ")";
+        texts[0] += "\n\n;; The way on to the next part of the level (split by Halo Map Porter)\n(script startup hmp_part_exit\n"
+                    "    (sleep_until" + test + " 1)\n    (fade_out 0 0 0 15)\n    (sleep 15)\n    (map_name \"" + plan.next + "\"))\n";
+    }
+    // Scripts nothing runs any more, out; then the part's BSP numbers.
+    Analysis b;
+    for (size_t i = 0; i < a.files.size(); i++) {
+        File f;
+        f.path = a.files[i].path;
+        f.text = texts[i];
+        f.forms = parse(f.text);
+        b.files.push_back(std::move(f));
+    }
+    analyze(b);
+    std::set<std::string> removed, kept;
+    auto out = level_texts(b, false, false, "", removed, kept);
+    int before = 0, after = 0;
+    for (auto &d : b.defs) if (d.kind == "script") before++;
+    for (auto &t : out) {
+        t.second = renumber_bsps(t.second, plan.renumber);
+        for (auto &f : parse(t.second)) if (head(f) == "script") after++;
+    }
+    stats.scripts_dropped = before - after;
+    return out;
+}
+
+bool locate(const fs::path &scenario, const std::function<std::vector<unsigned>(const std::vector<std::array<double, 3>> &)> &bsps_at,
+            std::map<std::string, unsigned> &bsps_of, std::vector<Switch> &switches) {
+    bsps_of.clear();
+    switches.clear();
+    tagfile::Tag t;
+    if (!t.load(scenario)) return false;
+    tagfile::Elem r = t.root();
+    std::vector<std::string> names;
+    std::vector<std::array<double, 3>> pts;
+    auto add = [&](const std::string &n, double x, double y, double z) {
+        if (n.empty()) return;
+        names.push_back(lower(n));
+        pts.push_back({x, y, z});
+    };
+    std::vector<std::string> volume_names;
+    std::vector<std::array<double, 3>> volume_mid, volume_fwd;
+    tagfile::Block tv = r.block("trigger volumes");
+    for (size_t i = 0; i < tv.size(); i++) {
+        double f[3], u[3], c[3], o[3];
+        for (int k = 0; k < 3; k++) {
+            f[k] = tv[i].num("rotation vector forward", k);
+            u[k] = tv[i].num("rotation vector up", k);
+            c[k] = tv[i].num("starting corner", k);
+            o[k] = tv[i].num("ending corner offset", k);
+        }
+        double l[3] = {u[1] * f[2] - u[2] * f[1], u[2] * f[0] - u[0] * f[2], u[0] * f[1] - u[1] * f[0]};
+        std::array<double, 3> m;
+        for (int k = 0; k < 3; k++) m[(size_t)k] = c[k] + (f[k] * o[0] + l[k] * o[1] + u[k] * o[2]) / 2;
+        volume_names.push_back(lower(tv[i].str("name")));
+        volume_mid.push_back(m);
+        volume_fwd.push_back({f[0], f[1], f[2]});
+        // (a volume's middle can be in a wall or the ground: points through it, 4 a side)
+        for (int x = 0; x < 4; x++)
+            for (int y = 0; y < 4; y++)
+                for (int z = 0; z < 4; z++) {
+                    const double a = (x + 0.5) / 4, b = (y + 0.5) / 4, cz = (z + 0.5) / 4;
+                    add(tv[i].str("name"), c[0] + f[0] * o[0] * a + l[0] * o[1] * b + u[0] * o[2] * cz,
+                        c[1] + f[1] * o[0] * a + l[1] * o[1] * b + u[1] * o[2] * cz, c[2] + f[2] * o[0] * a + l[2] * o[1] * b + u[2] * o[2] * cz);
+                }
+    }
+    tagfile::Block fl = r.block("cutscene flags");
+    for (size_t i = 0; i < fl.size(); i++) add(fl[i].str("name"), fl[i].num("position", 0), fl[i].num("position", 1), fl[i].num("position", 2));
+    tagfile::Block cp = r.block("cutscene camera points");
+    for (size_t i = 0; i < cp.size(); i++) add(cp[i].str("name"), cp[i].num("position", 0), cp[i].num("position", 1), cp[i].num("position", 2));
+    tagfile::Block en = r.block("encounters");
+    for (size_t i = 0; i < en.size(); i++) {
+        std::string n = en[i].str("name");
+        tagfile::Block sq = en[i].block("squads");
+        for (size_t q = 0; q < sq.size(); q++) {
+            tagfile::Block st = sq[q].block("starting locations");
+            for (size_t k = 0; k < st.size(); k++) add(n, st[k].num("position", 0), st[k].num("position", 1), st[k].num("position", 2));
+        }
+        tagfile::Block fp = en[i].block("firing positions");
+        for (size_t k = 0; k < fp.size(); k++) add(n, fp[k].num("position", 0), fp[k].num("position", 1), fp[k].num("position", 2));
+    }
+    std::vector<std::string> object_names;
+    tagfile::Block on = r.block("object names");
+    for (size_t i = 0; i < on.size(); i++) object_names.push_back(on[i].str("name"));
+    for (const char *k : {"scenery", "bipeds", "vehicles", "equipment", "weapons", "machines", "controls", "light fixtures", "sound scenery"}) {
+        tagfile::Block b = r.block(k);
+        for (size_t i = 0; i < b.size(); i++) {
+            long long ni = b[i].integer("name");
+            if (ni >= 0 && (size_t)ni < object_names.size())
+                add(object_names[(size_t)ni], b[i].num("position", 0), b[i].num("position", 1), b[i].num("position", 2) + 0.1);
+        }
+    }
+    std::vector<unsigned> in = bsps_at(pts);
+    for (size_t i = 0; i < names.size() && i < in.size(); i++) bsps_of[names[i]] |= in[i];
+    // (the switches: trigger volumes named "bspA,B", which the build makes into the scenario's switch volumes)
+    for (size_t v = 0; v < volume_names.size(); v++) {
+        unsigned from = 0, to = 0;
+        if (std::sscanf(volume_names[v].c_str(), "bsp%u,%u", &from, &to) != 2) continue;
+        Switch s;
+        s.volume = volume_names[v];
+        s.middle = volume_mid[v];
+        s.forward = volume_fwd[v];
+        s.source = (int)from;
+        s.destination = (int)to;
+        switches.push_back(s);
+    }
+    return true;
+}
+
 // ---------------------------------------------------------------- the scenario
 namespace {
 using tagfile::TagNode;
@@ -607,7 +887,7 @@ bool strip_scenario(const fs::path &scenario, const Strip &s, Stripped &out) {
         for (auto &e : *enc) {
             std::string n = lower(tagfile::get_str(e, "name"));
             bool keep = s.piece ? ai_named(n) : !(ai_dropped(n) && !ai_named(n));
-            if (keep && s.by_place && !s.piece && s.inside) {   // (all of it in BSPs that go: it goes)
+            if (keep && s.by_place && !s.piece && s.inside && !(s.keep_named && ai_named(n))) {   // (all of it in BSPs that go: it goes)
                 std::vector<std::array<double, 3>> pts;
                 auto at = [&](TagNode &l) { pts.push_back({num(l, "position", 0), num(l, "position", 1), num(l, "position", 2)}); };
                 if (auto *sq = tagfile::block(e, "squads"))

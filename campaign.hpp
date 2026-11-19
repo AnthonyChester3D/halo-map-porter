@@ -76,6 +76,36 @@ std::vector<std::string> containing_patterns(const std::string &text);
 // The cutscene camera points a script sets, in order.
 std::vector<std::string> camera_points_set(const std::string &text);
 
+// ---- Gameplay parts: a level split at its BSP switches into maps played one after another.
+// Each part has some of the level's BSPs (`part_of[bsp]`: its part, in the order a player reaches them). Where things
+// are (`where`: a name the scripts use, lowercase - a trigger volume, an encounter, an object, a cutscene flag - and
+// the parts it stands in) says which part a statement belongs to; a script's own place is that of what it names.
+//
+// Part p's scripts, each script's statements (and those of the begins and ifs in them) in turn:
+// - before its first statement that names something of part p, what earlier parts did is caught up at once: only the
+//   statements that set state (set, wake, a script stopped with sleep -1, allegiances, the HUD and input on or off)
+//   are kept, the waits, cutscenes, dialogue and saves go;
+// - after it, statements that name only other parts' things go (part p can't reach them), the rest stay.
+// A (switch_bsp N) to a later part's BSP, and a player in a switch volume (`exits`: those that lead to the next
+// part) end the part: the next is loaded (map_name `next`). Scripts nothing runs any more are left out, and the BSP
+// numbers become the part's (`renumber`).
+struct PartPlan {
+    std::vector<int> part_of;                      // each BSP's part
+    std::map<std::string, std::set<int>> where;    // name -> parts it stands in
+    std::vector<std::string> exits;                // trigger volumes leading on to the next part
+    std::string next;                              // the next part's map ("" for the last)
+    std::map<int, int> renumber;                   // this part's BSPs: old index -> new
+};
+// Where the things a level's scripts name stand: its trigger volumes (their middles), encounters (their starting and
+// firing positions), named objects, cutscene flags and camera points, by the BSPs `bsps_at` says each point is in (a
+// bit per BSP); then by `part_of` into parts. And its switches: trigger volumes named "bspA,B" (the build makes them
+// the scenario's switch volumes: from BSP A to B).
+struct Switch { std::string volume; int source = -1, destination = -1; std::array<double, 3> middle{}, forward{1, 0, 0}; };
+bool locate(const fs::path &scenario, const std::function<std::vector<unsigned>(const std::vector<std::array<double, 3>> &)> &bsps_at,
+            std::map<std::string, unsigned> &bsps_of, std::vector<Switch> &switches);
+struct PartStats { int kept = 0, caught_up = 0, dropped = 0, scripts_dropped = 0, scripted_exits = 0; };
+std::vector<std::pair<fs::path, std::string>> part_texts(const Analysis &a, const PartPlan &plan, int part, PartStats &stats);
+
 // The BSPs a script switches to or tests (switch_bsp N, structure_bsp_index compared with N).
 std::set<int> bsps_used(const std::string &text);
 // Those numbers changed (`to`: old index -> new).
@@ -95,6 +125,7 @@ struct Strip {
     // (the level only) Encounters by where they are too: one whose starting locations and firing positions are all in
     // BSPs that go, goes (and the conversations whose participants are its).
     bool by_place = false;
+    bool keep_named = false;   // (by_place: an encounter `names` has stays, wherever it is)
 };
 struct Stripped {
     int placements = 0, palette = 0, encounters = 0, conversations = 0, actors = 0, bsps = 0;
