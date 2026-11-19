@@ -27,7 +27,7 @@ enum { IDC_INTRO = 400, IDC_FILTER_LBL, IDC_FILTER, IDC_LIST, IDC_VIEW, IDC_LEVE
        IDC_ASMADE, IDC_ABOUT, IDC_LIBRARY, IDC_CLOSE, IDC_SHOW_MODEL, IDC_SHOW_COLL, IDC_SHOW_COLL_MADE, IDC_GROUP, IDC_HIDE_UNUSED,
        IDC_LODS_LBL, IDC_LODS, IDC_MED_LBL, IDC_MED, IDC_LOW_LBL, IDC_LOW, IDC_TRIS_LBL, IDC_TOP_LBL, IDC_TOP, IDC_TOPN,
        IDC_TOPN_LBL, IDC_STATUS, IDC_AGAIN, IDC_REDO, IDC_CARDS_LBL, IDC_CARDS, IDC_CARDSN, IDC_CARDSN_LBL, IDC_PIECES_LBL, IDC_PIECES, IDC_PIECESN,
-       IDC_PIECESN_LBL };
+       IDC_PIECESN_LBL, IDC_THISMAP };
 
 const UINT WM_UPDATED = WM_APP + 41;   // (the update's thread: done; lParam a Result*)
 const UINT WM_REDONE = WM_APP + 42;    // ("Make it again"'s thread: done; lParam a Result*)
@@ -117,6 +117,7 @@ std::wstring distance(const LodView::Model &m, double px) {
 lod::Settings lib() {
     lod::Settings s;
     s.library = St->library;
+    s.map = St->v.map_key;
     return s;
 }
 bool is_stock(const LodView::Model &m) { return m.stock || m.change == "stock"; }   // (Bungie's: only its levels of detail)
@@ -172,11 +173,13 @@ lod::Choice read_choice() {
     c.pieces = SendMessageW(item(IDC_PIECES), CB_GETCURSEL, 0, 0) == 1 ? std::min(50, number(IDC_PIECESN)) : 0;
     if (SendMessageW(item(IDC_PIECES), CB_GETCURSEL, 0, 0) == 1 && c.pieces <= 0) c.pieces = St->saved.pieces;
     c.skip = St->saved.skip;
+    c.this_map = !St->v.map_key.empty() && SendMessageW(item(IDC_THISMAP), BM_GETCHECK, 0, 0) == BST_CHECKED;
     return c;
 }
 bool same(const lod::Choice &a, const lod::Choice &b) {
     return a.lods == b.lods && a.top == b.top && (a.lods != 'm' || (a.medium == b.medium && a.low == b.low)) &&
-           (a.top != 't' || a.top_triangles == b.top_triangles) && a.cards == b.cards && a.pieces == b.pieces;
+           (a.top != 't' || a.top_triangles == b.top_triangles) && a.cards == b.cards && a.pieces == b.pieces &&
+           a.this_map == b.this_map;
 }
 
 // Which choice controls apply to the model shown.
@@ -197,6 +200,7 @@ void enable_choice() {
     EnableWindow(item(IDC_CARDSN), cards && ci == 2);
     bool pieces = any && !fp;
     for (int id : {IDC_PIECES_LBL, IDC_PIECES, IDC_PIECESN_LBL}) EnableWindow(item(id), pieces);
+    EnableWindow(item(IDC_THISMAP), any && !St->v.map_key.empty());
     EnableWindow(item(IDC_PIECESN), pieces && SendMessageW(item(IDC_PIECES), CB_GETCURSEL, 0, 0) == 1);
     EnableWindow(item(IDC_REDO), m && (bool)St->redo && !St->updating && (lods || top));
 }
@@ -208,7 +212,10 @@ void load_choice() {
     St->loading = true;
     const LodView::Model *m = St->model >= 0 ? &St->v.models[St->model] : nullptr;
     lod::Choice c = m && !St->library.empty() ? lod::choice(lib(), m->tag, m->name) : lod::Choice();
+    // (a model with no choice yet: what's chosen now is for this map only, unless unticked)
+    if (!c.chosen && !St->v.map_key.empty()) c.this_map = true;
     St->saved = c;
+    SendMessageW(item(IDC_THISMAP), BM_SETCHECK, c.this_map ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(item(IDC_LODS), CB_SETCURSEL, c.lods == 'm' ? 1 : c.lods == 'n' ? 2 : 0, 0);
     SendMessageW(item(IDC_TOP), CB_SETCURSEL, c.top == 'k' ? 1 : c.top == 't' ? 2 : 0, 0);
     SetWindowTextW(item(IDC_MED), c.lods == 'm' && c.medium > 0 ? std::to_wstring(c.medium).c_str() : L"");
@@ -632,6 +639,9 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case IDC_ASMADE:
             show_level(St->level);
             return 0;
+        case IDC_THISMAP:
+            if (code == BN_CLICKED && !St->loading) save_choice();
+            return 0;
         case IDC_HIDE_UNUSED:
             save_choice();
             g_hide_unused = SendMessageW(item(IDC_HIDE_UNUSED), BM_GETCHECK, 0, 0) == BST_CHECKED;
@@ -781,7 +791,8 @@ void create_controls() {
 
     // The choices for the model shown (lod.hpp Choice), saved as they change.
     add(L"STATIC", L"", SS_ETCHEDHORZ, 16, 546, 1148, 2, 0);
-    SendMessageW(add(L"STATIC", L"", SS_NOPREFIX, 16, 552, 1148, 20, IDC_GROUP), WM_SETFONT, (WPARAM)St->bold, TRUE);
+    SendMessageW(add(L"STATIC", L"", SS_NOPREFIX, 16, 552, 840, 20, IDC_GROUP), WM_SETFONT, (WPARAM)St->bold, TRUE);
+    add(L"BUTTON", L"These choices for this map only", WS_TABSTOP | BS_AUTOCHECKBOX, 870, 550, 294, 22, IDC_THISMAP);
     add(L"STATIC", L"Lower-detail versions:", SS_NOPREFIX, 16, 581, 160, 20, IDC_LODS_LBL);
     HWND lc = add(L"COMBOBOX", L"", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 180, 577, 250, 200, IDC_LODS);
     for (auto t : {L"As the Xbox tab says", L"Make them, aiming at", L"Don't make them (drawn in full)"})
@@ -834,23 +845,27 @@ void create_controls() {
                   L"the map in all.\n\nMake them: made whatever the Xbox tab says, however few triangles it has, aiming at the medium "
                   L"and low triangles you give (the shape may move further to get there; empty: about half and a fifth).\n\n"
                   L"Don't make them: drawn in full at every distance; a model with lower-detail versions of its own gets "
-                  L"no switch distances either.\n\nKept in choices.txt in the LOD library, for every map that uses the model.");
+                  L"no switch distances either.\n\nKept in choices.txt in the LOD library: for this map only, or every map that uses the model (the box above).");
     tip(IDC_TOP, L"As \"Heavy models\" says: the Xbox tab's choice.\n\nKeep it as made: never trimmed.\n\nTrim it to: aims at "
                  L"that many triangles, whatever the Xbox tab says (the shape may move up to 5% of the model's size to get "
                  L"there). It starts at what Bungie's models of its kind and size have.\n\nKept in choices.txt in the "
-                 L"LOD library, for every map that uses the model.");
+                 L"LOD library: for this map only, or every map that uses the model (the box above).");
     tip(IDC_CARDS, L"Leaf cards: the separate small pieces drawn with a cut-out shader (a tree's or a plant's leaves, "
                    L"grass, branches drawn as pictures on flat cards), 32 triangles or fewer each. Trimming keeps them as made "
                    L"(a card's outline is its texture's), so a tree mostly made of them only gets lighter with fewer.\n\nAs the "
                    L"Xbox tab says: \"Trees, plants\" there, for models that are mostly leaf cards (24 or more, a quarter or "
                    L"more of their triangles).\n\nTake out: that percent of them (up to 90), whatever the Xbox tab says, evenly "
                    L"through the model so it thins out the same everywhere; no part loses its last card. Its lower-detail "
-                   L"versions lose the same share.\n\nKept in choices.txt in the LOD library, for every map that uses the model.");
+                   L"versions lose the same share.\n\nKept in choices.txt in the LOD library: for this map only, or every map that uses the model (the box above).");
     tip(IDC_PIECES, L"Small pieces: parts of the model made as separate pieces (touching nothing else), smaller than that "
                     L"percent of the model's size (the diagonal of the box around it; each piece's the same): bolts, trim, "
                     L"decorations, greebles. Taken out of every level of detail; leaf cards are left to the line above, and "
                     L"each level keeps its biggest piece. \"Make it again\" shows what's left.\n\nKept in choices.txt in "
-                    L"the LOD library, for every map that uses the model.");
+                    L"the LOD library: for this map only, or every map that uses the model (the box above).");
+    tip(IDC_THISMAP, L"Ticked: the model's choices here are kept for this map only (a line marked with the map in choices.txt), "
+                     L"so a hard trim to make one map fit isn't brought to other maps that use the model; they keep its "
+                     L"choice for every map, or the Xbox tab's.\n\nUnticked: the choices are for every map that uses the "
+                     L"model (and this map's own goes).\n\nA model with no choice yet starts ticked.");
     tip(IDC_AGAIN, L"Puts your choices in the map: its models' levels of detail and trims are done again on the tags the "
                    L"conversion prepared, and the map is built (the rest of the map stays as converted). The list then shows "
                    L"the map as built.");

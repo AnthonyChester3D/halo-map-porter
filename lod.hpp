@@ -36,6 +36,7 @@ using LookUp = std::function<ShaderLook(const std::string &shader_tag)>;
 
 struct Settings {
     std::filesystem::path library;   // the LOD library folder (empty: make every time, keep nothing)
+    std::string map;                 // the map being converted (its scenario's name): its own choices come first
     int min_triangles = 1000;        // models with fewer (most detailed version) are left alone
     // The model's shaders (none given: every part is simplified). Trimming a model's most detailed version (seen up
     // close) keeps the triangles drawn cut out (leaf cards, grates: where their texture is see-through,
@@ -173,9 +174,13 @@ struct Choice {
     int pieces = 0;             // separate pieces smaller than this percent of the model's size taken out (0: none)
     bool skip = false;          // from skip.txt (lods n, top k)
     bool chosen = false;        // a line in choices.txt
+    bool this_map = false;      // the line is for this map only (Settings::map), not every map that uses the model
 };
 Choice choice(const Settings &settings, const std::string &model_tag, const std::string &object_name);
-// Writes `c` for the model (its tag path) in choices.txt, replacing its line; `note` (e.g. its name and map) ends the
+// A line can be for one map only ("map NAME" after the model): for that map it comes before the model's line for
+// every map, which no other map sees changed.
+// Writes `c` for the model (its tag path) in choices.txt, replacing its line (for this map only with c.this_map:
+// Settings::map's; else the one for every map, and this map's own goes); `note` (e.g. its name and map) ends the
 // line. A choice that's all automatic takes the line out (unless the model is in skip.txt: the line overrides that).
 // False if it can't.
 bool set_choice(const Settings &settings, const std::string &model_tag, const Choice &c, const std::string &note);

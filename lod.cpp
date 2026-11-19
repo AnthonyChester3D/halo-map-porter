@@ -531,7 +531,8 @@ static const char *kChoicesHeader =
     "# One line per model, tab separated: its tag path; lower-detail versions: auto, none, or make and the medium\r\n"
     "# and low triangles to aim for (0: automatic); its most detailed version: auto, as made, or trim and the\r\n"
     "# triangles; then, if chosen, its leaf cards: cards and the percent to take out (none: keep them all), and its\r\n"
-    "# small pieces: pieces and the percent of its size under which they're taken out. Lines starting with # are notes.\r\n";
+    "# small pieces: pieces and the percent of its size under which they're taken out; map and a map's name: for that\r\n"
+    "# map only (it comes first there; other maps use the model's line without one). Lines starting with # are notes.\r\n";
 
 static std::vector<std::string> split_tabs(const std::string &l) {
     std::vector<std::string> f;
@@ -553,6 +554,19 @@ static std::string tag_key(std::string t) {
     return t;
 }
 
+// The map a choices.txt line is for ("map NAME" among its fields, lower case), "" for every map.
+static std::string line_map(const std::vector<std::string> &f) {
+    for (size_t i = 3; i < f.size(); i++) {
+        std::string x = lower(f[i]);
+        if (x.rfind("map ", 0) == 0) {
+            x = x.substr(4);
+            while (!x.empty() && (x.back() == ' ' || x.back() == '\t')) x.pop_back();
+            return x;
+        }
+    }
+    return "";
+}
+
 Choice choice(const Settings &settings, const std::string &model_tag, const std::string &object_name) {
     Choice c;
     if (settings.library.empty()) return c;
@@ -560,11 +574,21 @@ Choice choice(const Settings &settings, const std::string &model_tag, const std:
     if (c.skip) c.lods = 'n', c.top = 'k';
     std::ifstream in(settings.library / "choices.txt", std::ios::binary);
     std::string l, key = tag_key(model_tag);
+    std::vector<std::vector<std::string>> mine, every;
     while (std::getline(in, l)) {
+        if (!l.empty() && l.back() == '\r') l.pop_back();
         if (l.empty() || l[0] == '#') continue;
         std::vector<std::string> f = split_tabs(l);
         if (f.size() < 3 || tag_key(f[0]) != key) continue;
+        const std::string m = line_map(f);
+        if (m.empty()) every.push_back(f);
+        else if (!settings.map.empty() && m == lower(settings.map)) mine.push_back(f);
+    }
+    for (auto *set : {&mine, &every}) {
+        if (set->empty()) continue;
+        std::vector<std::string> f = set->front();
         Choice got;
+        got.this_map = set == &mine;
         got.skip = c.skip;
         got.chosen = true;
         std::istringstream a(lower(f[1])), b(lower(f[2]));
@@ -618,7 +642,7 @@ bool set_choice(const Settings &settings, const std::string &model_tag, const Ch
     }
     std::string key = tag_key(model_tag), line;
     bool automatic = c.lods == 'a' && c.top == 'a' && c.cards < 0 && c.pieces <= 0;
-    if (!automatic || skipped(settings, model_tag, "")) {
+    if (!automatic || (c.this_map && !settings.map.empty()) || skipped(settings, model_tag, "")) {
         line = model_tag + "\t";
         if (c.lods == 'n') line += "none";
         else if (c.lods == 'm') line += "make " + std::to_string(std::max(0, c.medium)) + " " + std::to_string(std::max(0, c.low));
@@ -629,13 +653,25 @@ bool set_choice(const Settings &settings, const std::string &model_tag, const Ch
         else line += "auto";
         if (c.cards >= 0) line += "\tcards " + (c.cards == 0 ? std::string("none") : std::to_string(std::min(90, c.cards)));
         if (c.pieces > 0) line += "\tpieces " + std::to_string(std::min(50, c.pieces));
+        if (c.this_map && !settings.map.empty()) line += "\tmap " + lower(settings.map);
         if (!note.empty()) line += "\t# " + note;
     }
     bool placed = false;
+    const std::string here = lower(settings.map);
+    const bool mine = c.this_map && !here.empty();   // (automatic for this map too: a line of its own, over every map's)
     for (size_t i = 0; i < lines.size(); i++) {
         if (lines[i].empty() || lines[i][0] == '#') continue;
         std::vector<std::string> fl = split_tabs(lines[i]);
         if (tag_key(fl[0]) != key) continue;
+        // (this map's line: only it; every map's: it, and this map's own goes so every map's shows here too.
+        // Other maps' own lines stay.)
+        const std::string m = line_map(fl);
+        if (mine ? m != here : (!m.empty() && m != here)) continue;
+        if (!mine && m == here && !here.empty()) {
+            lines.erase(lines.begin() + (long)i);
+            i--;
+            continue;
+        }
         if (!placed && !line.empty()) {
             lines[i] = line;
             placed = true;

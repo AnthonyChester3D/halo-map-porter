@@ -9537,6 +9537,7 @@ void xbox_lods(Job &job, const std::vector<std::string> &deps) {
 
     lod::Settings lod_settings;
     lod_settings.library = !job.cfg.lod_library.empty() ? job.cfg.lod_library : job.cfg.cache_dir / "lod_library";
+    lod_settings.map = fs::path(from_u8(job.scenario)).filename().u8string();   // (its own choices first)
     // (how each shader draws: cut-out parts stay as made in every version)
     std::map<std::string, lod::ShaderLook> looks;
     lod_settings.look = [&](const std::string &tag) {
@@ -10636,6 +10637,7 @@ void xbox_props(Job &job) {
 static LodView make_lod_view(Job &job, const std::string &map_name) {
     LodView v;
     v.map_name = map_name;
+    v.map_key = fs::path(from_u8(job.scenario)).filename().u8string();
     v.update = job.work / "update.txt";
     std::map<std::string, double> radius_of;           // model -> its object's bounding radius
     std::map<std::string, int> per_model = models_on_map(job, &radius_of);   // model -> on the map
@@ -19946,7 +19948,7 @@ bool save_lod_view(const LodView &v, const fs::path &file) {
           << " " << m.cards << " " << m.card_triangles << " " << m.cards_taken;
         f << "\n" << m.collision << "\n" << m.note << "\n";
     }
-    f << "end\n";
+    f << "end\n" << "map " << v.map_key << "\n";
     return (bool)f;
 }
 bool load_lod_view(LodView &out, const fs::path &file) {
@@ -19985,6 +19987,7 @@ bool load_lod_view(LodView &out, const fs::path &file) {
         if (v3 && !text(m.note)) return false;
     }
     if (!text(line) || line != "end") return false;
+    if (text(line) && line.rfind("map ", 0) == 0) v.map_key = line.substr(4);   // (saved before it was kept: none)
     fs::path models = file;
     models += ".models";
     if (!load_previews(v.previews, models)) v.previews.clear();

@@ -314,6 +314,7 @@ struct LodView {
         int coll_made = -1, coll_now = -1;   // its collision's drawings in `previews`: as the map made it, as converted
     };
     std::string map_name;
+    std::string map_key;   // the map's scenario name: its own choices in the LOD library (lod::Settings::map)
     fs::path update;                   // the conversion's file for "Update the map" (update_xbox_models)
     std::vector<Model> models;
     std::vector<ModelPreview> previews;
