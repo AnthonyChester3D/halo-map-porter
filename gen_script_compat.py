@@ -17,3 +17,16 @@ for is_global, items in ((False, d['functions']), (True, d['globals'])):
         out.append('    {"%s", %s, \'%s\', %d},' % (e['name'], 'true' if is_global else 'false', types[e['type']], mask))
 out.append('};')
 open(sys.argv[2], 'w').write('\n'.join(out) + '\n')
+
+# script_types.inc: every Xbox function's return type (for gathering repeated script code into static scripts):
+#   python3 gen_script_compat.py definition.json script_compat.inc script_types.inc
+if len(sys.argv) > 3:
+    out = ["// Every Xbox script function's return type (\"passthrough\": that of its arguments).",
+           "// Generated from Invader's script definitions by gen_script_compat.py.",
+           'struct ScriptType { const char *name; const char *type; };',
+           'static const ScriptType kScriptTypes[] = {']
+    for e in d['functions']:
+        if 'xbox' in e.get('engines', {}):
+            out.append('    {"%s", "%s"},' % (e['name'], e['type']))
+    out.append('};')
+    open(sys.argv[3], 'w').write('\n'.join(out) + '\n')

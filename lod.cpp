@@ -1158,6 +1158,48 @@ Thin drop_small_pieces(const fs::path &model, double share, const Settings &sett
     return r;
 }
 
+int fit_compressed_nodes(const fs::path &model) {
+    tagfile::EditTag t;
+    if (!t.load(model)) return -1;
+    std::vector<TagNode> *geos = tagfile::block(t.root(), "geometries"), *nodes = tagfile::block(t.root(), "nodes");
+    if (!geos || !nodes) return -1;
+    const int kMost = 42;
+    std::vector<int> to(nodes->size());
+    for (size_t i = 0; i < nodes->size(); i++) {
+        int n = (int)i;
+        for (int guard = 0; n > kMost && guard < 256; guard++) {
+            double p = tagfile::get_num((*nodes)[(size_t)n], "parent node index");
+            n = p >= 0 && p < (double)nodes->size() && p != 65535 ? (int)p : 0;
+        }
+        to[i] = n > kMost ? 0 : n;
+    }
+    int changed = 0;
+    for (auto &g : *geos) {
+        std::vector<TagNode> *parts = tagfile::block(g, "parts");
+        if (!parts) continue;
+        for (auto &part : *parts) {
+            std::vector<TagNode> *uv = tagfile::block(part, "uncompressed vertices"), *cv = tagfile::block(part, "compressed vertices");
+            if (!uv || uv->empty() || (cv && !cv->empty())) continue;
+            for (auto &v : *uv) {
+                bool any = false;
+                for (const char *f : {"node0 index", "node1 index"}) {
+                    double x = tagfile::get_num(v, f);
+                    if (x > kMost && x < 65535 && x < (double)to.size()) { tagfile::set_num(v, f, to[(size_t)x]); any = true; }
+                }
+                // (both on one node now: all its weight there)
+                if (any && tagfile::get_num(v, "node0 index") == tagfile::get_num(v, "node1 index")) {
+                    tagfile::set_num(v, "node1 index", 65535);
+                    tagfile::set_num(v, "node0 weight", 1);
+                    tagfile::set_num(v, "node1 weight", 0);
+                }
+                changed += any;
+            }
+        }
+    }
+    if (changed && !t.save(model)) return -1;
+    return changed;
+}
+
 int drop_bad_triangles(const fs::path &model) {
     tagfile::EditTag t;
     if (!t.load(model)) return -1;

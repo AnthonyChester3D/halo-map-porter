@@ -350,6 +350,8 @@ struct Failure {
     // What used the failing tag, outward: "Scenario::netgame_equipment #10 in levels/test/bridge/bridge.scenario"
     // (the "Failed to compile" lines after the tag's own).
     std::vector<std::string> users;
+    // "Node limit exceeded for the target engine (25880 > 19001)": the scripts' nodes and the most the target takes
+    int nodes = 0, node_limit = 0;
 };
 
 static bool parse_failure(const std::string &log_text, Failure &f) {
@@ -362,6 +364,11 @@ static bool parse_failure(const std::string &log_text, Failure &f) {
         if (f.hsc_error.empty() && std::regex_search(l, hm, hsc_re)) {
             f.hsc_error = hm[1].str();
             while (!f.hsc_error.empty() && (f.hsc_error.back() == '\r' || f.hsc_error.back() == ' ')) f.hsc_error.pop_back();
+        }
+        {
+            static const std::regex nodes_re(R"(Node limit exceeded for the target engine \((\d+) > (\d+)\))");
+            std::smatch nm;
+            if (std::regex_search(l, nm, nodes_re)) { f.nodes = std::stoi(nm[1]); f.node_limit = std::stoi(nm[2]); }
         }
         if (l.rfind("Script compilation error:", 0) == 0) {
             f.script_error = l.substr(25);
@@ -1698,9 +1705,14 @@ struct Job {
                     const fs::path tp = fixes / from_u8(tag);
                     const std::string before = read(tp);
                     std::string out;
+                    // (they can't be made for vertices on a node past the 43 a compressed one can name: those first)
+                    const int moved = fs::path(from_u8(tag)).extension() == ".model" ? lod::fit_compressed_nodes(tp) : 0;
                     if (run_process({u8(tool(cfg, "invader-bludgeon")), "-t", u8(fixes), "-T", "missing-vertices", tag}, out) == 0 &&
                         read(tp) != before) {
-                        note("[fix]  " + tag + ": a part had no compressed vertices, which an Xbox model draws from; made from its others");
+                        note("[fix]  " + tag + ": a part had no compressed vertices, which an Xbox model draws from; made from its others" +
+                             (moved > 0 ? " (" + std::to_string(moved) + " of them were on nodes past the 43 an Xbox vertex can name, " +
+                                              "such as fingers: moved to the nearest node up the skeleton it can, so those bend with it)"
+                                        : std::string()));
                         return true;
                     }
                 }
@@ -2296,6 +2308,8 @@ static bool fix_script_shadow(Job &job, const std::string &err, std::string &wha
 static bool fix_script_navpoint(Job &job, const std::string &err, std::string &what);
 static bool fix_script_ai_as_unit(Job &job, const std::string &err, std::string &what);
 static bool fix_script_number_global(Job &job, const std::string &err, std::string &what);
+static bool fix_script_unplaced_name(Job &job, const std::string &err, std::string &what);
+static bool compact_map_scripts(Job &job, int have, int limit, std::string &what);
 static bool fix_script_missing_tag(Job &job, const std::string &err, std::string &what);
 static bool fix_script_unterminated(Job &job, const std::string &err, std::string &what);
 static bool fix_script_stray_statement(Job &job, const std::string &err, std::string &what);
@@ -3373,7 +3387,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
     };
     // "Estimate halves": after the build, its fixes made (or when the whole level doesn't fit), the halves measured.
     const bool halves = cfg.campaign_halves && job.target == Game::Xbox && !job.analysis;
-    bool scripts_tried = false;
+    bool scripts_tried = false, nodes_compacted = false;
     int none_fixes = 0, missing_fixes = 0;
     // The map doesn't fit the Xbox with the lower-detail versions the app made: take them out again (they're for
     // speed; the map's content comes first). `why` empty: quietly (measuring the map as it is without them).
@@ -3939,12 +3953,27 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
             if (!line.empty()) r.error += "\nThe line: " + line;
             return r;
         }
+        // More script nodes than the target takes: the code the scripts repeat gathered into static scripts, once.
+        if (f.nodes > f.node_limit && f.node_limit > 0) {
+            std::string what;
+            if (!nodes_compacted && !job.extra.empty() && compact_map_scripts(job, f.nodes, f.node_limit, what)) {
+                nodes_compacted = true;
+                job.note("[scripts] " + what);
+                continue;
+            }
+            r.error = "The map's scripts are too big for the " + std::string(game_name(job.target)) + ": " + thousands(f.nodes) +
+                      " script nodes, and it takes " + thousands(f.node_limit) + " (MCC takes 32,767)" +
+                      (nodes_compacted ? ", after gathering the code they repeat into scripts of its own" : std::string()) +
+                      (what.empty() ? std::string() : " (" + what + ")") + ".\nFull log: " + u8(job.work / "build.log");
+            return r;
+        }
         if (!f.hsc_error.empty()) {
             // A name in the map's scripts that the built map doesn't have (a nav point arrow its HUD lacks...).
             std::string what;
             if (!job.extra.empty() && none_fixes < 120 &&
                 (fix_script_navpoint(job, f.hsc_error, what) || fix_script_missing_tag(job, f.hsc_error, what) ||
-                 fix_script_ai_as_unit(job, f.hsc_error, what) || fix_script_number_global(job, f.hsc_error, what))) {
+                 fix_script_ai_as_unit(job, f.hsc_error, what) || fix_script_number_global(job, f.hsc_error, what) ||
+                 fix_script_unplaced_name(job, f.hsc_error, what))) {
                 none_fixes++;
                 job.note("[scripts] " + what);
                 continue;
@@ -11298,6 +11327,82 @@ static bool fix_script_ai_as_unit(Job &job, const std::string &err, std::string 
 
 // MCC's script compiler takes one number type where another goes ((< race_time short_global)); the original one
 // doesn't. The global is declared as the type wanted there instead (once: a second clash leaves it as the error).
+static int compact_scripts_safely(std::vector<std::string> &texts, int need, int &made);
+// The build's script files (the data folder's, for the scenario: every .hsc of its scripts folder) with the code they
+// repeat gathered into static scripts, enough to come under `limit` nodes from `have` (with a little to spare).
+static bool compact_map_scripts(Job &job, int have, int limit, std::string &what) {
+    fs::path data;
+    for (size_t k = 0; k + 1 < job.extra.size(); k++)
+        if (job.extra[k] == "-d") data = from_u8(job.extra[k + 1]);
+    if (data.empty()) return false;
+    // (the folder with the most script files: the scenario's)
+    std::map<fs::path, std::vector<fs::path>> by_dir;
+    std::error_code ec;
+    for (auto it = fs::recursive_directory_iterator(data, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec))
+        if (it->is_regular_file(ec) && hsc::lower(it->path().extension().u8string()) == ".hsc" && it->path().parent_path() != data)
+            by_dir[it->path().parent_path()].push_back(it->path());
+    std::vector<fs::path> files;
+    for (auto &[d, v] : by_dir)
+        if (v.size() > files.size()) files = v;
+    if (files.empty()) return false;
+    std::sort(files.begin(), files.end());
+    std::vector<std::string> texts;
+    for (auto &f : files) {
+        std::ifstream in(f, std::ios::binary);
+        texts.emplace_back((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    }
+    const int need = have - limit + limit / 50;
+    int made = 0;
+    const int saved = compact_scripts_safely(texts, need, made);
+    what = "the code the scripts repeat would save " + thousands(saved) + " nodes as " + std::to_string(made) + " scripts of its own";
+    if (saved < need) return false;
+    for (size_t i = 0; i < files.size(); i++) std::ofstream(files[i], std::ios::binary) << texts[i];
+    what = "the scripts have " + thousands(have) + " nodes and the " + std::string(game_name(job.target)) + " takes " + thousands(limit) +
+           ": code they repeat in many places gathered into " + std::to_string(made) + " static scripts, called where it was (" +
+           thousands(saved) + " nodes fewer)";
+    return true;
+}
+
+// A name the scripts use for an object that isn't placed in the built map (MCC's compiler lets a name be used with
+// no object behind it, or one with no kind, which isn't brought along: Rat Race's npc_update_controller): `none`
+// there, as it was in the game (nothing to kill, create or wake).
+static bool fix_script_unplaced_name(Job &job, const std::string &err, std::string &what) {
+    static const std::regex re(R"('([^']+)' is an object name that does not correspond to any object)");
+    std::smatch m;
+    if (!std::regex_search(err, m, re)) return false;
+    const std::string name = hsc::lower(m[1].str());
+    if (!job.retyped_globals.insert("name:" + name).second) return false;
+    fs::path at;
+    int line = 0, col = 0;
+    if (!script_error_place(job, err, at, line, col)) return false;
+    std::error_code ec;
+    int n = 0;
+    for (auto &e : fs::directory_iterator(at.parent_path(), ec)) {
+        if (hsc::lower(e.path().extension().u8string()) != ".hsc") continue;
+        std::ifstream in(e.path(), std::ios::binary);
+        std::string s((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        in.close();
+        std::vector<hsc::Node> top;
+        size_t i = 0;
+        if (!hsc::parse(s, i, top, false)) continue;
+        std::vector<std::pair<size_t, size_t>> spans;
+        std::function<void(const hsc::Node &, bool)> find = [&](const hsc::Node &x, bool head) {
+            if (!x.list) {
+                if (!head && !x.str && hsc::lower(x.atom) == name) spans.push_back({x.b, x.e});
+                return;
+            }
+            for (size_t k = 0; k < x.kids.size(); k++) find(x.kids[k], k == 0);
+        };
+        for (auto &t : top) find(t, false);
+        for (size_t k = spans.size(); k-- > 0;) s.replace(spans[k].first, spans[k].second - spans[k].first, "none");
+        if (!spans.empty()) { std::ofstream(e.path(), std::ios::binary) << s; n += (int)spans.size(); }
+    }
+    if (!n) return false;
+    what = "the scripts name the object " + m[1].str() + ", which isn't placed in the built map (MCC lets that through): " +
+           "none there now, as in the game (" + std::to_string(n) + "x)";
+    return true;
+}
+
 static bool fix_script_number_global(Job &job, const std::string &err, std::string &what) {
     static const std::regex re(R"(global '([^']+)' is '(short|long|real)' which cannot convert to '(short|long|real)')");
     std::smatch m;
@@ -12272,9 +12377,17 @@ struct ScriptConverter {
                 auto it = distance_volume_of.find(key);
                 if (it == distance_volume_of.end()) {
                     if (volume_room <= 0) break;
-                    std::string name = "d_" + flag.substr(0, 20) + "_" + num;
-                    std::replace(name.begin(), name.end(), '.', 'p');
-                    for (int k = 2; volume_names.count(name); k++) name = name.substr(0, 28) + std::to_string(k);
+                    // (5.000000 -> 5, 2.500000 -> 2p5; at most 31 characters, as a name can be)
+                    std::string n2 = num;
+                    if (n2.find('.') != std::string::npos) {
+                        while (!n2.empty() && n2.back() == '0') n2.pop_back();
+                        if (!n2.empty() && n2.back() == '.') n2.pop_back();
+                    }
+                    std::replace(n2.begin(), n2.end(), '.', 'p');
+                    if (n2.size() > 8) n2.resize(8);
+                    std::string name = "d_" + flag.substr(0, 20) + "_" + n2;
+                    if (name.size() > 31) name.resize(31);
+                    for (int k = 2; volume_names.count(name); k++) name = name.substr(0, 27) + "_" + std::to_string(k);
                     volume_names.insert(name);
                     volume_room--;
                     distance_volumes.push_back({name, d.kids[2].atom, dist});
@@ -12983,6 +13096,250 @@ static std::vector<bool> convert_texts(ScriptConverter &conv, std::vector<std::s
     return ok;
 }
 
+// MCC lets static scripts with parameters share a name, one per parameter count (Halo RPG's shuffle_tracks of 2, 3 and
+// 4 tracks); parameters become globals for the Xbox, a script each, so each gets its own name (shuffle_tracks_2...) and
+// each call the one of its argument count. Returns how many names were split (`texts`: every script file at once).
+static int split_overloads(std::vector<std::string> &texts) {
+    std::map<std::string, std::set<size_t>> arities;   // static script -> its parameter counts
+    std::vector<std::vector<hsc::Node>> tops(texts.size());
+    std::vector<bool> parsed(texts.size(), false);
+    for (size_t f = 0; f < texts.size(); f++) {
+        size_t i = 0;
+        if (!hsc::parse(texts[f], i, tops[f], false)) continue;
+        parsed[f] = true;
+        for (auto &n : tops[f])
+            if (n.list && n.kids.size() > 3 && !n.kids[0].list && hsc::lower(n.kids[0].atom) == "script" && !n.kids[1].list &&
+                hsc::lower(n.kids[1].atom) == "static" && n.kids[3].list && !n.kids[3].kids.empty() && !n.kids[3].kids[0].list)
+                arities[hsc::lower(n.kids[3].kids[0].atom)].insert(n.kids[3].kids.size() - 1);
+    }
+    std::map<std::string, std::set<size_t>> split;
+    for (auto &[name, a] : arities)
+        if (a.size() > 1) split[name] = a;
+    if (split.empty()) return 0;
+    auto renamed = [](const std::string &name, size_t k) {
+        std::string suffix = "_" + std::to_string(k);
+        return name.substr(0, 31 - suffix.size()) + suffix;
+    };
+    for (size_t f = 0; f < texts.size(); f++) {
+        if (!parsed[f]) continue;
+        std::vector<std::pair<std::pair<size_t, size_t>, std::string>> edits;
+        std::function<void(const hsc::Node &)> walk = [&](const hsc::Node &n) {
+            if (!n.list || n.kids.empty()) return;
+            if (!n.kids[0].list) {
+                auto it = split.find(hsc::lower(n.kids[0].atom));
+                if (it != split.end() && it->second.count(n.kids.size() - 1))
+                    edits.push_back({{n.kids[0].b, n.kids[0].e}, renamed(it->first, n.kids.size() - 1)});
+            }
+            for (size_t k = 1; k < n.kids.size(); k++) walk(n.kids[k]);
+        };
+        for (auto &n : tops[f]) {
+            // (the header (name (type param)...) is a call's shape too: renamed the same way)
+            if (n.list) walk(n);
+        }
+        std::sort(edits.begin(), edits.end());
+        for (size_t k = edits.size(); k-- > 0;)
+            texts[f].replace(edits[k].first.first, edits[k].first.second - edits[k].first.first, edits[k].second);
+    }
+    return (int)split.size();
+}
+
+// Every Xbox script function's return type (script_types.inc).
+#include "script_types.inc"
+
+// The Xbox takes 19,001 script nodes a map (each call, each name and each value one), MCC 32,767. Code the scripts
+// repeat (the same call with the same arguments in many places) becomes a static script of its own, called where it
+// was: a call is 2 nodes, so a block of 20 written 10 times saves about 160. Scripts have no local values, so any
+// block means the same wherever it's called from. Only blocks whose type is certain: a function's own return type, or,
+// in a place whose value nothing uses (a statement), any (a void script). At most 2 of these deep (each call is a
+// frame of the script thread's small stack: what's in the added ones isn't gathered again). Scripts in `protect` are
+// left as they are. Stops once `need` nodes are saved (0: as many as it can). Returns the nodes saved; `made`: the
+// scripts added.
+static int compact_scripts(std::vector<std::string> &texts, int need, int &made, const std::set<std::string> &protect) {
+    made = 0;
+    struct T { bool list = false, str = false; std::string atom; std::vector<T> kids; };
+    std::function<T(const hsc::Node &)> conv = [&](const hsc::Node &n) {
+        T t;
+        t.list = n.list;
+        t.str = n.str;
+        t.atom = n.str ? n.atom : hsc::lower(n.atom);
+        for (auto &k : n.kids) t.kids.push_back(conv(k));
+        return t;
+    };
+    std::map<std::string, std::string> ret;   // function or static script -> return type
+    for (auto &e : kScriptTypes) ret[e.name] = e.type;
+    struct Form { size_t file; std::string kind, type, name; T header; std::vector<T> body; bool is_script = false; std::string text; };
+    std::vector<Form> forms;
+    int scripts = 0;
+    for (size_t f = 0; f < texts.size(); f++) {
+        std::vector<hsc::Node> top;
+        size_t i = 0;
+        if (!hsc::parse(texts[f], i, top, false)) return 0;
+        for (auto &n : top) {
+            Form fm;
+            fm.file = f;
+            fm.text = texts[f].substr(n.b, n.e - n.b);
+            if (n.list && n.kids.size() >= 3 && !n.kids[0].list && hsc::lower(n.kids[0].atom) == "script" && !n.kids[1].list) {
+                scripts++;
+                fm.kind = hsc::lower(n.kids[1].atom);
+                size_t at = fm.kind == "static" || fm.kind == "stub" ? 3 : 2;
+                if (n.kids.size() <= at || n.kids[at].list) { forms.push_back(fm); continue; }
+                fm.type = at == 3 && !n.kids[2].list ? hsc::lower(n.kids[2].atom) : "void";
+                fm.name = hsc::lower(n.kids[at].atom);
+                if (fm.kind == "static") ret[fm.name] = fm.type;
+                if ((fm.kind == "static" || fm.kind == "continuous" || fm.kind == "dormant" || fm.kind == "startup") && !protect.count(fm.name)) {
+                    fm.is_script = true;
+                    for (size_t k = at + 1; k < n.kids.size(); k++) fm.body.push_back(conv(n.kids[k]));
+                }
+            }
+            forms.push_back(fm);
+        }
+    }
+    auto size_of = [](const T &t) {
+        std::function<int(const T &)> n = [&](const T &x) { int c = 1; for (auto &k : x.kids) c += n(k); return c; };
+        return n(t);
+    };
+    std::function<std::string(const T &)> key = [&](const T &t) {
+        if (!t.list) return t.atom;
+        std::string s = "(";
+        for (size_t k = 0; k < t.kids.size(); k++) s += (k ? " " : "") + key(t.kids[k]);
+        return s + ")";
+    };
+    std::map<std::string, int> depth;   // added script -> how many of them deep it goes
+    std::function<int(const T &)> depth_of = [&](const T &t) {
+        int d = 0;
+        if (t.list && !t.kids.empty() && !t.kids[0].list) {
+            auto it = depth.find(t.kids[0].atom);
+            if (it != depth.end()) d = it->second;
+        }
+        for (auto &k : t.kids) d = std::max(d, depth_of(k));
+        return d;
+    };
+    struct Added { std::string name, type; T body; };
+    std::vector<Added> added;
+    int saved = 0;
+    const int room = 512 - 8 - scripts;
+    for (int round = 0; round < room && (need <= 0 || saved < need); round++) {
+        // Each block that could become a script, how often, how big, of what type.
+        struct Count { int n = 0, size = 0; std::string type; const T *one = nullptr; };
+        std::map<std::pair<std::string, std::string>, Count> counts;
+        std::function<void(const T &, bool)> walk = [&](const T &t, bool stmt) {
+            if (!t.list || t.kids.empty() || t.kids[0].list) return;
+            const std::string &h = t.kids[0].atom;
+            auto r = ret.find(h);
+            std::string type;
+            if (r != ret.end() && r->second != "passthrough") type = r->second;
+            else if (r != ret.end() && stmt && h != "begin") type = "void";
+            if (!type.empty() && !depth.count(h) && t.kids.size() > 1) {
+                auto &c = counts[{key(t), type}];
+                if (!c.n) { c.size = size_of(t); c.type = type; c.one = &t; }
+                c.n++;
+            }
+            for (size_t k = 1; k < t.kids.size(); k++) {
+                bool s = false;
+                if (h == "begin") s = stmt || k + 1 < t.kids.size();
+                else if (h == "begin_random") s = stmt;
+                else if (h == "if") s = stmt && k > 1;
+                walk(t.kids[k], s);
+            }
+        };
+        for (auto &fm : forms)
+            if (fm.is_script)
+                for (size_t k = 0; k < fm.body.size(); k++) walk(fm.body[k], fm.type == "void" || k + 1 < fm.body.size());
+        const Count *best = nullptr;
+        std::pair<std::string, std::string> best_key;
+        int best_gain = 3;
+        for (auto &[k, c] : counts) {
+            if (c.n < 2) continue;
+            const int gain = (c.n - 1) * c.size - 2 * c.n - 2;
+            if (gain > best_gain && depth_of(*c.one) < 2) { best_gain = gain; best = &c; best_key = k; }
+        }
+        if (!best) break;
+        Added a{"hmp_c" + std::to_string(made++), best->type, *best->one};
+        const std::string bk = best_key.first, bt = best_key.second;
+        // Each place it is (of that type) calls the script.
+        std::function<void(T &, bool)> swap = [&](T &t, bool stmt) {
+            if (!t.list || t.kids.empty() || t.kids[0].list) return;
+            const std::string h = t.kids[0].atom;
+            auto r = ret.find(h);
+            std::string type;
+            if (r != ret.end() && r->second != "passthrough") type = r->second;
+            else if (r != ret.end() && stmt && h != "begin") type = "void";
+            if (type == bt && !depth.count(h) && key(t) == bk) {
+                T call;
+                call.list = true;
+                T name;
+                name.atom = a.name;
+                call.kids.push_back(name);
+                t = call;
+                return;
+            }
+            for (size_t k = 1; k < t.kids.size(); k++) {
+                bool s = false;
+                if (h == "begin") s = stmt || k + 1 < t.kids.size();
+                else if (h == "begin_random") s = stmt;
+                else if (h == "if") s = stmt && k > 1;
+                swap(t.kids[k], s);
+            }
+        };
+        for (auto &fm : forms)
+            if (fm.is_script)
+                for (size_t k = 0; k < fm.body.size(); k++) swap(fm.body[k], fm.type == "void" || k + 1 < fm.body.size());
+        depth[a.name] = 1 + depth_of(a.body);
+        ret[a.name] = a.type;
+        added.push_back(a);
+        saved += best_gain;
+    }
+    if (added.empty()) return 0;
+    // Written back: the scripts (bodies as they are now) after the added ones, in the first file (Invader takes the
+    // files' scripts and globals together, so where one is named doesn't matter).
+    std::function<std::string(const T &, int)> emit = [&](const T &t, int ind) {
+        if (!t.list) return t.atom;
+        std::string flat = key(t);
+        if (flat.size() + (size_t)ind < 110) return flat;
+        std::string s = "(" + emit(t.kids[0], ind + 4);
+        for (size_t k = 1; k < t.kids.size(); k++) s += "\n" + std::string((size_t)ind + 4, ' ') + emit(t.kids[k], ind + 4);
+        return s + ")";
+    };
+    std::vector<std::string> out(texts.size());
+    std::string defs = "; (repeated code gathered into scripts: fewer of the Xbox's script nodes)\n";
+    for (auto &a : added) defs += "(script static " + a.type + " " + a.name + "\n    " + emit(a.body, 4) + ")\n";
+    out[0] = defs + "\n";
+    for (auto &fm : forms) {
+        if (!fm.is_script) { out[fm.file] += fm.text + "\n"; continue; }
+        std::string s = "(script " + fm.kind + (fm.kind == "static" ? " " + fm.type : std::string()) + " " + fm.name;
+        for (auto &b : fm.body) s += "\n    " + emit(b, 4);
+        out[fm.file] += s + ")\n\n";
+    }
+    texts = out;
+    return saved;
+}
+
+// compact_scripts, then the scripts' depth in calls checked (ScriptStack): any that now goes past 480 of its 512 bytes
+// (or deeper than it went, if it did already) is left as it was, with every script on its deepest way, and it's done
+// again without them.
+static int compact_scripts_safely(std::vector<std::string> &texts, int need, int &made) {
+    std::map<std::string, int> was;
+    for (auto &[k, u] : ScriptStack(texts).tops()) was[k] = u.bytes;
+    std::set<std::string> protect;
+    for (int round = 0; round < 6; round++) {
+        std::vector<std::string> t = texts;
+        int m = 0;
+        const int saved = compact_scripts(t, need, m, protect);
+        if (!saved) { made = 0; return 0; }
+        bool fine = true;
+        for (auto &[k, u] : ScriptStack(t).tops()) {
+            auto w = was.find(k);
+            if (u.bytes <= std::max(480, w == was.end() ? 0 : w->second)) continue;
+            fine = false;
+            protect.insert(k);
+            for (auto &p : u.path) protect.insert(p);
+        }
+        if (fine) { texts = t; made = m; return saved; }
+    }
+    made = 0;
+    return 0;
+}
+
 // Scripts and globals nothing ever runs or reads, left out of the map's script files (every file at once: a name in
 // one may be used in another). Startup and continuous scripts run by themselves, stubs are kept, and from those on, a
 // script or global any kept one names is kept too. MCC lets a map's scripts be far bigger than the Xbox's 19,001 node
@@ -13246,8 +13603,18 @@ static void convert_scripts(Job &job, const fs::path &dir, Game target) {
             }
         }
         was_recoded.push_back(changed);
-        conv.collect_user_names(texts.back());
     }
+    // (MCC's static scripts that share a name, one per parameter count: one name each)
+    if (target != Game::MCC) {
+        std::vector<std::string> before = texts;
+        if (const int split = split_overloads(texts)) {
+            for (size_t i = 0; i < texts.size(); i++)
+                if (texts[i] != before[i]) was_recoded[i] = true;
+            job.note("[scripts] " + std::to_string(split) + " static script name" + (split > 1 ? "s" : "") + " MCC lets several scripts " +
+                     "share (one for each number of parameters, which the Xbox doesn't have): each its own name now, with its count");
+        }
+    }
+    for (auto &t : texts) conv.collect_user_names(t);
     if (recoded) job.note("[scripts] " + std::to_string(recoded) + " script file" + (recoded > 1 ? "s" : "") +
                           " had text that isn't UTF-8 (Windows-1252 dashes or quotes), which the compiler can't read: as plain text now");
     if (stub_fixed) job.note("[scripts] " + std::to_string(stub_fixed) + " stub" + (stub_fixed > 1 ? "s" : "") +
@@ -13313,8 +13680,27 @@ static void convert_scripts(Job &job, const fs::path &dir, Game target) {
                          (conv.distance_volumes.size() == 1 ? "" : "s") + " added, one a flag and distance; within about a quarter "
                          "of the distance where a circle and the box part)");
             } else {
-                // (the scripts name volumes that aren't there: the build says so; nothing else to do here)
-                job.note("[scripts] couldn't add the trigger volumes the distance tests became: " + out.substr(0, 300));
+                // (the scripts would name volumes that aren't there: the tests are "far away" again, as without them)
+                std::set<std::string> names;
+                for (auto &dv : conv.distance_volumes) names.insert(hsc::lower(dv.name));
+                for (size_t f = 0; f < files.size(); f++) {
+                    if (!ok[f]) continue;
+                    std::string t = texts[f];
+                    std::vector<hsc::Node> top;
+                    size_t at = 0;
+                    if (!hsc::parse(t, at, top, false)) continue;
+                    std::vector<std::pair<size_t, size_t>> spans;
+                    std::function<void(const hsc::Node &)> find = [&](const hsc::Node &n) {
+                        if (!n.list) return;
+                        if (n.kids.size() == 3 && !n.kids[0].list && !n.kids[1].list && hsc::lower(n.kids[0].atom) == "volume_test_objects" &&
+                            names.count(hsc::lower(n.kids[1].atom))) { spans.push_back({n.b, n.e}); return; }
+                        for (auto &k : n.kids) find(k);
+                    };
+                    for (auto &n : top) find(n);
+                    for (size_t k = spans.size(); k-- > 0;) t.replace(spans[k].first, spans[k].second - spans[k].first, "false");
+                    if (t != texts[f]) { texts[f] = t; std::ofstream(files[f], std::ios::binary) << t; }
+                }
+                job.note("[scripts] couldn't add the trigger volumes the distance tests became, so they read as far away: " + out.substr(0, 300));
             }
         }
     }
@@ -18919,9 +19305,15 @@ std::string convert_script_text(Game target, const std::string &text, std::vecto
         }
         conv.volume_room = 256;
     }
-    conv.collect_user_names(text);
     std::vector<std::string> t{text};
+    if (target != Game::MCC) split_overloads(t);
+    conv.collect_user_names(t[0]);
     if (!convert_texts(conv, t)[0] && notes) notes->push_back("could not parse");
+    if (const char *c = std::getenv("HMP_TEST_COMPACT")) {
+        int made = 0;
+        const int saved = compact_scripts_safely(t, std::atoi(c), made);
+        if (notes) notes->push_back("compacted: " + std::to_string(saved) + " nodes saved, " + std::to_string(made) + " scripts added");
+    }
     if (notes) {
         for (auto &[name, c] : conv.changes) notes->push_back(name + ": " + c.second + " (" + std::to_string(c.first) + "x)");
         for (auto &[name, c] : conv.fixes) notes->push_back(name + ": " + c.second);

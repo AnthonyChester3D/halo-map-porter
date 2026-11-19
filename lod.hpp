@@ -141,6 +141,12 @@ Thin thin_cards(const std::filesystem::path &model, double share, const Settings
 // thin_cards; each geometry keeps its biggest piece. Saved in place. `cards`/`taken` in the result: pieces.
 Thin drop_small_pieces(const std::filesystem::path &model, double share, const Settings &settings);
 
+// An Xbox model's compressed vertices name their nodes by a byte (three vertex shader constants a node: nodes 0-42).
+// A part with only uncompressed vertices skinned to later nodes (a 54-node MCC biped's fingers and jaw) can't have
+// compressed ones made: those vertices go to the nearest node up the skeleton that one can name. Returns how many
+// vertices changed (-1: couldn't be read).
+int fit_compressed_nodes(const std::filesystem::path &model);
+
 // Triangles that name vertices their part doesn't have (Custom Edition's tools let some through and its game skips
 // them; Invader refuses the model): left out, in every geometry. Saved in place. The parts changed (0: none, -1: the
 // model couldn't be read or saved).

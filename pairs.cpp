@@ -580,6 +580,15 @@ void compare(const std::string &tag, const std::string &g, Flat a, Flat b, Resul
                 }
             }
         }
+        // A vertex on a node past the 43 an Xbox (compressed) vertex can name: moved up the skeleton to one it can.
+        if ((g == "model" || g == "gbxmodel") && (ends(gk, "vertices[].node0_index") || ends(gk, "vertices[].node1_index") ||
+                                                 ends(gk, "vertices[].node0_weight") || ends(gk, "vertices[].node1_weight"))) {
+            const long a = std::atol(va.c_str()), b = std::atol(vb.c_str());
+            if (ends(gk, "_weight") || (a > 42 && a != 65535 && (b <= 42 || b == 65535))) {
+                d.ce += " (past the nodes an Xbox vertex can name: moved up the skeleton)";
+                note = true;
+            }
+        }
         // Trigger volumes added after the level's own: the distance tests Xbox scripts ask as boxes (no
         // objects_distance_to_flag there).
         if (g == "scenario" && starts(gk, "trigger_volumes")) {
