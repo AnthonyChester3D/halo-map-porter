@@ -15356,6 +15356,7 @@ static void campaign_apply(Job &job) {
     };
     auto finish_part = [&](const fs::path &file) -> std::string {
         const int p = cfg.campaign_part;
+        std::string spawn_note;
         tagfile::EditTag ed, orig;
         if (!ed.load(file) || !orig.load(scen_original)) return "the scenario couldn't be read";
         using tagfile::TagNode;
@@ -15380,17 +15381,35 @@ static void campaign_apply(Job &job) {
             std::vector<TagNode> *sl = tagfile::block(ed.root(), "player starting locations");
             std::vector<TagNode> *osl = tagfile::block(orig.root(), "player starting locations");
             if (!sl || !osl || osl->empty()) return "the level has no player starting location to copy";
-            const size_t count = std::max<size_t>(1, osl->size());
+            const size_t count = std::max<size_t>(entries.size(), osl->size());
             std::vector<TagNode> made;
+            std::vector<portals::V3> first_spots;
             for (size_t i = 0; i < count; i++) {
                 const campaign::Switch &x = entries[i % entries.size()];
                 TagNode n = (*osl)[0];
                 double dx = x.middle[0] - came_from[0], dy = x.middle[1] - came_from[1];
                 if (!came_from_set || std::hypot(dx, dy) < 0.01) { dx = x.forward[0]; dy = x.forward[1]; }
-                const double facing = std::atan2(dy, dx), side = ((double)(i / entries.size()) - (count / entries.size() - 1) / 2.0) * 0.6;
-                tagfile::set_num(n, "position", x.middle[0] - std::sin(facing) * side, 0);
-                tagfile::set_num(n, "position", x.middle[1] + std::cos(facing) * side, 1);
-                tagfile::set_num(n, "position", x.middle[2], 2);
+                const double facing = std::atan2(dy, dx);
+                // (on open, level ground near the volume, with room for a vehicle the player arrives in (Halo 1
+                // Unlimited makes it at the first starting location); the others beside it, room for a player)
+                fs::path dst = (size_t)x.destination < nbsp && !bsp_tags[(size_t)x.destination].empty() ? job.owner(bsp_tags[(size_t)x.destination]) : fs::path();
+                if (!dst.empty()) dst /= from_u8(bsp_tags[(size_t)x.destination]);
+                portals::V3 at = x.middle;
+                if (i < entries.size()) {
+                    portals::V3 g;
+                    if (!dst.empty() && (portals::ground_spot(dst, x.middle, 2.5, 10, g) || portals::ground_spot(dst, x.middle, 1.0, 10, g))) at = g;
+                    else spawn_note = " (no open, level ground found near where it's entered: a vehicle carried over may not fit)";
+                    first_spots.push_back(at);
+                } else {
+                    const portals::V3 &f0 = first_spots[i % entries.size()];
+                    const double side = (double)(i / entries.size()) * ((i / entries.size()) % 2 ? 1 : -1) * 1.2;
+                    portals::V3 want{f0[0] - std::sin(facing) * side - std::cos(facing) * 1.5, f0[1] + std::cos(facing) * side - std::sin(facing) * 1.5, f0[2] + 0.5};
+                    portals::V3 g;
+                    at = !dst.empty() && portals::ground_spot(dst, want, 0.5, 3, g) ? g : f0;
+                }
+                tagfile::set_num(n, "position", at[0], 0);
+                tagfile::set_num(n, "position", at[1], 1);
+                tagfile::set_num(n, "position", at[2], 2);
                 tagfile::set_num(n, "facing", facing);
                 tagfile::set_num(n, "bsp index", to.count(x.destination) ? to[x.destination] : 0);
                 made.push_back(n);
@@ -15429,7 +15448,7 @@ static void campaign_apply(Job &job) {
             }
         }
         if (!ed.save(file)) return "the scenario couldn't be saved";
-        part_what += "; " + std::to_string(renamed) + " switch volume" + (renamed == 1 ? "" : "s") + " made its way on";
+        part_what += "; " + std::to_string(renamed) + " switch volume" + (renamed == 1 ? "" : "s") + " made its way on" + spawn_note;
         return "";
     };
     if (piece == 0) {

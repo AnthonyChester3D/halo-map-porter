@@ -1664,6 +1664,55 @@ bool inside_level(const fs::path &bsp_file, const std::vector<V3> &points, std::
     return true;
 }
 
+bool ground_spot(const fs::path &bsp_file, const V3 &near, double radius, double search, V3 &spot) {
+    tagfile::Tag t;
+    if (!t.load(bsp_file)) return false;
+    Bsp b;
+    if (!load_bsp(t.root(), b, nullptr)) return false;
+    // The ground under a point (within 12 units down), or none.
+    auto ground = [&](const V3 &p, double &z) {
+        if (b.leaf_at(p) < 0) return false;
+        double hit = -1;
+        trace(b, 0, p, p - V3{0, 0, 12}, 0, 1, [&](int leaf, double tt) { if (leaf == kSolid) { hit = tt; return true; } return false; });
+        if (hit < 0) return false;
+        z = p[2] - 12 * hit;
+        return true;
+    };
+    bool found = false;
+    double best = 1e30;
+    const double step = std::max(0.25, radius / 2);
+    for (double dx = -search; dx <= search + 1e-9; dx += step)
+        for (double dy = -search; dy <= search + 1e-9; dy += step) {
+            const double d = std::hypot(dx, dy);
+            if (d > search || d >= best) continue;
+            // Start from up to 3 heights (a volume's middle can be under a ceiling or over a drop).
+            for (double up : {0.0, 1.5, -1.5}) {
+                V3 p{near[0] + dx, near[1] + dy, near[2] + up};
+                double z0 = 0;
+                if (!ground(p, z0)) continue;
+                // Level, open ground: the ground around it within a few inches, nothing in the way up to 2.5 units.
+                bool ok = true;
+                for (int k = 0; k < 8 && ok; k++) {
+                    const double a = k * 3.14159265358979 / 4;
+                    for (double r : {radius * 0.5, radius}) {
+                        V3 q{p[0] + std::cos(a) * r, p[1] + std::sin(a) * r, z0 + 1.2};
+                        double z1 = 0;
+                        if (!ground(q, z1) || std::fabs(z1 - z0) > 0.2 + 0.08 * r) { ok = false; break; }
+                        for (double h : {0.3, 1.2, 2.5})
+                            if (b.leaf_at(V3{q[0], q[1], z0 + h}) < 0) { ok = false; break; }
+                        if (!ok) break;
+                    }
+                }
+                if (!ok) continue;
+                spot = V3{p[0], p[1], z0 + 0.1};
+                best = d;
+                found = true;
+                break;
+            }
+        }
+    return found;
+}
+
 namespace {
 
 // Occlusion: which clusters can be seen at all from each one (the visibility data the engine checks before it goes

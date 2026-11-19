@@ -117,6 +117,10 @@ struct Drawn { double median = 0, high = 0, mean = 0; int samples = 0, triangles
 bool estimate(const std::filesystem::path &bsp, Arrangement which, const std::vector<int> *cl, const std::vector<ClusterPortal> *portals,
               Drawn &out, const PlayArea &area = PlayArea(), const std::vector<std::vector<char>> *pvs = nullptr);
 
+// A spot on open, level ground near `near` (within `search` units across), with room `radius` units around it and
+// 2.5 up (a vehicle made there fits): the nearest one found, standing on the ground. False if none.
+bool ground_spot(const std::filesystem::path &bsp, const V3 &near, double radius, double search, V3 &spot);
+
 // Views from where players play (as estimate() samples them, with the tag's own clusters and portals): where the
 // eyes are, which way they look (level), and the level's surfaces the engine draws.
 struct SampleView { V3 eye{}; double yaw = 0; std::vector<int> drawn; };
