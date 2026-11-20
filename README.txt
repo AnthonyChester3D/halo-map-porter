@@ -1105,6 +1105,17 @@ Portals ("Portals", Xbox tab)
   how many rooms and portals the level got and what it draws in a typical
   and a busy view, before and after (see "Performance" below). If Invader
   ever rejects the level with them, the app builds it as it was.
+  Each cluster's surfaces are kept in pieces (subclusters) that the Xbox
+  checks one by one against what it can see of the cluster: a cluster
+  seen only over a wall or past a doorway's edge draws only the pieces
+  in that part of the view, and a dynamic light redraws only the pieces
+  it touches. With portals on, every level's pieces are made smaller (up
+  to 16 triangles each, split across their longest side, height too),
+  kept when that draws less: about 13-22% less on average on Blood
+  Gulch and the open levels of Halo, Assault on the Control Room and
+  343 Guilty Spark. It adds about 60 KB to a big level;
+  a map that's then over the Xbox's limit by no more than that gets its
+  levels' own pieces back first.
 
 Custom weapons and "Use the Xbox's own weapons, vehicles and player model"
   Every Xbox map always contains the stock multiplayer weapons: the Xbox

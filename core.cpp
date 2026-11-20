@@ -494,6 +494,8 @@ struct Job {
     fs::path given_map;      // convert: the map as the player has it (input_map can be a copy with plainer tag names)
     fs::path original;       // an Xbox conversion: the map's tags as extracted (Perfect Conversion compares with them)
     size_t lod_xbox_bytes = 0;
+    std::vector<std::pair<fs::path, std::string>> chunk_backups;   // levels whose subclusters the app made smaller, as they were
+    long long chunk_bytes = 0;                                     // what that adds to the map (about)
     std::vector<LodView::Model> lod_changes;   // the models whose levels of detail changed (for the LODs window)
     std::set<std::string> crunched_models;   // models Perfect Conversion made a triangle per part (nothing uses them)
     std::map<std::string, std::string> trim_originals;   // trimmed models (tag) as the map made them, for that window
@@ -3705,7 +3707,9 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
             if (bsp_error) {
                 for (auto &[p, b] : job.portal_backups) std::ofstream(p, std::ios::binary | std::ios::trunc) << b;
                 job.portal_backups.clear();
-                job.note("[portals] Invader didn't accept the level with the portals the app added, so it was built as it was");
+                job.chunk_backups.clear();
+                job.chunk_bytes = 0;
+                job.note("[portals] Invader didn't accept the level with the portals or subclusters the app made, so it was built as it was");
                 performance = performance_lines(job);
                 cmd = make_cmd();
                 continue;
@@ -3720,6 +3724,18 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
             undo_lods("is " + tb[1].str().substr(0, 5) + " MB, over the Xbox's " + tb[2].str().substr(0, 5) + " MB limit")) {
             cmd = make_cmd();
             keep_early = true;
+            continue;
+        }
+        // Over the limit by no more than the smaller subclusters added: the level's own come back.
+        if (std::regex_search(out, tb, too_big) && job.target == Game::Xbox && !job.chunk_backups.empty() &&
+            (std::atof(tb[1].str().c_str()) - std::atof(tb[2].str().c_str())) * 1048576.0 < job.chunk_bytes * 0.9) {
+            for (auto &[p, b] : job.chunk_backups) std::ofstream(p, std::ios::binary | std::ios::trunc) << b;
+            job.chunk_backups.clear();
+            job.chunk_bytes = 0;
+            job.note("[portals] the map is " + tb[1].str().substr(0, 5) + " MB, over the Xbox's " + tb[2].str().substr(0, 5) +
+                     " MB limit, so the levels' smaller subclusters went back to their own");
+            performance = performance_lines(job);
+            cmd = make_cmd();
             continue;
         }
         // Over the limit: long stereo sounds at 44.1 kHz go to 22.05 kHz first (half each, and music is most of a
@@ -8964,6 +8980,21 @@ void xbox_portals(Job &job) {
             job.log("  [portals] the level" + name + " has no portals; none added: it " + pr.why);
         } else {
             job.log("  [portals] the level" + name + "'s own portals kept: it " + pr.why);
+        }
+        // Its subclusters smaller (when the portals didn't make them so): less of a cluster seen in part is drawn.
+        portals::ChunkResult cr = portals::rechunk(file, po.chunk, po.area);
+        if (cr.changed) {
+            bool backed = false;
+            for (auto &pb : job.portal_backups) backed = backed || pb.first == file;
+            if (!backed) job.portal_backups.push_back({file, cr.original});
+            job.chunk_backups.push_back({file, std::move(cr.original)});
+            job.chunk_bytes += cr.bytes;
+            char kb[32];
+            snprintf(kb, sizeof kb, "%.0f", cr.bytes / 1024.0);
+            job.note("[portals] the level" + name + "'s " + thousands(cr.before) + " subclusters (the pieces the Xbox checks against the view) made " +
+                     thousands(cr.after) + " smaller ones (" + kb + " KB more): about " + thousands((long long)cr.drawn_after) +
+                     " of its triangles drawn in an average view (was " + thousands((long long)cr.drawn_before) + "), " +
+                     thousands((long long)cr.high_after) + " in a busy one (was " + thousands((long long)cr.high_before) + ")");
         }
     }
 }

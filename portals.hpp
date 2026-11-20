@@ -95,6 +95,7 @@ struct Options {
     bool occlude = true;
     std::vector<std::array<double, 3>> cameras;   // where cutscene cameras are (eyes too)
     bool flying = false;                          // something flies (an eye can be anywhere in the open)
+    int chunk = 16;            // the most triangles in a subcluster the app writes (rechunk())
 };
 
 // A portal between two clusters as Halo stores it: the "front" cluster is behind its plane (a collision BSP plane),
@@ -115,7 +116,9 @@ void cluster_portals(const Leaves &leaves, const std::vector<int> &cl, std::vect
 enum class Arrangement { Own, None, Given };
 struct Drawn { double median = 0, high = 0, mean = 0; int samples = 0, triangles = 0; };   // high: 9 in 10 views draw fewer
 bool estimate(const std::filesystem::path &bsp, Arrangement which, const std::vector<int> *cl, const std::vector<ClusterPortal> *portals,
-              Drawn &out, const PlayArea &area = PlayArea(), const std::vector<std::vector<char>> *pvs = nullptr);
+              Drawn &out, const PlayArea &area = PlayArea(), const std::vector<std::vector<char>> *pvs = nullptr, int chunk = 0);
+// (`chunk`: each cluster's pieces (its subclusters, which the engine checks against the view one by one) of up to that
+// many triangles; 0: with `Own`, the tag's own subclusters.)
 
 // A spot on open, level ground near `near` (within `search` units across), with room `radius` units around it and
 // 2.5 up (a vehicle made there fits): the nearest one found, standing on the ground. False if none.
@@ -147,6 +150,20 @@ struct Result {
     std::string rooms_why;                 // grid: why not rooms
     int pairs = 0, hidden = 0;             // cluster pairs, and how many of them the visibility data says can't see
 };
+
+// Each of the level's clusters' subclusters made again, of up to `most` triangles each (near each other, halved
+// across their longest side, height too): the engine checks each one's box against its view of the cluster, so
+// smaller ones draw less of a cluster seen only in part (over a wall, through a doorway's corner), and a dynamic
+// light takes less again. Kept when the estimate draws less (`original`: the tag as it was).
+struct ChunkResult {
+    bool changed = false;
+    std::string why;
+    int before = 0, after = 0;                   // subclusters
+    double drawn_before = 0, drawn_after = 0, high_before = 0, high_after = 0;
+    long long bytes = 0;                         // what the map grows by (about)
+    std::string original;
+};
+ChunkResult rechunk(const std::filesystem::path &bsp, int most, const PlayArea &area);
 
 // A level's triangles, for measuring how much of it a light reaches (the Xbox draws every level triangle a dynamic
 // light reaches again, for each light, out of 32,768 triangles a frame).

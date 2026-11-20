@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <chrono>
 #include <cstring>
+#include <fstream>
 #include <functional>
 #include <map>
 #include <set>
@@ -1272,13 +1273,42 @@ void floor_triangles(const Bsp &b, const std::vector<std::array<V3, 3>> &tri, st
     }
 }
 
+// A cluster's surfaces in pieces (its subclusters) of up to `most` triangles near each other, halved across their
+// longest side (height too) until they fit: the engine checks each piece's box against the view it has of the cluster
+// (structure_visibility_traverse_subclusters), and a dynamic light takes the whole pieces its box touches.
+struct Piece { V3 lo{}, hi{}; std::vector<int> s; };
+const int kChunk = 16;   // (Options::chunk)
+void pieces(std::vector<int> idx, const std::vector<std::array<V3, 3>> &tri, size_t most, std::vector<Piece> &out) {
+    if (idx.empty()) return;
+    Piece pc;
+    pc.lo = {1e30, 1e30, 1e30};
+    pc.hi = {-1e30, -1e30, -1e30};
+    for (int sfc : idx)
+        for (auto &p : tri[(size_t)sfc])
+            for (int k = 0; k < 3; k++) { pc.lo[(size_t)k] = std::min(pc.lo[(size_t)k], p[(size_t)k]); pc.hi[(size_t)k] = std::max(pc.hi[(size_t)k], p[(size_t)k]); }
+    if (idx.size() <= std::max<size_t>(1, most)) {
+        pc.s = std::move(idx);
+        out.push_back(std::move(pc));
+        return;
+    }
+    int ax = 0;
+    for (int k = 1; k < 3; k++)
+        if (pc.hi[(size_t)k] - pc.lo[(size_t)k] > pc.hi[(size_t)ax] - pc.lo[(size_t)ax]) ax = k;
+    auto mid = [&](int sfc) { return tri[(size_t)sfc][0][(size_t)ax] + tri[(size_t)sfc][1][(size_t)ax] + tri[(size_t)sfc][2][(size_t)ax]; };
+    size_t h = idx.size() / 2;
+    std::nth_element(idx.begin(), idx.begin() + (long)h, idx.end(), [&](int x, int y) { return mid(x) < mid(y); });
+    pieces(std::vector<int>(idx.begin(), idx.begin() + (long)h), tri, most, out);
+    pieces(std::vector<int>(idx.begin() + (long)h, idx.end()), tri, most, out);
+}
+
 // How the engine sees the level from one spot: from the camera's cluster on through the portals it can see, the
-// view narrowed to each portal (structure_visibility_traverse_cluster). Returns the triangles drawn.
+// view narrowed to each portal (structure_visibility_traverse_cluster), and of each reached cluster the pieces whose
+// boxes are in that view (structure_visibility_traverse_subclusters). Returns the triangles drawn.
 int drawn_from(const View &view, int start, const std::vector<std::vector<int>> &portals_of, const std::vector<ClusterPortal> &portals,
-               const std::vector<std::vector<int>> &surfaces_of, const std::vector<std::array<V3, 3>> &tri, std::vector<int> &stamp,
+               const std::vector<std::vector<Piece>> &pieces_of, const std::vector<std::array<V3, 3>> &tri, std::vector<int> &stamp,
                int frame, const std::vector<std::vector<char>> *pvs = nullptr) {
     const double tx = std::tan(35.0 * 3.14159265358979 / 180), ty = tx * 0.75;
-    size_t nc = surfaces_of.size();
+    size_t nc = pieces_of.size();
     std::vector<char> on_path(nc, 0), seen(nc, 0);
     std::vector<std::array<double, 4>> rect(nc, {1e9, 1e9, -1e9, -1e9});
     int steps = 0;
@@ -1334,22 +1364,25 @@ int drawn_from(const View &view, int start, const std::vector<std::vector<int>> 
     for (size_t c = 0; c < nc; c++) {
         if (!seen[c]) continue;
         auto &R = rect[c];
-        for (int sfc : surfaces_of[c]) {
-            if (stamp[(size_t)sfc] == frame) continue;
-            double x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
-            bool behind = false, front = false;
-            for (auto &p : tri[(size_t)sfc]) {
-                V3 q = to_view(p);
-                if (q[2] <= 0.01) { behind = true; continue; }
-                front = true;
-                x0 = std::min(x0, q[0] / q[2]); x1 = std::max(x1, q[0] / q[2]);
-                y0 = std::min(y0, q[1] / q[2]); y1 = std::max(y1, q[1] / q[2]);
+        double x0 = std::max(R[0], -tx), x1 = std::min(R[2], tx), y0 = std::max(R[1], -ty), y1 = std::min(R[3], ty);
+        for (auto &pc : pieces_of[c]) {
+            // Out of view when all of its box's corners are outside one side of the view (or behind the camera).
+            bool out = false;
+            V3 q[8];
+            for (int k = 0; k < 8; k++)
+                q[k] = to_view(V3{(k & 1) ? pc.hi[0] : pc.lo[0], (k & 2) ? pc.hi[1] : pc.lo[1], (k & 4) ? pc.hi[2] : pc.lo[2]});
+            for (int side = 0; side < 5 && !out; side++) {
+                bool all = true;
+                for (int k = 0; k < 8 && all; k++) {
+                    double f = side == 0 ? q[k][0] - x0 * q[k][2] : side == 1 ? x1 * q[k][2] - q[k][0] : side == 2 ? q[k][1] - y0 * q[k][2]
+                             : side == 3 ? y1 * q[k][2] - q[k][1] : q[k][2] - 0.01;
+                    if (f >= 0) all = false;
+                }
+                out = all;
             }
-            if (!front) continue;
-            if (behind) { x0 = y0 = -1e9; x1 = y1 = 1e9; }   // (crossing the camera's plane: could be anywhere)
-            if (x1 < std::max(R[0], -tx) || x0 > std::min(R[2], tx) || y1 < std::max(R[1], -ty) || y0 > std::min(R[3], ty)) continue;
-            stamp[(size_t)sfc] = frame;
-            count++;
+            if (out) continue;
+            for (int sfc : pc.s)
+                if (sfc >= 0 && sfc < (int)stamp.size() && stamp[(size_t)sfc] != frame) { stamp[(size_t)sfc] = frame; count++; }
         }
     }
     return count;
@@ -1480,7 +1513,7 @@ namespace {
 bool sample(const fs::path &bsp_file, Arrangement which, const std::vector<int> *cl_in, const std::vector<ClusterPortal> *portals_in,
             const PlayArea &area, int max_views, int *triangles,
             const std::function<void(const View &, int, const std::vector<int> &, int)> &each,
-            const std::vector<std::vector<char>> *pvs_in = nullptr) {
+            const std::vector<std::vector<char>> *pvs_in = nullptr, int chunk = 0) {
     tagfile::Tag t;
     if (!t.load(bsp_file)) return false;
     tagfile::Elem r = t.root();
@@ -1524,6 +1557,28 @@ bool sample(const fs::path &bsp_file, Arrangement which, const std::vector<int> 
                 in[(size_t)c][(size_t)sfc] = 1;
                 surfaces_of[(size_t)c].push_back((int)sfc);
             }
+        }
+    }
+    // Each cluster's pieces: the tag's own subclusters (its own clusters, chunk 0), else its surfaces in pieces of up
+    // to `chunk` (kChunk) triangles.
+    std::vector<std::vector<Piece>> pieces_of((size_t)nc);
+    if (which == Arrangement::Own && chunk <= 0) {
+        tagfile::Block cls = r.block("clusters");
+        for (size_t i = 0; i < cls.size() && (int)i < nc; i++) {
+            tagfile::Block sub = cls[i].block("subclusters");
+            const char *ax[3] = {"world bounds x", "world bounds y", "world bounds z"};
+            for (size_t k = 0; k < sub.size(); k++) {
+                Piece pc;
+                for (int a = 0; a < 3; a++) { pc.lo[(size_t)a] = sub[k].num(ax[a], 0); pc.hi[(size_t)a] = sub[k].num(ax[a], 1); }
+                tagfile::Block idx = sub[k].block("surface indices");
+                for (size_t j = 0; j < idx.size(); j++) pc.s.push_back((int)idx[j].integer("index"));
+                pieces_of[i].push_back(std::move(pc));
+            }
+        }
+    } else {
+        for (int c = 0; c < nc; c++) {
+            std::sort(surfaces_of[(size_t)c].begin(), surfaces_of[(size_t)c].end());
+            pieces(surfaces_of[(size_t)c], tri, (size_t)(chunk > 0 ? chunk : kChunk), pieces_of[(size_t)c]);
         }
     }
     for (size_t i = 0; i < portals.size(); i++) {
@@ -1576,7 +1631,7 @@ bool sample(const fs::path &bsp_file, Arrangement which, const std::vector<int> 
             w.fwd = {std::cos(yaw), std::sin(yaw), 0};
             w.up = {0, 0, 1};
             w.right = cross(w.fwd, w.up);
-            int n = drawn_from(w, cl[(size_t)leaf], portals_of, portals, surfaces_of, tri, stamp, frame, pvs.empty() ? nullptr : &pvs);
+            int n = drawn_from(w, cl[(size_t)leaf], portals_of, portals, pieces_of, tri, stamp, frame, pvs.empty() ? nullptr : &pvs);
             each(w, n, stamp, frame);
             frame++;
         }
@@ -1587,12 +1642,12 @@ bool sample(const fs::path &bsp_file, Arrangement which, const std::vector<int> 
 }   // namespace
 
 bool estimate(const fs::path &bsp_file, Arrangement which, const std::vector<int> *cl_in, const std::vector<ClusterPortal> *portals_in,
-              Drawn &out, const PlayArea &area, const std::vector<std::vector<char>> *pvs) {
+              Drawn &out, const PlayArea &area, const std::vector<std::vector<char>> *pvs, int chunk) {
     out = Drawn();
     std::vector<int> counts;
     int triangles = 0;
     if (!sample(bsp_file, which, cl_in, portals_in, area, 2400, &triangles,
-                [&](const View &, int n, const std::vector<int> &, int) { counts.push_back(n); }, pvs))
+                [&](const View &, int n, const std::vector<int> &, int) { counts.push_back(n); }, pvs, chunk))
         return false;
     std::sort(counts.begin(), counts.end());
     out.samples = (int)counts.size();
@@ -2231,6 +2286,80 @@ static bool grid_clusters(const Leaves &L, const std::vector<std::array<V3, 3>> 
     return false;
 }
 
+// A cluster's subclusters, as `pcs`.
+static void write_pieces(std::vector<tagfile::TagNode> &subs, int sub_sid, const std::vector<Piece> &pcs) {
+    subs.clear();
+    for (auto &pc : pcs) {
+        tagfile::TagNode sn = tagfile::new_node(sub_sid);
+        const char *ax[3] = {"world bounds x", "world bounds y", "world bounds z"};
+        for (int a = 0; a < 3; a++) {
+            tagfile::set_num(sn, ax[a], pc.lo[(size_t)a], 0);
+            tagfile::set_num(sn, ax[a], pc.hi[(size_t)a], 1);
+        }
+        std::vector<tagfile::TagNode> *si = tagfile::block(sn, "surface indices");
+        int isid = tagfile::block_struct(sn, "surface indices");
+        for (int sfc : pc.s) {
+            tagfile::TagNode x = tagfile::new_node(isid);
+            tagfile::set_num(x, "index", sfc);
+            si->push_back(std::move(x));
+        }
+        subs.push_back(std::move(sn));
+    }
+}
+
+ChunkResult rechunk(const fs::path &file, int most, const PlayArea &area) {
+    ChunkResult r;
+    std::string before_bytes;
+    {
+        std::ifstream f(file, std::ios::binary);
+        before_bytes.assign(std::istreambuf_iterator<char>(f), {});
+    }
+    tagfile::EditTag et;
+    tagfile::Tag rt;
+    std::vector<std::array<V3, 3>> tri;
+    if (!et.load(file) || !rt.load(file) || !load_triangles(rt.root(), tri)) { r.why = "couldn't be read"; return r; }
+    std::vector<tagfile::TagNode> *clusters = tagfile::block(et.root(), "clusters");
+    if (!clusters || clusters->empty()) { r.why = "has no clusters"; return r; }
+    int sub_sid = tagfile::block_struct((*clusters)[0], "subclusters");
+    for (auto &cn : *clusters) {
+        std::vector<tagfile::TagNode> *subs = tagfile::block(cn, "subclusters");
+        if (!subs || subs->empty()) continue;
+        r.before += (int)subs->size();
+        // (its surfaces: each once, as the subclusters have them)
+        std::vector<int> mine;
+        std::set<int> have;
+        for (auto &sn : *subs)
+            if (std::vector<tagfile::TagNode> *si = tagfile::block(sn, "surface indices"))
+                for (auto &x : *si) {
+                    long long v = (long long)tagfile::get_num(x, "index");
+                    if (v >= 0 && v < (long long)tri.size() && have.insert((int)v).second) mine.push_back((int)v);
+                }
+        std::sort(mine.begin(), mine.end());
+        std::vector<Piece> pcs;
+        pieces(mine, tri, (size_t)most, pcs);
+        if (pcs.size() > 4096) { r.after += (int)subs->size(); continue; }   // (the engine's most per cluster)
+        write_pieces(*subs, sub_sid, pcs);
+        r.after += (int)pcs.size();
+    }
+    if (r.after <= r.before) { r.why = "is in small enough pieces already"; return r; }
+    Drawn d0, d1;
+    if (!estimate(file, Arrangement::Own, nullptr, nullptr, d0, area)) { r.why = "couldn't be measured"; return r; }
+    if (!et.save(file)) { r.why = "couldn't be saved"; return r; }
+    if (!estimate(file, Arrangement::Own, nullptr, nullptr, d1, area) || d1.mean >= d0.mean) {
+        std::ofstream(file, std::ios::binary | std::ios::trunc) << before_bytes;
+        r.why = "draws no less in smaller pieces";
+        return r;
+    }
+    r.changed = true;
+    r.drawn_before = d0.mean;
+    r.drawn_after = d1.mean;
+    r.high_before = d0.high;
+    r.high_after = d1.high;
+    r.bytes = (long long)(r.after - r.before) * 0x24;
+    r.original = std::move(before_bytes);
+    return r;
+}
+
 Result add_portals(const fs::path &file, const Options &options) {
     using tagfile::TagNode;
     Result r;
@@ -2269,7 +2398,7 @@ Result add_portals(const fs::path &file, const Options &options) {
     occ.flying = options.flying;
     // Worth it? What the engine would draw from where players are, as it is and with.
     Drawn before, after;
-    if (!estimate(file, replan ? Arrangement::Own : Arrangement::None, nullptr, nullptr, before, options.area)) {
+    if (!estimate(file, replan ? Arrangement::Own : Arrangement::None, nullptr, nullptr, before, options.area, nullptr, options.chunk)) {
         r.why = "couldn't be measured";
         return r;
     }
@@ -2320,7 +2449,7 @@ Result add_portals(const fs::path &file, const Options &options) {
                 if (a != c && !sv[(size_t)a][(size_t)c]) hidden++;
             }
         Drawn d;
-        if (!estimate(file, Arrangement::Given, &c_in, &pl, d, options.area, &sv)) return "couldn't be measured";
+        if (!estimate(file, Arrangement::Given, &c_in, &pl, d, options.area, &sv, options.chunk)) return "couldn't be measured";
         if (getenv("HMP_PORTALS_DEBUG"))
             fprintf(stderr, "arrangement: %d clusters, %zu portals, %d of %d pairs hidden; drawn %.0f (mean %.0f, high %.0f) against %.0f (%.0f, %.0f)\n", n,
                     pl.size(), hidden, n * (n - 1), d.median, d.mean, d.high, before.median, before.mean, before.high);
@@ -2425,44 +2554,12 @@ Result add_portals(const fs::path &file, const Options &options) {
         std::vector<TagNode> *subs = tagfile::block(cn, "subclusters");
         if (!subs) { r.why = "couldn't be read"; return r; }
         subs->clear();
-        // Subclusters: the cluster's surfaces in groups of up to 64 near each other (the engine checks each group's
-        // box against the view).
-        std::function<void(std::vector<int>)> split = [&](std::vector<int> idx) {
-            if (idx.empty()) return;
-            V3 lo{1e30, 1e30, 1e30}, hi{-1e30, -1e30, -1e30};
-            for (int sfc : idx)
-                for (auto &p : tri[(size_t)sfc])
-                    for (int k = 0; k < 3; k++) { lo[k] = std::min(lo[k], p[k]); hi[k] = std::max(hi[k], p[k]); }
-            if (idx.size() <= 64) {
-                TagNode sn = tagfile::new_node(sub_sid);
-                tagfile::set_num(sn, "world bounds x", lo[0], 0);
-                tagfile::set_num(sn, "world bounds x", hi[0], 1);
-                tagfile::set_num(sn, "world bounds y", lo[1], 0);
-                tagfile::set_num(sn, "world bounds y", hi[1], 1);
-                tagfile::set_num(sn, "world bounds z", lo[2], 0);
-                tagfile::set_num(sn, "world bounds z", hi[2], 1);
-                std::vector<TagNode> *si = tagfile::block(sn, "surface indices");
-                int isid = tagfile::block_struct(sn, "surface indices");
-                for (int sfc : idx) {
-                    TagNode x = tagfile::new_node(isid);
-                    tagfile::set_num(x, "index", sfc);
-                    si->push_back(std::move(x));
-                }
-                subs->push_back(std::move(sn));
-                return;
-            }
-            int ax = 0;
-            for (int k = 1; k < 3; k++)
-                if (hi[k] - lo[k] > hi[ax] - lo[ax]) ax = k;
-            auto mid = [&](int sfc) { return tri[(size_t)sfc][0][ax] + tri[(size_t)sfc][1][ax] + tri[(size_t)sfc][2][ax]; };
-            size_t h = idx.size() / 2;
-            std::nth_element(idx.begin(), idx.begin() + (long)h, idx.end(), [&](int x, int y) { return mid(x) < mid(y); });
-            split(std::vector<int>(idx.begin(), idx.begin() + (long)h));
-            split(std::vector<int>(idx.begin() + (long)h, idx.end()));
-        };
+        // Subclusters: the cluster's surfaces in pieces near each other (pieces()).
         std::vector<int> mine = surf[(size_t)c];
         std::sort(mine.begin(), mine.end());
-        split(mine);
+        std::vector<Piece> pcs;
+        pieces(mine, tri, (size_t)options.chunk, pcs);
+        write_pieces(*subs, sub_sid, pcs);
         if (std::vector<TagNode> *csi = tagfile::block(cn, "surface indices")) csi->clear();
         // Mirrors: each in the cluster it's in.
         if (std::vector<TagNode> *mir = tagfile::block(cn, "mirrors")) {
