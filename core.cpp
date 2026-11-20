@@ -8881,7 +8881,10 @@ void xbox_materials(Job &job, const std::vector<std::string> &deps) {
 // divided further with xbox_replan_portals, else only squares of its open ground (when they draw less than its own
 // portals). The Xbox's own levels are left as they are.
 void xbox_portals(Job &job) {
-    if (!job.cfg.xbox_add_portals || job.analysis) return;
+    // (a Perfect Conversion: only the subclusters made smaller, which only the drawing reads; its clusters, portals and
+    // leaves are what the PC map's, as the game's visibility wakes objects and AI by them)
+    const bool chunks_only = !job.cfg.xbox_add_portals && job.cfg.xbox_chunks_only;
+    if ((!job.cfg.xbox_add_portals && !chunks_only) || job.analysis) return;
     std::string scen = job.scenario + ".scenario";
     fs::path sdir = job.owner(scen);
     tagfile::Tag stag;
@@ -8922,7 +8925,7 @@ void xbox_portals(Job &job) {
             if (own_clusters == 0) continue;
         }
         std::string name = bsps.size() > 1 ? " (" + fs::path(from_u8(b)).stem().u8string() + ")" : "";
-        job.log("Finding the level's rooms and doorways" + name + "...");
+        job.log((chunks_only ? "Making the level's subclusters smaller" : "Finding the level's rooms and doorways") + name + "...");
         fs::path ed = editable_owner(job, b);
         if (ed.empty()) continue;
         fs::path file = ed / from_u8(b);
@@ -8946,6 +8949,7 @@ void xbox_portals(Job &job) {
         po.replan = job.cfg.xbox_replan_portals;
         po.cameras = cameras;
         po.flying = flying;
+        if (!chunks_only) {
         portals::Result pr = portals::add_portals(file, po);
         auto drawn = [&](const portals::Result &x) {
             return "about " + thousands((long long)x.drawn_after) + " of its triangles drawn in a typical view (was " +
@@ -8985,6 +8989,7 @@ void xbox_portals(Job &job) {
             job.log("  [portals] the level" + name + " has no portals; none added: it " + pr.why);
         } else {
             job.log("  [portals] the level" + name + "'s own portals kept: it " + pr.why);
+        }
         }
         // Its subclusters smaller (when the portals didn't make them so): less of a cluster seen in part is drawn.
         portals::ChunkResult cr = portals::rechunk(file, po.chunk, po.area);
@@ -18710,6 +18715,7 @@ static Config perfect_config(Config c) {
     for (auto &v : c.xbox_vehicle_slots) v.clear();
     c.xbox_compress_animations = 0;
     c.xbox_collision = 0;
+    c.xbox_chunks_only = c.xbox_add_portals;   // (its subclusters made smaller: the pair check doesn't look at them)
     c.xbox_add_portals = false;
     c.xbox_replan_portals = false;
     c.xbox_rider_ai_off = false;
@@ -19946,7 +19952,7 @@ std::string xbox_prepare_key(const Config &c) {
     for (auto &[w, r] : c.xbox_weapon_replacements) k << "repl=" << w << "=" << r << "\n";
     k << "other=" << c.xbox_other_weapons << "\n";
     for (auto &[w, r] : c.xbox_replace) k << "pick=" << w << "=" << r << "\n";
-    k << "anim=" << c.xbox_compress_animations << " coll=" << c.xbox_collision << " portals=" << c.xbox_add_portals
+    k << "anim=" << c.xbox_compress_animations << " coll=" << c.xbox_collision << " portals=" << c.xbox_add_portals << " chunks=" << c.xbox_chunks_only
       << c.xbox_replan_portals << " bots=" << c.xbox_bot_nodes << "\n";
     for (auto &w : c.xbox_bot_waypoints) k << "waypoint=" << w[0] << " " << w[1] << " " << w[2] << "\n";
     for (auto &w : c.xbox_bot_removed) k << "removed=" << w[0] << " " << w[1] << " " << w[2] << "\n";

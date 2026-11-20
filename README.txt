@@ -1116,6 +1116,12 @@ Portals ("Portals", Xbox tab)
   343 Guilty Spark. It adds about 60 KB to a big level;
   a map that's then over the Xbox's limit by no more than that gets its
   levels' own pieces back first.
+  A Perfect Conversion gets no portals: the game wakes objects and AI,
+  and muffles sounds, by which clusters can see each other, so a linked
+  PC and Xbox with different clusters would disagree about what's going
+  on (the pair check compares the clusters, portals and leaves). Its
+  pieces are still made smaller with portals on: only the drawing reads
+  them, and the pair check leaves them out.
 
 Custom weapons and "Use the Xbox's own weapons, vehicles and player model"
   Every Xbox map always contains the stock multiplayer weapons: the Xbox

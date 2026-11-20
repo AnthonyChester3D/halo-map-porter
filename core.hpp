@@ -154,7 +154,8 @@ struct Config {
     std::set<std::string> xbox_reflection_picks;
     // Only measure the level's shaders (no build): Result::shaders is the file for the level shaders window.
     bool level_shaders_only = false;
-    bool extras_only = false;   // (with level_shaders_only: the showcase and bot file made too, for write_extras)
+    bool extras_only = false;
+    bool xbox_chunks_only = false;   // (Perfect Conversion with the portals option on: only the subclusters made smaller)   // (with level_shaders_only: the showcase and bot file made too, for write_extras)
     // Xbox: convert (or build) only as far as the LODs window: the tags prepared, the models' levels of detail made,
     // the window's file and "Update the map"'s written (Result::lods, Result::update), but no map built. The window's
     // "Build the map" ("Update the map") builds it from there.
