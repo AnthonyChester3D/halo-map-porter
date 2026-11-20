@@ -539,6 +539,7 @@ struct Job {
     fs::path shaders_file;                     // the level shaders file (levelshaders.hpp), for the window
     std::string campaign_report;               // a campaign level's cutscenes (campaign_apply), for Result::campaign
     bool no_piece = false;                     // the cutscene piece asked for isn't in the level (nothing to build)
+    std::string campaign_error;                // a gameplay part (Config::campaign_parts) that couldn't be made: why
     std::string shaders_line;                  // the report's line on the level's shader passes
 
     Job(const Config &c, const Log &l, Game t) : cfg(c), log(l), target(t) {}
@@ -15326,11 +15327,20 @@ static void campaign_apply(Job &job) {
         plan.renumber = to;
         campaign::PartStats ps;
         auto out = campaign::part_texts(la, plan, p, ps);
+        // (what was found, for the log when it can't be made)
+        auto found = [&]() {
+            std::string f = "; the level's switch volumes:";
+            if (sw.empty()) f += " none";
+            for (auto &x : sw) f += " " + x.volume + " (BSP " + std::to_string(x.source) + " to " + std::to_string(x.destination) + ")";
+            f += "; its BSPs' parts:";
+            for (size_t b = 0; b < nbsp; b++) f += " " + std::to_string(b) + "->" + std::to_string(part_of[b] + 1);
+            return f;
+        };
         if (p + 1 < parts && plan.exits.empty() && !ps.scripted_exits) {
-            why = "no switch leads on from its BSPs to the next part's (its scripts don't switch there either)";
+            why = "no switch leads on from its BSPs to the next part's (its scripts don't switch there either)" + found();
             return texts;
         }
-        if (p > 0 && entries.empty()) { why = "no switch leads into it from the part before (nowhere to start it)"; return texts; }
+        if (p > 0 && entries.empty()) { why = "no switch leads into it from the part before (nowhere to start it)" + found(); return texts; }
         // (which way to face where it starts: from where the part before started, or the level did)
         {
             tagfile::Tag t;
@@ -15470,7 +15480,10 @@ static void campaign_apply(Job &job) {
             // where it leads on.
             std::string why;
             texts = make_part(keep, texts, why);
-            if (!why.empty()) return "part " + std::to_string(cfg.campaign_part + 1) + " couldn't be made: " + why;
+            if (!why.empty()) {
+                job.campaign_error = "Part " + std::to_string(cfg.campaign_part + 1) + " of the level couldn't be made: " + why;
+                return job.campaign_error;
+            }
             all_after.clear();
             for (auto &t : texts) all_after += t.second + "\n";
             kept = campaign::atoms(all_after);
@@ -15539,7 +15552,10 @@ static void campaign_apply(Job &job) {
     if (!campaign::strip_scenario(scen_file, st, out)) return "the scenario couldn't be cut down: " + out.why;
     if (piece == 0 && cfg.campaign_parts > 1) {
         std::string why = finish_part(scen_file);
-        if (!why.empty()) return "part " + std::to_string(cfg.campaign_part + 1) + ": " + why;
+        if (!why.empty()) {
+            job.campaign_error = "Part " + std::to_string(cfg.campaign_part + 1) + " of the level couldn't be made: " + why;
+            return job.campaign_error;
+        }
     }
     std::string bsps;
     for (size_t i = 0; i < st.keep_bsps.size(); i++) bsps += (i ? ", " : "") + fs::path(from_u8(bsp_tags[(size_t)st.keep_bsps[i]])).stem().u8string();
@@ -15826,6 +15842,7 @@ bool prepare_for_xbox(Job &job, std::string &err) {
     job.watch("the scripts");
     campaign_apply(job);   // (a campaign level: its cutscenes, split off when asked)
     job.watch("splitting the campaign level");
+    if (!job.campaign_error.empty()) { err = job.campaign_error; return false; }
     if (!job.analysis) note_script_tricks(job, xsrc);
 
     job.source = xsrc;
