@@ -102,7 +102,11 @@ struct PartPlan {
 // the scenario's switch volumes: from BSP A to B).
 struct Switch { std::string volume; int source = -1, destination = -1; std::array<double, 3> middle{}, forward{1, 0, 0}; };
 bool locate(const fs::path &scenario, const std::function<std::vector<unsigned>(const std::vector<std::array<double, 3>> &)> &bsps_at,
-            std::map<std::string, unsigned> &bsps_of, std::vector<Switch> &switches);
+            std::map<std::string, unsigned> &bsps_of, std::vector<Switch> &switches, std::map<std::string, Switch> *volumes = nullptr);
+// A level whose scripts switch BSPs (switch_bsp N) when a player is in a trigger volume (Custom Edition's way, with
+// volumes of other names): each such volume and the BSP it switches to, for those of `to` (the volume tested in the
+// statement with the switch, or in the wait just before it).
+std::vector<std::pair<std::string, int>> scripted_switches(const Analysis &a, const std::set<int> &to);
 struct PartStats { int kept = 0, caught_up = 0, dropped = 0, scripts_dropped = 0, scripted_exits = 0; };
 std::vector<std::pair<fs::path, std::string>> part_texts(const Analysis &a, const PartPlan &plan, int part, PartStats &stats);
 

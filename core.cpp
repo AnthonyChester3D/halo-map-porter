@@ -15236,7 +15236,8 @@ static void campaign_apply(Job &job) {
         const int parts = cfg.campaign_parts, p = cfg.campaign_part;
         std::map<std::string, unsigned> bsps_of;
         std::vector<campaign::Switch> sw;
-        if (!campaign::locate(scen_original, bsps_at, bsps_of, sw)) { why = "the scenario couldn't be read"; return texts; }
+        std::map<std::string, campaign::Switch> volumes;
+        if (!campaign::locate(scen_original, bsps_at, bsps_of, sw, &volumes)) { why = "the scenario couldn't be read"; return texts; }
         campaign::Analysis la;
         for (auto &t : texts) {
             campaign::File f;
@@ -15323,6 +15324,18 @@ static void campaign_apply(Job &job) {
             }
             if (part_of[(size_t)x.source] == p - 1 && part_of[(size_t)x.destination] == p) entries.push_back(x);
         }
+        // (a level whose scripts do its switching: it's entered where they switch into it, from the volume they test)
+        if (p > 0 && entries.empty()) {
+            std::set<int> into;
+            for (size_t b = 0; b < nbsp; b++) if (part_of[b] == p) into.insert((int)b);
+            for (auto &[v, dest] : campaign::scripted_switches(la, into)) {
+                auto it = volumes.find(v);
+                if (it == volumes.end()) continue;
+                campaign::Switch x = it->second;
+                x.destination = dest;
+                entries.push_back(x);
+            }
+        }
         if (p + 1 < parts) plan.next = "+./" + (p + 1 < (int)cfg.campaign_part_folders.size() ? cfg.campaign_part_folders[(size_t)p + 1] : std::string());
         plan.renumber = to;
         campaign::PartStats ps;
@@ -15332,6 +15345,12 @@ static void campaign_apply(Job &job) {
             std::string f = "; the level's switch volumes:";
             if (sw.empty()) f += " none";
             for (auto &x : sw) f += " " + x.volume + " (BSP " + std::to_string(x.source) + " to " + std::to_string(x.destination) + ")";
+            f += "; scripted switches:";
+            std::set<int> all;
+            for (size_t b = 0; b < nbsp; b++) all.insert((int)b);
+            auto ss = campaign::scripted_switches(la, all);
+            if (ss.empty()) f += " none";
+            for (auto &[v, d] : ss) f += " " + v + " (to BSP " + std::to_string(d) + ")";
             f += "; its BSPs' parts:";
             for (size_t b = 0; b < nbsp; b++) f += " " + std::to_string(b) + "->" + std::to_string(part_of[b] + 1);
             return f;

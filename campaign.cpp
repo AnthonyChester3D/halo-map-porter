@@ -552,6 +552,12 @@ std::vector<std::pair<fs::path, std::string>> part_texts(const Analysis &a, cons
                 continue;
             }
             // (reached: the first statement naming something that stands in this part (not a script that does))
+            // (a switch to another part's BSP, not the way on: that BSP isn't here)
+            if (head(*s) == "switch_bsp" && s->kids.size() >= 2 && is_int(s->kids[1].atom) && part_of_bsp(std::stoi(s->kids[1].atom)) != part) {
+                edits.push_back({fi, s->b, s->e, ""});
+                stats.dropped++;
+                continue;
+            }
             if (!reached && parts_of(text, *s, true).count(part)) reached = true;
             if (!reached) {
                 // Catching up: what earlier parts did, at once.
@@ -664,9 +670,10 @@ std::vector<std::pair<fs::path, std::string>> part_texts(const Analysis &a, cons
 }
 
 bool locate(const fs::path &scenario, const std::function<std::vector<unsigned>(const std::vector<std::array<double, 3>> &)> &bsps_at,
-            std::map<std::string, unsigned> &bsps_of, std::vector<Switch> &switches) {
+            std::map<std::string, unsigned> &bsps_of, std::vector<Switch> &switches, std::map<std::string, Switch> *volumes) {
     bsps_of.clear();
     switches.clear();
+    if (volumes) volumes->clear();
     tagfile::Tag t;
     if (!t.load(scenario)) return false;
     tagfile::Elem r = t.root();
@@ -731,6 +738,14 @@ bool locate(const fs::path &scenario, const std::function<std::vector<unsigned>(
     }
     std::vector<unsigned> in = bsps_at(pts);
     for (size_t i = 0; i < names.size() && i < in.size(); i++) bsps_of[names[i]] |= in[i];
+    if (volumes)
+        for (size_t v = 0; v < volume_names.size(); v++) {
+            Switch s;
+            s.volume = volume_names[v];
+            s.middle = volume_mid[v];
+            s.forward = volume_fwd[v];
+            (*volumes)[s.volume] = s;
+        }
     // (the switches: trigger volumes named "bspA,B", which the build makes into the scenario's switch volumes)
     for (size_t v = 0; v < volume_names.size(); v++) {
         unsigned from = 0, to = 0;
@@ -744,6 +759,43 @@ bool locate(const fs::path &scenario, const std::function<std::vector<unsigned>(
         switches.push_back(s);
     }
     return true;
+}
+
+std::vector<std::pair<std::string, int>> scripted_switches(const Analysis &a, const std::set<int> &to) {
+    std::vector<std::pair<std::string, int>> out;
+    std::set<std::pair<std::string, int>> seen;
+    auto volumes_in = [](const Node &n, std::vector<std::string> &v) {
+        walk(n, [&](const Node &k) {
+            const std::string &h = head(k);
+            if ((h == "volume_test_object" || h == "volume_test_objects" || h == "volume_test_objects_all") && k.kids.size() >= 2 && !k.kids[1].list)
+                v.push_back(k.kids[1].atom);
+        });
+    };
+    std::function<void(const std::vector<const Node *> &)> list = [&](const std::vector<const Node *> &stmts) {
+        for (size_t i = 0; i < stmts.size(); i++) {
+            const Node &s = *stmts[i];
+            std::set<int> targets;
+            walk(s, [&](const Node &k) {
+                if (head(k) == "switch_bsp" && k.kids.size() >= 2 && is_int(k.kids[1].atom) && to.count(std::stoi(k.kids[1].atom)))
+                    targets.insert(std::stoi(k.kids[1].atom));
+            });
+            if (targets.empty()) continue;
+            std::vector<std::string> v;
+            volumes_in(s, v);
+            if (v.empty() && i > 0) volumes_in(*stmts[i - 1], v);
+            for (auto &name : v)
+                for (int t : targets)
+                    if (seen.insert({name, t}).second) out.push_back({name, t});
+        }
+    };
+    for (auto &d : a.defs) {
+        if (d.kind != "script") continue;
+        const Node &f = a.files[d.file].forms[d.form];
+        std::vector<const Node *> body;
+        for (size_t k = body_start(f); k < f.kids.size(); k++) body.push_back(&f.kids[k]);
+        list(body);
+    }
+    return out;
 }
 
 // ---------------------------------------------------------------- the scenario
