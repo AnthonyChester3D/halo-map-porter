@@ -2337,18 +2337,37 @@ one go, with the names, descriptions and pictures the pack's menu shows.
      installer hasn't built it).
 
 Where Xbox conversions go. With the Build tab's Xbox folder set (the batch
-window's "Save to"), each map is built into a map pack folder in it, then
-put where it belongs once it's done:
-  H1U Crossplay\<map>\              linked pairs: the Xbox maps
-  H1U Crossplay (Custom Edition)\    the Custom Edition maps they're linked to,
-                                     copied as they are (your originals stay)
-  H1U Xbox\<map>\                   converted, but not linked
+window's "Save to"), it's laid out the way Halo 1 Unlimited reads the
+Xbox's maps folder: maps\<folder>\ holding a .map is a map, and
+maps\<pack>\<folder>\ one of a pack's maps (two levels, no more; a pack's
+name and a map folder's 30 characters together at most):
+  Copy to Xbox maps\                 copy what's in it into the Xbox's maps
+                                     folder, as it is
+    Crossplay\<map>\                maps on their own that are linked
+    Xbox\<map>\                     maps on their own, converted but not
+                                     linked
+    <pack>\<map>\                   a pack: a campaign's levels and their
+                                     pieces (Lumoria\lumoria_c P2\), an MCC
+                                     Workshop item's maps; its shared file
+                                     in it
+  PC side\Custom Edition\, PC side\MCC\
+                                     the PC maps the linked ones are linked
+                                     to, copied as they are (your originals
+                                     stay)
   Batch report.csv                   each map of the last batch: its result,
                                      where it went and why it failed
-A map that fails leaves nothing behind (and an earlier run's output of it
-is taken away), and a protected map's original moves into "Map Protected
-(Fail)" beside it. The three pack folders' names can be changed in the batch
-window. Single conversions do the same.
+Names are cut to fit: a pack's to 12 characters (without words like
+"Campaign" or "Pack" when it's longer), a map folder's to what the pack's
+leaves of the 30 (a campaign's level folders leave 5 more for their
+pieces' " Open", " End", " P2"). A map that fails leaves nothing behind
+(and an earlier run's output of it is taken away), and a protected map's
+original moves into "Map Protected (Fail)" beside it. A pack is one: when
+one of its maps fails, none of them is kept. A campaign is linked only when
+all of it is: a level in gameplay parts can't be, so then none of its
+levels is converted to be, and when one level doesn't link the others'
+links are taken away. stock.shared isn't written here (every Xbox's
+installer builds its own). The four folders' names can be changed in the
+batch window. Single conversions do the same.
 
 A batch takes each map's work folder away once the map is done (its scratch
 copy of the tags, hundreds of MB each), keeping only the latest one, which
@@ -2418,9 +2437,9 @@ and closing cutscenes into maps of their own, so each piece needs only
 what it uses. The map is the Convert tab's, with the Xbox tab's options,
 converted to Xbox map folders:
   - the level, in the Convert tab's folder;
-  - its opening cutscene, in "<folder> - Opening" beside it: it plays,
+  - its opening cutscene, in "<folder> Open" beside it: it plays,
     then loads the level (still skippable: a skip goes straight on);
-  - its closing cutscene, in "<folder> - Ending": the level's end loads
+  - its closing cutscene, in "<folder> End": the level's end loads
     it, and it ends as the level did (map_name to the next level, or
     game_won).
 Each piece loads the next with map_name "+./<folder>": Halo 1 Unlimited

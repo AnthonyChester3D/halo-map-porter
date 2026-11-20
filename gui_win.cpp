@@ -116,8 +116,8 @@ enum {
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new158.exe is 1.158).
-#define HMP_VERSION L"1.158"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new159.exe is 1.159).
+#define HMP_VERSION L"1.159"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -866,6 +866,7 @@ static void set_busy(bool b) {
 
 static bool same_path(const fs::path &a, const fs::path &b) { return _wcsicmp(a.wstring().c_str(), b.wstring().c_str()) == 0; }
 static fs::path xbox_pack_dir(const fs::path &dir);
+static std::wstring fit_loose_folder(const std::wstring &folder);
 
 // Convert tab, Xbox output: the file name is the map's name on the Xbox.
 static std::wstring conv_xbox_name() {
@@ -942,8 +943,11 @@ static void update_out_path() {
             else base = in.parent_path();
             out = base / folder / in.filename();
         } else if (to == Game::Xbox && folder_mode()) {
+            const fs::path given = dir;
             dir = xbox_pack_dir(dir);   // (built in the Xbox pack folder, then put where it belongs)
-            out = dir / W(conv_card().folder) / (conv_map_name() + L".map");
+            std::wstring folder = W(conv_card().folder);
+            if (!same_path(dir, given)) folder = fit_loose_folder(folder);   // (the map list's 30 characters)
+            out = dir / folder / (conv_map_name() + L".map");
         } else if (to == Game::Xbox) {
             std::wstring name = conv_xbox_name();
             out = dir / (name + L".map");
@@ -1941,27 +1945,78 @@ static size_t clear_batch_work(const fs::path &cache) {
     return moved;
 }
 
-// Where Xbox conversions go, under the Build tab's Xbox folder: linked pairs in one map pack folder (with the Custom
-// Edition maps they're linked to, copied as they are, in another), maps that converted but aren't linked in a third.
+// Where Xbox conversions go, under the Build tab's Xbox folder, laid out as the Xbox's maps folder is read (two levels:
+// maps\<map>\ a map, maps\<pack>\<map>\ a pack's; a pack's name and a map folder's 30 characters together at most):
+//   Copy to Xbox maps\Crossplay\<map>\    maps on their own that are linked (one pack)
+//   Copy to Xbox maps\Xbox\<map>\         maps on their own that converted but aren't linked (one pack)
+//   Copy to Xbox maps\<pack>\<map>\       a pack: a campaign's levels, an MCC Workshop item's maps (linked or not)
+//   PC side\Custom Edition\, PC side\MCC\  the PC maps the linked ones are linked to, copied as they are
+// What's in "Copy to Xbox maps" goes in the Xbox's maps folder as it is.
 struct PackLayout {
     fs::path root;                        // (empty: conversions go where they're saved, as they are)
     std::wstring crossplay, ce, mcc, xbox;   // the four folders' names
+    fs::path maps() const { return root / L"Copy to Xbox maps"; }
+    fs::path xbox_dir() const { return maps() / xbox; }
+    fs::path cross_dir() const { return maps() / crossplay; }
+    fs::path ce_dir() const { return root / L"PC side" / ce; }
+    fs::path mcc_dir() const { return root / L"PC side" / mcc; }
 };
+static const size_t kMapListChars = 30;   // (a pack's name and a map folder's, together)
+static const size_t kPackChars = 12;      // (a pack's name at most)
+// A name cut to `most` characters: at a space when there's one in the last third, without what ends it badly.
+static std::wstring fit_name(std::wstring s, size_t most) {
+    std::wstring o;
+    for (wchar_t c : s) if (!(c == L' ' && (o.empty() || o.back() == L' '))) o += c;   // (one space at a time)
+    while (!o.empty() && o.back() == L' ') o.pop_back();
+    if (o.size() > most) {
+        size_t cut = o.rfind(L' ', most);
+        o.resize(cut != std::wstring::npos && cut >= most * 2 / 3 ? cut : most);
+        // (a bracket left open: what's in it goes)
+        size_t open = o.rfind(L'('), close = o.rfind(L')');
+        if (open != std::wstring::npos && (close == std::wstring::npos || close < open) && open > 0) o.resize(open);
+    }
+    while (!o.empty() && (o.back() == L' ' || o.back() == L'-' || o.back() == L'.' || o.back() == L'(' || o.back() == L',')) o.pop_back();
+    return o;
+}
+// A pack's folder: its name without the words that say it's a pack or a campaign, kPackChars at most.
+static std::wstring pack_folder_for(const std::wstring &name) {
+    std::wstring s = name;
+    for (auto &c : s) if (c == L'_') c = L' ';
+    if (s.size() > kPackChars) {
+        std::wistringstream in(s);
+        std::wstring w, kept;
+        for (; in >> w;) {
+            const std::wstring lw = lower(w);
+            if (lw == L"campaign" || lw == L"pack" || lw == L"maps" || lw == L"map" || lw == L"the" || lw == L"full") continue;
+            kept += (kept.empty() ? L"" : L" ") + w;
+        }
+        if (!kept.empty()) s = kept;
+    }
+    std::wstring o = fit_name(W(mapcard::sanitize_folder(N(s))), kPackChars);
+    return o.empty() ? L"Pack" : o;
+}
+// A campaign pack's level folders leave room for their pieces' (" Open", " End", " P2").
+static const size_t kPieceChars = 5;
 static PackLayout pack_layout() {
     PackLayout l;
     l.root = fs::path(get_text(ID_B_XBOX_OUT));
     std::error_code ec;
     if (!l.root.empty() && !fs::is_directory(l.root, ec)) l.root.clear();
-    l.crossplay = ini_get(L"pack_crossplay", L"H1U Crossplay");
-    l.ce = ini_get(L"pack_crossplay_ce", L"H1U Crossplay (Custom Edition)");
-    l.mcc = ini_get(L"pack_crossplay_mcc", L"H1U Crossplay (MCC)");
-    l.xbox = ini_get(L"pack_xbox", L"H1U Xbox");
+    l.crossplay = fit_name(ini_get(L"layout_crossplay", L"Crossplay"), kPackChars);
+    l.ce = ini_get(L"layout_ce", L"Custom Edition");
+    l.mcc = ini_get(L"layout_mcc", L"MCC");
+    l.xbox = fit_name(ini_get(L"layout_xbox", L"Xbox"), kPackChars);
+    if (l.crossplay.empty()) l.crossplay = L"Crossplay";
+    if (l.xbox.empty()) l.xbox = L"Xbox";
     return l;
 }
+// How long a loose map's folder can be (it moves between the Xbox and Crossplay packs).
+static size_t loose_folder_chars(const PackLayout &l) { return kMapListChars - std::max(l.crossplay.size(), l.xbox.size()); }
+static std::wstring fit_loose_folder(const std::wstring &folder) { return fit_name(folder, loose_folder_chars(pack_layout())); }
 // The Build tab's Xbox folder, as a conversion's folder: its Xbox pack folder (any other folder: itself).
 static fs::path xbox_pack_dir(const fs::path &dir) {
     const PackLayout l = pack_layout();
-    return !l.root.empty() && same_path(dir, l.root) ? dir / l.xbox : dir;
+    return !l.root.empty() && same_path(dir, l.root) ? l.xbox_dir() : dir;
 }
 static bool move_folder(const fs::path &from, const fs::path &to) {
     std::error_code ec;
@@ -1987,18 +2042,40 @@ static fs::path place_conversion(const PackLayout &l, const fs::path &in, const 
     // (its folder under the Xbox pack, a pack's map folder too: CE Digsite Multiplayer\Albatross)
     if (l.root.empty()) return built;
     std::error_code ec;
-    const fs::path folder = built.parent_path().lexically_relative(l.root / l.xbox);
+    fs::path ce = l.ce_dir() / in.filename();
+    // A pack's map (Copy to Xbox maps\<pack>\<map>\): it stays in its pack, linked or not; its PC map copied when linked.
+    {
+        const fs::path rel = built.parent_path().lexically_relative(l.maps());
+        if (!rel.empty() && rel != "." && *rel.begin() != ".." && std::distance(rel.begin(), rel.end()) == 2 &&
+            lower(rel.begin()->wstring()) != lower(l.xbox) && lower(rel.begin()->wstring()) != lower(l.crossplay)) {
+            const std::wstring pack = rel.begin()->wstring();
+            const std::string mcc_prefix = "mcc_maps\\";
+            if (r.linked_pc_name.rfind(mcc_prefix, 0) == 0) {
+                ce = l.mcc_dir() / W(r.linked_pc_name.substr(mcc_prefix.size()));
+                ce += r.linked_ce.extension();
+            }
+            if (r.ok && !r.link.empty()) {
+                fs::create_directories(ce.parent_path(), ec);
+                fs::copy_file(r.linked_ce.empty() ? in : r.linked_ce, ce, fs::copy_options::overwrite_existing, ec);
+                log("Linked: in the pack " + N(pack) + ", with the PC map in " + N(ce.parent_path().wstring()));
+            } else if (!r.ok) {
+                fs::remove_all(built.parent_path(), ec);
+            }
+            where = N(pack);
+            return built;
+        }
+    }
+    const fs::path folder = built.parent_path().lexically_relative(l.xbox_dir());
     if (folder.empty() || folder == "." || *folder.begin() == "..") return built;
-    if (!same_path(l.root / l.xbox / folder, built.parent_path())) return built;
-    fs::path ce = l.root / l.ce / in.filename();
-    const fs::path xbox = l.root / l.xbox / folder, cross = l.root / l.crossplay / folder;
+    if (!same_path(l.xbox_dir() / folder, built.parent_path())) return built;
+    const fs::path xbox = l.xbox_dir() / folder, cross = l.cross_dir() / folder;
     // (an MCC map: in the MCC pack folder, laid out as OpenCE's mcc_maps folder: <package>\<level>.map)
     // (the package's own bitmaps.map / sounds.map go beside it when its link was hashed with them; MCC's own sets are
     // every OpenCE's)
     const std::string mcc_prefix = "mcc_maps\\";
     const bool mcc = r.linked_pc_name.rfind(mcc_prefix, 0) == 0;
     if (mcc) {
-        ce = l.root / l.mcc / W(r.linked_pc_name.substr(mcc_prefix.size()));
+        ce = l.mcc_dir() / W(r.linked_pc_name.substr(mcc_prefix.size()));
         ce += r.linked_ce.extension();
     }
     if (r.ok && !r.link.empty()) {
@@ -2022,7 +2099,7 @@ static fs::path place_conversion(const PackLayout &l, const fs::path &in, const 
             r.link = cross / r.link.filename();
             r.output = cross / built.filename();
             where = N(l.crossplay);
-            log("Linked: in " + N((l.root / l.crossplay).wstring()) + ", with the PC map in " + N(ce.parent_path().wstring()));
+            log("Linked: in " + N(l.cross_dir().wstring()) + ", with the PC map in " + N(ce.parent_path().wstring()));
             return r.output;
         }
         where = N(l.xbox);
@@ -2237,7 +2314,7 @@ static void start_convert(bool again = false) {
         std::error_code ec;
         const bool existed = fs::exists(out.parent_path(), ec);
         Result r = !prepared.empty() ? build_prepared(cfg, prepared, post_log) : convert_map(cfg, in, from, to, out, share, post_log, m.get());
-        if (layout.root.empty() || !same_path(out.parent_path().parent_path(), layout.root / layout.xbox))
+        if (layout.root.empty() || !same_path(out.parent_path().parent_path(), layout.xbox_dir()))
             drop_folder_if_protected(r, out.parent_path(), existed);
         if (prepared.empty() && to == Game::Xbox) mark_in_catalog(in, r, post_log);
         keep_measurement(r, key, m);
@@ -2341,9 +2418,9 @@ static std::vector<fs::path> level_and_pieces(const fs::path &out, const Campaig
     const fs::path folder = out.parent_path(), root = folder.parent_path();
     const std::wstring name = folder.filename().wstring(), stem = out.stem().wstring();
     std::vector<fs::path> more;
-    if (p.open) more.push_back(root / (name + L" - Opening") / (stem + L"_opening.map"));
-    if (p.close) more.push_back(root / (name + L" - Ending") / (stem + L"_ending.map"));
-    for (int k = 2; k <= p.parts; k++) more.push_back(root / (name + L" - Part " + std::to_wstring(k)) / (stem + L"_part" + std::to_wstring(k) + L".map"));
+    if (p.open) more.push_back(root / (name + L" Open") / (stem + L"_opening.map"));
+    if (p.close) more.push_back(root / (name + L" End") / (stem + L"_ending.map"));
+    for (int k = 2; k <= p.parts; k++) more.push_back(root / (name + L" P" + std::to_wstring(k)) / (stem + L"_part" + std::to_wstring(k) + L".map"));
     for (auto &m : more)
         if (fs::exists(m, ec)) v.push_back(m);
     return v;
@@ -2374,7 +2451,8 @@ static void store_campaign_shared(const std::wstring &campaign, const std::vecto
         const fs::path folder = ms.front().parent_path().parent_path();
         log("");
         log("==== " + N(campaign) + ": storing what its " + std::to_string(ms.size()) + " maps share once, in " + N(folder.wstring()));
-        sharedfile::Result r = sharedfile::make(folder, N(shared_name_for(campaign)), ms, stock_maps, fs::path(), cache, log);
+        // (stock.shared kept with the app's cache, not written beside them: every Xbox's installer builds its own)
+        sharedfile::Result r = sharedfile::make(folder, N(shared_name_for(campaign)), ms, stock_maps, cache, cache, log);
         const std::string t = r.ok ? r.report : "Not stored once (the maps are as they were): " + r.error;
         log(t);
         if (text) *text += t + "\n";
@@ -2397,7 +2475,7 @@ static void store_campaign_shared(const std::wstring &campaign, const std::vecto
 
 // ---- the Campaign tab: a campaign level's opening and closing cutscenes, split off into maps of their own
 // (campaign.hpp). The Convert tab's map, converted for the Xbox into map folders: the level in the Convert tab's
-// folder, its opening cutscene in "<folder> - Opening" beside it, its closing one in "<folder> - Ending". Each piece
+// folder, its opening cutscene in "<folder> Open" beside it, its closing one in "<folder> End". Each piece
 // loads the next with map_name (Halo 1 Unlimited finds a folder beside it by name).
 static void create_campaign_page() {
     const int P = 4;
@@ -2493,15 +2571,15 @@ static void campaign_report(const std::string &text) {
 static std::array<fs::path, 3> campaign_outputs(const fs::path &out) {
     const fs::path folder = out.parent_path(), root = folder.parent_path();
     const std::wstring name = folder.filename().wstring(), stem = out.stem().wstring();
-    return {out, root / (name + L" - Opening") / (stem + L"_opening.map"), root / (name + L" - Ending") / (stem + L"_ending.map")};
+    return {out, root / (name + L" Open") / (stem + L"_opening.map"), root / (name + L" End") / (stem + L"_ending.map")};
 }
-// The gameplay parts' maps: part 1 is the level's (the Convert tab's output), part k "<folder> - Part k".
+// The gameplay parts' maps: part 1 is the level's (the Convert tab's output), part k "<folder> Pk".
 static std::vector<fs::path> campaign_part_outputs(const fs::path &out, int parts) {
     const fs::path folder = out.parent_path(), root = folder.parent_path();
     const std::wstring name = folder.filename().wstring(), stem = out.stem().wstring();
     std::vector<fs::path> v{out};
     for (int k = 2; k <= parts; k++)
-        v.push_back(root / (name + L" - Part " + std::to_wstring(k)) / (stem + L"_part" + std::to_wstring(k) + L".map"));
+        v.push_back(root / (name + L" P" + std::to_wstring(k)) / (stem + L"_part" + std::to_wstring(k) + L".map"));
     return v;
 }
 static bool campaign_ready(fs::path &in, fs::path &out, Game &from) {
@@ -2664,6 +2742,16 @@ static void start_campaign_convert() {
         return;
     }
     if (!check_card_folder(conv_card())) return;
+    // A level of a campaign, converted into the Build tab's Xbox folder: in the campaign's pack (Copy to Xbox maps\<pack>\).
+    const PackLayout layout = pack_layout();
+    const std::wstring campaign_name = campaign_picks_for(in, campaign_defaults(), load_campaigns()).name;
+    if (!layout.root.empty() && !campaign_name.empty()) {
+        const fs::path above = out.parent_path().parent_path();
+        const std::wstring pack = pack_folder_for(campaign_name);
+        if (same_path(above, layout.xbox_dir()) || same_path(above, layout.maps() / pack) || same_path(above, layout.root))
+            out = layout.maps() / pack / fit_name(out.parent_path().filename().wstring(), kMapListChars - pack.size() - kPieceChars) /
+                  out.filename();
+    }
     std::wstring card_note;
     if (!write_card(conv_card_dir(), conv_card_name(), out, card_note)) return;
     save_settings();
@@ -2674,7 +2762,6 @@ static void start_campaign_convert() {
     const std::string card_name = N(conv_card_name());
     const std::string title = mapcard::load_card(card_dir, card_name).name;
     const bool share = checked(ID_SHARE), store_shared = checked(ID_CA_SHARED), use_stock = checked(ID_CA_STOCK);
-    const std::wstring campaign_name = campaign_picks_for(in, campaign_defaults(), load_campaigns()).name;
     const CampaignPicks defaults = campaign_defaults();
     set_busy(true);
     SetWindowTextW(g_log, L"");
@@ -2691,6 +2778,10 @@ static void start_campaign_convert() {
         if (!failed.empty()) {
             r.ok = false;
             r.error = "Pieces that didn't build:\n" + failed + (r.error.empty() ? "" : "the level: " + r.error);
+        }
+        if (r.ok && !layout.root.empty() && !campaign_name.empty()) {   // (linked: its PC map copied beside the others)
+            std::string where;
+            place_conversion(layout, in, out, r, where, post_log);
         }
         // What the pieces have in common stored once (sharedfile.hpp), in <level folder>-<version>.shared beside their
         // folders: every piece there, converted now or before (one drawing on it is read through it, and draws on the new
@@ -2713,7 +2804,7 @@ static void start_campaign_convert() {
             post_log("");
             post_log("==== Storing what the pieces share once, in " + N(folder.wstring()));
             sharedfile::Result s = sharedfile::make(folder, N(out.parent_path().filename().wstring()), pieces,
-                                                    use_stock ? cfg.xbox_maps_dir : fs::path(), fs::path(),
+                                                    use_stock ? cfg.xbox_maps_dir : fs::path(), cfg.cache_dir / "shared",
                                                     cfg.cache_dir / "shared", post_log);
             const std::string text = s.ok ? s.report : "Not stored once: " + s.error + "\n";
             post_log(text);
@@ -2953,10 +3044,10 @@ static void open_batch() {
     h.layout_changed = [](const std::wstring &root, const std::wstring &cross, const std::wstring &ce, const std::wstring &mcc,
                           const std::wstring &xbox) {
         set_text(ID_B_XBOX_OUT, root);
-        ini_set(L"pack_crossplay", cross.empty() ? L"H1U Crossplay" : cross);
-        ini_set(L"pack_crossplay_ce", ce.empty() ? L"H1U Crossplay (Custom Edition)" : ce);
-        ini_set(L"pack_crossplay_mcc", mcc.empty() ? L"H1U Crossplay (MCC)" : mcc);
-        ini_set(L"pack_xbox", xbox.empty() ? L"H1U Xbox" : xbox);
+        ini_set(L"layout_crossplay", cross.empty() ? L"Crossplay" : cross);
+        ini_set(L"layout_ce", ce.empty() ? L"Custom Edition" : ce);
+        ini_set(L"layout_mcc", mcc.empty() ? L"MCC" : mcc);
+        ini_set(L"layout_xbox", xbox.empty() ? L"Xbox" : xbox);
         save_settings();
     };
     h.pick_folder = [](HWND, const std::wstring &start) { return pick_folder(start); };
@@ -3142,13 +3233,22 @@ static void open_batch() {
             if (j.pieces) j.cfg.xbox_perfect = false;   // (its pieces stay together, in the Xbox pack folder)
             // Built into the Xbox pack folder, in a folder of the card's name (else the map's), and put where it
             // belongs once it's done (place_conversion).
-            if (!layout.root.empty() && mcc) {
-                j.out = layout.root / layout.xbox / rel;
-            } else if (!layout.root.empty()) {
+            // A pack's maps (a campaign's levels, an MCC item's maps) in a folder of its own: Copy to Xbox maps\<pack>\<map>\.
+            if (!layout.root.empty()) {
                 std::wstring folder = j.in.stem().wstring();
-                if (!j.card_dir.empty())
+                fs::path file = lower(j.in.stem().wstring()) + L".map";
+                if (mcc) {
+                    folder = rel.parent_path().filename().wstring();
+                    file = rel.filename();
+                } else if (!j.card_dir.empty()) {
                     if (auto c = mapcard::load_card(j.card_dir, j.card_name); !c.folder.empty()) folder = W(c.folder);
-                j.out = layout.root / layout.xbox / folder / (lower(j.in.stem().wstring()) + L".map");
+                }
+                const std::wstring pack = j.campaign ? pack_folder_for(j.group) : !j.group.empty() ? pack_folder_for(j.group) : std::wstring();
+                if (pack.empty()) {
+                    j.out = layout.xbox_dir() / fit_name(folder, loose_folder_chars(layout)) / file;
+                } else {
+                    j.out = layout.maps() / pack / fit_name(folder, kMapListChars - pack.size() - (j.campaign ? kPieceChars : 0)) / file;
+                }
             }
             if (folder_mode()) {
                 std::wstring note;
@@ -3183,10 +3283,13 @@ static void open_batch() {
                 if (!j.card_dir.empty() && j.card_dir == (*jobs)[it->second].card_dir)
                     j.group = (*jobs)[it->second].group = (*jobs)[it->second].out.parent_path().filename().wstring();
                 // (named for the map: a campaign's chapters share one map card's name, "Wintersmith Campain (wintersmith4)")
-                for (int n = 1;; n++) {
-                    fs::path dir = j.out.parent_path().parent_path() /
-                                   (j.out.parent_path().filename().wstring() + L" (" + j.in.stem().wstring() +
-                                    (n > 1 ? L" " + std::to_wstring(n) : std::wstring()) + L")");
+                const fs::path above = j.out.parent_path().parent_path();
+                const size_t most = layout.root.empty() ? 64
+                                    : same_path(above, layout.xbox_dir()) ? loose_folder_chars(layout)
+                                    : kMapListChars - above.filename().wstring().size() - (j.campaign ? kPieceChars : 0);
+                for (int n = 2;; n++) {
+                    const std::wstring tail = L" " + std::to_wstring(n);
+                    fs::path dir = above / (fit_name(j.out.parent_path().filename().wstring(), most > tail.size() ? most - tail.size() : 1) + tail);
                     if (first_at.count(lower(dir.wstring()))) continue;
                     first_at[lower(dir.wstring())] = a;
                     j.out = dir / j.out.filename();
@@ -3198,13 +3301,28 @@ static void open_batch() {
         // A campaign's chapters (Job1::group): what two or more of them use stored once, in the pack's file
         // (<campaign>-<version>.shared) in the folder above theirs, once the last of them is done; with stock.shared
         // under it, so on when the Xbox tab draws maps on stock.shared.
-        struct Group { int left = 0; std::vector<fs::path> maps; bool finished = false, campaign = false; };
+        // A pack is one: when one of its maps fails, none of them is kept; a campaign is linked only when all of it is
+        // (a level in gameplay parts can't be, so then none of it is built to be).
+        struct Group { int left = 0; std::vector<fs::path> maps, pc_copies; bool finished = false, campaign = false, failed = false,
+                       unlinked = false; std::vector<std::string> bad, not_linked; std::set<std::wstring> inputs; };
         auto groups = std::make_shared<std::map<std::wstring, Group>>();
         for (auto &j : *jobs)
             if (!j.group.empty() && j.same_as.empty()) {
                 (*groups)[j.group].left++;
                 (*groups)[j.group].campaign = (*groups)[j.group].campaign || j.campaign;
+                (*groups)[j.group].inputs.insert(lower(j.in.wstring()));
             }
+        {
+            std::set<std::wstring> in_parts;
+            for (auto &j : *jobs)
+                if (j.campaign && j.pieces && j.picks.parts > 1) in_parts.insert(j.group);
+            for (auto &j : *jobs)
+                if (j.campaign && in_parts.count(j.group) && j.cfg.xbox_perfect) {
+                    j.cfg.xbox_perfect = false;
+                    post_log("[" + N(j.in.stem().wstring()) + "] Not a Perfect Conversion: a level of its campaign (" + N(j.group) +
+                             ") is in gameplay parts, so none of the campaign can be linked.");
+                }
+        }
         g_batch_stop = false;
         set_busy(true);
         SetWindowTextW(g_log, L"");
@@ -3215,17 +3333,58 @@ static void open_batch() {
         const fs::path cache = base.cache_dir;
         std::thread([jobs, share, stock_shared, at_once, layout, keep_logs, cache, groups, ca_shared, ca_stock, ca_defaults] {
             std::mutex group_lock;
-            auto group_done = [&](Job1 &j, bool ok, const Log &log) {   // (the last chapter: the campaign's file)
+            auto group_done = [&](Job1 &j, const Result &r, const Log &log) {   // (the last chapter: the campaign's file)
                 if (j.group.empty()) return;
-                std::vector<fs::path> maps;
+                const bool ok = r.ok;
+                std::vector<fs::path> maps, pc_copies;
+                bool pack_failed = false, unlink = false;
+                std::string bad, not_linked;
                 {
                     std::lock_guard<std::mutex> g(group_lock);
                     Group &gr = (*groups)[j.group];
                     if (ok)
                         for (auto &m : j.pieces ? level_and_pieces(j.out, j.picks) : std::vector<fs::path>{j.out}) gr.maps.push_back(m);
+                    if (!ok) {
+                        gr.bad.push_back(N(j.in.stem().wstring()));
+                        std::error_code e0;
+                        if (j.pieces) {   // (the pieces it made before one didn't build)
+                            for (auto &m : campaign_outputs(j.out)) fs::remove_all(m.parent_path(), e0);
+                            for (auto &m : campaign_part_outputs(j.out, 4)) fs::remove_all(m.parent_path(), e0);
+                        }
+                    }
+                    if (ok && !r.link.empty()) {
+                        const std::string mcc_prefix = "mcc_maps\\";
+                        fs::path ce = layout.ce_dir() / j.in.filename();
+                        if (r.linked_pc_name.rfind(mcc_prefix, 0) == 0) {
+                            ce = layout.mcc_dir() / W(r.linked_pc_name.substr(mcc_prefix.size()));
+                            ce += r.linked_ce.extension();
+                        }
+                        gr.pc_copies.push_back(ce);
+                    } else if (ok) {
+                        gr.not_linked.push_back(N(j.in.stem().wstring()));
+                    }
                     if (--gr.left > 0 || gr.finished) return;
                     gr.finished = true;
                     maps = gr.maps;
+                    pc_copies = gr.pc_copies;
+                    for (auto &b : gr.bad) bad += (bad.empty() ? "" : ", ") + b;
+                    for (auto &b : gr.not_linked) not_linked += (not_linked.empty() ? "" : ", ") + b;
+                    pack_failed = gr.failed = !gr.bad.empty();
+                    unlink = gr.unlinked = !pack_failed && gr.campaign && !gr.pc_copies.empty() && !gr.not_linked.empty();
+                }
+                std::error_code ec;
+                if (pack_failed) {   // (none of the pack kept: its maps' folders, their PC maps)
+                    for (auto &m : maps) fs::remove_all(m.parent_path(), ec);
+                    for (auto &c : pc_copies) fs::remove(c, ec);
+                    log("[pack] " + N(j.group) + ": " + bad + " didn't convert, so none of the pack's maps were kept (a pack is one).");
+                    return;
+                }
+                if (unlink) {   // (a campaign some of whose levels didn't link: none of it is, a campaign is played whole)
+                    for (auto &m : maps)
+                        for (auto &e : fs::directory_iterator(m.parent_path(), ec))
+                            if (lower(e.path().extension().wstring()) == L".h1ulink") fs::remove(e.path(), ec);
+                    for (auto &c : pc_copies) fs::remove(c, ec);
+                    log("[pack] " + N(j.group) + ": " + not_linked + " didn't link, so none of the campaign is linked (it's played whole).");
                 }
                 if (j.campaign) {   // (with the campaign's levels converted before, and their pieces)
                     if (!ca_shared) return;
@@ -3340,7 +3499,7 @@ static void open_batch() {
                     if (where == "Map Protected (Fail)") st = L"Protected: moved to Map Protected (Fail)";
                 }
                 batchui::progress(j.index, st, r.ok ? size : std::wstring(), r.ok ? j.out.wstring() : std::wstring(L"\x01"));
-                group_done(j, r.ok, log);
+                group_done(j, r, log);
                 {
                     std::lock_guard<std::mutex> g(report_lock);
                     report.push_back({N(j.in.stem().wstring()), N(j.in.wstring()),
@@ -3376,6 +3535,26 @@ static void open_batch() {
                 } else if (!gr.campaign && stock_shared && gr.maps.size() >= 2) {
                     finish_campaign(jobs->front().cfg, name, gr.maps, post_log);
                 }
+            }
+            // (a pack that failed: each of its maps failed with it, in the list and the report; a campaign not linked whole)
+            for (auto &j : *jobs) {
+                if (j.group.empty() || !groups->count(j.group)) continue;
+                const Group &gr = (*groups)[j.group];
+                if (!gr.failed && !gr.unlinked) continue;
+                std::string why;
+                for (auto &b : gr.failed ? gr.bad : gr.not_linked) why += (why.empty() ? "" : ", ") + b;
+                const std::string st = gr.failed ? "Failed: the pack " + N(j.group) + " failed (" + why + " didn't convert)"
+                                                 : "Converted, not linked: the campaign isn't linked whole (" + why + " didn't link)";
+                bool was_ok = false;
+                for (auto &row : report)
+                    if (lower(W(row[1])) == lower(j.in.wstring()) && row[2].rfind("Converted", 0) == 0) {
+                        was_ok = true;
+                        if (row[2] == "Converted, linked") linked--;
+                        if (gr.failed) { row[2] = "Failed"; row[3] = N(j.group); ok--; failed++; }
+                        else row[2] = "Converted";
+                        row[4] = st;
+                    }
+                if (was_ok) batchui::progress(j.index, W(st), gr.failed ? std::wstring() : L"\x01", L"\x01");
             }
             std::wstring sum = std::to_wstring(ok) + L" converted" + (linked ? L" (" + std::to_wstring(linked) + L" linked)" : L"") +
                                (failed ? L", " + std::to_wstring(failed) + L" failed" : L"") +
