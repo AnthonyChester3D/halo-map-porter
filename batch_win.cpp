@@ -18,7 +18,7 @@ namespace {
 
 enum { IDC_INTRO = 400, IDC_STATS = 499, IDC_LIST, IDC_FIND, IDC_ADD, IDC_REMOVE, IDC_ALL, IDC_NONE, IDC_GO, IDC_STOP, IDC_CLOSE, IDC_STATUS,
        IDC_BROWSE, IDC_AT_ONCE_LBL, IDC_AT_ONCE, IDC_ROOT_LBL, IDC_ROOT, IDC_ROOT_BROWSE, IDC_PACKS_LBL, IDC_PACK_CROSS,
-       IDC_PACK_CE, IDC_PACK_XBOX, IDC_WORKSHOP, IDC_PACK_MCC, IDC_SHOW_LBL, IDC_SHOW, IDC_SHOWN };
+       IDC_PACK_CE, IDC_PACK_XBOX, IDC_WORKSHOP, IDC_PACK_MCC, IDC_SHOW_LBL, IDC_SHOW, IDC_SHOWN, IDC_EXTRAS };
 // What the list shows ("Show:"), by each map's last run, game and kind
 enum Show { SHOW_ALL, SHOW_TICKED, SHOW_UNTICKED, SHOW_DONE, SHOW_LINKED, SHOW_NOT_LINKED, SHOW_FAILED, SHOW_HEAVY, SHOW_FIXABLE,
             SHOW_NOT_RUN, SHOW_MCC, SHOW_CE, SHOW_MP, SHOW_CAMPAIGN, SHOW_COUNT };
@@ -273,7 +273,9 @@ void update_buttons() {
                    IDC_PACK_CROSS, IDC_PACK_CE, IDC_PACK_MCC, IDC_PACK_XBOX})
         EnableWindow(item(id), !St->running);
     EnableWindow(item(IDC_GO), !St->running && ticked > 0);
+    EnableWindow(item(IDC_EXTRAS), !St->running && ticked > 0);
     ShowWindow(item(IDC_STOP), St->running ? SW_SHOW : SW_HIDE);
+    ShowWindow(item(IDC_EXTRAS), St->running ? SW_HIDE : SW_SHOW);
     wchar_t b[200];
     if (!St->running)
     {
@@ -544,7 +546,9 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             fill();
             update_buttons();
             return 0;
-        case IDC_GO: {
+        case IDC_GO:
+        case IDC_EXTRAS: {
+            const bool extras = LOWORD(wp) == IDC_EXTRAS;
             tell_layout();
             std::vector<int> which;
             std::vector<std::wstring> was;
@@ -554,14 +558,14 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                     which.push_back(i);
                     St->items[(size_t)i].status = L"Waiting";
                 }   // (the others keep their last result)
-            if (which.empty() || !St->hooks.start) return 0;
+            if (which.empty() || !(extras ? (bool)St->hooks.extras : (bool)St->hooks.start)) return 0;
             // (the rows as they are: what "Show:" picked stays in the list while it runs, "Waiting" or not)
             for (int i : which)
                 if (St->row_of[(size_t)i] >= 0) ListView_SetItemText(St->list, St->row_of[(size_t)i], 4, (LPWSTR)St->items[(size_t)i].status.c_str());
             St->running = true;
             update_buttons();
             int at_once = (int)SendMessageW(item(IDC_AT_ONCE), CB_GETCURSEL, 0, 0) + 1;
-            if (!St->hooks.start(St->items, which, std::clamp(at_once, 1, kMaxAtOnce))) {
+            if (!(extras ? St->hooks.extras(St->items, which) : St->hooks.start(St->items, which, std::clamp(at_once, 1, kMaxAtOnce)))) {
                 St->running = false;
                 for (size_t i = 0; i < St->items.size(); i++) St->items[i].status = was[i];
                 fill();
@@ -651,7 +655,7 @@ HWND add(const wchar_t *cls, const wchar_t *text, DWORD style, int x, int y, int
     int ax = 0, ay = y >= 470 ? 1 : 0;
     if (id == IDC_INTRO || id == IDC_STATUS || id == IDC_ROOT || id == IDC_SHOWN) ax = 2;   // (Save to grows; the packs stay right of it)
     if (id == IDC_ROOT_BROWSE || id == IDC_PACKS_LBL || id == IDC_PACK_CROSS || id == IDC_PACK_CE || id == IDC_PACK_MCC || id == IDC_PACK_XBOX) ax = 1;
-    if (id == IDC_AT_ONCE_LBL || id == IDC_AT_ONCE || id == IDC_STOP || id == IDC_GO || id == IDC_CLOSE) ax = 1;
+    if (id == IDC_AT_ONCE_LBL || id == IDC_AT_ONCE || id == IDC_STOP || id == IDC_GO || id == IDC_CLOSE || id == IDC_EXTRAS) ax = 1;
     St->anchors.push_back({id, x, y, w, h, ax, ay});
     return c;
 }
@@ -711,6 +715,8 @@ void create_controls() {
     for (int i = 1; i <= kMaxAtOnce; i++) SendMessageW(at, CB_ADDSTRING, 0, (LPARAM)std::to_wstring(i).c_str());
     SendMessageW(at, CB_SETCURSEL, (WPARAM)(std::clamp(St->hooks.at_once, 1, kMaxAtOnce) - 1), 0);
     add(L"BUTTON", L"Stop after this map", WS_TABSTOP, 590, 554, 150, 30, IDC_STOP);
+    // (in Stop's place while nothing runs)
+    add(L"BUTTON", L"Showcase && bots only", WS_TABSTOP, 590, 554, 150, 30, IDC_EXTRAS);
     add(L"BUTTON", L"Convert ticked", WS_TABSTOP | BS_DEFPUSHBUTTON, 748, 554, 120, 30, IDC_GO);
     add(L"BUTTON", L"Close", WS_TABSTOP, 876, 554, 88, 30, IDC_CLOSE);
 }

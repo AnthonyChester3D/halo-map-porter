@@ -32,6 +32,10 @@ struct Hooks {
     // and done(). False (after telling the user) if it can't start.
     // `at_once`: how many maps are converted at the same time (each in its own thread and work folder).
     std::function<bool(const std::vector<Item> &items, const std::vector<int> &which, int at_once)> start;
+    // "Showcase & bots only": for these (the ticked ones), the showcase flythrough and bot file made from the map and
+    // written beside its Xbox map, which isn't built again or touched, in a worker thread (progress() and done(), as
+    // start's). False if it can't start.
+    std::function<bool(const std::vector<Item> &items, const std::vector<int> &which)> extras;
     // Asked to stop after the map being converted.
     std::function<void()> stop;
     // Where a map picked with "Browse..." goes (its earlier output, else beside the others); "" if it can't tell.

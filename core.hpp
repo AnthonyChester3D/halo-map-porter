@@ -154,6 +154,7 @@ struct Config {
     std::set<std::string> xbox_reflection_picks;
     // Only measure the level's shaders (no build): Result::shaders is the file for the level shaders window.
     bool level_shaders_only = false;
+    bool extras_only = false;   // (with level_shaders_only: the showcase and bot file made too, for write_extras)
     // Xbox: convert (or build) only as far as the LODs window: the tags prepared, the models' levels of detail made,
     // the window's file and "Update the map"'s written (Result::lods, Result::update), but no map built. The window's
     // "Build the map" ("Update the map") builds it from there.
@@ -282,6 +283,12 @@ bool analyze_xbox_contents(const Config &cfg, const fs::path &input, Game in_gam
 // Prepares the map for the Xbox as a conversion would (without building it) and measures its level's shaders:
 // `file` the level shaders file (levelshaders.hpp save()). `in_game` Unknown: `input` is a scenario in a tags folder.
 bool analyze_level_shaders(const Config &cfg, const fs::path &input, Game in_game, fs::path &file, std::string &error, const Log &log);
+// An Xbox map converted before: its showcase flythrough (showcase.txt) and bot file (bots.txt: the waypoints the app
+// adds and the ladders, which Halo 1 Unlimited adds to the map's own) made from `input` (the map it was converted
+// from) and written beside `xbox_map` in its folder, without building or touching the map. A showcase.txt or bots.txt
+// the app didn't write is kept. `report`: what was written (or kept, and why not).
+bool write_extras(const Config &cfg, const fs::path &input, Game in_game, const fs::path &xbox_map, std::string &report,
+                  std::string &error, const Log &log);
 // A measurement saved to / read from a file (read: false if missing, damaged or from another version). The models
 // go in a second file beside it (`file` + ".models"); without it the measurement still reads, with no models.
 bool save_content_analysis(const ContentAnalysis &a, const fs::path &file);
@@ -346,6 +353,7 @@ struct Result {
     fs::path pair_check;               // Perfect Conversion: the comparison's report
     std::string campaign;              // a campaign level: its cutscenes, for the Campaign tab (campaign.hpp)
     bool no_piece = false;             // a cutscene piece (Config::campaign_piece) the level hasn't: nothing built
+    std::string showcase, showcase_note, bot_file, bot_note;   // Config::extras_only: what write_extras writes
 };
 
 // What a built map offers, for the Halo Universal XBE's map browser (build 20): the info.txt lines "Gametypes:" and

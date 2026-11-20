@@ -490,6 +490,7 @@ struct Job {
     std::vector<std::pair<fs::path, std::string>> portal_backups;   // levels the app gave portals, as they were
     fs::path bots_picture;   // the bots' waypoints from above (bot_route_points), for beside the report
     std::string bot_file;    // Perfect Conversion: the bot file (botnodes::bot_file), for bots.txt beside the map
+    std::string bot_note;    // (and the [bots] line about it, for write_extras)
     fs::path input_map;      // convert: the map converted
     fs::path given_map;      // convert: the map as the player has it (input_map can be a copy with plainer tag names)
     fs::path original;       // an Xbox conversion: the map's tags as extracted (Perfect Conversion compares with them)
@@ -3265,6 +3266,10 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
         copy_over(job.work / "bots.scenario_structure_bsp", b, ec);
     }
     if (cfg.level_shaders_only) {   // (measured: nothing more to do)
+        r.showcase = job.showcase;
+        r.showcase_note = job.showcase_note;
+        r.bot_file = job.bot_file;
+        r.bot_note = job.bot_note;
         r.ok = !job.shaders_file.empty();
         if (!r.ok) r.error = "The map's level couldn't be measured.";
         return r;
@@ -8480,7 +8485,7 @@ void xbox_reflections(Job &job) {
         }
         if (cfg.write_perf_tour && !cfg.level_shaders_only && job.perf_tour.empty())   // (the first level: the one a match loads)
             job.perf_tour = make_perf_tour(a, p, stag.root(), a.map_name);
-        if (cfg.xbox_showcase && !cfg.level_shaders_only && job.showcase.empty() && !job.update) {
+        if (cfg.xbox_showcase && (!cfg.level_shaders_only || cfg.extras_only) && job.showcase.empty() && !job.update) {
             showcase::Showcase own;
             std::string why;
             if (!cfg.xbox_showcase_text.empty() && showcase::read(cfg.xbox_showcase_text, own, &why) && !own.shots.empty()) {
@@ -17289,11 +17294,13 @@ void bot_route_points(Job &job, const fs::path &xsrc) {
     nodes.insert(nodes.end(), mine.begin(), mine.end());
     nodes.insert(nodes.end(), br.added.begin(), br.added.end());
     // (the ladders, green: for the bot file)
-    if (job.cfg.xbox_perfect) {   // (the scenario's placements stay the map's: the waypoints go in the bot file)
+    if (job.cfg.xbox_perfect || job.cfg.extras_only) {   // (the scenario's placements stay the map's: the waypoints go in the bot file)
         std::string name = fs::path(from_u8(job.scenario)).filename().u8string(), why;
         std::vector<botnodes::V3> placed = at_vehicles;   // (the vehicles' and yours: placed, not planned)
         placed.insert(placed.end(), mine.begin(), mine.end());
         job.bot_file = botnodes::bot_file(name, br.added, placed, ladders, &why);
+        job.bot_note = std::to_string(br.added.size()) + " waypoints added to the map's " + std::to_string(br.given) + ", " +
+                       std::to_string(std::min<size_t>(ladders.size(), 16)) + " ladders";
         added = (int)br.added.size();
         if (!why.empty()) job.log("  [bots] the bot file: " + why);
         nodes.clear();
@@ -17358,7 +17365,7 @@ void bot_route_points(Job &job, const fs::path &xsrc) {
         auto pct = [&](long v) { return std::to_string((int)std::lround(100.0 * v / std::max(1, br.given * (br.given - 1)))); };
         const int searched = added - br.on_ramps - br.in_narrow - br.on_open;
         l += ". Added " + std::to_string(added) +
-             (job.cfg.xbox_perfect ? std::string(" (in the bot file, bots.txt beside the map), ")
+             (job.cfg.xbox_perfect || job.cfg.extras_only ? std::string(" (in the bot file, bots.txt beside the map), ")
                                    : std::string(" (item spawn points that spawn nothing), ")) + std::to_string(total) + " now: " +
              std::to_string(br.on_ramps) + " along ramps (foot, middle, turns, top), " + std::to_string(br.in_narrow) +
              " through doorways, tunnels, bridges and along ledges, " + std::to_string(br.on_open) +
@@ -20752,6 +20759,54 @@ bool analyze_level_shaders(const Config &cfg_in, const fs::path &input, Game in_
                                         : convert_map_impl(cfg, input, in_game, Game::Xbox, dummy, false, log, nullptr);
     if (!r.ok) { error = r.error.empty() ? "The map couldn't be measured." : r.error; return false; }
     file = r.shaders;
+    return true;
+}
+
+bool write_extras(const Config &cfg_in, const fs::path &input, Game in_game, const fs::path &xbox_map, std::string &report,
+                  std::string &error, const Log &log) {
+    report.clear();
+    error.clear();
+    std::error_code ec;
+    if (!fs::exists(xbox_map, ec)) { error = "The Xbox map isn't there any more: " + u8(xbox_map); return false; }
+    if (!fs::exists(xbox_map.parent_path() / "info.txt", ec)) {
+        error = "It isn't a folder map (no info.txt beside it): Halo 1 Unlimited reads showcase.txt and bots.txt in a map's folder.";
+        return false;
+    }
+    const bool pc_map = in_game == Game::CE || in_game == Game::MCC;
+    if (!pc_map) { error = "The map it was converted from isn't a Custom Edition or MCC map."; return false; }
+    Config cfg = cfg_in.xbox_perfect ? perfect_config(cfg_in) : cfg_in;
+    cfg.level_shaders_only = true;
+    cfg.extras_only = true;
+    cfg.xbox_add_portals = false;   // (nothing's built: the portals would only take time)
+    cfg.xbox_showcase = true;
+    fs::path dummy = cfg.cache_dir / "shaders" / (input.stem().u8string() + ".map");
+    Result r = convert_map_impl(cfg, input, in_game, Game::Xbox, dummy, false, log, nullptr);
+    if (!r.ok) { error = r.error.empty() ? "The map's level couldn't be read." : r.error; return false; }
+    auto read = [](const fs::path &f) {
+        std::ifstream in(f, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    };
+    std::vector<std::string> said;
+    const fs::path sf = xbox_map.parent_path() / "showcase.txt", bf = xbox_map.parent_path() / "bots.txt";
+    if (r.showcase.empty()) {
+        said.push_back("no showcase (" + (r.showcase_note.empty() ? std::string("no shots could be made") : r.showcase_note) + ")");
+    } else if (std::string had = read(sf); !had.empty() && !showcase::ours(had)) {
+        said.push_back("kept the folder's own showcase.txt");
+    } else if (std::ofstream(sf, std::ios::binary | std::ios::trunc) << r.showcase) {
+        said.push_back("showcase.txt, " + r.showcase_note);
+    } else {
+        said.push_back("showcase.txt couldn't be written");
+    }
+    if (r.bot_file.empty()) {
+        said.push_back("no bot file (" + (r.bot_note.empty() ? std::string("bots play multiplayer maps only") : r.bot_note) + ")");
+    } else if (std::string had = read(bf); !had.empty() && had.find("made by Halo Map Porter") == std::string::npos) {
+        said.push_back("kept the folder's own bots.txt");
+    } else if (std::ofstream(bf, std::ios::binary | std::ios::trunc) << r.bot_file) {
+        said.push_back("bots.txt" + (r.bot_note.empty() ? std::string() : ": " + r.bot_note));
+    } else {
+        said.push_back("bots.txt couldn't be written");
+    }
+    for (size_t i = 0; i < said.size(); i++) report += (i ? "; " : "") + said[i];
     return true;
 }
 

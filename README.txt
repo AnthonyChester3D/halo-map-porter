@@ -2357,6 +2357,19 @@ go when the next one starts. Settings' "Keep failed maps' logs" (off to
 start with) keeps a failed map's Invader output and scripts first, a few KB,
 in %LOCALAPPDATA%\HaloMapPorter\logs\failed builds\<map>\.
 
+"Showcase & bots only" (the batch window, beside "Convert ticked"): for
+each ticked map converted before, its showcase flythrough (showcase.txt)
+and bot file (bots.txt: the bot waypoints the app adds and the ladders)
+are made from the map it was converted from and written in its Xbox map's
+folder. The Xbox map isn't built again or changed: Halo 1 Unlimited adds a
+folder map's bots.txt waypoints to the map's own as it loads (one within a
+world unit of another is the same one). Each map's own Level window
+choices count (your shots, your waypoints); a showcase.txt or bots.txt in
+the folder that the app didn't write is kept. It needs the map it was
+converted from where it was, and an Xbox map in a map folder (with its
+info.txt). Bots play multiplayer maps only, so a campaign map gets only a
+showcase.
+
 Drawing on stock.shared one map at a time (Xbox tab, "Save the map drawing
 on stock.shared"): each map converted for the Xbox, on its own or in a
 batch, is laid out again with what stock.shared has left out of it, the
@@ -2442,6 +2455,15 @@ kept and left out; each one's tag memory is in its own report.
 On the Xbox: until its menus list campaign folder maps, put the first
 piece in place of a stock level's map to play it; the rest are folder maps
 it loads. Network co-op hasn't been tried with split levels.
+Campaign: the campaign the level belongs to. Its levels share one shared
+file (below), and a batch converts a level whose choices here were saved
+(the cutscenes ticked, the gameplay parts) as its pieces, with them. A
+campaign map (by its header) is in its folder's campaign to start with:
+levels kept together in one folder (Lumoria_Full_Campaign) are one
+campaign, or the campaign another map of that folder was put in. Type a
+name, or pick one, to put a level in a campaign (or "(none)"). The
+choices are kept for each map (the tab shows the map's own when you come
+to it), and the batch window's Pack column shows each map's campaign.
 Shared files (Halo 1 Unlimited v1.102 or later): with "Store the textures
 and sounds the pieces share once" ticked, after the pieces are converted
 the textures and sounds two or more of them use go in
@@ -2450,7 +2472,13 @@ each piece is laid out again without them. "And draw on stock.shared"
 takes what's in stock.shared (the stock multiplayer maps' textures and
 sounds and what three or more campaign levels use, laid out from the Xbox
 maps folder in Settings, the same file the installer builds) from there
-instead, written beside it. Lumoria A's three pieces: 347 MB -> 133 MB.
+instead, written beside it. A level in a campaign: the file is the
+campaign's, <campaign>-<version>.shared, holding what two or more of the
+pieces of every level of it converted so far use (each level where it was
+converted to last; one file in each folder holding them), and a level's
+own file from before is taken away once its maps draw on the campaign's.
+A batch with the campaign's levels in it makes the campaign's file once
+the last of them is done (with "Store the textures..." ticked here). Lumoria A's three pieces: 347 MB -> 133 MB.
 A level is too big for its pack file to be copied into a cache file, so
 the pack file is stored unpacked then (the game reads it where it is).
 Copy the .shared file to the Xbox with the pieces, into the folder
