@@ -13150,6 +13150,70 @@ static int split_overloads(std::vector<std::string> &texts) {
     return (int)split.size();
 }
 
+// A global with a script's name (Lumoria D's cheat_to_g, a startup script testing a boolean of the same name): a name
+// in a value's place is the global, at the head of a call the script. The global gets a name of its own, so neither
+// the build nor what leaves out unused scripts takes one for the other. Returns how many.
+static int split_global_script_names(std::vector<std::string> &texts) {
+    std::set<std::string> scripts, globals, taken;
+    std::vector<std::vector<hsc::Node>> tops(texts.size());
+    std::vector<bool> ok(texts.size(), false);
+    for (size_t f = 0; f < texts.size(); f++) {
+        size_t i = 0;
+        if (!hsc::parse(texts[f], i, tops[f], false)) continue;
+        ok[f] = true;
+        for (auto &n : tops[f]) {
+            if (!n.list || n.kids.size() < 3 || n.kids[0].list || n.kids[1].list) continue;
+            const std::string h = hsc::lower(n.kids[0].atom);
+            if (h == "global" && !n.kids[2].list) { globals.insert(hsc::lower(n.kids[2].atom)); taken.insert(hsc::lower(n.kids[2].atom)); }
+            if (h == "script") {
+                const std::string ty = hsc::lower(n.kids[1].atom);
+                const size_t at = (ty == "static" || ty == "stub") && n.kids.size() >= 4 ? 3 : 2;
+                const hsc::Node &nm = n.kids[at];
+                std::string name = hsc::lower(nm.list ? (nm.kids.empty() || nm.kids[0].list ? "" : nm.kids[0].atom) : nm.atom);
+                scripts.insert(name);
+                taken.insert(name);
+            }
+        }
+    }
+    std::map<std::string, std::string> to;
+    for (auto &g : globals)
+        if (scripts.count(g)) {
+            std::string n = g.substr(0, 25) + "_value";
+            for (int k = 2; taken.count(n); k++) n = g.substr(0, 24) + "_val" + std::to_string(k);
+            taken.insert(n);
+            to[g] = n;
+        }
+    if (to.empty()) return 0;
+    for (size_t f = 0; f < texts.size(); f++) {
+        if (!ok[f]) continue;
+        std::vector<std::pair<size_t, size_t>> at;
+        std::vector<std::string> with;
+        // (every atom of the name but a call's head and a script's own name)
+        std::function<void(const hsc::Node &, bool)> walk = [&](const hsc::Node &n, bool is_head) {
+            if (!n.list) {
+                auto it = to.find(hsc::lower(n.atom));
+                if (it != to.end() && !is_head && !n.str) { at.push_back({n.b, n.e}); with.push_back(it->second); }
+                return;
+            }
+            for (size_t k = 0; k < n.kids.size(); k++) walk(n.kids[k], k == 0);
+        };
+        for (auto &n : tops[f]) {
+            if (n.list && n.kids.size() >= 3 && !n.kids[0].list && hsc::lower(n.kids[0].atom) == "script" && !n.kids[1].list) {
+                const std::string ty = hsc::lower(n.kids[1].atom);
+                const size_t first = (ty == "static" || ty == "stub") && n.kids.size() >= 4 ? 4 : 3;   // (the body: past the name)
+                for (size_t k = first; k < n.kids.size(); k++) walk(n.kids[k], false);
+            } else {
+                walk(n, false);
+            }
+        }
+        std::vector<size_t> order(at.size());
+        for (size_t k = 0; k < order.size(); k++) order[k] = k;
+        std::sort(order.begin(), order.end(), [&](size_t x, size_t y) { return at[x].first > at[y].first; });
+        for (size_t k : order) texts[f].replace(at[k].first, at[k].second - at[k].first, with[k]);
+    }
+    return (int)to.size();
+}
+
 // Every Xbox script function's return type (script_types.inc).
 #include "script_types.inc"
 
@@ -13610,6 +13674,16 @@ static void convert_scripts(Job &job, const fs::path &dir, Game target) {
             }
         }
         was_recoded.push_back(changed);
+    }
+    // (a global and a script of one name: the global gets one of its own)
+    {
+        std::vector<std::string> before = texts;
+        if (const int both = split_global_script_names(texts)) {
+            for (size_t i = 0; i < texts.size(); i++)
+                if (texts[i] != before[i]) was_recoded[i] = true;
+            job.note("[scripts] " + std::to_string(both) + " global" + (both > 1 ? "s" : "") + " had a script's name: renamed (name_value), " +
+                     "so neither is taken for the other");
+        }
     }
     // (MCC's static scripts that share a name, one per parameter count: one name each)
     if (target != Game::MCC) {
@@ -19614,6 +19688,7 @@ std::string convert_script_text(Game target, const std::string &text, std::vecto
         conv.volume_room = 256;
     }
     std::vector<std::string> t{text};
+    split_global_script_names(t);
     if (target != Game::MCC) split_overloads(t);
     conv.collect_user_names(t[0]);
     if (!convert_texts(conv, t)[0] && notes) notes->push_back("could not parse");
