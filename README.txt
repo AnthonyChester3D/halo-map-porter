@@ -2485,7 +2485,9 @@ file (below), and a batch converts a level whose choices here were saved
 (the cutscenes ticked, the gameplay parts) as its pieces, with them. A
 campaign map (by its header) is in its folder's campaign to start with:
 levels kept together in one folder (Lumoria_Full_Campaign) are one
-campaign, or the campaign another map of that folder was put in. Type a
+campaign, or the campaign another map of that folder was put in; an MCC
+mod's campaign maps are the mod's campaign (its title), and a folder called
+"maps" (a game's, or one of all sorts of maps) is no campaign. Type a
 name, or pick one, to put a level in a campaign (or "(none)"). The
 choices are kept for each map (the tab shows the map's own when you come
 to it), and the batch window's Pack column shows each map's campaign.

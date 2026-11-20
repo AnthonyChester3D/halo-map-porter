@@ -116,8 +116,8 @@ enum {
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new160.exe is 1.160).
-#define HMP_VERSION L"1.160"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new161.exe is 1.161).
+#define HMP_VERSION L"1.161"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -2394,6 +2394,14 @@ static CampaignPicks campaign_picks_for(const fs::path &in, const CampaignPicks 
     const std::wstring dir = lower(in.parent_path().wstring());
     for (auto &[k, v] : all)   // (the campaign another map of its folder is in)
         if (!v.name.empty() && lower(fs::path(k).parent_path().wstring()) == dir) { p.name = v.name; return p; }
+    // An MCC mod's campaign maps: its campaign (the mod's title); any other folder called "maps" is a game's or a
+    // folder of all sorts of maps, not one campaign's (you put a level in one here).
+    if (const fs::path mod = mapcard::mcc_mod_root(in); !mod.empty()) {
+        const MccItem item = mcc_item(mod);
+        p.name = item.title.empty() ? mod.filename().wstring() : item.title;
+        return p;
+    }
+    if (lower(in.parent_path().filename().wstring()) == L"maps") return p;
     p.name = in.parent_path().filename().wstring();
     return p;
 }

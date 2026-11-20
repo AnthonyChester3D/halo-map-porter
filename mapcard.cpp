@@ -794,13 +794,19 @@ fs::path mod_file(const fs::path &root, std::string rel) {
 }
 }   // namespace
 
+// An MCC mod: <root>\maps\<map>.map with the mod's ModInfo.json in <root>, or (a mod without one) in a Workshop item's
+// folder (steamapps\workshop\content\976730\<item>\) with its multiplayer or campaign folder. Any other "maps" folder
+// is only a folder of maps (a game's, your own), not a mod.
 fs::path mcc_mod_root(const fs::path &map_file) {
     std::error_code ec;
     if (lower8(map_file.parent_path().filename().u8string()) != "maps") return {};
     fs::path root = map_file.parent_path().parent_path();
-    if (!fs::exists(root / "ModInfo.json", ec) && !fs::is_directory(root / "multiplayer", ec) && !fs::is_directory(root / "campaign", ec))
-        return {};
-    return root;
+    if (fs::exists(root / "ModInfo.json", ec)) return root;
+    std::string above = lower8(root.parent_path().u8string());
+    for (auto &c : above) if (c == '/') c = '\\';
+    const bool workshop = above.size() >= 26 && above.compare(above.size() - 26, 26, "workshop\\content\\976730") == 0;
+    if (workshop && (fs::is_directory(root / "multiplayer", ec) || fs::is_directory(root / "campaign", ec))) return root;
+    return {};
 }
 std::string mcc_mod_title(const fs::path &mod_root) {
     JVal mod;
@@ -810,10 +816,8 @@ std::string mcc_mod_title(const fs::path &mod_root) {
 
 bool import_mcc_mod_card(const fs::path &dir, const fs::path &map_file, const std::string &default_name, std::string &what) {
     std::error_code ec;
-    if (lower8(map_file.parent_path().filename().u8string()) != "maps") return false;
-    fs::path root = map_file.parent_path().parent_path();
-    if (!fs::exists(root / "ModInfo.json", ec) && !fs::is_directory(root / "multiplayer", ec) && !fs::is_directory(root / "campaign", ec))
-        return false;
+    fs::path root = mcc_mod_root(map_file);
+    if (root.empty()) return false;
     Card c;
     if (fs::exists(dir / "card.txt", ec)) {   // keep a card the user has filled in
         c = load_card(dir, default_name);
