@@ -201,14 +201,20 @@ struct Config {
     // and the closing cutscene's. Each piece logs what was found ([campaign] lines; Result::campaign).
     int campaign_split = 0, campaign_piece = 0;
     std::string campaign_level_folder, campaign_closing_folder;
-    // The Campaign tab's "Estimate halves": the level (its cutscenes split off as ticked) prepared, then built quickly
-    // as two halves at each place its BSPs switch, for each half's tag memory; nothing is kept (Result::campaign).
+    // The Campaign tab's "Estimate parts": the level (its cutscenes split off as ticked) prepared, each BSP built
+    // quickly on its own for its tag memory, the fewest parts that fit planned from that (cut where the fewest ways
+    // back cross) and built to check; nothing is kept (Result::campaign, with an "HMP_PARTS: <part of each BSP>" line).
     bool campaign_halves = false;
     // Campaign levels split into gameplay parts at their BSP switches (campaign.hpp PartPlan): how many (0, 1: none),
     // which this conversion makes (with campaign_piece 0), and each part's folder (part 0's is campaign_level_folder):
     // a part ends by loading the next ("+./folder"), the last one the closing cutscene's as the level did.
     int campaign_parts = 0, campaign_part = 0;
     std::vector<std::string> campaign_part_folders;
+    // Which part each BSP is in (by BSP index; "Estimate parts" plans it); empty, or not one for each BSP: worked out
+    // (the BSPs in the order a player reaches them, in runs of about the same size). A switch volume from a part's BSP
+    // into one of another part (other than the next's, its way on) becomes a closed way back: a player stepping in is
+    // put back just outside it (the BSP beyond isn't in the part).
+    std::vector<int> campaign_part_of;
 };
 
 // A model to show in the weapons & vehicles window: its most detailed version (each region's first permutation),

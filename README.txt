@@ -2480,6 +2480,20 @@ kept and left out; each one's tag memory is in its own report.
 On the Xbox: until its menus list campaign folder maps, put the first
 piece in place of a stock level's map to play it; the rest are folder maps
 it loads. Network co-op hasn't been tried with split levels.
+Gameplay parts (up to 12): a level too big for the Xbox's tag memory is
+split at its BSP switches into maps that load one another (Halo 1
+Unlimited carries the player's weapons, and the vehicle they're in, from
+one into the next). "Estimate parts" plans them: the level prepared as for
+Convert, each BSP built quickly on its own for its tag memory, then the
+fewest parts that each fit (22 MB), cut where the fewest switch volumes
+cross, each part reached by a switch from the one before, and those parts
+built to check (a part that comes out over is planned again with less in
+each). The plan is kept for the map, and the parts box set to it: Convert
+the pieces builds those parts. A level whose BSPs connect in more than a
+line (an island you can walk around) has switch volumes leading back into
+an earlier part, or past the next: each becomes a closed way back, and a
+player stepping in is put back on the ground just outside it (the BSP
+beyond isn't in the part), as a door that locked behind them.
 Campaign: the campaign the level belongs to. Its levels share one shared
 file (below), and a batch converts a level whose choices here were saved
 (the cutscenes ticked, the gameplay parts) as its pieces, with them. A

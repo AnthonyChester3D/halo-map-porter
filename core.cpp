@@ -3033,15 +3033,15 @@ static std::string campaign_halves(Job &job, std::vector<std::string> cmd) {
     for (auto it = cmd.begin() + 1; it != cmd.end();) it = (*it == "-O" || *it == "-E") ? cmd.erase(it) : it + 1;
     cmd.insert(cmd.end() - 3, {"-O", "-E"});
 
-    // Each half in a folder of its own (its scenario in tags/, read first; its scripts in data/), so several build at once.
-    struct Half {
-        int k = 0, h = 0;   // (k 0: the whole level)
+    // Each run of BSPs (a part) in a folder of its own (its scenario in tags/, read first; its scripts in data/), so
+    // several build at once.
+    struct Run {
+        std::vector<int> bsps;   // (empty: the whole level)
         std::vector<std::string> cmd;
         double mb = 0;
         std::string err;
         int encounters = 0, scripts_dropped = 0;
     };
-    std::vector<Half> halves;
     const fs::path root = job.work / "halves";
     fs::remove_all(root, ec);
     auto cmd_in = [&](const fs::path &dir, bool own_tags, bool own_data) {
@@ -3053,62 +3053,54 @@ static std::string campaign_halves(Job &job, std::vector<std::string> cmd) {
         if (own_tags) c.insert(std::find(c.begin(), c.end(), "-t"), {"-t", u8(dir / "tags")});
         return c;
     };
-    {
-        Half whole;
-        fs::create_directories(root / "whole", ec);
-        whole.cmd = cmd_in(root / "whole", false, false);
-        halves.push_back(std::move(whole));
-    }
-    for (int k = 1; k < n; k++)
-        for (int h = 0; h < 2; h++) {
-            Half x;
-            x.k = k;
-            x.h = h;
-            const fs::path dir = root / (std::to_string(k) + "_" + std::to_string(h));
-            std::vector<int> keep(order.begin() + (h ? k : 0), h ? order.end() : order.begin() + k);
-            std::set<int> kept(keep.begin(), keep.end());
-            std::map<int, int> to;
-            for (size_t i = 0; i < keep.size(); i++) to[keep[i]] = (int)i;
-            const fs::path own = dir / "tags" / from_u8(scen);
-            fs::create_directories(own.parent_path(), ec);
+    int made = 0;
+    auto make_run = [&](const std::vector<int> &keep) {
+        Run x;
+        x.bsps = keep;
+        const fs::path dir = root / std::to_string(made++);
+        std::set<int> kept(keep.begin(), keep.end());
+        std::map<int, int> to;
+        for (size_t i = 0; i < keep.size(); i++) to[keep[i]] = (int)i;
+        const fs::path own = dir / "tags" / from_u8(scen);
+        fs::create_directories(own.parent_path(), ec);
+        copy_over(sp, own, ec);
+        campaign::Strip st;
+        st.keep_bsps = keep;
+        st.by_place = true;
+        st.inside = [&](const std::vector<std::array<double, 3>> &pts) {
+            std::vector<int> where(pts.size(), 0);
+            for (int b = 0; b < n; b++) {
+                fs::path bo = bsp_tags[(size_t)b].empty() ? fs::path() : job.owner(bsp_tags[(size_t)b]);
+                std::vector<char> in;
+                if (bo.empty() || !portals::inside_level(bo / from_u8(bsp_tags[(size_t)b]), pts, in)) continue;
+                for (size_t i = 0; i < in.size(); i++) if (in[i]) where[i] |= kept.count(b) ? 1 : 2;
+            }
+            return where;
+        };
+        // (first, which encounters go: those standing only in the other parts; then the scripts without them, and the
+        // scenario again keeping every object those scripts still name, wherever it stands: Invader won't compile a
+        // script naming an object that isn't placed. So a part is a little over, not under.)
+        campaign::Stripped out;
+        if (!campaign::strip_scenario(own, st, out)) { x.mb = -1; x.err = out.why; return x; }
+        std::vector<std::pair<fs::path, std::string>> texts;
+        if (scripts) {
+            texts = campaign::texts_without(a, out.gone_ai, x.scripts_dropped);
+            std::string all;
+            for (auto &t : texts) all += t.second + "\n";
+            st.names = campaign::atoms(all);
+            st.patterns = campaign::containing_patterns(all);
             copy_over(sp, own, ec);
-            campaign::Strip st;
-            st.keep_bsps = keep;
-            st.by_place = true;
-            st.inside = [&](const std::vector<std::array<double, 3>> &pts) {
-                std::vector<int> where(pts.size(), 0);
-                for (int b = 0; b < n; b++) {
-                    fs::path bo = bsp_tags[(size_t)b].empty() ? fs::path() : job.owner(bsp_tags[(size_t)b]);
-                    std::vector<char> in;
-                    if (bo.empty() || !portals::inside_level(bo / from_u8(bsp_tags[(size_t)b]), pts, in)) continue;
-                    for (size_t i = 0; i < in.size(); i++) if (in[i]) where[i] |= kept.count(b) ? 1 : 2;
-                }
-                return where;
-            };
-            // (first, which encounters go: those standing only in the other half; then the scripts without them, and
-            // the scenario again keeping every object those scripts still name, wherever it stands: Invader won't
-            // compile a script naming an object that isn't placed. So a half is a little over, not under.)
-            campaign::Stripped out;
-            if (!campaign::strip_scenario(own, st, out)) { x.mb = -1; x.err = out.why; halves.push_back(std::move(x)); continue; }
-            std::vector<std::pair<fs::path, std::string>> texts;
-            if (scripts) {
-                texts = campaign::texts_without(a, out.gone_ai, x.scripts_dropped);
-                std::string all;
-                for (auto &t : texts) all += t.second + "\n";
-                st.names = campaign::atoms(all);
-                st.patterns = campaign::containing_patterns(all);
-                copy_over(sp, own, ec);
-                if (!campaign::strip_scenario(own, st, out)) { x.mb = -1; x.err = out.why; halves.push_back(std::move(x)); continue; }
-            }
-            x.encounters = out.encounters;
-            for (auto &[path, text] : texts) {
-                fs::path to_file = dir / "data" / path.lexically_relative(xdata);
-                fs::create_directories(to_file.parent_path(), ec);
-                std::ofstream(to_file, std::ios::binary) << campaign::renumber_bsps(text, to);
-            }
-            x.cmd = cmd_in(dir, true, scripts);
-            halves.push_back(std::move(x));
+            if (!campaign::strip_scenario(own, st, out)) { x.mb = -1; x.err = out.why; return x; }
         }
+        x.encounters = out.encounters;
+        for (auto &[path, text] : texts) {
+            fs::path to_file = dir / "data" / path.lexically_relative(xdata);
+            fs::create_directories(to_file.parent_path(), ec);
+            std::ofstream(to_file, std::ios::binary) << campaign::renumber_bsps(text, to);
+        }
+        x.cmd = cmd_in(dir, true, scripts);
+        return x;
+    };
     // The builds, as many at once as there are cores to spare and memory for (each takes a core and up to about 2 GB).
     const unsigned cores = std::max(1u, std::thread::hardware_concurrency());
     size_t by_memory = 4;
@@ -3118,70 +3110,205 @@ static std::string campaign_halves(Job &job, std::vector<std::string> cmd) {
         if (GlobalMemoryStatusEx(&ms)) by_memory = (size_t)(ms.ullAvailPhys / (2ull << 30));
     }
 #endif
-    const size_t at_once = std::clamp<size_t>(std::min<size_t>(cores > 1 ? cores - 1 : 1, by_memory), 1, halves.size());
-    job.log("Building the level and its halves quickly, " + std::to_string(at_once) + " at a time (" +
-            std::to_string(halves.size()) + " builds)...");
-    std::atomic<size_t> next{0}, done{0};
-    std::mutex log_lock;
     const fs::path logs = job.work / "halves_logs";   // (each build's output, for a look when one fails)
     fs::remove_all(logs, ec);
     fs::create_directories(logs, ec);
-    auto worker = [&] {
-        static const std::regex over(R"(Maximum tag space exceeded \(([\d.]+) MiB)");
-        for (size_t i; (i = next++) < halves.size();) {
-            Half &x = halves[i];
-            if (x.mb < 0) continue;
-            std::string out;
-            int rc = run_process(x.cmd, out);
-            std::ofstream(logs / (x.k ? std::to_string(x.k) + "_" + std::to_string(x.h) + ".log" : std::string("whole.log")), std::ios::binary)
-                << out << "\n(exit code " << rc << ")\n";
-            std::smatch m;
-            x.mb = rc == 0 ? tag_space_used(out) : std::regex_search(out, m, over) ? std::atof(m[1].str().c_str()) : 0;
-            if (x.mb <= 0) {   // (the first error, else the last line)
-                std::istringstream in(out);
-                std::string l, last, first_error;
-                while (std::getline(in, l)) {
-                    if (l.empty()) continue;
-                    last = l;
-                    if (first_error.empty() && (l.find("ERROR") != std::string::npos || l.find("rror:") != std::string::npos ||
-                                                l.rfind("Failed", 0) == 0))
-                        first_error = l;
+    int logged = 0;
+    auto build = [&](std::vector<Run> &runs, const std::string &what) {
+        if (runs.empty()) return;
+        const size_t at_once = std::clamp<size_t>(std::min<size_t>(cores > 1 ? cores - 1 : 1, by_memory), 1, runs.size());
+        job.log("Building " + what + " quickly, " + std::to_string(at_once) + " at a time (" + std::to_string(runs.size()) + " builds)...");
+        std::atomic<size_t> next{0}, done{0};
+        std::mutex log_lock;
+        const int first_log = logged;
+        logged += (int)runs.size();
+        auto worker = [&] {
+            static const std::regex over(R"(Maximum tag space exceeded \(([\d.]+) MiB)");
+            for (size_t i; (i = next++) < runs.size();) {
+                Run &x = runs[i];
+                if (x.mb < 0) continue;
+                std::string out;
+                int rc = run_process(x.cmd, out);
+                std::ofstream(logs / (std::to_string(first_log + (int)i) + ".log"), std::ios::binary) << out << "\n(exit code " << rc << ")\n";
+                std::smatch m;
+                x.mb = rc == 0 ? tag_space_used(out) : std::regex_search(out, m, over) ? std::atof(m[1].str().c_str()) : 0;
+                if (x.mb <= 0) {   // (the first error, else the last line)
+                    std::istringstream in(out);
+                    std::string l, last, first_error;
+                    while (std::getline(in, l)) {
+                        if (l.empty()) continue;
+                        last = l;
+                        if (first_error.empty() && (l.find("ERROR") != std::string::npos || l.find("rror:") != std::string::npos ||
+                                                    l.rfind("Failed", 0) == 0))
+                            first_error = l;
+                    }
+                    x.err = (first_error.empty() ? last : first_error) + " (exit code " + std::to_string(rc) + ")";
+                    x.mb = -1;
                 }
-                x.err = (first_error.empty() ? last : first_error) + " (exit code " + std::to_string(rc) + ")";
-                x.mb = -1;
+                std::lock_guard<std::mutex> g(log_lock);
+                job.log("  (" + std::to_string(++done) + " of " + std::to_string(runs.size()) + " built)");
             }
-            std::lock_guard<std::mutex> g(log_lock);
-            job.log("  (" + std::to_string(++done) + " of " + std::to_string(halves.size()) + " built)");
-        }
-    };
-    std::vector<std::thread> pool;
-    for (size_t i = 0; i < at_once; i++) pool.emplace_back(worker);
-    for (auto &t : pool) t.join();
-    fs::remove_all(root, ec);
-
-    char buf[400];
-    std::string report = "Halves (each built quickly for its tag memory, of the Xbox's 22 MB; the BSPs in the order a player reaches them: ";
-    for (size_t i = 0; i < order.size(); i++) report += (i ? ", " : "") + stem(order[i]);
-    report += "):\n";
-    if (halves[0].mb > 0) snprintf(buf, sizeof buf, "- the level as one map: %.1f MB%s\n", halves[0].mb, halves[0].mb > 22 ? ", over" : "");
-    report += halves[0].mb > 0 ? std::string(buf) : "- the level as one map: couldn't be built (" + halves[0].err + ")\n";
-    for (int k = 1; k < n; k++) {
-        const Half &f = halves[(size_t)(2 * k - 1)], &g = halves[(size_t)(2 * k)];
-        std::string first, second;
-        for (int i = 0; i < k; i++) first += (i ? ", " : "") + stem(order[(size_t)i]);
-        for (int i = k; i < n; i++) second += (i > k ? ", " : "") + stem(order[(size_t)i]);
-        auto half = [&](const Half &x, const std::string &bsps) {
-            if (x.mb < 0) return "(" + bsps + ") couldn't be built: " + x.err;
-            snprintf(buf, sizeof buf, "%.1f MB%s (%s; %d encounters and %d scripts left out)", x.mb, x.mb > 22 ? ", over" : "", bsps.c_str(),
-                     x.encounters, x.scripts_dropped);
-            return std::string(buf);
         };
-        std::string line = "- split before " + stem(order[(size_t)k]) + ": first half " + half(f, first) + "; second half " + half(g, second);
-        report += line + "\n";
-        job.log("  " + line);
+        std::vector<std::thread> pool;
+        for (size_t i = 0; i < at_once; i++) pool.emplace_back(worker);
+        for (auto &t : pool) t.join();
+    };
+    const double limit = 22.0;   // (the Xbox's tag memory, MB)
+    char buf[400];
+    auto names_of = [&](const std::vector<int> &bs) {
+        std::string t;
+        for (int b : bs) t += (t.empty() ? "" : ", ") + stem(b);
+        return t;
+    };
+
+    // 1. The whole level, and each BSP on its own (what a part with only it would take).
+    std::vector<Run> first;
+    {
+        Run whole;
+        fs::create_directories(root / "whole", ec);
+        whole.cmd = cmd_in(root / "whole", false, false);
+        first.push_back(std::move(whole));
     }
-    report += "\n(Estimates: a half keeps what stands in its BSPs and the encounters there, and the scripts that don't need an "
-              "encounter that went. A real split would also need the player carried over to the second half.)\n";
+    for (int b : order) first.push_back(make_run({b}));
+    build(first, "the level and each of its BSPs on its own");
+    std::string report = "Parts (each built quickly for its tag memory, of the Xbox's 22 MB; the BSPs in the order a player reaches them: " +
+                         names_of(order) + "):\n";
+    if (first[0].mb > 0) snprintf(buf, sizeof buf, "- the level as one map: %.1f MB%s\n", first[0].mb, first[0].mb > limit ? ", over" : "");
+    report += first[0].mb > 0 ? std::string(buf) : "- the level as one map: couldn't be built (" + first[0].err + ")\n";
+    // (each BSP's own share: its tag's size; the rest of a part with only it is what the part needs anyway)
+    std::vector<double> single((size_t)n, -1), own_mb((size_t)n, 0);
+    std::vector<int> pos((size_t)n, 0);
+    for (size_t i = 0; i < order.size(); i++) pos[(size_t)order[i]] = (int)i;
+    report += "- each BSP on its own:";
+    bool any_bad = false;
+    for (size_t i = 0; i < order.size(); i++) {
+        const int b = order[i];
+        const Run &x = first[i + 1];
+        fs::path bo = job.owner(bsp_tags[(size_t)b]);
+        std::error_code e2;
+        own_mb[(size_t)b] = bo.empty() ? 0 : (double)fs::file_size(bo / from_u8(bsp_tags[(size_t)b]), e2) / 1048576.0;
+        single[(size_t)b] = x.mb;
+        if (x.mb < 0) { report += " " + stem(b) + " couldn't be built (" + x.err + ");"; any_bad = true; continue; }
+        snprintf(buf, sizeof buf, " %s %.1f MB%s;", stem(b).c_str(), x.mb, x.mb > limit ? " (over on its own)" : "");
+        report += buf;
+        if (x.mb > limit) any_bad = true;
+    }
+    report += "\n";
+    if (any_bad) {
+        report += "\nA BSP that doesn't fit (or build) on its own can't be fitted by parts: the map needs to lose what that BSP "
+                  "brings first (the Xbox tab's shrinking options, the LODs window), then estimate again.\n";
+        fs::remove_all(root, ec);
+        return report;
+    }
+    // 2. The fewest parts that fit, cut where the fewest switches cross (each crossing is a closed way back, or the way
+    //    on), each part reached by a switch from the one before. A run's size: its biggest BSP's on its own, and the
+    //    others' own tags on top.
+    auto est = [&](size_t j, size_t i) {
+        double base = 0, sum = 0;
+        for (size_t k = j; k < i; k++) {
+            const int b = order[k];
+            base = std::max(base, single[(size_t)b] - own_mb[(size_t)b]);
+            sum += own_mb[(size_t)b];
+        }
+        return base + sum;
+    };
+    const size_t m = order.size();
+    auto crossing = [&](size_t j) {
+        int c = 0;
+        for (auto &[x, y] : edges)
+            if (x >= 0 && y >= 0 && x < n && y < n && std::min(pos[(size_t)x], pos[(size_t)y]) < (int)j && std::max(pos[(size_t)x], pos[(size_t)y]) >= (int)j) c++;
+        return c;
+    };
+    auto forward = [&](size_t h, size_t j, size_t i) {
+        if (edges.empty()) return true;   // (a level whose scripts switch: can't tell, so any cut)
+        for (auto &[x, y] : edges)
+            if (x >= 0 && y >= 0 && x < n && y < n && (size_t)pos[(size_t)x] >= h && (size_t)pos[(size_t)x] < j &&
+                (size_t)pos[(size_t)y] >= j && (size_t)pos[(size_t)y] < i)
+                return true;
+        return false;
+    };
+    std::vector<int> part_of((size_t)n, 0);
+    std::vector<std::vector<int>> plan;
+    double cap = limit - 0.5;
+    std::vector<Run> checked;
+    for (int round = 0; round < 4; round++) {
+        // g[j][i]: the best way to the run order[j..i) being a part: (parts, crossings), and the run before's start.
+        const std::pair<int, int> none{1 << 20, 0};
+        std::vector<std::vector<std::pair<int, int>>> g(m + 1, std::vector<std::pair<int, int>>(m + 1, none));
+        std::vector<std::vector<size_t>> prev(m + 1, std::vector<size_t>(m + 1, 0));
+        for (size_t i = 1; i <= m; i++)
+            if (est(0, i) <= cap) g[0][i] = {1, 0};
+        for (size_t j = 1; j < m; j++)
+            for (size_t i = j + 1; i <= m; i++) {
+                if (est(j, i) > cap) continue;
+                for (size_t h = 0; h < j; h++) {
+                    if (g[h][j] == none || !forward(h, j, i)) continue;
+                    std::pair<int, int> c{g[h][j].first + 1, g[h][j].second + crossing(j)};
+                    if (c < g[j][i]) { g[j][i] = c; prev[j][i] = h; }
+                }
+            }
+        size_t best = m;
+        for (size_t j = 0; j < m; j++)
+            if (g[j][m] != none && (best == m || g[j][m] < g[best][m])) best = j;
+        if (best == m) {
+            report += "\nNo way to cut it into parts that each fit was found (each part has to be reached by a switch from the one "
+                      "before). The map needs to lose some of what it holds first, then estimate again.\n";
+            fs::remove_all(root, ec);
+            return report;
+        }
+        plan.clear();
+        for (size_t i = m, j = best;;) {
+            std::vector<int> run(order.begin() + (long)j, order.begin() + (long)i);
+            plan.insert(plan.begin(), run);
+            if (j == 0) break;
+            const size_t h = prev[j][i];
+            i = j;
+            j = h;
+        }
+        for (size_t k = 0; k < plan.size(); k++)
+            for (int b : plan[k]) part_of[(size_t)b] = (int)k;
+        if (plan.size() == 1) break;
+        // 3. Each part built, to check: one over (or that won't build) lowers what a part may hold, and it's planned again.
+        checked.clear();
+        for (auto &run : plan) checked.push_back(make_run(run));
+        build(checked, "the " + std::to_string(plan.size()) + " parts planned");
+        double worst = 0;
+        bool failed = false;
+        for (auto &x : checked) {
+            if (x.mb < 0) failed = true;
+            worst = std::max(worst, x.mb);
+        }
+        if (!failed && worst <= limit) break;
+        if (round == 3) break;
+        cap -= failed ? 2.0 : (worst - limit) + 0.5;
+        job.log("  (a part came out " + (failed ? std::string("unbuildable") : std::to_string(worst).substr(0, 5) + " MB") + ": planning again with less in each)");
+    }
+    fs::remove_all(root, ec);
+    report += "\nPlanned: " + std::to_string(plan.size()) + " part" + (plan.size() == 1 ? "" : "s") + ":\n";
+    int closed = 0;
+    for (size_t k = 0; k < plan.size(); k++) {
+        std::string size;
+        if (k < checked.size() && plan.size() > 1) {
+            const Run &x = checked[k];
+            if (x.mb < 0) size = "couldn't be built: " + x.err;
+            else {
+                snprintf(buf, sizeof buf, "%.1f MB%s (%d encounters and %d scripts left to other parts)", x.mb, x.mb > limit ? ", over" : "",
+                         x.encounters, x.scripts_dropped);
+                size = buf;
+            }
+        } else {
+            snprintf(buf, sizeof buf, "about %.1f MB", est(0, m));
+            size = buf;
+        }
+        report += "- part " + std::to_string(k + 1) + ": " + names_of(plan[k]) + ": " + size + "\n";
+    }
+    for (auto &[x, y] : edges)
+        if (x >= 0 && y >= 0 && x < n && y < n && part_of[(size_t)x] != part_of[(size_t)y] && part_of[(size_t)y] != part_of[(size_t)x] + 1) closed++;
+    report += "(" + std::to_string(closed) + " switch volume" + (closed == 1 ? "" : "s") +
+              " between parts lead back, or past the next: each a closed way back, putting a player who steps in back where they came from.)\n";
+    report += "\nThe Campaign tab takes this plan for the map: Convert the pieces builds these parts.\nHMP_PARTS:";
+    for (int b = 0; b < n; b++) report += (b ? "," : "") + std::to_string(part_of[(size_t)b]);
+    report += "\n";
     return report;
 }
 
@@ -15332,6 +15459,7 @@ static void campaign_apply(Job &job) {
     std::string part_what;
     std::vector<int> part_of(nbsp, -1);
     std::map<std::string, std::string> exit_names;          // "bspA,B" volumes leading on -> their names in the part
+    std::map<std::string, std::string> back_names;          // "bspA,B" volumes leading back (or past the next) -> theirs
     std::vector<campaign::Switch> entries;                  // the switches from the part before into this one
     std::array<double, 3> came_from{0, 0, 0};               // where the player was coming from (for which way to face)
     bool came_from_set = false;
@@ -15421,6 +15549,20 @@ static void campaign_apply(Job &job) {
             for (size_t x = j; x < i; x++) part_of[(size_t)order[x]] = (int)k - 1;
             i = j;
         }
+        // (the plan "Estimate parts" made, or the one picked: which part each BSP is in)
+        if (cfg.campaign_part_of.size() == nbsp) {
+            std::vector<int> given = cfg.campaign_part_of;
+            std::vector<int> count((size_t)parts, 0);
+            bool fits = true;
+            for (size_t b = 0; b < nbsp; b++) {
+                if (!level_bsps.count((int)b)) { given[b] = -1; continue; }
+                if (given[b] < 0 || given[b] >= parts) { fits = false; break; }
+                count[(size_t)given[b]]++;
+            }
+            for (int c : count) fits = fits && c > 0;
+            if (fits) part_of = given;
+            else job.log("  [campaign] the parts planned for its BSPs don't fit " + std::to_string(parts) + " parts: worked out again");
+        }
         std::set<int> mine;
         for (size_t b = 0; b < nbsp; b++) if (part_of[b] == p) mine.insert((int)b);
         keep_list(mine);
@@ -15438,6 +15580,10 @@ static void campaign_apply(Job &job) {
                 plan.exits.push_back(nm);
             }
             if (part_of[(size_t)x.source] == p - 1 && part_of[(size_t)x.destination] == p) entries.push_back(x);
+            // (a way back, or past the next part: closed, the BSP beyond isn't in this part)
+            if (part_of[(size_t)x.source] == p && part_of[(size_t)x.destination] >= 0 && part_of[(size_t)x.destination] != p &&
+                part_of[(size_t)x.destination] != p + 1 && !back_names.count(x.volume))
+                back_names[x.volume] = "hmp_back_" + std::to_string(back_names.size());
         }
         // (a level whose scripts do its switching: it's entered where they switch into it, from the volume they test)
         if (p > 0 && entries.empty()) {
@@ -15455,6 +15601,18 @@ static void campaign_apply(Job &job) {
         plan.renumber = to;
         campaign::PartStats ps;
         auto out = campaign::part_texts(la, plan, p, ps);
+        // The closed ways back: a player in one is put back at its flag, just outside it in this part's BSP.
+        if (!back_names.empty() && !out.empty()) {
+            std::string t = "\n; Halo Map Porter: the ways back into the parts before (or past the next), closed\n";
+            for (auto &[vol, nm] : back_names) {
+                t += "(script continuous " + nm + "\n    (if (volume_test_objects " + nm + " (players))\n        (begin\n";
+                for (int i = 0; i < 4; i++)
+                    t += "            (if (volume_test_object " + nm + " (list_get (players) " + std::to_string(i) + ")) (object_teleport (list_get (players) " +
+                         std::to_string(i) + ") " + nm + "_f))\n";
+                t += "        )\n    )\n)\n";
+            }
+            out[0].second += t;
+        }
         // (what was found, for the log when it can't be made)
         auto found = [&]() {
             std::string f = "; the level's switch volumes:";
@@ -15515,6 +15673,8 @@ static void campaign_apply(Job &job) {
                 if (std::sscanf(l.c_str(), "bsp%u,%u", &from, &dest) != 2) continue;
                 auto ex = exit_names.find(l);
                 if (ex != exit_names.end()) { tagfile::set_str(v, "name", ex->second); renamed++; continue; }
+                auto bk = back_names.find(l);
+                if (bk != back_names.end()) { tagfile::set_str(v, "name", bk->second); continue; }
                 if (to.count((int)from) && to.count((int)dest))
                     tagfile::set_str(v, "name", "bsp" + std::to_string(to[(int)from]) + "," + std::to_string(to[(int)dest]));
                 else
@@ -15591,8 +15751,71 @@ static void campaign_apply(Job &job) {
                 }
             }
         }
+        // The closed ways back: each one's flag on open ground just outside it, in its BSP of this part (not the one
+        // beyond), the nearest such spot around it; else where the part starts.
+        int closed = 0, unplaced = 0;
+        if (!back_names.empty()) {
+            std::vector<TagNode> *fl = tagfile::block(ed.root(), "cutscene flags");
+            std::vector<TagNode> *tvs = tagfile::block(ed.root(), "trigger volumes");
+            std::vector<TagNode> *sl = tagfile::block(ed.root(), "player starting locations");
+            if (fl && tvs) {
+                const int sid = tagfile::block_struct(ed.root(), "cutscene flags");
+                for (auto &v : *tvs) {
+                    const std::string nm = tagfile::get_str(v, "name");
+                    std::string vol;
+                    for (auto &[k, x] : back_names) if (x == nm) vol = k;
+                    if (vol.empty()) continue;
+                    unsigned from = 0, dest = 0;
+                    std::sscanf(vol.c_str(), "bsp%u,%u", &from, &dest);
+                    double f[3], u[3], c[3], o[3];
+                    for (int k = 0; k < 3; k++) {
+                        f[k] = tagfile::get_num(v, "rotation vector forward", k);
+                        u[k] = tagfile::get_num(v, "rotation vector up", k);
+                        c[k] = tagfile::get_num(v, "starting corner", k);
+                        o[k] = tagfile::get_num(v, "ending corner offset", k);
+                    }
+                    const double l[3] = {u[1] * f[2] - u[2] * f[1], u[2] * f[0] - u[0] * f[2], u[0] * f[1] - u[1] * f[0]};
+                    portals::V3 mid;
+                    for (int k = 0; k < 3; k++) mid[(size_t)k] = c[k] + (f[k] * o[0] + l[k] * o[1] + u[k] * o[2]) / 2;
+                    const double reach = std::sqrt(o[0] * o[0] + o[1] * o[1] + o[2] * o[2]) / 2 + 2.0;
+                    // (the spots around it: in its BSP of this part, not in the one beyond, with ground)
+                    std::vector<std::array<double, 3>> cand;
+                    for (double r : {reach, reach + 2, reach + 5})
+                        for (int a = 0; a < 16; a++) {
+                            const double t = a * 3.14159265358979 / 8;
+                            cand.push_back({mid[0] + std::cos(t) * r, mid[1] + std::sin(t) * r, mid[2]});
+                        }
+                    std::vector<unsigned> in = bsps_at(cand);
+                    fs::path src = from < nbsp && !bsp_tags[from].empty() ? job.owner(bsp_tags[from]) : fs::path();
+                    if (!src.empty()) src /= from_u8(bsp_tags[from]);
+                    portals::V3 at{};
+                    bool found = false;
+                    for (size_t i = 0; i < cand.size() && i < in.size() && !found; i++) {
+                        if (!(in[i] >> from & 1) || (dest < 32 && in[i] >> dest & 1)) continue;
+                        portals::V3 g;
+                        if (!src.empty() && portals::ground_spot(src, portals::V3{cand[i][0], cand[i][1], cand[i][2]}, 0.6, 4, g)) { at = g; found = true; }
+                    }
+                    if (!found) {
+                        unplaced++;
+                        if (sl && !sl->empty())
+                            for (int k = 0; k < 3; k++) at[(size_t)k] = tagfile::get_num((*sl)[0], "position", k);
+                    }
+                    TagNode n = fl->empty() ? tagfile::new_node(sid) : (*fl)[0];
+                    tagfile::set_str(n, "name", nm + "_f");
+                    for (int k = 0; k < 3; k++) tagfile::set_num(n, "position", at[(size_t)k], k);
+                    const double face = std::atan2(at[1] - mid[1], at[0] - mid[0]);   // (facing away from it)
+                    tagfile::set_num(n, "facing", face, 0);
+                    tagfile::set_num(n, "facing", 0.0, 1);
+                    fl->push_back(n);
+                    closed++;
+                }
+            }
+        }
         if (!ed.save(file)) return "the scenario couldn't be saved";
         part_what += "; " + std::to_string(renamed) + " switch volume" + (renamed == 1 ? "" : "s") + " made its way on" + spawn_note;
+        if (closed)
+            part_what += "; " + std::to_string(closed) + " way" + (closed == 1 ? "" : "s") + " back (or past the next part) closed: a player stepping in is put back just outside" +
+                         (unplaced ? " (" + std::to_string(unplaced) + " with no ground found near, back at where the part starts)" : std::string());
         return "";
     };
     if (piece == 0) {

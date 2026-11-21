@@ -116,8 +116,8 @@ enum {
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new161.exe is 1.161).
-#define HMP_VERSION L"1.161"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new162.exe is 1.162).
+#define HMP_VERSION L"1.162"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -2336,7 +2336,9 @@ static void start_convert(bool again = false) {
 // "<map>\t<campaign>\t<opening>\t<closing>\t<parts>", a line each, the last one for a map counting). A map with none
 // saved takes the tab's last choices, and a campaign map (by its header) the campaign of the maps beside it, else
 // its folder's name: a campaign's levels sit together in one folder (Lumoria_Full_Campaign). "-": in none.
-struct CampaignPicks { bool saved = false; std::wstring name; bool open = true, close = true; int parts = 1; };
+static const int kMostParts = 12;   // (gameplay parts a level can be split into)
+struct CampaignPicks { bool saved = false; std::wstring name; bool open = true, close = true; int parts = 1;
+                       std::vector<int> part_of; };   // ("Estimate parts"' plan: each BSP's part, for `parts`)
 static fs::path campaigns_file() { return appdata_dir(CSIDL_LOCAL_APPDATA) / L"campaigns.txt"; }
 static std::mutex g_campaigns_lock;
 static std::map<std::wstring, CampaignPicks> load_campaigns() {
@@ -2358,7 +2360,14 @@ static std::map<std::wstring, CampaignPicks> load_campaigns() {
         p.name = c[1] == "-" ? std::wstring() : W(c[1]);
         p.open = c[2] == "1";
         p.close = c[3] == "1";
-        p.parts = std::clamp(std::atoi(c[4].c_str()), 1, 4);
+        p.parts = std::clamp(std::atoi(c[4].c_str()), 1, kMostParts);
+        if (c.size() > 5)
+            for (size_t a = 0; a < c[5].size();) {
+                size_t b = c[5].find(',', a);
+                p.part_of.push_back(std::atoi(c[5].substr(a, b == std::string::npos ? std::string::npos : b - a).c_str()));
+                if (b == std::string::npos) break;
+                a = b + 1;
+            }
         m[lower(W(c[0]))] = p;
     }
     return m;
@@ -2370,9 +2379,12 @@ static void save_campaign_picks(const fs::path &in, const CampaignPicks &p) {
     m[lower(in.wstring())] = q;
     std::lock_guard<std::mutex> g(g_campaigns_lock);
     std::ofstream f(campaigns_file(), std::ios::binary | std::ios::trunc);
-    for (auto &[k, v] : m)
+    for (auto &[k, v] : m) {
         f << N(k) << '\t' << (v.name.empty() ? std::string("-") : N(v.name)) << '\t' << (v.open ? 1 : 0) << '\t' << (v.close ? 1 : 0)
-          << '\t' << v.parts << '\n';
+          << '\t' << v.parts << '\t';
+        for (size_t i = 0; i < v.part_of.size(); i++) f << (i ? "," : "") << v.part_of[i];
+        f << '\n';
+    }
 }
 // "Campaign", "Multiplayer", "UI" from the map's header ("" if it can't be read).
 static std::wstring map_kind(const fs::path &in) {
@@ -2504,8 +2516,10 @@ static void create_campaign_page() {
     y += 26;
     label(P, L"Gameplay parts:", 26, y, 110, ID_CA_PARTS_LBL);
     add(P, L"COMBOBOX", L"", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 140, y, 360, 200, ID_CA_PARTS);
-    for (auto t : {L"1 (the level as one map)", L"2 (split at a BSP switch)", L"3", L"4"})
-        SendDlgItemMessageW(g_wnd, ID_CA_PARTS, CB_ADDSTRING, 0, (LPARAM)t);
+    for (int k = 1; k <= kMostParts; k++) {
+        const std::wstring t = k == 1 ? L"1 (the level as one map)" : k == 2 ? L"2 (split at a BSP switch)" : std::to_wstring(k);
+        SendDlgItemMessageW(g_wnd, ID_CA_PARTS, CB_ADDSTRING, 0, (LPARAM)t.c_str());
+    }
     y += 30;
     label(P, L"Campaign:", 26, y, 110, ID_CA_GROUP_LBL);
     add(P, L"COMBOBOX", L"", WS_TABSTOP | CBS_DROPDOWN | CBS_AUTOHSCROLL | WS_VSCROLL, 140, y, 360, 240, ID_CA_GROUP);
@@ -2515,7 +2529,7 @@ static void create_campaign_page() {
     check(P, L"And draw on stock.shared: what's in the stock maps and campaign (needs the Xbox maps folder in Settings)", 46, y, 688, ID_CA_STOCK);
     y += 32;
     button(P, L"Convert the pieces", 26, y, 160, ID_CA_CONVERT, true);
-    button(P, L"Estimate halves", 196, y, 140, ID_CA_HALVES);
+    button(P, L"Estimate parts", 196, y, 140, ID_CA_HALVES);
     y += 36;
     add(P, L"EDIT", L"", WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 26, y, 708, 466 - y, ID_CA_REPORT, WS_EX_CLIENTEDGE);
 }
@@ -2524,7 +2538,7 @@ static CampaignPicks campaign_defaults() {
     CampaignPicks p;
     p.open = ini_get(L"ca_open", L"1") == L"1";
     p.close = ini_get(L"ca_close", L"1") == L"1";
-    p.parts = std::clamp(_wtoi(ini_get(L"ca_parts", L"1").c_str()), 1, 4);
+    p.parts = std::clamp(_wtoi(ini_get(L"ca_parts", L"1").c_str()), 1, kMostParts);
     return p;
 }
 static std::wstring g_campaign_map;   // (the map the tab shows the choices of)
@@ -2568,6 +2582,11 @@ static void save_campaign_tab() {
     while (!name.empty() && iswspace(name.front())) name.erase(0, 1);
     if (name == L"(none)") name.clear();
     p.name = name;
+    {   // (the plan "Estimate parts" made, while it's for as many parts)
+        const auto all = load_campaigns();
+        auto it = all.find(lower(g_campaign_map));
+        if (it != all.end() && it->second.parts == p.parts) p.part_of = it->second.part_of;
+    }
     save_campaign_picks(fs::path(g_campaign_map), p);
 }
 static void campaign_report(const std::string &text) {
@@ -2650,13 +2669,37 @@ static void start_campaign_halves() {
     cfg.work_tag = "halves";
     set_busy(true);
     SetWindowTextW(g_log, L"");
-    campaign_report("Estimating the halves (the map is prepared as for Convert, then each half built quickly: this takes a while)...");
-    append_log(L"Estimating " + in.filename().wstring() + L" split in two...");
+    campaign_report("Estimating the parts (the map is prepared as for Convert, then each BSP built quickly on its own, then the parts planned: this takes a while)...");
+    append_log(L"Estimating " + in.filename().wstring() + L" in parts...");
     std::thread([=] {
         fs::path dummy = cfg.cache_dir / "campaign" / (in.stem().u8string() + ".map");
         Result r = convert_map(cfg, in, from, Game::Xbox, dummy, false, post_log, nullptr);
-        PostMessageW(g_wnd, WM_APP_CAMPAIGN, 0, (LPARAM) new std::string(r.ok ? r.campaign : "Couldn't prepare the map: " + r.error));
-        finish(r, "Estimated the halves (the Campaign tab shows them)", Keys{}, false, false, true);
+        std::string text = r.ok ? r.campaign : "Couldn't prepare the map: " + r.error;
+        // (the plan, kept for the map: Convert the pieces builds those parts)
+        if (size_t at = text.find("HMP_PARTS:"); r.ok && at != std::string::npos) {
+            std::vector<int> part_of;
+            int most = -1;
+            for (size_t a = at + 10; a < text.size() && text[a] != '\n';) {
+                size_t b = text.find_first_of(",\n", a);
+                if (b == std::string::npos) b = text.size();
+                part_of.push_back(std::atoi(text.substr(a, b - a).c_str()));
+                most = std::max(most, part_of.back());
+                a = b < text.size() && text[b] == ',' ? b + 1 : b;
+            }
+            text.erase(at);
+            if (most >= 0 && most < kMostParts) {
+                const auto all = load_campaigns();
+                CampaignPicks p = campaign_picks_for(in, campaign_defaults(), all);
+                p.open = opening;
+                p.close = closing;
+                p.parts = most + 1;
+                p.part_of = part_of;
+                save_campaign_picks(in, p);
+                PostMessageW(g_wnd, WM_APP_CAMPAIGN, 1, (LPARAM) new std::string());
+            }
+        }
+        PostMessageW(g_wnd, WM_APP_CAMPAIGN, 0, (LPARAM) new std::string(text));
+        finish(r, "Estimated the parts (the Campaign tab shows them)", Keys{}, false, false, true);
     }).detach();
 }
 // A level converted as pieces (the Campaign tab's choices `p`): its opening and closing cutscenes as maps of their own,
@@ -2675,6 +2718,7 @@ static Result convert_level_pieces(const Config &cfg_in, const fs::path &in, Gam
     const auto part_outs = campaign_part_outputs(out, parts);
     Config cfg2 = cfg;
     cfg2.campaign_parts = parts;
+    if ((int)p.part_of.size() > 0 && p.parts == parts) cfg2.campaign_part_of = p.part_of;
     // (a level in parts isn't the Custom Edition map any more: no Perfect Conversion, nothing linked to play with it)
     if (parts > 1) cfg2.xbox_perfect = false;
     for (auto &po : part_outs) cfg2.campaign_part_folders.push_back(N(po.parent_path().filename().wstring()));
@@ -2782,6 +2826,11 @@ static void start_campaign_convert() {
         pk.open = opening;
         pk.close = closing;
         pk.parts = parts;
+        {   // (the plan "Estimate parts" made for it)
+            const auto all = load_campaigns();
+            auto it = all.find(lower(in.wstring()));
+            if (it != all.end() && it->second.parts == parts) pk.part_of = it->second.part_of;
+        }
         Result r = convert_level_pieces(cfg_in, in, from, out, pk, share, title, card_dir, card_name, failed);
         if (!failed.empty()) {
             r.ok = false;
@@ -3357,7 +3406,7 @@ static void open_batch() {
                         std::error_code e0;
                         if (j.pieces) {   // (the pieces it made before one didn't build)
                             for (auto &m : campaign_outputs(j.out)) fs::remove_all(m.parent_path(), e0);
-                            for (auto &m : campaign_part_outputs(j.out, 4)) fs::remove_all(m.parent_path(), e0);
+                            for (auto &m : campaign_part_outputs(j.out, kMostParts)) fs::remove_all(m.parent_path(), e0);
                         }
                     }
                     if (ok && !r.link.empty()) {
@@ -4551,7 +4600,7 @@ static void create_controls() {
     set_check(ID_CA_CLOSE, ini_get(L"ca_close", L"1") == L"1");
     set_check(ID_CA_SHARED, ini_get(L"ca_shared", L"0") == L"1");
     set_check(ID_CA_STOCK, ini_get(L"ca_stock", L"0") == L"1");
-    SendDlgItemMessageW(g_wnd, ID_CA_PARTS, CB_SETCURSEL, std::clamp(_wtoi(ini_get(L"ca_parts", L"1").c_str()), 1, 4) - 1, 0);
+    SendDlgItemMessageW(g_wnd, ID_CA_PARTS, CB_SETCURSEL, std::clamp(_wtoi(ini_get(L"ca_parts", L"1").c_str()), 1, kMostParts) - 1, 0);
     set_check(ID_X_ALLVEH, ini_get(L"x_allveh", L"1") == L"1");
     set_check(ID_X_LODSTOCK, ini_get(L"x_lodstock", L"0") == L"1");
     set_check(ID_X_MAKELOD, ini_get(L"x_makelod", L"1") == L"1");
@@ -4875,6 +4924,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         break;
     case WM_APP_CAMPAIGN: {
         auto *s = (std::string *)lp;
+        if (wp == 1) campaign_page_shown();   // ("Estimate parts" planned them: the tab shows the plan's parts)
         if (!s->empty()) campaign_report(*s);
         delete s;
         return 0;
