@@ -13644,6 +13644,21 @@ static int compact_scripts(std::vector<std::string> &texts, int need, int &made,
         for (auto &k : t.kids) d = std::max(d, depth_of(k));
         return d;
     };
+    // (a call of Halo 1 Unlimited's MCC functions written out, (begin (print "<name>") <wrapped arguments> <stand-in>):
+    // only the arguments inside the calls that wrap them are gathered from, as maptrim reads the rest by its shape)
+    auto h1u_values = [](const T &t) {
+        std::vector<size_t> v;
+        if (t.kids.size() < 2 || t.kids[0].atom != "begin" || !t.kids[1].list || t.kids[1].kids.size() != 2 ||
+            t.kids[1].kids[0].list || t.kids[1].kids[0].atom != "print" || !t.kids[1].kids[1].str)
+            return std::make_pair(false, v);
+        for (size_t k = 2; k < t.kids.size(); k++) v.push_back(k);
+        return std::make_pair(true, v);
+    };
+    auto wrapped_at = [](const T &w) -> size_t {   // (where a wrapping call has its argument)
+        if (!w.list || w.kids.empty() || w.kids[0].list) return 0;
+        if (w.kids[0].atom == "objects_can_see_flag" || (w.kids[0].atom == "sleep" && w.kids.size() == 3)) return w.kids.size() > 2 ? 2 : 0;
+        return w.kids.size() > 1 ? 1 : 0;
+    };
     struct Added { std::string name, type; T body; };
     std::vector<Added> added;
     int saved = 0;
@@ -13663,6 +13678,11 @@ static int compact_scripts(std::vector<std::string> &texts, int need, int &made,
                 auto &c = counts[{key(t), type}];
                 if (!c.n) { c.size = size_of(t); c.type = type; c.one = &t; }
                 c.n++;
+            }
+            if (auto hv = h1u_values(t); hv.first) {
+                for (size_t k : hv.second)
+                    if (size_t at = wrapped_at(t.kids[k])) walk(t.kids[k].kids[at], false);
+                return;
             }
             for (size_t k = 1; k < t.kids.size(); k++) {
                 bool s = false;
@@ -13701,6 +13721,11 @@ static int compact_scripts(std::vector<std::string> &texts, int need, int &made,
                 name.atom = a.name;
                 call.kids.push_back(name);
                 t = call;
+                return;
+            }
+            if (auto hv = h1u_values(t); hv.first) {
+                for (size_t k : hv.second)
+                    if (size_t at = wrapped_at(t.kids[k])) swap(t.kids[k].kids[at], false);
                 return;
             }
             for (size_t k = 1; k < t.kids.size(); k++) {
