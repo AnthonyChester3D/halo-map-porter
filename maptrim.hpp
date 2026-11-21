@@ -22,9 +22,11 @@ struct Result {
     uint32_t nodes = 0, kept = 0;  // script nodes in use; the table's size after
     uint32_t saved = 0;            // bytes of tag data taken out
     uint32_t tag_data = 0, largest_bsp = 0;   // after, in bytes: together they're the tag memory the map needs
+    int h1u_calls = 0, h1u_failed = 0;        // calls of Halo 1 Unlimited's MCC functions made its own (and not)
 };
 // `map`: an Xbox map Invader just built (compressed or not), rewritten in place. `tag_space`: the tag space Invader was
 // told the map has (its -T) when more than the Xbox's 22 MiB: Invader put the BSPs at the top of that, so they're
 // moved to the top of the Xbox's (0: built for the Xbox's). `spare`: nodes kept free past those in use.
-Result trim_scripts(const fs::path &map, uint64_t tag_space = 0, uint32_t spare = 256);
+// `trim` false: only Halo 1 Unlimited's MCC functions' calls made its own (h1u_calls), the table left its size.
+Result trim_scripts(const fs::path &map, uint64_t tag_space = 0, uint32_t spare = 256, bool trim = true);
 }   // namespace maptrim

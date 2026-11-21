@@ -491,6 +491,7 @@ struct Job {
     fs::path bots_picture;   // the bots' waypoints from above (bot_route_points), for beside the report
     std::string bot_file;    // Perfect Conversion: the bot file (botnodes::bot_file), for bots.txt beside the map
     std::string bot_note;    // (and the [bots] line about it, for write_extras)
+    int h1u_written = 0;     // calls of Halo 1 Unlimited's MCC functions the scripts were written with (maptrim::h1u_calls)
     fs::path input_map;      // convert: the map converted
     fs::path given_map;      // convert: the map as the player has it (input_map can be a copy with plainer tag names)
     fs::path original;       // an Xbox conversion: the map's tags as extracted (Perfect Conversion compares with them)
@@ -2987,7 +2988,7 @@ static bool scenario_is_campaign(const Job &job) {
 // is built in a folder of its own (its scenario and scripts read first), several at once; the conversion's tags stay
 // as they were.
 static void drop_unplaced_palette(Job &job, const fs::path &xsrc);
-static std::string campaign_halves(Job &job, std::vector<std::string> cmd) {
+static std::string campaign_halves(Job &job, std::vector<std::string> cmd, bool no_scripts = false) {
     std::error_code ec;
     const std::string scen = job.scenario + ".scenario";
     fs::path sdir = job.owner(scen);
@@ -3026,7 +3027,9 @@ static std::string campaign_halves(Job &job, std::vector<std::string> cmd) {
     campaign::Analysis a;
     std::string why;
     const fs::path xdata = job.work / "xbox_data";
-    const bool scripts = campaign::load(xdata, a, why);
+    // (no_scripts: the level's scripts are over the Xbox's script nodes as one map, so each part's tag memory is measured
+    // without them: Invader writes the node table at its full size whatever the scripts use, so they hardly change it)
+    const bool scripts = !no_scripts && campaign::load(xdata, a, why);
     // (a BSP no switch leads to and no script switches to: never reached (a debug room), in no part; with no switch
     // volumes at all, the scripts do the switching, so each BSP's kept)
     std::vector<int> never;
@@ -3110,7 +3113,8 @@ static std::string campaign_halves(Job &job, std::vector<std::string> cmd) {
             fs::create_directories(to_file.parent_path(), ec);
             std::ofstream(to_file, std::ios::binary) << campaign::renumber_bsps(text, to);
         }
-        x.cmd = cmd_in(dir, true, scripts);
+        if (no_scripts) fs::create_directories(dir / "data", ec);
+        x.cmd = cmd_in(dir, true, scripts || no_scripts);
         return x;
     };
     // The builds, as many at once as there are cores to spare and memory for (each takes a core and up to about 2 GB).
@@ -3177,8 +3181,8 @@ static std::string campaign_halves(Job &job, std::vector<std::string> cmd) {
     std::vector<Run> first;
     {
         Run whole;
-        fs::create_directories(root / "whole", ec);
-        whole.cmd = cmd_in(root / "whole", false, false);
+        fs::create_directories(root / "whole" / "data", ec);
+        whole.cmd = cmd_in(root / "whole", false, no_scripts);
         first.push_back(std::move(whole));
     }
     for (int b : order) first.push_back(make_run({b}));
@@ -3514,8 +3518,20 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
                     "script node table, to see whether it fits with the table trimmed)");
             if (run_process(c, out) != 0) { out = first; return; }
         }
-        const maptrim::Result t = maptrim::trim_scripts(tmp_out, space);
+        const maptrim::Result t = maptrim::trim_scripts(tmp_out, space, 256, cfg.xbox_trim_scripts);
         char buf[200];
+        // (calls of Halo 1 Unlimited's MCC functions not made its own would run the calls that only wrap their
+        // arguments: the map isn't kept)
+        if (job.h1u_written && (t.h1u_failed || (t.h1u_calls == 0 && rc == 0))) {
+            std::error_code ec;
+            fs::remove(tmp_out, ec);
+            rc = 1;
+            out = "Halo Map Porter couldn't write the calls of Halo 1 Unlimited's MCC functions into the built map (" +
+                  std::to_string(t.h1u_calls) + " made, " + std::to_string(t.h1u_failed) + " not" + (t.ok ? "" : "; " + t.error) + ")";
+            job.log("  " + out);
+            return;
+        }
+        if (t.h1u_calls) job.log("  " + std::to_string(t.h1u_calls) + " calls of Halo 1 Unlimited's MCC functions written in as its own (bit_test and the like)");
         if (!t.ok && space && t.tag_data) {   // (still over: say by how much, for the steps after)
             snprintf(buf, sizeof buf, "Maximum tag space exceeded (%.4f MiB > 22.0000 MiB)", (t.tag_data + (double)t.largest_bsp) / 1048576.0);
             out = std::regex_replace(first, over, std::string(buf), std::regex_constants::format_first_only);
@@ -3761,7 +3777,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
             }
         }
         if (!took) rc = run_process(cmd, out);
-        if (job.target == Game::Xbox && !job.analysis && cfg.xbox_trim_scripts) trim_scripts(rc, out);
+        if (job.target == Game::Xbox && !job.analysis && (cfg.xbox_trim_scripts || job.h1u_written)) trim_scripts(rc, out);
         if (rc == 0 && job.analysis) {
             std::ofstream(job.work / "build.log") << out;
             std::string err;
@@ -4127,6 +4143,14 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
             return r;
         }
         // More script nodes than the target takes: the code the scripts repeat gathered into static scripts, once.
+        // ("Estimate parts": each part keeps only its share of them, so the parts are measured without the scripts)
+        if (f.nodes > f.node_limit && f.node_limit > 0 && halves) {
+            job.log("The level's scripts are over the Xbox's " + thousands(f.node_limit) + " script nodes as one map (" + thousands(f.nodes) +
+                    "): the parts are measured without them (each part keeps only its share)");
+            r.campaign = campaign_halves(job, make_cmd(), true);
+            r.ok = true;
+            return r;
+        }
         if (f.nodes > f.node_limit && f.node_limit > 0) {
             std::string what;
             if (!nodes_compacted && !job.extra.empty() && compact_map_scripts(job, f.nodes, f.node_limit, what)) {
@@ -12005,6 +12029,69 @@ struct ScriptConverter {
         }
     }
 
+    // Halo 1 Unlimited's MCC functions (v1.149), at fixed indices in its function table. Invader compiles for the
+    // Xbox's own table, so each call is written as (begin (print "<name>") <each argument in a call that gives it its type> <a
+    // stand-in of what it returns>), which Invader compiles for any of them; maptrim::h1u_calls then makes that the
+    // function's own call in the built map (its index, its arguments' nodes linked to it, the rest left out).
+    struct H1uFunction { int index; char ret; std::vector<const char *> params; };
+    static const H1uFunction *h1u_function(const std::string &name) {
+        static const std::map<std::string, H1uFunction> table{
+            {"bit_test", {422, 'b', {"long", "short"}}},
+            {"bit_toggle", {423, 'l', {"long", "short", "boolean"}}},
+            {"bitwise_flags_toggle", {424, 'l', {"long", "long", "boolean"}}},
+            {"bitwise_and", {425, 'l', {"long", "long"}}},
+            {"bitwise_or", {426, 'l', {"long", "long"}}},
+            {"bitwise_xor", {427, 'l', {"long", "long"}}},
+            {"bitwise_left_shift", {428, 'l', {"long", "short"}}},
+            {"bitwise_right_shift", {429, 'l', {"long", "short"}}},
+            {"objects_distance_to_object", {430, 'r', {"object_list", "object"}}},
+            {"objects_distance_to_flag", {431, 'r', {"object_list", "cutscene_flag"}}},
+            {"objects_distance_to_position", {432, 'r', {"object_list", "real", "real", "real"}}},
+            {"list_count_not_dead", {433, 's', {"object_list"}}},
+            {"local_players", {434, 'o', {}}},
+            {"players_on_multiplayer_team", {435, 'o', {"short"}}},
+            {"game_is_authoritative", {436, 'b', {}}},
+            {"physics_set_gravity", {437, 'v', {"real"}}},
+            {"physics_get_gravity", {438, 'r', {}}},
+            {"physics_constants_reset", {439, 'v', {}}},
+            {"script_started", {440, 'b', {"script"}}},
+            {"script_finished", {441, 'b', {"script"}}},
+        };
+        auto it = table.find(name);
+        return it == table.end() ? nullptr : &it->second;
+    }
+    // (an argument in a call of the Xbox's own whose parameter there is of its type: maptrim takes it out of that call)
+    static std::string h1u_wrap(const std::string &type, const std::string &a) {
+        if (type == "long") return "(numeric_countdown_timer_set " + a + " false)";
+        if (type == "short") return "(numeric_countdown_timer_get " + a + ")";
+        if (type == "boolean") return "(not " + a + ")";
+        if (type == "real") return "(+ " + a + ")";
+        if (type == "object_list") return "(list_count " + a + ")";
+        if (type == "object") return "(unit " + a + ")";
+        if (type == "cutscene_flag") return "(objects_can_see_flag (players) " + a + " 0)";
+        return "(sleep 0 " + a + ")";   // script
+    }
+    std::string h1u_call(const std::string &s, const hsc::Node &n) {
+        const std::string name = hsc::lower(n.kids[0].atom);
+        const H1uFunction *f = h1u_function(name);
+        if (!f || n.kids.size() - 1 != f->params.size()) return "";
+        std::string r = "(begin (print \"" + name + "\")";
+        for (size_t k = 0; k < f->params.size(); k++) {
+            const hsc::Node &a = n.kids[k + 1];
+            std::string v = emit(s, a);
+            if (std::string(f->params[k]) == "script") {   // (MCC names the script as a string; it's a script here)
+                if (a.str && v.size() >= 2) v = v.substr(1, v.size() - 2);
+                if (v.empty() || v.find_first_of(" ()\"") != std::string::npos) return "";
+            }
+            r += " " + h1u_wrap(f->params[k], v);
+        }
+        // (what it gives, so the begin's of that type; a void one with nothing in it but the name, a statement after it,
+        // or Invader writes the (print ...) alone)
+        r += std::string(" ") + stand_in(f->ret);
+        count(name, "native (Halo 1 Unlimited)");
+        return r + ")";
+    }
+
     static const char *stand_in(char type) {
         switch (type) {
         case 'v': return "(not false)";     // a call with no effect
@@ -12309,6 +12396,10 @@ struct ScriptConverter {
             }
             const ScriptName *g = lookup(n.atom);
             if (g && g->global) {
+                if (hsc::lower(n.atom) == "game_speed_value") {   // (the game's speed: as it plays, 1)
+                    count("game_speed_value", "read as 1");
+                    return "(+ 1 0)";
+                }
                 count(hsc::lower(n.atom), std::string("read as ") + (g->type == 'b' ? "false" : "0"));
                 return stand_in(g->type);
             }
@@ -12335,6 +12426,48 @@ struct ScriptConverter {
             if (n.kids.size() > at) {
                 const hsc::Node &nm = n.kids[at];
                 cur_script = nm.list ? (nm.kids.empty() || nm.kids[0].list ? "" : nm.kids[0].atom) : nm.atom;
+            }
+        }
+        // Halo 1 Unlimited's own MCC functions (h1u_call): native, at their indices in its function table.
+        if (target == Game::Xbox) {
+            // ((= (bit_test v b) 1) and the like: its boolean as it is (MCC's bit_test gives a number, Halo 1 Unlimited's
+            // true or false)
+            if ((head == "=" || head == "!=") && n.kids.size() == 3)
+                for (int side = 1; side <= 2; side++) {
+                    const hsc::Node &c = n.kids[(size_t)side], &v = n.kids[(size_t)(3 - side)];
+                    if (!c.list || c.kids.empty() || c.kids[0].list || hsc::lower(c.kids[0].atom) != "bit_test" || !lookup("bit_test")) continue;
+                    if (v.list || v.str || (v.atom != "0" && v.atom != "1")) continue;
+                    const bool truth = (head == "=") == (v.atom == "1");
+                    const std::string call = h1u_call(s, c);
+                    if (call.empty()) break;
+                    return truth ? call : "(not " + call + ")";
+                }
+            // (one compared: the comparison takes its type from its first value, which Invader can't tell of the
+            // written-out call: the other value first (the comparison turned round), or the call in a call that gives
+            // it its type when the other's a number as it's written, which maptrim takes out again)
+            static const std::map<std::string, std::string> turned{{"=", "="}, {"!=", "!="}, {"<", ">"}, {">", "<"}, {"<=", ">="}, {">=", "<="}};
+            if (turned.count(head) && n.kids.size() == 3)
+                for (int side = 1; side <= 2; side++) {
+                    const hsc::Node &c = n.kids[(size_t)side], &o = n.kids[(size_t)(3 - side)];
+                    if (!c.list || c.kids.empty() || c.kids[0].list) continue;
+                    const std::string ch = hsc::lower(c.kids[0].atom);
+                    const H1uFunction *f = ch == "bit_test" ? nullptr : h1u_function(ch);
+                    if (!f || !lookup(ch) || !missing.count(ch)) continue;
+                    const std::string call = h1u_call(s, c);
+                    if (call.empty()) break;
+                    const bool literal = !o.list && (o.str || o.atom.find_first_not_of("-0123456789.") == std::string::npos ||
+                                                     hsc::lower(o.atom) == "true" || hsc::lower(o.atom) == "false");
+                    if (!literal) {
+                        const std::string op = side == 1 ? turned.at(head) : head;
+                        return "(" + op + " " + emit(s, o) + " " + call + ")";
+                    }
+                    const std::string typed = f->ret == 's' ? "(numeric_countdown_timer_get " + call + ")" : f->ret == 'b' ? "(and " + call + ")"
+                                              : f->ret == 'o' ? call : "(+ " + call + ")";
+                    return "(" + head + " " + (side == 1 ? typed + " " + emit(s, o) : emit(s, o) + " " + typed) + ")";
+                }
+            if (lookup(head) && missing.count(head) && h1u_function(head)) {
+                const std::string call = h1u_call(s, n);
+                if (!call.empty()) return head == "bit_test" ? "(if " + call + " (+ 1 0) (+ 0 0))" : call;
             }
         }
         // (if (= v 0) a (if (= v 1) b ...)): a switch (see `switches`)
@@ -12558,7 +12691,7 @@ struct ScriptConverter {
         // (< (objects_distance_to_flag objects flag) 5), as the Xbox can ask it: is one of them in a box about the flag
         // that size (each way out from it 0.89 times the distance: the box's square has the circle's area, so it's
         // never off by more than about a quarter of the distance)
-        if ((head == "<" || head == "<=" || head == ">" || head == ">=") && n.kids.size() == 3 && !flag_at.empty() &&
+        if (target != Game::Xbox && (head == "<" || head == "<=" || head == ">" || head == ">=") && n.kids.size() == 3 && !flag_at.empty() &&
             missing.count("objects_distance_to_flag") && !missing.count("volume_test_objects")) {
             for (int side = 1; side <= 2; side++) {
                 const hsc::Node &d = n.kids[(size_t)side], &v = n.kids[(size_t)(3 - side)];
@@ -12596,7 +12729,12 @@ struct ScriptConverter {
                 return inside ? test : "(not " + test + ")";
             }
         }
-        // (set <global the target doesn't have> value) -> no-op
+        // (set <global the target doesn't have> value) -> no-op; MCC's game speed -> (game_speed value)
+        if (head == "set" && n.kids.size() == 3 && !n.kids[1].list && hsc::lower(n.kids[1].atom) == "game_speed_value" &&
+            lookup(n.kids[1].atom)) {
+            count("game_speed_value", "setting it now (game_speed ...)");
+            return "(game_speed " + emit(s, n.kids[2]) + ")";
+        }
         if (head == "set" && n.kids.size() >= 2 && !n.kids[1].list) {
             const ScriptName *g = lookup(n.kids[1].atom);
             if (g && g->global) {
@@ -12636,8 +12774,7 @@ struct ScriptConverter {
             {"breadcrumbs_deactivate_team_nav_point_flag", {"deactivate_team_nav_point_flag", "now deactivate_team_nav_point_flag"}},
             {"breadcrumbs_deactivate_team_nav_point_object", {"deactivate_team_nav_point_object", "now deactivate_team_nav_point_object"}},
             {"game_time_authoritative", {"game_time", "now game_time"}},
-            {"local_players", {"players", "now players (all players)"}},
-            {"list_count_not_dead", {"list_count", "now list_count (also counts dead ones)"}},
+            {"cinematic_abort", {"cinematic_stop", "now cinematic_stop"}},
         };
         auto rn = renames.find(head);
         if (rn != renames.end() && has(rn->second.first)) {
@@ -12658,6 +12795,30 @@ struct ScriptConverter {
         if ((head == "abs_real" || head == "abs_integer") && argc == 1 && has("max")) {
             count(head, "now (max x (* -1 x))");
             return "(max " + args[0] + " (* -1 " + args[0] + "))";
+        }
+        if (head == "breadcrumbs_nav_points_active" && argc == 0) {
+            count(head, "always true");
+            return "(not false)";
+        }
+        // (a nav point at a position: Halo's are at a flag or an object: the flag nearest it, when it's given as numbers)
+        if (head == "breadcrumbs_activate_team_nav_point_position" && argc == 7 && has("activate_team_nav_point_flag") && !flag_at.empty()) {
+            double p[3];
+            bool numbers = true;
+            for (int k = 0; k < 3; k++) {
+                const hsc::Node &a = n.kids[(size_t)k + 3];
+                if (a.list || a.str || a.atom.find_first_not_of("-0123456789.") != std::string::npos || a.atom.empty()) numbers = false;
+                else p[k] = std::atof(a.atom.c_str());
+            }
+            if (numbers) {
+                std::string best;
+                double bd = 1e30;
+                for (auto &[nm, q] : flag_at) {
+                    const double dd = (q[0] - p[0]) * (q[0] - p[0]) + (q[1] - p[1]) * (q[1] - p[1]) + (q[2] - p[2]) * (q[2] - p[2]);
+                    if (dd < bd) { bd = dd; best = nm; }
+                }
+                count(head, "now activate_team_nav_point_flag at the nearest flag");
+                return "(activate_team_nav_point_flag " + args[0] + " " + args[1] + " " + best + " " + args[6] + ")";
+            }
         }
         if (head == "game_is_authoritative" && argc == 0) {
             count(head, "always true");
@@ -13973,6 +14134,8 @@ static void convert_scripts(Job &job, const fs::path &dir, Game target) {
             }
         }
     }
+    for (auto &[name, c] : conv.changes)
+        if (c.second.rfind("native", 0) == 0) job.h1u_written += c.first;
     for (auto &[name, c] : conv.changes)
         job.note("[scripts] " + name + " (not in " + game_name(target) + "): " + c.second + " (" +
                  std::to_string(c.first) + "x)");

@@ -491,10 +491,29 @@ game, the app rewrites the map's scripts for that game:
     parameter set from the game's time, or from another one that holds
     it, becomes a long (good for half a year of game time). Shorts and
     longs convert to each other wherever a function wants one.
+  - Xbox: MCC's script functions that Halo 1 Unlimited (v1.149) has
+    natively stay as they are: bit_test, bit_toggle, bitwise_flags_toggle,
+    bitwise_and/or/xor, bitwise_left_shift/right_shift,
+    objects_distance_to_object/flag/position, list_count_not_dead,
+    local_players, players_on_multiplayer_team, game_is_authoritative,
+    physics_set_gravity/get_gravity/constants_reset, script_started and
+    script_finished. Invader only knows the Xbox's own functions, so each
+    call is compiled in a form it takes and made the function's own call
+    in the built map (its index in Halo 1 Unlimited's function table, its
+    arguments in their types); a map where that can't be done isn't kept.
+    MCC's bit_test gives a number and Halo 1 Unlimited's true or false, so
+    (= (bit_test v b) 1) is the test itself. Others are written with what
+    the Xbox has: pin as (min (max ...)), abs_real and abs_integer as
+    (max x (* -1 x)), sleep_forever as (sleep -1), the breadcrumbs nav
+    points at a flag or object as Halo's team nav points (one at a position
+    at the flag nearest it), game_time_authoritative as game_time,
+    game_speed_value set as (game_speed ...) and read as 1,
+    cinematic_abort as cinematic_stop; mcc_mission_segment is false,
+    breadcrumbs_nav_points_active true, and MCC's sound gains (the
+    player's own settings) 1, their setters left out.
   - Anything else becomes a stand-in that does nothing: calls with no
     result (like sv_say, which posts a chat message on PC servers) are
-    removed, true/false checks return false, numbers return 0, and
-    distance checks return "far away".
+    removed, true/false checks return false and numbers return 0.
   - Xbox: a continuous script that only tests players against trigger
     volumes, each one every tick (Deathtrap's kill volume: 16 players'
     tests, 30 times a second, a good part of its 0.6 ms of script time a

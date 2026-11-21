@@ -5,6 +5,7 @@
 #include <chrono>
 #include <thread>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <iterator>
 #include <unordered_set>
@@ -171,7 +172,112 @@ bool read_file(const fs::path &p, std::string &s) {
 
 }   // namespace
 
-Result trim_scripts(const fs::path &map, uint64_t tag_space, uint32_t spare) {
+// The calls of Halo 1 Unlimited's MCC functions in a script node table (the nodes from `nodes`, `count` of them; the
+// table's strings at `strings`): (begin (print "<name>") <arguments, each in a call of the Xbox's own that gives it its type>
+// <a stand-in of what it returns>) as Invader compiles it, made <name>'s call: its index (the begin's and its
+// function name's), its name, and the arguments' nodes linked to it in their types (each node's value cast to that as
+// it's read); the marker, the calls that wrapped the arguments and the stand-in left unlinked. `failed`: ones whose
+// nodes weren't as expected (left as they were).
+static int h1u_calls(std::string &d, size_t nodes, uint32_t count, size_t strings, uint32_t strings_size, int &failed) {
+    struct Fn { const char *name; uint16_t index; std::vector<int> params; int ret; };
+    // (the parameters' types: 5 boolean, 6 real, 7 short, 8 long, 10 script, 12 cutscene flag, 23 object list, 37 object)
+    static const Fn fns[] = {
+        {"bit_test", 422, {8, 7}, 5}, {"bit_toggle", 423, {8, 7, 5}, 8}, {"bitwise_flags_toggle", 424, {8, 8, 5}, 8},
+        {"bitwise_and", 425, {8, 8}, 8}, {"bitwise_or", 426, {8, 8}, 8}, {"bitwise_xor", 427, {8, 8}, 8},
+        {"bitwise_left_shift", 428, {8, 7}, 8}, {"bitwise_right_shift", 429, {8, 7}, 8},
+        {"objects_distance_to_object", 430, {23, 37}, 6}, {"objects_distance_to_flag", 431, {23, 12}, 6},
+        {"objects_distance_to_position", 432, {23, 6, 6, 6}, 6}, {"list_count_not_dead", 433, {23}, 7}, {"local_players", 434, {}, 23},
+        {"players_on_multiplayer_team", 435, {7}, 23}, {"game_is_authoritative", 436, {}, 5}, {"physics_set_gravity", 437, {6}, 4},
+        {"physics_get_gravity", 438, {}, 6}, {"physics_constants_reset", 439, {}, 4}, {"script_started", 440, {10}, 5},
+        {"script_finished", 441, {10}, 5},
+    };
+    // (the call each type's argument is wrapped in, its function index on the Xbox, and which of its arguments it is)
+    auto wrapper = [](int type, uint16_t &fn, int &pos) {
+        switch (type) {
+        case 8: fn = 61; pos = 0; return true;    // numeric_countdown_timer_set (long, boolean)
+        case 7: fn = 62; pos = 0; return true;    // numeric_countdown_timer_get (short)
+        case 5: fn = 27; pos = 0; return true;    // not (boolean)
+        case 6: fn = 7; pos = 0; return true;     // + (real)
+        case 23: fn = 46; pos = 0; return true;   // list_count (object list)
+        case 37: fn = 23; pos = 0; return true;   // unit (object)
+        case 12: fn = 52; pos = 1; return true;   // objects_can_see_flag (object list, cutscene flag, real)
+        case 10: fn = 19; pos = 1; return true;   // sleep (short, script)
+        }
+        return false;
+    };
+    auto at = [&](uint32_t id) -> size_t {   // (a node's place, from its id; 0 for none)
+        if (id == 0xFFFFFFFFu) return 0;
+        const uint32_t i = id & 0xFFFF;
+        return i < count ? nodes + (size_t)i * kNodeSize : 0;
+    };
+    auto id_of = [&](size_t p) { return (uint32_t)get16(d, p) << 16 | (uint32_t)((p - nodes) / kNodeSize); };
+    auto str = [&](uint32_t off) -> std::string {
+        if (off >= strings_size) return "";
+        const char *c = d.data() + strings + off;
+        return std::string(c, strnlen(c, strings_size - off));
+    };
+    int made = 0;
+    failed = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        const size_t b = nodes + (size_t)i * kNodeSize;
+        const uint16_t flags = get16(d, b + 6);
+        if (flags & 3 || get16(d, b + 2) != 0 || get16(d, b) == 0) continue;   // (a begin's call: not a value, not a script's)
+        const size_t name = at(get32(d, b + 16));
+        if (!name) continue;
+        // (its first: (print "<name>"), a call of print (28) whose argument is the name as a string)
+        const size_t marker = at(get32(d, name + 8));
+        if (!marker || get16(d, marker + 6) & 1 || get16(d, marker + 2) != 28) continue;
+        const size_t pname = at(get32(d, marker + 16)), text = pname ? at(get32(d, pname + 8)) : 0;
+        if (!text || (get16(d, text + 6) & 5) != 1 || get16(d, text + 4) != 9) continue;   // (a string's value)
+        const std::string fn_name = str(get32(d, text + 12));
+        const Fn *f = nullptr;
+        for (auto &x : fns) if (fn_name == x.name) f = &x;
+        if (!f) continue;
+        // (each argument: the wrapping call's argument at its place)
+        std::vector<size_t> args;
+        size_t cur = at(get32(d, marker + 8));
+        bool ok = true;
+        for (int type : f->params) {
+            uint16_t wfn = 0;
+            int pos = 0;
+            if (!cur || !wrapper(type, wfn, pos) || get16(d, cur + 6) & 1 || get16(d, cur + 2) != wfn) { ok = false; break; }
+            const size_t wname = at(get32(d, cur + 16));
+            size_t a = wname ? at(get32(d, wname + 8)) : 0;
+            for (int k = 0; k < pos && a; k++) a = at(get32(d, a + 8));
+            if (!a) { ok = false; break; }
+            args.push_back(a);
+            cur = at(get32(d, cur + 8));
+        }
+        if (!ok) { failed++; continue; }
+        // The call: its index and name; its arguments linked after its name, each of its parameter's type. (A value of
+        // no type, as Invader leaves a begin whose type it can't tell: what the function gives, which casts to nothing)
+        if (get16(d, b + 4) == 3) put16(d, b + 4, (uint16_t)f->ret);
+        put16(d, b + 2, f->index);
+        put16(d, name + 2, f->index);
+        put32(d, name + 12, get32(d, text + 12));
+        put32(d, name + 8, args.empty() ? 0xFFFFFFFFu : id_of(args[0]));
+        for (size_t k = 0; k < args.size(); k++) {
+            put16(d, args[k] + 4, (uint16_t)f->params[k]);
+            put32(d, args[k] + 8, k + 1 < args.size() ? id_of(args[k + 1]) : 0xFFFFFFFFu);
+        }
+        made++;
+    }
+    // The calls that only gave one its type ((+ <call>), (and <call>), (numeric_countdown_timer_get <call>), with it as
+    // their only argument): that call in their place (their node: its index and name; their type and place kept).
+    for (uint32_t i = 0; made && i < count; i++) {
+        const size_t w = nodes + (size_t)i * kNodeSize;
+        const uint16_t wi = get16(d, w + 2);
+        if (get16(d, w + 6) & 3 || get16(d, w) == 0 || (wi != 7 && wi != 5 && wi != 62)) continue;
+        const size_t wname = at(get32(d, w + 16));
+        const size_t c = wname ? at(get32(d, wname + 8)) : 0;
+        if (!c || get16(d, c + 6) & 3 || get16(d, c + 2) < 422 || get16(d, c + 2) > 441 || get32(d, c + 8) != 0xFFFFFFFFu) continue;
+        put16(d, w + 2, get16(d, c + 2));
+        put32(d, w + 16, get32(d, c + 16));
+    }
+    return made;
+}
+
+Result trim_scripts(const fs::path &map, uint64_t tag_space, uint32_t spare, bool trim) {
     Result r;
     std::string raw, d;
     if (!read_file(map, raw) || raw.size() < kHeader || raw.compare(0, 4, "daeh") != 0 || raw.compare(0x7FC, 4, "toof") != 0) {
@@ -213,16 +319,23 @@ Result trim_scripts(const fs::path &map, uint64_t tag_space, uint32_t spare) {
     }
     const uint32_t max = get16(d, h + 32);
     r.nodes = std::max({get16(d, h + 44), get16(d, h + 46), get16(d, h + 48)});
+    // Halo 1 Unlimited's MCC functions, written as (begin "<name>" <wrapped arguments> <stand-in>) for Invader: each
+    // made the function's own call (h1u_calls), before the table's trimmed and the map checked.
+    {
+        const uint32_t ssize = get32(d, sd + kMlScenarioSyntax + 20), sptr = get32(d, sd + kMlScenarioSyntax + 32);
+        const size_t sp = ssize && tags.has(sptr) && tags.has(sptr + ssize - 1) ? w.pos(sptr) : 0;
+        if (sp) r.h1u_calls = h1u_calls(d, h + kTableHeader, std::min<uint32_t>(r.nodes, max), sp, ssize, r.h1u_failed);
+    }
     r.kept = std::min(kFullTable, r.nodes + spare);
     while ((kFullTable - r.kept) % 8) r.kept++;   // (moves what's after it by a multiple of 32 bytes: it stays aligned)
     uint32_t cut = 0;
-    if (max == kFullTable && get16(d, h + 34) == kNodeSize && size == kTableHeader + kNodeSize * kFullTable)
+    if (trim && max == kFullTable && get16(d, h + 34) == kNodeSize && size == kTableHeader + kNodeSize * kFullTable)
         cut = kNodeSize * (kFullTable - r.kept);
     const uint32_t cut1 = table + size, cut0 = cut1 - cut;   // (the nodes taken out: [cut0, cut1))
     for (size_t i = w.pos(cut0); cut && i < w.pos(cut0) + cut; i++)
         if (d[i]) { r.error = "the script node table's unused nodes aren't empty"; return r; }
 
-    if (!cut && !lift) {
+    if (!cut && !lift && !r.h1u_calls) {
         r.ok = true;
         r.tag_data = tags.size;
         return r;
