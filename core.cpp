@@ -3029,17 +3029,27 @@ static std::string campaign_halves(Job &job, std::vector<std::string> cmd, bool 
     const fs::path xdata = job.work / "xbox_data";
     // (no_scripts: the level's scripts are over the Xbox's script nodes as one map, so each part's tag memory is measured
     // without them: Invader writes the node table at its full size whatever the scripts use, so they hardly change it)
-    const bool scripts = !no_scripts && campaign::load(xdata, a, why);
+    const bool have_scripts = campaign::load(xdata, a, why), scripts = have_scripts && !no_scripts;
     // (a BSP no switch leads to and no script switches to: never reached (a debug room), in no part; with no switch
     // volumes at all, the scripts do the switching, so each BSP's kept)
     std::vector<int> never;
     {
+        // (the BSPs the scripts switch to are reached too, and what switches lead on from them: a level that starts in
+        // an empty BSP its scripts switch out of (b30_evolved's b30r_empty))
         std::set<int> scripted;
-        if (scripts)
+        if (have_scripts)
             for (auto &f : a.files) for (int b : campaign::bsps_used(f.text)) scripted.insert(b);
+        for (int b : scripted)
+            if (b >= 0 && b < n && !seen[(size_t)b]) {
+                seen[(size_t)b] = 1;
+                order.push_back(b);
+                for (size_t i = order.size() - 1; i < order.size(); i++)
+                    for (auto &[x, y] : edges)
+                        if (x == order[i] && y >= 0 && y < n && !seen[(size_t)y]) { seen[(size_t)y] = 1; order.push_back(y); }
+            }
         for (int i = 0; i < n; i++) {
             if (seen[(size_t)i]) continue;
-            if (edges.empty() || scripted.count(i)) order.push_back(i);
+            if (edges.empty()) order.push_back(i);
             else never.push_back(i);
         }
     }
