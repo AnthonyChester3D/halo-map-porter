@@ -116,8 +116,8 @@ enum {
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new162.exe is 1.162).
-#define HMP_VERSION L"1.162"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new163.exe is 1.163).
+#define HMP_VERSION L"1.163"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -867,6 +867,8 @@ static void set_busy(bool b) {
 static bool same_path(const fs::path &a, const fs::path &b) { return _wcsicmp(a.wstring().c_str(), b.wstring().c_str()) == 0; }
 static fs::path xbox_pack_dir(const fs::path &dir);
 static std::wstring fit_loose_folder(const std::wstring &folder);
+static std::array<fs::path, 3> campaign_outputs(const fs::path &out);
+static std::vector<fs::path> campaign_part_outputs(const fs::path &out, int parts);
 
 // Convert tab, Xbox output: the file name is the map's name on the Xbox.
 static std::wstring conv_xbox_name() {
@@ -2438,9 +2440,9 @@ static std::vector<fs::path> level_and_pieces(const fs::path &out, const Campaig
     const fs::path folder = out.parent_path(), root = folder.parent_path();
     const std::wstring name = folder.filename().wstring(), stem = out.stem().wstring();
     std::vector<fs::path> more;
-    if (p.open) more.push_back(root / (name + L" Open") / (stem + L"_opening.map"));
-    if (p.close) more.push_back(root / (name + L" End") / (stem + L"_ending.map"));
-    for (int k = 2; k <= p.parts; k++) more.push_back(root / (name + L" P" + std::to_wstring(k)) / (stem + L"_part" + std::to_wstring(k) + L".map"));
+    for (auto &m : campaign_outputs(out)) if (m != out && ((p.open && m.parent_path().filename().wstring() == name + L" Open") ||
+                                                            (p.close && m.parent_path().filename().wstring() == name + L" End"))) more.push_back(m);
+    for (auto &m : campaign_part_outputs(out, p.parts)) if (m != out) more.push_back(m);
     for (auto &m : more)
         if (fs::exists(m, ec)) v.push_back(m);
     return v;
@@ -2595,10 +2597,17 @@ static void campaign_report(const std::string &text) {
     set_text(ID_CA_REPORT, t);
 }
 // The pieces' maps: [0] the level (the Convert tab's output), [1] the opening's, [2] the closing's.
+// A piece's map file: the level's name and the piece's, 31 characters at most (a map's name, which its scenario is
+// built with, can't be longer), the level's cut to leave room.
+static fs::path piece_file(const std::wstring &stem, const std::wstring &suffix) {
+    std::wstring s = stem.substr(0, stem.size() + suffix.size() > 31 ? 31 - std::min<size_t>(31, suffix.size()) : stem.size());
+    while (!s.empty() && s.back() == L'_') s.pop_back();
+    return s + suffix + L".map";
+}
 static std::array<fs::path, 3> campaign_outputs(const fs::path &out) {
     const fs::path folder = out.parent_path(), root = folder.parent_path();
     const std::wstring name = folder.filename().wstring(), stem = out.stem().wstring();
-    return {out, root / (name + L" Open") / (stem + L"_opening.map"), root / (name + L" End") / (stem + L"_ending.map")};
+    return {out, root / (name + L" Open") / piece_file(stem, L"_opening"), root / (name + L" End") / piece_file(stem, L"_ending")};
 }
 // The gameplay parts' maps: part 1 is the level's (the Convert tab's output), part k "<folder> Pk".
 static std::vector<fs::path> campaign_part_outputs(const fs::path &out, int parts) {
@@ -2606,7 +2615,7 @@ static std::vector<fs::path> campaign_part_outputs(const fs::path &out, int part
     const std::wstring name = folder.filename().wstring(), stem = out.stem().wstring();
     std::vector<fs::path> v{out};
     for (int k = 2; k <= parts; k++)
-        v.push_back(root / (name + L" P" + std::to_wstring(k)) / (stem + L"_part" + std::to_wstring(k) + L".map"));
+        v.push_back(root / (name + L" P" + std::to_wstring(k)) / piece_file(stem, L"_part" + std::to_wstring(k)));
     return v;
 }
 static bool campaign_ready(fs::path &in, fs::path &out, Game &from) {

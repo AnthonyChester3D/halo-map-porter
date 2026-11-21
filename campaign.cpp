@@ -161,9 +161,15 @@ std::string statements_text(const std::string &text, const Node &n) {
     }
     return "    " + slice(text, n.b, n.e) + "\n";
 }
+// (a script declared as a stub and defined later, as MCC's scripts do for one called before it's defined: the definition)
 const Def *def_named(const Analysis &a, const std::string &name) {
-    for (auto &d : a.defs) if (d.name == name) return &d;
-    return nullptr;
+    const Def *first = nullptr;
+    for (auto &d : a.defs)
+        if (d.name == name) {
+            if (d.type != "stub") return &d;
+            if (!first) first = &d;
+        }
+    return first;
 }
 }   // namespace
 
