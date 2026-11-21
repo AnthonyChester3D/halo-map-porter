@@ -707,9 +707,9 @@ Result make(const fs::path &folder, const std::string &base_name, const std::vec
             maps.back()->path = p;
         }
         {
-            std::vector<std::thread> th;
-            for (auto &mp : maps)
-                th.emplace_back([&m = *mp] {
+            // (a few at a time: each holds its map packed and unpacked while it reads, a level's 100 MB and 250 MB)
+            std::atomic<size_t> next{0};
+            auto read_one = [&](Map &m) {
                     std::string disk;
                     if (!read_file(m.path, disk)) { m.skipped = "it couldn't be read"; return; }
                     m.disk_size = disk.size();
@@ -720,6 +720,12 @@ Result make(const fs::path &folder, const std::string &base_name, const std::vec
                     m.ident_tail = crc32_of(disk.data() + disk.size() - edge, edge);
                     std::string why;
                     if (!unpack(disk, m.data, m.compressed, why)) { m.data.clear(); m.skipped = why; }
+            };
+            const size_t at_once = std::clamp<size_t>(std::thread::hardware_concurrency(), 1, 4);
+            std::vector<std::thread> th;
+            for (size_t t = 0; t < std::min(at_once, maps.size()); t++)
+                th.emplace_back([&] {
+                    for (size_t i; (i = next++) < maps.size();) read_one(*maps[i]);
                 });
             for (auto &t : th) t.join();
         }
