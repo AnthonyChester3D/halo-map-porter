@@ -485,7 +485,10 @@ void enable_all(bool on) {
 void start_update() {
     if (St->updating) return;
     save_choice();
-    if (!St->update) return;
+    if (!St->update) {   // (only the models were prepared: the main window converts the map, with the choices)
+        if (!St->built) close_window(true);
+        return;
+    }
     St->updating = true;
     enable_all(false);
     status(St->built ? L"Updating the map: the models' levels of detail and trims, then the build..."
@@ -833,6 +836,9 @@ void create_controls() {
     for (int i = 0; i < 5; i++) ShowWindow(item(IDC_LEVEL0 + i), SW_HIDE);
     EnableWindow(item(IDC_ASMADE), FALSE);
     if (St->library.empty()) status(L"Set the LOD library folder on the Settings tab to keep choices for models.");
+    else if (!St->built && !St->update)
+        status(L"Only the models were prepared. Choose what each model gets, \"Make it again\" to see it, then \"Build the map\" "
+               L"to convert the map with your choices.");
     else if (!St->built)
         status(L"Prepared: the map isn't built yet. Choose what each model gets, \"Make it again\" to see it, then \"Build the map\".");
 

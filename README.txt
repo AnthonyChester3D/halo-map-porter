@@ -1047,12 +1047,15 @@ Levels of detail (LODs)
   Xbox tab's windows are for"): on the last conversion or Unpack of it with
   the Xbox tab's weapon and vehicle options as they are (its models done
   again first, in seconds, when the "Heavy models" or LOD options changed),
-  or else the map is prepared as far as the window (the tags, the models'
-  levels of detail and trims; no build, so it takes about a third of a
-  conversion) and the window opens on that. Its button then says "Build
-  the map": the first build, from the tags prepared, with every model's
-  choice. (Precipice: 28 s prepared, a model made again in under a
-  second, built in 60 s, the same map a 2-minute conversion makes.)
+  or else only the map's models are prepared (the tags taken out, the
+  weapons and vehicles the Xbox tab picks, the models' levels of detail,
+  trims and collision; none of the textures, sounds, HUDs, scripts,
+  campaign parts, lights or portals the rest of a conversion does) and
+  the window opens on that, listing the whole map's models (a campaign
+  level converted in parts: every part's, each part using the same
+  choices). Its button then says "Build the map": the map converted, with
+  every model's choice. (b30_evolved: the window took 31 minutes when it
+  prepared everything, most of it textures, lights and portals.)
   The map goes where the Convert tab's Save as says (or the Build tab's
   Xbox folder); a Convert tab set to another game is switched to Xbox
   first, with the Xbox Save as, and the log says so.
@@ -1266,7 +1269,7 @@ Weapons & vehicles window (Xbox)
   own (Keep or None).
   Measuring takes about as long as a conversion (the app prepares the map and
   builds a test copy, then reads back what each part takes), unless the map
-  was converted or unpacked (or prepared for the LODs window) with the Xbox
+  was converted or unpacked with the Xbox
   tab's weapon and vehicle options as they are and no picks: then it's
   measured from the tags that prepared (the models done again with the
   "Heavy models" and LOD options now), in seconds (Precipice: 8 s instead

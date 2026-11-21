@@ -160,6 +160,10 @@ struct Config {
     // the window's file and "Update the map"'s written (Result::lods, Result::update), but no map built. The window's
     // "Build the map" ("Update the map") builds it from there.
     bool xbox_prepare_only = false;
+    // (with xbox_prepare_only, the LODs window opened on a map not converted yet: only what its models are made from and
+    // their levels of detail; no textures, sounds, HUDs, scripts, campaign parts, lights or portals. Its tags can't be
+    // built: the window's "Build the map" converts the map, with the choices made in it.)
+    bool xbox_lods_only = false;
     // Custom weapons with no Xbox original: empty = keep them, else an Xbox weapon name (e.g. "sniper rifle").
     std::string xbox_other_weapons;
     // MCC maps' options a custom vehicle set turns on (a named vehicle only a custom set spawns, which the map's scripts

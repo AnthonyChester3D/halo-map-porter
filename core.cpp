@@ -3432,7 +3432,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
         }
         job.watch("preparing the tags");
         if (!job.user_tags.empty() && !job.overlay.empty() && job.target != Game::MCC) keep_user_edits(job);
-        if (job.target != Game::MCC) convert_bc7_textures(job);
+        if (job.target != Game::MCC && !cfg.xbox_lods_only) convert_bc7_textures(job);
         job.watch("keeping your edits / BC7 textures");
         if (job.target == Game::Xbox && cfg.xbox_perfect) {
             perfect_keep_gameplay(job);
@@ -3441,14 +3441,14 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
         }
         if (job.target == Game::Xbox) xbox_content_passes(job);
         else if (job.from == Game::Xbox) reorder_multipurpose_maps(job, tag_dependencies(job, job.scenario + ".scenario", true));
-        water_volumes(job);
+        if (!cfg.xbox_lods_only) water_volumes(job);
         job.watch("water volumes");
         place_kept_level_tags(job);
         job.watch("placing the map's level tags");
     }
     job.watch("the preparation");
     std::vector<std::string> performance;   // the report's "Performance" section (Xbox)
-    if (job.target == Game::Xbox && !job.analysis) {
+    if (job.target == Game::Xbox && !job.analysis && !cfg.xbox_lods_only) {
         performance = performance_lines(job);
         if (!performance.empty()) {
             job.log("Performance (what the Xbox has to draw):");
@@ -3508,7 +3508,8 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
     if (job.target == Game::Xbox && !job.analysis && !job.lod_deps.empty() && !cfg.level_shaders_only)
         r.update = job.work / "update.txt";
     if (cfg.xbox_prepare_only && job.target == Game::Xbox && !job.analysis) {   // (as far as the LODs window)
-        job.log("Prepared: the map isn't built yet (Convert, or the LODs window's \"Build the map\", builds it from these tags).");
+        job.log(cfg.xbox_lods_only ? "Prepared the models for the LODs window (only them: its \"Build the map\" converts the map with your choices)."
+                                   : "Prepared: the map isn't built yet (Convert, or the LODs window's \"Build the map\", builds it from these tags).");
         r.ok = true;
         return r;
     }
@@ -8415,6 +8416,20 @@ static std::vector<std::string> content_dependencies(Job &job) {
 }
 
 void xbox_content_passes(Job &job) {
+    if (job.cfg.xbox_lods_only) {   // (the LODs window only: the models as the conversion makes them, nothing else)
+        auto deps = content_dependencies(job);
+        flatten_layered_shaders(job, deps);
+        mcc_flags_for_xbox(job, deps);
+        deps = content_dependencies(job);
+        xbox_materials(job, deps);
+        xbox_scenery_sizes(job, deps);
+        xbox_lods(job, deps);
+        job.watch("the levels of detail");
+        xbox_collision(job, deps);
+        xbox_scenery(job, deps);
+        job.watch("the collision and scenery");
+        return;
+    }
     auto deps = content_dependencies(job);
     flatten_layered_shaders(job, deps);
     if (!job.cfg.level_shaders_only) reorder_multipurpose_maps(job, deps);   // (before textures are capped)
@@ -16304,7 +16319,7 @@ bool prepare_for_xbox(Job &job, std::string &err) {
         drop_dead_placements(job, xsrc);
         restrict_to_xbox_mp(job, xsrc);
     }
-    if (!job.analysis) bot_route_points(job, xsrc);
+    if (!job.analysis && !cfg.xbox_lods_only) bot_route_points(job, xsrc);
     if (!perfect) apply_xbox_slots(job, xsrc);
     merge_map_globals(job, xsrc);
     if (!perfect) {
@@ -16361,6 +16376,10 @@ bool prepare_for_xbox(Job &job, std::string &err) {
             hud_tags.push_back(rel);
         else if (ext == ".sound" && sound_needs_reencode(e.path()))
             sound_tags.push_back(rel);
+    }
+    if (cfg.xbox_lods_only) {   // (the LODs window only: HUDs and sounds change no model)
+        hud_tags.clear();
+        sound_tags.clear();
     }
 
     // PC/MCC HUDs were drawn against the PC versions of the stock HUD bitmaps, which have extra
@@ -16501,12 +16520,15 @@ bool prepare_for_xbox(Job &job, std::string &err) {
     }
 
     // Scripts: PC renamed player_effect_set_max_rumble to ..._vibrate; Xbox only knows rumble.
-    xbox_scripts(job, xsrc);
-    job.watch("the scripts");
-    campaign_apply(job);   // (a campaign level: its cutscenes, split off when asked)
-    job.watch("splitting the campaign level");
-    if (!job.campaign_error.empty()) { err = job.campaign_error; return false; }
-    if (!job.analysis) note_script_tricks(job, xsrc);
+    // (The LODs window only: neither, the whole map's models listed, as every part of it uses its choices.)
+    if (!cfg.xbox_lods_only) {
+        xbox_scripts(job, xsrc);
+        job.watch("the scripts");
+        campaign_apply(job);   // (a campaign level: its cutscenes, split off when asked)
+        job.watch("splitting the campaign level");
+        if (!job.campaign_error.empty()) { err = job.campaign_error; return false; }
+        if (!job.analysis) note_script_tricks(job, xsrc);
+    }
 
     job.source = xsrc;
     return true;

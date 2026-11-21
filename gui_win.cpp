@@ -117,7 +117,7 @@ enum {
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
 // The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new175.exe is 1.175).
-#define HMP_VERSION L"1.175"
+#define HMP_VERSION L"1.176"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -1506,7 +1506,9 @@ static void open_lods() {
     // The last conversion (or Unpack) of this map with these options, going to the same place: open the window on it;
     // when only the models' options changed since, their levels of detail and trims are done again on its tags first
     // (seconds), not the whole map.
-    if (!g_last_lods.empty() && !g_last_update.empty() && g_last_update_key == pkey && fs::exists(fs::path(g_last_lods)) &&
+    // (tags prepared for the LODs window alone carry pkey + "L": the window opens on them, but Convert won't build them)
+    if (!g_last_lods.empty() && !g_last_update.empty() && (g_last_update_key == pkey || g_last_update_key == pkey + "L") &&
+        fs::exists(fs::path(g_last_lods)) &&
         fs::exists(fs::path(g_last_update)) && same_path(update_output(fs::path(g_last_update)), out)) {
         if (!to_note.empty()) append_log(to_note);
         if (g_last_models_key == models_key(cfg)) {
@@ -1517,7 +1519,7 @@ static void open_lods() {
         apply_map_picks(rc, in);
         apply_shader_picks(rc, in);
         apply_user_scripts(rc, in);
-        Keys k{pkey, models_key(rc), g_last_build_key, true};   // (the tags as they were prepared: Convert can still build from them)
+        Keys k{g_last_update_key, models_key(rc), g_last_build_key, true};   // (the tags as they were prepared: Convert can still build from them)
         fs::path update(g_last_update);
         set_busy(true);
         SetWindowTextW(g_log, L"");
@@ -1540,12 +1542,17 @@ static void open_lods() {
     apply_shader_picks(cfg, in);
     apply_user_scripts(cfg, in);
     cfg.xbox_prepare_only = true;
+    // Only the models: the window lists them and makes their levels of detail; its "Build the map" converts the map
+    // (minutes, not the half hour a whole conversion's preparing takes on a big campaign level).
+    cfg.xbox_lods_only = true;
     bool share = checked(build ? ID_B_SHARE : ID_SHARE);
     Keys k = keys_for(cfg, in, !build);
+    k.tags += "L";
+    k.build.clear();
     std::string lkey = shaders_key(cfg, in);
     set_busy(true);
     SetWindowTextW(g_log, L"");
-    append_log(L"Preparing " + in.filename().wstring() + L" for the LODs window (the map is built from there)");
+    append_log(L"Preparing the models of " + in.filename().wstring() + L" for the LODs window (only them: its \"Build the map\" converts the map)");
     if (!to_note.empty()) append_log(to_note);
     if (!card_note.empty()) append_log(card_note);
     std::thread([=] {
@@ -4958,11 +4965,13 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 };
                 fs::path view = fs::path(g_last_lods);
                 auto run_redo = [c, view](const std::string &model) -> Result { return redo_model_lods(c, view, model, post_log); };
+                // (the models alone prepared: no map can be built from them, so "Build the map" converts it)
+                const bool models_only = !update.empty() && !g_last_update_key.empty() && g_last_update_key.back() == 'L';
                 bool again = lodui::show(h, view, !c.lod_library.empty() ? c.lod_library : c.cache_dir / "lod_library",
-                                         update.empty() ? std::function<Result()>() : std::function<Result()>(run_update),
+                                         update.empty() || models_only ? std::function<Result()>() : std::function<Result()>(run_update),
                                          update.empty() ? std::function<Result(const std::string &)>()
                                                         : std::function<Result(const std::string &)>(run_redo),
-                                         update.empty() || fs::exists(update_output(update)));
+                                         !models_only && (update.empty() || fs::exists(update_output(update))));
                 if (again && !g_busy) {
                     if (g_last_was_build) start_build();
                     else   // (To changed since the Xbox conversion: still the Xbox map, asking as a new one would)
