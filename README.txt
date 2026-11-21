@@ -447,7 +447,9 @@ there. So after copying over a new build, the old one plays until the
 cache is cleared, either from your dashboard or automatically by an XBE
 that clears it at launch. The app also gives every Xbox build its own
 header checksum (from the map's contents), so tools that compare map
-headers can tell builds apart.
+headers can tell builds apart. Every Xbox map is padded with zeros to whole
+512-byte sectors: Halo 1 Unlimited copies a folder map into the Xbox's
+cache by sectors, and can't copy one that isn't.
 
 SCRIPTS
 Each game has a slightly different set of script functions. MCC added

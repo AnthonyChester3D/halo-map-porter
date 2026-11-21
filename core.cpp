@@ -2746,12 +2746,19 @@ uint32_t crc32_of(const char *d, size_t n);
 // Invader leaves the checksum in an Xbox map's header at 0xFFFFFFFF, so every build of a map has the
 // same header checksum. Stamp a CRC32 of the map's body there instead: a rebuilt map then always has a
 // different header, which is what the Xbox (with the cache-refresh XBE) uses to tell that its hard-drive
-// cache copy is stale. Nothing on the Xbox verifies this value against the map's contents.
+// cache copy is stale. Nothing on the Xbox verifies this value against the map's contents. The map is padded to
+// whole 512-byte sectors first.
 bool stamp_xbox_checksum(const fs::path &p) {
     std::ifstream in(p, std::ios::binary);
     std::string b((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     in.close();
     if (b.size() <= 0x800 || b.compare(0, 4, "daeh") != 0 || b.compare(0x7FC, 4, "toof") != 0) return false;
+    if (b.size() % 512) {   // (whole 512-byte sectors, zeros at the end: Halo 1 Unlimited copies a folder map into the Xbox's cache by sectors)
+        const size_t pad = 512 - b.size() % 512;
+        b.append(pad, '\0');
+        std::ofstream ap(p, std::ios::binary | std::ios::app);
+        if (!ap.write(b.data() + b.size() - pad, (std::streamsize)pad)) return false;
+    }
     uint32_t crc = crc32_of(b.data() + 0x800, b.size() - 0x800);
     if (crc == 0xFFFFFFFFu) crc = 0xFFFFFFFEu;
     char le[4] = {(char)crc, (char)(crc >> 8), (char)(crc >> 16), (char)(crc >> 24)};
