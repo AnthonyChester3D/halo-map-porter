@@ -110,10 +110,13 @@ std::vector<std::pair<std::string, int>> scripted_switches(const Analysis &a, co
 struct PartStats { int kept = 0, caught_up = 0, dropped = 0, scripts_dropped = 0, scripted_exits = 0; };
 std::vector<std::pair<fs::path, std::string>> part_texts(const Analysis &a, const PartPlan &plan, int part, PartStats &stats);
 
-// The BSPs a script switches to or tests (switch_bsp N, structure_bsp_index compared with N).
+// The BSPs a script switches to or tests (switch_bsp N, structure_bsp_index compared with N), and those held by the
+// globals it does that with ((global short <name> N), (set <name> N); defined in the same text).
 std::set<int> bsps_used(const std::string &text);
-// Those numbers changed (`to`: old index -> new).
-std::string renumber_bsps(const std::string &text, const std::map<int, int> &to);
+// The names a script uses as BSP indices (switch_bsp <name>, structure_bsp_index compared with <name>).
+std::set<std::string> bsp_index_names(const std::string &text);
+// Those numbers changed (`to`: old index -> new). `also`: names used as BSP indices in the level's other files.
+std::string renumber_bsps(const std::string &text, const std::map<int, int> &to, const std::set<std::string> *also = nullptr);
 
 // The scenario cut down (`scenario`, saved in place). `keep_bsps`: the BSPs left, in order (renumbered from 0).
 // `piece`: everything not named in `names` goes, but scenery standing in a kept BSP; else (the level) only what's named

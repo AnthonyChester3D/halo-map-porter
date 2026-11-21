@@ -23,6 +23,7 @@ struct Result {
     uint32_t saved = 0;            // bytes of tag data taken out
     uint32_t tag_data = 0, largest_bsp = 0;   // after, in bytes: together they're the tag memory the map needs
     int h1u_calls = 0, h1u_failed = 0;        // calls of Halo 1 Unlimited's MCC functions made its own (and not)
+    int h1u_repaired = 0;                     // links cut in a map an earlier maptrim made the calls in (one node linked twice)
 };
 // `map`: an Xbox map Invader just built (compressed or not), rewritten in place. `tag_space`: the tag space Invader was
 // told the map has (its -T) when more than the Xbox's 22 MiB: Invader put the BSPs at the top of that, so they're

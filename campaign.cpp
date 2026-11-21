@@ -293,38 +293,66 @@ std::vector<std::string> camera_points_set(const std::string &text) {
     return out;
 }
 
-std::set<int> bsps_used(const std::string &text) {
-    std::set<int> out;
-    for (auto &f : parse(text))
+// The names a script uses as BSP indices: switch_bsp's, and what's compared with structure_bsp_index (b30_evolved's
+// globals, (switch_bsp bsp_index_ext_lz) with (global short bsp_index_ext_lz 1)).
+static void bsp_index_names(const std::vector<Node> &forms, std::set<std::string> &names) {
+    for (auto &f : forms)
         walk(f, [&](const Node &n) {
             if (!n.list) return;
-            if (head(n) == "switch_bsp" && n.kids.size() >= 2 && is_int(n.kids[1].atom)) out.insert(std::stoi(n.kids[1].atom));
+            if (head(n) == "switch_bsp" && n.kids.size() >= 2 && !n.kids[1].list && !is_int(n.kids[1].atom)) names.insert(n.kids[1].atom);
             bool tests = false;
             for (auto &k : n.kids) if (head(k) == "structure_bsp_index") tests = true;
             if (tests)
-                for (auto &k : n.kids) if (!k.list && is_int(k.atom)) out.insert(std::stoi(k.atom));
+                for (size_t i = 1; i < n.kids.size(); i++)
+                    if (!n.kids[i].list && !is_int(n.kids[i].atom)) names.insert(n.kids[i].atom);
         });
+}
+
+std::set<std::string> bsp_index_names(const std::string &text) {
+    std::set<std::string> names;
+    bsp_index_names(parse(text), names);
+    return names;
+}
+
+// Each place a BSP's number is written: switch_bsp's, what's compared with structure_bsp_index, and the numbers the
+// names of `names` are given ((global short <name> N), (set <name> N)).
+static void bsp_numbers(const std::vector<Node> &forms, const std::set<std::string> &names, const std::function<void(const Node &)> &at) {
+    for (auto &f : forms)
+        walk(f, [&](const Node &n) {
+            if (!n.list) return;
+            const std::string &h = head(n);
+            if (h == "switch_bsp" && n.kids.size() >= 2 && !n.kids[1].list && is_int(n.kids[1].atom)) at(n.kids[1]);
+            bool tests = false;
+            for (auto &k : n.kids) if (head(k) == "structure_bsp_index") tests = true;
+            if (tests)
+                for (auto &k : n.kids) if (!k.list && is_int(k.atom)) at(k);
+            if (h == "global" && n.kids.size() >= 4 && names.count(n.kids[2].atom) && !n.kids[3].list && is_int(n.kids[3].atom)) at(n.kids[3]);
+            if (h == "set" && n.kids.size() >= 3 && names.count(n.kids[1].atom) && !n.kids[2].list && is_int(n.kids[2].atom)) at(n.kids[2]);
+        });
+}
+
+std::set<int> bsps_used(const std::string &text) {
+    const std::vector<Node> forms = parse(text);
+    std::set<std::string> names;
+    bsp_index_names(forms, names);
+    std::set<int> out;
+    bsp_numbers(forms, names, [&](const Node &k) { out.insert(std::stoi(k.atom)); });
     return out;
 }
 
-std::string renumber_bsps(const std::string &text, const std::map<int, int> &to) {
+std::string renumber_bsps(const std::string &text, const std::map<int, int> &to, const std::set<std::string> *also) {
+    const std::vector<Node> forms = parse(text);
+    std::set<std::string> names;
+    bsp_index_names(forms, names);
+    if (also) names.insert(also->begin(), also->end());
     std::vector<std::pair<size_t, size_t>> at;   // (atoms to change: their places)
     std::vector<std::string> with;
-    auto change = [&](const Node &k) {
-        if (k.list || !is_int(k.atom)) return;
+    bsp_numbers(forms, names, [&](const Node &k) {
         auto it = to.find(std::stoi(k.atom));
         if (it == to.end()) return;
         at.push_back({k.b, k.e});
         with.push_back(std::to_string(it->second));
-    };
-    for (auto &f : parse(text))
-        walk(f, [&](const Node &n) {
-            if (!n.list) return;
-            if (head(n) == "switch_bsp" && n.kids.size() >= 2) change(n.kids[1]);
-            bool tests = false;
-            for (auto &k : n.kids) if (head(k) == "structure_bsp_index") tests = true;
-            if (tests) for (auto &k : n.kids) change(k);
-        });
+    });
     std::vector<size_t> order(at.size());
     for (size_t i = 0; i < order.size(); i++) order[i] = i;
     std::sort(order.begin(), order.end(), [&](size_t x, size_t y) { return at[x].first > at[y].first; });
@@ -492,8 +520,36 @@ bool sets_state(const Node &s) {
 }
 }   // namespace
 
+// The globals the level's scripts use as BSP indices that are given a number once and never set (b30_evolved's
+// (global short bsp_index_ext_lz 1)): their numbers, so (switch_bsp bsp_index_ext_lz) is a switch to BSP 1.
+static std::map<std::string, int> bsp_constants(const Analysis &a) {
+    std::set<std::string> names;
+    for (auto &f : a.files) bsp_index_names(f.forms, names);
+    std::map<std::string, int> out;
+    std::set<std::string> changed;
+    for (auto &f : a.files)
+        for (auto &form : f.forms)
+            walk(form, [&](const Node &n) {
+                if (!n.list) return;
+                const std::string &h = head(n);
+                if (h == "global" && n.kids.size() >= 4 && names.count(n.kids[2].atom) && !n.kids[3].list && is_int(n.kids[3].atom))
+                    out[n.kids[2].atom] = std::stoi(n.kids[3].atom);
+                if (h == "set" && n.kids.size() >= 2 && !n.kids[1].list) changed.insert(n.kids[1].atom);
+            });
+    for (auto &c : changed) out.erase(c);
+    return out;
+}
+// The BSP a (switch_bsp <n>) goes to: <n>, or the number of the global named (-1: neither).
+static int switch_target(const Node &s, const std::map<std::string, int> &consts) {
+    if (head(s) != "switch_bsp" || s.kids.size() < 2 || s.kids[1].list) return -1;
+    if (is_int(s.kids[1].atom)) return std::stoi(s.kids[1].atom);
+    auto it = consts.find(s.kids[1].atom);
+    return it == consts.end() ? -1 : it->second;
+}
+
 std::vector<std::pair<fs::path, std::string>> part_texts(const Analysis &a, const PartPlan &plan, int part, PartStats &stats) {
     stats = PartStats();
+    const std::map<std::string, int> consts = bsp_constants(a);
     // Where each script is: what it names, and what the scripts it wakes and calls name, until nothing changes.
     std::map<std::string, std::set<int>> where = plan.where;
     auto part_of_bsp = [&](int b) { return b >= 0 && b < (int)plan.part_of.size() ? plan.part_of[(size_t)b] : -1; };
@@ -527,6 +583,8 @@ std::vector<std::pair<fs::path, std::string>> part_texts(const Analysis &a, cons
             if (k.list) return;
             auto it = m.find(k.atom.substr(0, k.atom.find('/')));
             if (it != m.end()) ps.insert(it->second.begin(), it->second.end());
+            auto c = consts.find(k.atom);   // (a global holding a BSP's number)
+            if (c != consts.end() && part_of_bsp(c->second) >= 0) ps.insert(part_of_bsp(c->second));
         });
         for (int b : bsps_used(slice(text, n.b, n.e))) if (part_of_bsp(b) >= 0) ps.insert(part_of_bsp(b));
         return ps;
@@ -551,15 +609,15 @@ std::vector<std::pair<fs::path, std::string>> part_texts(const Analysis &a, cons
             std::set<int> ps = parts_of(text, *s);
             const bool here = ps.count(part) > 0;
             // (a switch to the next part's BSP: the part ends there)
-            if (!plan.next.empty() && head(*s) == "switch_bsp" && s->kids.size() >= 2 && is_int(s->kids[1].atom) &&
-                part_of_bsp(std::stoi(s->kids[1].atom)) == part + 1) {
+            const int target = switch_target(*s, consts);
+            if (!plan.next.empty() && target >= 0 && part_of_bsp(target) == part + 1) {
                 edits.push_back({fi, s->b, s->e, leave});
                 stats.scripted_exits++;
                 continue;
             }
             // (reached: the first statement naming something that stands in this part (not a script that does))
             // (a switch to another part's BSP, not the way on: that BSP isn't here)
-            if (head(*s) == "switch_bsp" && s->kids.size() >= 2 && is_int(s->kids[1].atom) && part_of_bsp(std::stoi(s->kids[1].atom)) != part) {
+            if (target >= 0 && part_of_bsp(target) != part) {
                 edits.push_back({fi, s->b, s->e, ""});
                 stats.dropped++;
                 continue;
@@ -667,8 +725,10 @@ std::vector<std::pair<fs::path, std::string>> part_texts(const Analysis &a, cons
     auto out = level_texts(b, false, false, "", removed, kept);
     int before = 0, after = 0;
     for (auto &d : b.defs) if (d.kind == "script") before++;
+    std::set<std::string> bsp_names;
+    for (auto &f : b.files) bsp_index_names(f.forms, bsp_names);
     for (auto &t : out) {
-        t.second = renumber_bsps(t.second, plan.renumber);
+        t.second = renumber_bsps(t.second, plan.renumber, &bsp_names);
         for (auto &f : parse(t.second)) if (head(f) == "script") after++;
     }
     stats.scripts_dropped = before - after;
@@ -768,6 +828,7 @@ bool locate(const fs::path &scenario, const std::function<std::vector<unsigned>(
 }
 
 std::vector<std::pair<std::string, int>> scripted_switches(const Analysis &a, const std::set<int> &to) {
+    const std::map<std::string, int> consts = bsp_constants(a);
     std::vector<std::pair<std::string, int>> out;
     std::set<std::pair<std::string, int>> seen;
     auto volumes_in = [](const Node &n, std::vector<std::string> &v) {
@@ -782,8 +843,8 @@ std::vector<std::pair<std::string, int>> scripted_switches(const Analysis &a, co
             const Node &s = *stmts[i];
             std::set<int> targets;
             walk(s, [&](const Node &k) {
-                if (head(k) == "switch_bsp" && k.kids.size() >= 2 && is_int(k.kids[1].atom) && to.count(std::stoi(k.kids[1].atom)))
-                    targets.insert(std::stoi(k.kids[1].atom));
+                const int t = switch_target(k, consts);
+                if (t >= 0 && to.count(t)) targets.insert(t);
             });
             if (targets.empty()) continue;
             std::vector<std::string> v;

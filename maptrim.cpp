@@ -178,7 +178,7 @@ bool read_file(const fs::path &p, std::string &s) {
 // function name's), its name, and the arguments' nodes linked to it in their types (each node's value cast to that as
 // it's read); the marker, the calls that wrapped the arguments and the stand-in left unlinked. `failed`: ones whose
 // nodes weren't as expected (left as they were).
-static int h1u_calls(std::string &d, size_t nodes, uint32_t count, size_t strings, uint32_t strings_size, int &failed) {
+static int h1u_calls(std::string &d, size_t nodes, uint32_t count, size_t strings, uint32_t strings_size, int &failed, int &repaired) {
     struct Fn { const char *name; uint16_t index; std::vector<int> params; int ret; };
     // (the parameters' types: 5 boolean, 6 real, 7 short, 8 long, 10 script, 12 cutscene flag, 23 object list, 37 object)
     static const Fn fns[] = {
@@ -234,7 +234,7 @@ static int h1u_calls(std::string &d, size_t nodes, uint32_t count, size_t string
         for (auto &x : fns) if (fn_name == x.name) f = &x;
         if (!f) continue;
         // (each argument: the wrapping call's argument at its place)
-        std::vector<size_t> args;
+        std::vector<size_t> args, from;   // (each argument, and the node whose next it was)
         size_t cur = at(get32(d, marker + 8));
         bool ok = true;
         for (int type : f->params) {
@@ -242,10 +242,11 @@ static int h1u_calls(std::string &d, size_t nodes, uint32_t count, size_t string
             int pos = 0;
             if (!cur || !wrapper(type, wfn, pos) || get16(d, cur + 6) & 1 || get16(d, cur + 2) != wfn) { ok = false; break; }
             const size_t wname = at(get32(d, cur + 16));
-            size_t a = wname ? at(get32(d, wname + 8)) : 0;
-            for (int k = 0; k < pos && a; k++) a = at(get32(d, a + 8));
+            size_t a = wname ? at(get32(d, wname + 8)) : 0, before = wname;
+            for (int k = 0; k < pos && a; k++) before = a, a = at(get32(d, a + 8));
             if (!a) { ok = false; break; }
             args.push_back(a);
+            from.push_back(before);
             cur = at(get32(d, cur + 8));
         }
         if (!ok) { failed++; continue; }
@@ -255,6 +256,8 @@ static int h1u_calls(std::string &d, size_t nodes, uint32_t count, size_t string
         put16(d, b + 2, f->index);
         put16(d, name + 2, f->index);
         put32(d, name + 12, get32(d, text + 12));
+        // (each argument's old link cut first: a node may be linked to once, as Halo 1 Unlimited checks)
+        for (size_t k = 0; k < args.size(); k++) put32(d, from[k] + 8, 0xFFFFFFFFu);
         put32(d, name + 8, args.empty() ? 0xFFFFFFFFu : id_of(args[0]));
         for (size_t k = 0; k < args.size(); k++) {
             put16(d, args[k] + 4, (uint16_t)f->params[k]);
@@ -273,6 +276,29 @@ static int h1u_calls(std::string &d, size_t nodes, uint32_t count, size_t string
         if (!c || get16(d, c + 6) & 3 || get16(d, c + 2) < 422 || get16(d, c + 2) > 441 || get32(d, c + 8) != 0xFFFFFFFFu) continue;
         put16(d, w + 2, get16(d, c + 2));
         put32(d, w + 16, get32(d, c + 16));
+        put32(d, wname + 8, 0xFFFFFFFFu);   // (the call's node let go of: its name is the wrapper's now)
+        put16(d, c, 0);
+    }
+    // A map an earlier maptrim made the calls in (Boxfight's first builds): each argument was left the next of the
+    // call that wrapped it too, a node linked twice, which Halo 1 Unlimited takes for damaged scripts (none run). Those
+    // links cut, as they're made now.
+    repaired = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        const size_t c = nodes + (size_t)i * kNodeSize;
+        const uint16_t fi = get16(d, c + 2);
+        if (get16(d, c + 6) & 1 || get16(d, c) == 0 || fi < 422 || fi > 441) continue;
+        const size_t name = at(get32(d, c + 16));
+        if (!name || get16(d, name + 2) != fi) continue;
+        size_t prev = name;
+        for (size_t a = at(get32(d, name + 8)), steps = 0; a && steps < 16; prev = a, a = at(get32(d, a + 8)), steps++) {
+            const uint32_t ai = (uint32_t)((a - nodes) / kNodeSize);
+            for (uint32_t j = 0; j < count; j++) {
+                const size_t n = nodes + (size_t)j * kNodeSize;
+                if (n == prev || !get16(d, n) || get32(d, n + 8) == 0xFFFFFFFFu || (get32(d, n + 8) & 0xFFFF) != ai) continue;
+                put32(d, n + 8, 0xFFFFFFFFu);
+                repaired++;
+            }
+        }
     }
     return made;
 }
@@ -324,7 +350,7 @@ Result trim_scripts(const fs::path &map, uint64_t tag_space, uint32_t spare, boo
     {
         const uint32_t ssize = get32(d, sd + kMlScenarioSyntax + 20), sptr = get32(d, sd + kMlScenarioSyntax + 32);
         const size_t sp = ssize && tags.has(sptr) && tags.has(sptr + ssize - 1) ? w.pos(sptr) : 0;
-        if (sp) r.h1u_calls = h1u_calls(d, h + kTableHeader, std::min<uint32_t>(r.nodes, max), sp, ssize, r.h1u_failed);
+        if (sp) r.h1u_calls = h1u_calls(d, h + kTableHeader, std::min<uint32_t>(r.nodes, max), sp, ssize, r.h1u_failed, r.h1u_repaired);
     }
     r.kept = std::min(kFullTable, r.nodes + spare);
     while ((kFullTable - r.kept) % 8) r.kept++;   // (moves what's after it by a multiple of 32 bytes: it stays aligned)
@@ -335,7 +361,10 @@ Result trim_scripts(const fs::path &map, uint64_t tag_space, uint32_t spare, boo
     for (size_t i = w.pos(cut0); cut && i < w.pos(cut0) + cut; i++)
         if (d[i]) { r.error = "the script node table's unused nodes aren't empty"; return r; }
 
-    if (!cut && !lift && !r.h1u_calls) {
+    // (a table kept whole that an earlier maptrim gave a smaller maximum (Boxfight's first builds): its own again,
+    // as the game checks it against the size)
+    const bool max_back = !cut && max != kFullTable && get16(d, h + 34) == kNodeSize && size == kTableHeader + kNodeSize * kFullTable;
+    if (!cut && !lift && !r.h1u_calls && !r.h1u_repaired && !max_back) {
         r.ok = true;
         r.tag_data = tags.size;
         return r;
@@ -375,7 +404,8 @@ Result trim_scripts(const fs::path &map, uint64_t tag_space, uint32_t spare, boo
         return r;
     }
     put32(d, sd + kMlScenarioSyntax, size - cut);
-    put16(d, h + 32, (uint16_t)r.kept);
+    if (cut) put16(d, h + 32, (uint16_t)r.kept);   // (a table kept whole keeps its maximum: the game checks it against the size)
+    else if (max_back) put16(d, h + 32, (uint16_t)kFullTable);
     d.erase(w.pos(cut0), cut);
     put32(d, 0x14, tags.size - cut);
     const size_t end = tags.file + tags.size - cut;

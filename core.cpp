@@ -3038,7 +3038,11 @@ static std::string campaign_halves(Job &job, std::vector<std::string> cmd, bool 
         // an empty BSP its scripts switch out of (b30_evolved's b30r_empty))
         std::set<int> scripted;
         if (have_scripts)
-            for (auto &f : a.files) for (int b : campaign::bsps_used(f.text)) scripted.insert(b);
+            {
+                std::string all;   // (a global the BSP's number is in may be in another file than its switch)
+                for (auto &f : a.files) all += f.text + "\n";
+                scripted = campaign::bsps_used(all);
+            }
         for (int b : scripted)
             if (b >= 0 && b < n && !seen[(size_t)b]) {
                 seen[(size_t)b] = 1;
@@ -3077,6 +3081,13 @@ static std::string campaign_halves(Job &job, std::vector<std::string> cmd, bool 
         }
         if (own_tags) c.insert(std::find(c.begin(), c.end(), "-t"), {"-t", u8(dir / "tags")});
         return c;
+    };
+    // (no_scripts: a data folder with one script that does nothing, which Invader compiles in place of the level's:
+    // the scenario's own compiled scripts have no source with them, which it won't build)
+    auto no_scripts_data = [&](const fs::path &data) {
+        const fs::path sd = data / from_u8(job.scenario).parent_path() / "scripts";
+        fs::create_directories(sd, ec);
+        std::ofstream(sd / "hmp_estimate.hsc", std::ios::binary) << "(script static void hmp_estimate (sleep 1))\n";
     };
     int made = 0;
     auto make_run = [&](const std::vector<int> &keep) {
@@ -3118,12 +3129,14 @@ static std::string campaign_halves(Job &job, std::vector<std::string> cmd, bool 
             if (!campaign::strip_scenario(own, st, out)) { x.mb = -1; x.err = out.why; return x; }
         }
         x.encounters = out.encounters;
+        std::set<std::string> bsp_names;
+        for (auto &t : texts) for (auto &nm : campaign::bsp_index_names(t.second)) bsp_names.insert(nm);
         for (auto &[path, text] : texts) {
             fs::path to_file = dir / "data" / path.lexically_relative(xdata);
             fs::create_directories(to_file.parent_path(), ec);
-            std::ofstream(to_file, std::ios::binary) << campaign::renumber_bsps(text, to);
+            std::ofstream(to_file, std::ios::binary) << campaign::renumber_bsps(text, to, &bsp_names);
         }
-        if (no_scripts) fs::create_directories(dir / "data", ec);
+        if (no_scripts) no_scripts_data(dir / "data");
         x.cmd = cmd_in(dir, true, scripts || no_scripts);
         return x;
     };
@@ -3191,7 +3204,8 @@ static std::string campaign_halves(Job &job, std::vector<std::string> cmd, bool 
     std::vector<Run> first;
     {
         Run whole;
-        fs::create_directories(root / "whole" / "data", ec);
+        if (no_scripts) no_scripts_data(root / "whole" / "data");
+        else fs::create_directories(root / "whole" / "data", ec);
         whole.cmd = cmd_in(root / "whole", false, no_scripts);
         first.push_back(std::move(whole));
     }
@@ -15742,7 +15756,11 @@ static void campaign_apply(Job &job) {
         }
         std::vector<int> order;
         std::set<int> scripted;
-        for (auto &f : la.files) for (int b : campaign::bsps_used(f.text)) scripted.insert(b);
+        {
+            std::string all;   // (a global the BSP's number is in may be in another file than its switch)
+            for (auto &f : la.files) all += f.text + "\n";
+            scripted = campaign::bsps_used(all);
+        }
         for (int b : level_bsps)   // (one nothing names, switches to or a script switches to (a debug room): in no part)
             if (sw.empty() || first[(size_t)b] < 1e9 || scripted.count(b)) order.push_back(b);
         std::stable_sort(order.begin(), order.end(), [&](int x, int y) { return first[(size_t)x] < first[(size_t)y]; });
@@ -16069,11 +16087,14 @@ static void campaign_apply(Job &job) {
             st.by_place = true;
             st.keep_named = true;   // (a statement of this part naming another part's encounter too)
         }
-        if (write)
+        if (write) {
+            std::set<std::string> bsp_names;
+            for (auto &t : texts) for (auto &nm : campaign::bsp_index_names(t.second)) bsp_names.insert(nm);
             for (auto &t : texts) {
                 std::ofstream f(t.first, std::ios::binary | std::ios::trunc);
-                f << (cfg.campaign_parts > 1 ? t.second : campaign::renumber_bsps(t.second, to));   // (a part's: renumbered already)
+                f << (cfg.campaign_parts > 1 ? t.second : campaign::renumber_bsps(t.second, to, &bsp_names));   // (a part's: renumbered already)
             }
+        }
         st.names = kept;
         st.drop = removed;
         st.patterns = campaign::containing_patterns(all_after);
