@@ -1712,7 +1712,17 @@ bool inside_level(const fs::path &bsp_file, const std::vector<V3> &points, std::
     Bsp b;
     if (!load_bsp(r, b, nullptr)) return false;
     tagfile::Block sl = r.block("leaves");
+    // (within its world bounds too: a BSP whose collision has no outside, b30_evolved's b30r_empty (a 2-unit box), puts
+    // every point anywhere in its one cluster)
+    const double lo[3] = {r.num("world bounds x", 0), r.num("world bounds y", 0), r.num("world bounds z", 0)},
+                 hi[3] = {r.num("world bounds x", 1), r.num("world bounds y", 1), r.num("world bounds z", 1)};
+    const bool bounded = hi[0] > lo[0] && hi[1] > lo[1] && hi[2] >= lo[2];
     for (size_t i = 0; i < points.size(); i++) {
+        if (bounded) {
+            bool in_box = true;
+            for (int k = 0; k < 3; k++) in_box = in_box && points[i][k] >= lo[k] - 2 && points[i][k] <= hi[k] + 2;
+            if (!in_box) continue;
+        }
         int leaf = b.leaf_at(points[i]);
         inside[i] = leaf >= 0 && (size_t)leaf < sl.size() && sl[(size_t)leaf].integer("cluster") >= 0;
     }

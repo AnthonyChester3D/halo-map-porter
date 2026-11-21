@@ -138,7 +138,7 @@ struct Strip {
     bool switch_names = false;
 };
 struct Stripped {
-    int placements = 0, palette = 0, encounters = 0, conversations = 0, actors = 0, bsps = 0;
+    int placements = 0, palette = 0, encounters = 0, conversations = 0, actors = 0, bsps = 0, command_lists = 0, animations = 0;
     std::set<std::string> gone_ai;   // (by_place: the encounters and conversations that went, lowercase)
     std::string why;
 };

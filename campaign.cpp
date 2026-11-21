@@ -960,6 +960,20 @@ bool strip_scenario(const fs::path &scenario, const Strip &s, Stripped &out) {
             for (auto &p : *items) pts.push_back({num(p, "position", 0), num(p, "position", 1), num(p, "position", 2)});
             std::vector<int> got = s.inside(pts);
             if (got.size() == where.size()) where = got;
+            // (one in no BSP, its origin in the ground (a rock's, a tree's): where a little above it is)
+            std::vector<size_t> none;
+            std::vector<std::array<double, 3>> up;
+            for (size_t i = 0; i < where.size(); i++)
+                if (!where[i]) {
+                    none.push_back(i);
+                    for (double dz : {0.5, 1.5, 3.0}) up.push_back({pts[i][0], pts[i][1], pts[i][2] + dz});
+                }
+            if (!none.empty()) {
+                std::vector<int> got2 = s.inside(up);
+                if (got2.size() == up.size())
+                    for (size_t k = 0; k < none.size(); k++)
+                        for (size_t j = 0; j < 3 && !where[none[k]]; j++) where[none[k]] = got2[k * 3 + j];
+            }
         }
         for (size_t pi = 0; pi < items->size(); pi++) {
             TagNode &p = (*items)[pi];
@@ -974,6 +988,9 @@ bool strip_scenario(const fs::path &scenario, const Strip &s, Stripped &out) {
                     else in_gone = true;
                 }
             if (!bits) { in_kept = (where[pi] & 1) != 0; in_gone = (where[pi] & 2) != 0; }
+            // (its bits name a kept BSP it isn't in by that BSP's own geometry, and one that goes it is in: it goes. The
+            // build that set them can count a point as in a BSP whose collision has no outside, b30_evolved's b30r_empty)
+            else if (where[pi] && in_kept && !(where[pi] & 1) && (where[pi] & 2)) { in_kept = false; in_gone = true; }
             bool keep;
             // (a piece: what its scripts name, and what stands in its BSPs; the level: all but what only the pieces
             // named, and what stands only in the BSPs that went)
@@ -1015,7 +1032,12 @@ bool strip_scenario(const fs::path &scenario, const Strip &s, Stripped &out) {
         for (auto &e : *enc) {
             std::string n = lower(tagfile::get_str(e, "name"));
             bool keep = s.piece ? ai_named(n) : !(ai_dropped(n) && !ai_named(n));
-            if (keep && s.by_place && !s.piece && s.inside && !(s.keep_named && ai_named(n))) {   // (all of it in BSPs that go: it goes)
+            const int manual = (int)num(e, "manual bsp index");
+            if (keep && s.by_place && !s.piece && ((int)num(e, "flags") & 0x40) && manual >= 0 && manual < 65535 && !(s.keep_named && ai_named(n))) {
+                // (the level names its BSP (manual bsp index): with that BSP, wherever else its places are. b30_evolved's
+                // encounters each name theirs, and its first BSP, a tiny box, counts every point as in it)
+                if (new_bsp(manual) < 0) { keep = false; out.gone_ai.insert(n); }
+            } else if (keep && s.by_place && !s.piece && s.inside && !(s.keep_named && ai_named(n))) {   // (all of it in BSPs that go: it goes)
                 std::vector<std::array<double, 3>> pts;
                 auto at = [&](TagNode &l) { pts.push_back({num(l, "position", 0), num(l, "position", 1), num(l, "position", 2)}); };
                 if (auto *sq = tagfile::block(e, "squads"))
@@ -1112,6 +1134,62 @@ bool strip_scenario(const fs::path &scenario, const Strip &s, Stripped &out) {
         for (auto &p : *ps) {
             int b = (int)num(p, "bsp index");
             if (b >= 0 && b < 65535) tagfile::set_num(p, "bsp index", std::max(0, new_bsp(b)));
+        }
+    // (by_place: a command list in a BSP that goes goes too, unless a script names it; then the ai animation references
+    // nothing uses any more, those left renumbered: b30_evolved's brute and elite animations, in every part)
+    if (s.by_place && !s.piece)
+        if (auto *cl = tagfile::block(root, "command lists")) {
+            // (the ones a kept squad's starting locations give their actors: kept, and renumbered)
+            auto starts = [&](const std::function<void(TagNode &)> &f) {
+                if (auto *enc = tagfile::block(root, "encounters"))
+                    for (auto &e : *enc)
+                        if (auto *sq = tagfile::block(e, "squads"))
+                            for (auto &q : *sq)
+                                if (auto *st = tagfile::block(q, "starting locations")) for (auto &x : *st) f(x);
+            };
+            std::vector<char> given(cl->size(), 0);
+            starts([&](TagNode &x) { const int c = (int)num(x, "command list"); if (c >= 0 && (size_t)c < given.size()) given[(size_t)c] = 1; });
+            std::vector<TagNode> left;
+            std::vector<int> moved(cl->size(), -1);
+            for (size_t i = 0; i < cl->size(); i++) {
+                TagNode &c = (*cl)[i];
+                const int mb = (int)num(c, "manual bsp index"), pb = (int)num(c, "precomputed bsp index");
+                const int b = ((int)num(c, "flags") & 0x20) && mb >= 0 && mb < 65535 ? mb : pb;   // (flag 5: manual bsp index)
+                if (!given[i] && b >= 0 && b < 65535 && new_bsp(b) < 0 && !named(lower(tagfile::get_str(c, "name")))) { out.command_lists++; continue; }
+                moved[i] = (int)left.size();
+                left.push_back(c);
+            }
+            if (left.size() < cl->size())
+                starts([&](TagNode &x) {
+                    const int c = (int)num(x, "command list");
+                    if (c >= 0 && (size_t)c < moved.size()) tagfile::set_num(x, "command list", moved[(size_t)c] < 0 ? 65535 : moved[(size_t)c]);
+                });
+            *cl = std::move(left);
+            if (auto *anims = tagfile::block(root, "ai animation references")) {
+                std::vector<int> used(anims->size(), 0);
+                auto each = [&](const std::function<void(TagNode &)> &f) {
+                    for (auto &c : *cl)
+                        if (auto *cmd = tagfile::block(c, "commands")) for (auto &x : *cmd) f(x);
+                    if (auto *enc = tagfile::block(root, "encounters"))
+                        for (auto &e : *enc)
+                            if (auto *sq = tagfile::block(e, "squads"))
+                                for (auto &q : *sq)
+                                    if (auto *mp = tagfile::block(q, "move positions")) for (auto &x : *mp) f(x);
+                };
+                each([&](TagNode &x) { const int a = (int)num(x, "animation"); if (a >= 0 && (size_t)a < used.size()) used[(size_t)a] = 1; });
+                std::vector<int> to_new(anims->size(), -1);
+                std::vector<TagNode> kept;
+                for (size_t i = 0; i < anims->size(); i++)
+                    if (used[i]) { to_new[i] = (int)kept.size(); kept.push_back((*anims)[i]); }
+                if (kept.size() < anims->size()) {
+                    each([&](TagNode &x) {
+                        const int a = (int)num(x, "animation");
+                        if (a >= 0 && (size_t)a < to_new.size()) tagfile::set_num(x, "animation", to_new[(size_t)a] < 0 ? 65535 : to_new[(size_t)a]);
+                    });
+                    out.animations += (int)(anims->size() - kept.size());
+                    *anims = std::move(kept);
+                }
+            }
         }
     if (auto *cl = tagfile::block(root, "command lists"))
         for (auto &c : *cl)

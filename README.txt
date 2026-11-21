@@ -2519,7 +2519,14 @@ plan and in the parts (and in a BSP measured on its own, its switch
 volumes to BSPs it isn't with are no longer switches). A BSP named as a
 debug room (b30_evolved's b30r_debugroom) is in no part, and whatever
 switches there goes with it (each block of script that does, and what else
-it does, such as putting the player in that room). The plan is kept for the map, and the parts box set to it: Convert
+it does, such as putting the player in that room). What a part keeps is
+judged by where things stand: an encounter by the BSP the level names for
+it (its manual BSP index) when it does, a placement in none of the BSPs by
+where a little above it is, a point outside a BSP's bounds never in it (a
+BSP whose collision has no outside, b30_evolved's b30r_empty, otherwise
+counts everything as in it), and the command lists of BSPs that go (and
+the AI animations only they used) go too, unless a script or a squad
+names them. The plan is kept for the map, and the parts box set to it: Convert
 the pieces builds those parts; with no plan for the parts picked, Convert
 the pieces estimates first and builds the plan's parts. A level's pieces
 go together: when one fails, the rest aren't built. A level whose BSPs
