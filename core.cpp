@@ -3610,6 +3610,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
     };
     // "Estimate halves": after the build, its fixes made (or when the whole level doesn't fit), the halves measured.
     const bool halves = cfg.campaign_halves && job.target == Game::Xbox && !job.analysis;
+    bool halves_no_scripts = false;   // (the level's scripts over the node limit: built with a stand-in for its other fixes)
     bool scripts_tried = false, nodes_compacted = false;
     int none_fixes = 0, missing_fixes = 0;
     // The map doesn't fit the Xbox with the lower-detail versions the app made: take them out again (they're for
@@ -4082,7 +4083,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
         }
         if (std::regex_search(out, tb, tag_space) && halves) {
             early.stop_all();
-            r.campaign = campaign_halves(job, make_cmd());
+            r.campaign = campaign_halves(job, make_cmd(), halves_no_scripts);
             r.ok = true;
             return r;
         }
@@ -4192,12 +4193,20 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
         }
         // More script nodes than the target takes: the code the scripts repeat gathered into static scripts, once.
         // ("Estimate parts": each part keeps only its share of them, so the parts are measured without the scripts)
-        if (f.nodes > f.node_limit && f.node_limit > 0 && halves) {
+        if (f.nodes > f.node_limit && f.node_limit > 0 && halves && !halves_no_scripts) {
+            // (built on with a script that does nothing in their place, so the fixes the rest of the level needs are made
+            // before the parts are measured: b30_evolved's contrail and lightning, behind its scripts)
             job.log("The level's scripts are over the Xbox's " + thousands(f.node_limit) + " script nodes as one map (" + thousands(f.nodes) +
-                    "): the parts are measured without them (each part keeps only its share)");
-            r.campaign = campaign_halves(job, make_cmd(), true);
-            r.ok = true;
-            return r;
+                    "): the parts are measured without them (each part keeps only its share); built on with a stand-in script for its other fixes");
+            halves_no_scripts = true;
+            const fs::path sd = job.work / "estimate_data";
+            fs::remove_all(sd, ec);
+            fs::create_directories(sd / from_u8(job.scenario).parent_path() / "scripts", ec);
+            std::ofstream(sd / from_u8(job.scenario).parent_path() / "scripts" / "hmp_estimate.hsc", std::ios::binary)
+                << "(script static void hmp_estimate (sleep 1))\n";
+            job.extra = {"-d", u8(sd), "-S", "data"};
+            cmd = make_cmd();
+            continue;
         }
         if (f.nodes > f.node_limit && f.node_limit > 0) {
             std::string what;
@@ -4262,7 +4271,7 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
         return r;
     }
     if (halves) {
-        r.campaign = campaign_halves(job, make_cmd());
+        r.campaign = campaign_halves(job, make_cmd(), halves_no_scripts);
         r.ok = true;
         return r;
     }

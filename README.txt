@@ -2510,7 +2510,9 @@ fewest parts that each fit (22 MB), cut where the fewest switch volumes
 cross, each part reached by a switch from the one before, and those parts
 built to check (a part that comes out over is planned again with less in
 each). A level's scripts over the Xbox's 19,001 script nodes as one map
-are left out of that measuring (each part keeps only its share of them).
+are left out of that measuring (each part keeps only its share of them):
+the level is built on with a script that does nothing in their place, so
+the fixes the rest of it needs are made before the parts are measured.
 A BSP switched to by a global's number (b30_evolved's
 (switch_bsp bsp_index_ext_lz)) counts as a switch to that BSP, in the
 plan and in the parts (and in a BSP measured on its own, its switch
