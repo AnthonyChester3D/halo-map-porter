@@ -2511,7 +2511,8 @@ each). A level's scripts over the Xbox's 19,001 script nodes as one map
 are left out of that measuring (each part keeps only its share of them).
 A BSP switched to by a global's number (b30_evolved's
 (switch_bsp bsp_index_ext_lz)) counts as a switch to that BSP, in the
-plan and in the parts. The plan is kept for the map, and the parts box set to it: Convert
+plan and in the parts (and in a BSP measured on its own, its switch
+volumes to BSPs it isn't with are no longer switches). The plan is kept for the map, and the parts box set to it: Convert
 the pieces builds those parts; with no plan for the parts picked, Convert
 the pieces estimates first and builds the plan's parts. A level's pieces
 go together: when one fails, the rest aren't built. A level whose BSPs

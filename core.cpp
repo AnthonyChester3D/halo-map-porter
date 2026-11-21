@@ -3103,6 +3103,7 @@ static std::string campaign_halves(Job &job, std::vector<std::string> cmd, bool 
         campaign::Strip st;
         st.keep_bsps = keep;
         st.by_place = true;
+        st.switch_names = true;
         st.inside = [&](const std::vector<std::array<double, 3>> &pts) {
             std::vector<int> where(pts.size(), 0);
             for (int b = 0; b < n; b++) {
@@ -8390,7 +8391,8 @@ void xbox_content_passes(Job &job) {
     deps = content_dependencies(job); // flattened layers (and layers drawn together) drop out
     cap_effects(job, deps);
     cap_texture_sizes(job, deps);
-    int unaligned = 0, flares = 0;
+    int unaligned = 0, flares = 0, off_flares = 0;
+    std::string off_names;
     for (auto &dep : deps) {
         fs::path own = job.owner(dep);
         if (own.empty() || own == job.overlay) continue; // the Xbox's own tags are fine as they are
@@ -8404,11 +8406,36 @@ void xbox_content_passes(Job &job) {
             // Xbox never tries to draw one.
             auto g = edit_lines(job, own, dep, {"-G", "bitmap"});
             auto c = edit_lines(job, own, dep, {"-C", "reflections"});
-            if (g.empty() || c.empty() || (g[0] != "" && g[0] != ".bitmap") || c[0] == "0" || c[0].empty()) continue;
+            if (g.empty() || c.empty() || c[0] == "0" || c[0].empty()) continue;
+            if (g[0] == "" || g[0] == ".bitmap") {
+                fs::path ed = editable_owner(job, dep);
+                bool ok = false;
+                if (!ed.empty()) edit_lines(job, ed, dep, {"-E", "reflections[*]"}, &ok);
+                if (ok) flares++;
+                continue;
+            }
+            // Reflections drawn with a bitmap its bitmap tag doesn't have (b30_evolved's charging plasma pistol: #6
+            // of soft flare large's one), which Invader won't build: removed.
+            std::string bp = g[0];
+            for (auto &ch : bp) if (ch == '\\') ch = '/';
+            if (!has_suffix(bp, ".bitmap")) bp += ".bitmap";
+            const fs::path bown = job.owner(bp);
+            const auto bc = bown.empty() ? std::vector<std::string>() : edit_lines(job, bown, bp, {"-C", "bitmap_data"});
+            if (bc.empty() || bc[0].empty()) continue;
+            const long have = std::atol(bc[0].c_str()), count = std::atol(c[0].c_str());
+            std::vector<long> bad;
+            for (long i = 0; i < count; i++) {
+                const auto bi = edit_lines(job, own, dep, {"-G", "reflections[" + std::to_string(i) + "].bitmap_index"});
+                if (!bi.empty() && !bi[0].empty() && std::atol(bi[0].c_str()) >= have) bad.push_back(i);
+            }
+            if (bad.empty()) continue;
             fs::path ed = editable_owner(job, dep);
-            bool ok = false;
-            if (!ed.empty()) edit_lines(job, ed, dep, {"-E", "reflections[*]"}, &ok);
-            if (ok) flares++;
+            bool ok = !ed.empty();
+            for (auto i = bad.rbegin(); ok && i != bad.rend(); ++i) edit_lines(job, ed, dep, {"-E", "reflections[" + std::to_string(*i) + "]"}, &ok);
+            if (ok) {
+                off_flares++;
+                if (off_flares <= 3) off_names += (off_names.empty() ? "" : ", ") + fs::path(from_u8(dep)).stem().u8string();
+            }
         }
     }
     if (unaligned)
@@ -8417,6 +8444,9 @@ void xbox_content_passes(Job &job) {
     if (flares)
         job.note("[xbox] removed the reflections from " + std::to_string(flares) +
                  " lens flares that have no bitmap to draw them with");
+    if (off_flares)
+        job.note("[xbox] removed the reflections of " + std::to_string(off_flares) + " lens flare" + (off_flares == 1 ? "" : "s") + " (" + off_names +
+                 (off_flares > 3 ? ", ..." : "") + ") drawn with a bitmap their bitmap tag doesn't have (Invader won't build them)");
     job.watch("the textures");
     if (!job.cfg.level_shaders_only) {
         xbox_materials(job, deps);

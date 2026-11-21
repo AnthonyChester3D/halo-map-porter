@@ -1075,6 +1075,17 @@ bool strip_scenario(const fs::path &scenario, const Strip &s, Stripped &out) {
                         }
         }
     }
+    if (s.switch_names)
+        if (auto *tv = tagfile::block(root, "trigger volumes"))
+            for (auto &v : *tv) {
+                const std::string n = tagfile::get_str(v, "name");
+                std::string l = n;
+                for (auto &c : l) c = (char)tolower((unsigned char)c);
+                unsigned a = 0, b = 0;
+                if (std::sscanf(l.c_str(), "bsp%u,%u", &a, &b) != 2) continue;
+                const int na = new_bsp((int)a), nb = new_bsp((int)b);
+                tagfile::set_str(v, "name", na >= 0 && nb >= 0 ? "bsp" + std::to_string(na) + "," + std::to_string(nb) : "x" + n);
+            }
     // What else names a BSP by number.
     if (auto *sw = tagfile::block(root, "bsp switch trigger volumes")) {
         std::vector<TagNode> left;

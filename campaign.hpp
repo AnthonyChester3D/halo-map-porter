@@ -133,6 +133,9 @@ struct Strip {
     // BSPs that go, goes (and the conversations whose participants are its).
     bool by_place = false;
     bool keep_named = false;   // (by_place: an encounter `names` has stays, wherever it is)
+    // The switch volumes' names ("bspA,B", which the build makes the switches from) renumbered too, or made no longer
+    // switches where a BSP isn't kept (Invader won't build a switch to a BSP the scenario hasn't).
+    bool switch_names = false;
 };
 struct Stripped {
     int placements = 0, palette = 0, encounters = 0, conversations = 0, actors = 0, bsps = 0;
