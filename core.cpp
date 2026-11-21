@@ -3021,13 +3021,25 @@ static std::string campaign_halves(Job &job, std::vector<std::string> cmd) {
     for (size_t i = 0; i < order.size(); i++)
         for (auto &[a, b] : edges)
             if (a == order[i] && b >= 0 && b < n && !seen[(size_t)b]) { seen[(size_t)b] = 1; order.push_back(b); }
-    for (int i = 0; i < n; i++) if (!seen[(size_t)i]) order.push_back(i);
     auto stem = [&](int b) { return fs::path(from_u8(bsp_tags[(size_t)b])).stem().u8string(); };
 
     campaign::Analysis a;
     std::string why;
     const fs::path xdata = job.work / "xbox_data";
     const bool scripts = campaign::load(xdata, a, why);
+    // (a BSP no switch leads to and no script switches to: never reached (a debug room), in no part; with no switch
+    // volumes at all, the scripts do the switching, so each BSP's kept)
+    std::vector<int> never;
+    {
+        std::set<int> scripted;
+        if (scripts)
+            for (auto &f : a.files) for (int b : campaign::bsps_used(f.text)) scripted.insert(b);
+        for (int i = 0; i < n; i++) {
+            if (seen[(size_t)i]) continue;
+            if (edges.empty() || scripted.count(i)) order.push_back(i);
+            else never.push_back(i);
+        }
+    }
     // The build as Convert makes it, with identical data stored once (as an over-full map is built) and no file size
     // limit. Over the tag memory, Invader's error says how much it needed.
     for (auto it = cmd.begin() + 1; it != cmd.end();) it = (*it == "-O" || *it == "-E") ? cmd.erase(it) : it + 1;
@@ -3179,6 +3191,8 @@ static std::string campaign_halves(Job &job, std::vector<std::string> cmd) {
     std::vector<double> single((size_t)n, -1), own_mb((size_t)n, 0);
     std::vector<int> pos((size_t)n, 0);
     for (size_t i = 0; i < order.size(); i++) pos[(size_t)order[i]] = (int)i;
+    std::vector<char> out_of((size_t)n, 0);
+    for (int b : never) out_of[(size_t)b] = 1;
     report += "- each BSP on its own:";
     bool any_bad = false;
     for (size_t i = 0; i < order.size(); i++) {
@@ -3216,18 +3230,21 @@ static std::string campaign_halves(Job &job, std::vector<std::string> cmd) {
     auto crossing = [&](size_t j) {
         int c = 0;
         for (auto &[x, y] : edges)
-            if (x >= 0 && y >= 0 && x < n && y < n && std::min(pos[(size_t)x], pos[(size_t)y]) < (int)j && std::max(pos[(size_t)x], pos[(size_t)y]) >= (int)j) c++;
+            if (x >= 0 && y >= 0 && x < n && y < n && !out_of[(size_t)x] && !out_of[(size_t)y] &&
+                std::min(pos[(size_t)x], pos[(size_t)y]) < (int)j && std::max(pos[(size_t)x], pos[(size_t)y]) >= (int)j)
+                c++;
         return c;
     };
     auto forward = [&](size_t h, size_t j, size_t i) {
         if (edges.empty()) return true;   // (a level whose scripts switch: can't tell, so any cut)
         for (auto &[x, y] : edges)
-            if (x >= 0 && y >= 0 && x < n && y < n && (size_t)pos[(size_t)x] >= h && (size_t)pos[(size_t)x] < j &&
+            if (x >= 0 && y >= 0 && x < n && y < n && !out_of[(size_t)x] && !out_of[(size_t)y] && (size_t)pos[(size_t)x] >= h && (size_t)pos[(size_t)x] < j &&
                 (size_t)pos[(size_t)y] >= j && (size_t)pos[(size_t)y] < i)
                 return true;
         return false;
     };
     std::vector<int> part_of((size_t)n, 0);
+    for (int b : never) part_of[(size_t)b] = -1;
     std::vector<std::vector<int>> plan;
     double cap = limit - 0.5;
     std::vector<Run> checked;
@@ -3303,7 +3320,10 @@ static std::string campaign_halves(Job &job, std::vector<std::string> cmd) {
         report += "- part " + std::to_string(k + 1) + ": " + names_of(plan[k]) + ": " + size + "\n";
     }
     for (auto &[x, y] : edges)
-        if (x >= 0 && y >= 0 && x < n && y < n && part_of[(size_t)x] != part_of[(size_t)y] && part_of[(size_t)y] != part_of[(size_t)x] + 1) closed++;
+        if (x >= 0 && y >= 0 && x < n && y < n && part_of[(size_t)x] >= 0 && part_of[(size_t)y] >= 0 && part_of[(size_t)x] != part_of[(size_t)y] &&
+            part_of[(size_t)y] != part_of[(size_t)x] + 1)
+            closed++;
+    if (!never.empty()) report += "(left out of every part, as nothing reaches them: " + names_of(never) + ")\n";
     report += "(" + std::to_string(closed) + " switch volume" + (closed == 1 ? "" : "s") +
               " between parts lead back, or past the next: each a closed way back, putting a player who steps in back where they came from.)\n";
     report += "\nThe Campaign tab takes this plan for the map: Convert the pieces builds these parts.\nHMP_PARTS:";
@@ -15522,7 +15542,11 @@ static void campaign_apply(Job &job) {
                         first[(size_t)x.source] < 1e9 && first[(size_t)x.destination] >= 1e9)
                         first[(size_t)x.destination] = first[(size_t)x.source] + 0.5;
         }
-        std::vector<int> order(level_bsps.begin(), level_bsps.end());
+        std::vector<int> order;
+        std::set<int> scripted;
+        for (auto &f : la.files) for (int b : campaign::bsps_used(f.text)) scripted.insert(b);
+        for (int b : level_bsps)   // (one nothing names, switches to or a script switches to (a debug room): in no part)
+            if (sw.empty() || first[(size_t)b] < 1e9 || scripted.count(b)) order.push_back(b);
         std::stable_sort(order.begin(), order.end(), [&](int x, int y) { return first[(size_t)x] < first[(size_t)y]; });
         if ((int)order.size() < parts) { why = "the level has " + std::to_string(order.size()) + " BSPs, too few for " + std::to_string(parts) + " parts"; return texts; }
         // Into `parts` runs of that order, the biggest as small as can be (by the BSPs' tag sizes).
@@ -15555,8 +15579,8 @@ static void campaign_apply(Job &job) {
             std::vector<int> count((size_t)parts, 0);
             bool fits = true;
             for (size_t b = 0; b < nbsp; b++) {
-                if (!level_bsps.count((int)b)) { given[b] = -1; continue; }
-                if (given[b] < 0 || given[b] >= parts) { fits = false; break; }
+                if (!level_bsps.count((int)b) || given[b] < 0) { given[b] = -1; continue; }   // (-1: in no part, never reached)
+                if (given[b] >= parts) { fits = false; break; }
                 count[(size_t)given[b]]++;
             }
             for (int c : count) fits = fits && c > 0;

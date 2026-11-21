@@ -2483,7 +2483,7 @@ Result add_portals(const fs::path &file, const Options &options) {
         std::string w;
         if (!leaf_portals(file, LL, &w, options.see_through)) w = "couldn't be read";
         else if (!grid_clusters(LL, tri, front_normals(b, tri), replan, options.grid_cells + (replan ? (int)old_n : 0), g, &cell))
-            w = "has no ground to divide into squares";
+            w = "would need more clusters or portals than the engine draws (or has no ground)";
         else w = attempt(LL, g);
         if (w.empty()) {
             r.grid = true;
