@@ -2743,6 +2743,14 @@ bool recover_and_convert_scripts(Job &job) {
 
 uint32_t crc32_of(const char *d, size_t n);
 
+// A BSP that's a debug room by its name (b30_evolved's b30r_debugroom, reached by holding jump at the start on Easy,
+// its buttons switching to the level's checkpoints): in no part, and whatever switches there goes with it.
+static bool debug_bsp(const std::string &tag) {
+    std::string s = fs::path(from_u8(tag)).stem().u8string();
+    for (auto &c : s) c = (char)tolower((unsigned char)c);
+    return s.find("debug") != std::string::npos;
+}
+
 // Invader leaves the checksum in an Xbox map's header at 0xFFFFFFFF, so every build of a map has the
 // same header checksum. Stamp a CRC32 of the map's body there instead: a rebuilt map then always has a
 // different header, which is what the Xbox (with the cache-refresh XBE) uses to tell that its hard-drive
@@ -3039,7 +3047,7 @@ static std::string campaign_halves(Job &job, std::vector<std::string> cmd, bool 
     const bool have_scripts = campaign::load(xdata, a, why), scripts = have_scripts && !no_scripts;
     // (a BSP no switch leads to and no script switches to: never reached (a debug room), in no part; with no switch
     // volumes at all, the scripts do the switching, so each BSP's kept)
-    std::vector<int> never;
+    std::vector<int> never, debugs;
     {
         // (the BSPs the scripts switch to are reached too, and what switches lead on from them: a level that starts in
         // an empty BSP its scripts switch out of (b30_evolved's b30r_empty))
@@ -3063,6 +3071,9 @@ static std::string campaign_halves(Job &job, std::vector<std::string> cmd, bool 
             if (edges.empty()) order.push_back(i);
             else never.push_back(i);
         }
+        for (auto it = order.begin(); it != order.end();)
+            if (*it != start && debug_bsp(bsp_tags[(size_t)*it])) { debugs.push_back(*it); never.push_back(*it); it = order.erase(it); }
+            else ++it;
     }
     // The build as Convert makes it, with identical data stored once (as an over-full map is built) and no file size
     // limit. Over the tag memory, Invader's error says how much it needed.
@@ -3359,7 +3370,12 @@ static std::string campaign_halves(Job &job, std::vector<std::string> cmd, bool 
         if (x >= 0 && y >= 0 && x < n && y < n && part_of[(size_t)x] >= 0 && part_of[(size_t)y] >= 0 && part_of[(size_t)x] != part_of[(size_t)y] &&
             part_of[(size_t)y] != part_of[(size_t)x] + 1)
             closed++;
-    if (!never.empty()) report += "(left out of every part, as nothing reaches them: " + names_of(never) + ")\n";
+    {
+        std::vector<int> unreached;
+        for (int b : never) if (std::find(debugs.begin(), debugs.end(), b) == debugs.end()) unreached.push_back(b);
+        if (!unreached.empty()) report += "(left out of every part, as nothing reaches them: " + names_of(unreached) + ")\n";
+        if (!debugs.empty()) report += "(left out of every part, as a debug room: " + names_of(debugs) + "; whatever switches there goes with it)\n";
+    }
     report += "(" + std::to_string(closed) + " switch volume" + (closed == 1 ? "" : "s") +
               " between parts lead back, or past the next: each a closed way back, putting a player who steps in back where they came from.)\n";
     report += "\nThe Campaign tab takes this plan for the map: Convert the pieces builds these parts.\nHMP_PARTS:";
@@ -15798,8 +15814,9 @@ static void campaign_apply(Job &job) {
             for (auto &f : la.files) all += f.text + "\n";
             scripted = campaign::bsps_used(all);
         }
-        for (int b : level_bsps)   // (one nothing names, switches to or a script switches to (a debug room): in no part)
-            if (sw.empty() || first[(size_t)b] < 1e9 || scripted.count(b)) order.push_back(b);
+        for (int b : level_bsps)   // (one nothing names, switches to or a script switches to, or a debug room: in no part)
+            if ((sw.empty() || first[(size_t)b] < 1e9 || scripted.count(b)) && !(level_bsps.size() > 1 && debug_bsp(bsp_tags[(size_t)b])))
+                order.push_back(b);
         std::stable_sort(order.begin(), order.end(), [&](int x, int y) { return first[(size_t)x] < first[(size_t)y]; });
         if ((int)order.size() < parts) { why = "the level has " + std::to_string(order.size()) + " BSPs, too few for " + std::to_string(parts) + " parts"; return texts; }
         // Into `parts` runs of that order, the biggest as small as can be (by the BSPs' tag sizes).

@@ -599,6 +599,15 @@ std::vector<std::pair<fs::path, std::string>> part_texts(const Analysis &a, cons
     std::function<void(size_t, const std::vector<const Node *> &, bool &)> statements = [&](size_t fi, const std::vector<const Node *> &list,
                                                                                          bool &reached) {
         const std::string &text = a.files[fi].text;
+        // (a list with a switch to a BSP in no part (a debug room): all of it goes, what it does there with it, such as
+        // putting the player at a spot in that room)
+        for (const Node *s : list) {
+            const int t = switch_target(*s, consts);
+            if (t < 0 || t >= (int)plan.part_of.size() || part_of_bsp(t) >= 0) continue;
+            for (size_t i = 0; i < list.size(); i++) edits.push_back({fi, list[i]->b, list[i]->e, i ? "" : "(sleep 0)"});
+            stats.dropped += (int)list.size();
+            return;
+        }
         bool ended = false;
         for (const Node *s : list) {
             if (ended) {   // (after a wait for a later part: the part is over by then)
