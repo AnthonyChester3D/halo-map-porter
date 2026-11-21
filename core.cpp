@@ -16162,7 +16162,7 @@ static void campaign_apply(Job &job) {
     }
     if (sdir != job.fixes && !job.to_fixes(scen, sdir)) { job.note("[campaign] the scenario couldn't be copied to change it"); return; }
     std::string line = make(this_piece, opening_on, closing_on, job.fixes / from_u8(scen), true);
-    job.note("[campaign] made " + line +
+    job.note(std::string(line.find("couldn't be made") != std::string::npos ? "[campaign] " : "[campaign] made ") + line +
              (this_piece == 1 ? "; then it loads the level (\"+./" + cfg.campaign_level_folder + "\")" :
               this_piece == 0 && closing_on ? "; at its end it loads its closing cutscene (\"+./" + cfg.campaign_closing_folder + "\")" : ""));
 }

@@ -116,8 +116,8 @@ enum {
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
-// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new167.exe is 1.167).
-#define HMP_VERSION L"1.167"
+// The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new168.exe is 1.168).
+#define HMP_VERSION L"1.168"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -2631,6 +2631,22 @@ static bool campaign_ready(fs::path &in, fs::path &out, Game &from) {
     if (out.empty() || !out.has_parent_path()) { MessageBoxW(g_wnd, L"Choose where the converted map goes on the Convert tab.", L"Halo Map Porter", MB_ICONINFORMATION); return false; }
     return true;
 }
+// The plan an estimate's report ends with ("HMP_PARTS:" and each BSP's part), taken out of `text`.
+static bool take_plan(std::string &text, std::vector<int> &part_of, int &most) {
+    size_t at = text.find("HMP_PARTS:");
+    if (at == std::string::npos) return false;
+    part_of.clear();
+    most = -1;
+    for (size_t a = at + 10; a < text.size() && text[a] != '\n';) {
+        size_t b = text.find_first_of(",\n", a);
+        if (b == std::string::npos) b = text.size();
+        part_of.push_back(std::atoi(text.substr(a, b - a).c_str()));
+        most = std::max(most, part_of.back());
+        a = b < text.size() && text[b] == ',' ? b + 1 : b;
+    }
+    text.erase(at);
+    return true;
+}
 static Config campaign_config(const fs::path &in) {
     Config cfg = make_config();
     apply_xbox_options(cfg);
@@ -2685,17 +2701,9 @@ static void start_campaign_halves() {
         Result r = convert_map(cfg, in, from, Game::Xbox, dummy, false, post_log, nullptr);
         std::string text = r.ok ? r.campaign : "Couldn't prepare the map: " + r.error;
         // (the plan, kept for the map: Convert the pieces builds those parts)
-        if (size_t at = text.find("HMP_PARTS:"); r.ok && at != std::string::npos) {
-            std::vector<int> part_of;
-            int most = -1;
-            for (size_t a = at + 10; a < text.size() && text[a] != '\n';) {
-                size_t b = text.find_first_of(",\n", a);
-                if (b == std::string::npos) b = text.size();
-                part_of.push_back(std::atoi(text.substr(a, b - a).c_str()));
-                most = std::max(most, part_of.back());
-                a = b < text.size() && text[b] == ',' ? b + 1 : b;
-            }
-            text.erase(at);
+        std::vector<int> part_of;
+        int most = -1;
+        if (r.ok && take_plan(text, part_of, most)) {
             if (most >= 0 && most < kMostParts) {
                 const auto all = load_campaigns();
                 CampaignPicks p = campaign_picks_for(in, campaign_defaults(), all);
@@ -2718,16 +2726,48 @@ static Result convert_level_pieces(const Config &cfg_in, const fs::path &in, Gam
                                    bool share, const std::string &title, const fs::path &card_dir, const std::string &card_name,
                                    std::string &failed) {
     const bool opening = p.open, closing = p.close;
-    const int parts = p.parts;
+    int parts = p.parts;
     Config cfg = cfg_in;
     const auto outs = campaign_outputs(out);
     cfg.campaign_split = (opening ? 1 : 0) | (closing ? 2 : 0);
     cfg.campaign_level_folder = N(out.parent_path().filename().wstring());
     cfg.campaign_closing_folder = N(outs[2].parent_path().filename().wstring());
+    std::vector<int> plan = (int)p.part_of.size() > 0 && p.parts > 1 ? p.part_of : std::vector<int>();
+    if (parts > 1 && plan.empty()) {
+        // No plan for these parts yet ("Estimate parts" not run for them): the estimate first, and its plan built.
+        post_log("");
+        post_log("==== No plan for the parts yet: estimating them first (as \"Estimate parts\" does)");
+        Config e = cfg;
+        e.campaign_piece = 0;
+        e.campaign_halves = true;
+        e.work_tag = "halves";
+        const fs::path dummy = cfg.cache_dir / "campaign" / (in.stem().u8string() + ".map");
+        Result er = convert_map(e, in, from, Game::Xbox, dummy, false, post_log, nullptr);
+        std::string text = er.ok ? er.campaign : er.error;
+        int most = -1;
+        if (!er.ok || !take_plan(text, plan, most) || most < 0) {
+            failed += "the parts: they couldn't be planned: " + (text.empty() ? std::string("no plan came out") : text) + "\n";
+            return Result();
+        }
+        post_log(text);
+        if (most >= kMostParts) {
+            failed += "the parts: the plan needs " + std::to_string(most + 1) + " parts, more than the " + std::to_string(kMostParts) + " a level can have\n";
+            return Result();
+        }
+        if (most + 1 != parts) post_log("  (the plan makes " + std::to_string(most + 1) + " parts, not the " + std::to_string(parts) + " picked: its parts are built)");
+        parts = most + 1;
+        CampaignPicks keep = campaign_picks_for(in, campaign_defaults(), load_campaigns());
+        keep.open = opening;
+        keep.close = closing;
+        keep.parts = parts;
+        keep.part_of = plan;
+        save_campaign_picks(in, keep);
+        PostMessageW(g_wnd, WM_APP_CAMPAIGN, 1, (LPARAM) new std::string());
+    }
     const auto part_outs = campaign_part_outputs(out, parts);
     Config cfg2 = cfg;
     cfg2.campaign_parts = parts;
-    if ((int)p.part_of.size() > 0 && p.parts == parts) cfg2.campaign_part_of = p.part_of;
+    if (!plan.empty()) cfg2.campaign_part_of = plan;
     // (a level in parts isn't the Custom Edition map any more: no Perfect Conversion, nothing linked to play with it)
     if (parts > 1) cfg2.xbox_perfect = false;
     for (auto &po : part_outs) cfg2.campaign_part_folders.push_back(N(po.parent_path().filename().wstring()));
@@ -2751,7 +2791,11 @@ static Result convert_level_pieces(const Config &cfg_in, const fs::path &in, Gam
             fs::remove(o.parent_path(), ec);              // (its folder, when that leaves it empty)
             continue;
         }
-        if (!r.ok) { failed += std::string(piece == 1 ? "the opening" : "the closing") + ": " + r.error + "\n"; continue; }
+        if (!r.ok) {   // (a level's pieces go together: the rest aren't built)
+            failed += std::string(piece == 1 ? "the opening" : "the closing") + ": " + r.error + "\n";
+            post_log("  (the level's other pieces aren't built: its pieces go together)");
+            return Result();
+        }
         mapcard::Card card;
         card.name = (title.empty() ? N(out.parent_path().filename().wstring()) : title) + (piece == 1 ? " (opening)" : " (ending)");
         card.desc = piece == 1 ? "The level's opening cutscene: plays, then loads the level." : "The level's closing cutscene.";
@@ -2773,7 +2817,11 @@ static Result convert_level_pieces(const Config &cfg_in, const fs::path &in, Gam
         fs::create_directories(o.parent_path(), ec);
         Result pr = convert_map(c, in, from, Game::Xbox, o, share, post_log, nullptr);
         if (part > 0) {
-            if (!pr.ok) { failed += "part " + std::to_string(part + 1) + ": " + pr.error + "\n"; continue; }
+            if (!pr.ok) {
+                failed += "part " + std::to_string(part + 1) + ": " + pr.error + "\n";
+                post_log("  (the level's other parts aren't built: its pieces go together)");
+                return Result();
+            }
             mapcard::Card card;
             card.name = (title.empty() ? N(out.parent_path().filename().wstring()) : title) + " (part " + std::to_string(part + 1) + ")";
             card.desc = "Part " + std::to_string(part + 1) + " of the level: the part before loads it, carrying the player over.";

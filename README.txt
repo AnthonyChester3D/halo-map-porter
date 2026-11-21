@@ -2508,7 +2508,10 @@ fewest parts that each fit (22 MB), cut where the fewest switch volumes
 cross, each part reached by a switch from the one before, and those parts
 built to check (a part that comes out over is planned again with less in
 each). The plan is kept for the map, and the parts box set to it: Convert
-the pieces builds those parts. A level whose BSPs connect in more than a
+the pieces builds those parts; with no plan for the parts picked, Convert
+the pieces estimates first and builds the plan's parts. A level's pieces
+go together: when one fails, the rest aren't built. A level whose BSPs
+connect in more than a
 line (an island you can walk around) has switch volumes leading back into
 an earlier part, or past the next: each becomes a closed way back, and a
 player stepping in is put back on the ground just outside it (the BSP
