@@ -2395,13 +2395,30 @@ Names are cut to fit: a pack's to 12 characters (without words like
 leaves of the 30 (a campaign's level folders leave 5 more for their
 pieces' " Open", " End", " P2"). A map that fails leaves nothing behind
 (and an earlier run's output of it is taken away), and a protected map's
-original moves into "Map Protected (Fail)" beside it. A pack is one: when
-one of its maps fails, none of them is kept. A campaign is linked only when
+original moves into "Map Protected (Fail)" beside it. A campaign is one:
+when one of its levels fails, none of them is kept. Any other pack keeps
+the maps that converted, and they share one file with every map already in
+its folder, so a map converted into the pack later (the one that failed,
+or a new one) joins it. A campaign is linked only when
 all of it is: a level in gameplay parts can't be, so then none of its
 levels is converted to be, and when one level doesn't link the others'
 links are taken away. stock.shared isn't written here (every Xbox's
 installer builds its own). The four folders' names can be changed in the
 batch window. Single conversions do the same.
+
+Packs of your own: right-click maps in the batch list (the ones selected,
+or the one you clicked) and "Add ... to a new pack..." asks for its name
+(12 characters at most: it's the pack's folder); "Add ... to a pack" puts
+them in one the list already has (yours, or an MCC item's), and "Take ...
+out of the pack" undoes it. They go into Copy to Xbox maps\<pack>\ when
+they're converted. A pack's right-click menu also has "Store <pack>'s
+shared file again": every map in its folder as it is, none converted,
+what they share stored once in a new file (a map drawing on another
+pack's file, or an earlier one of this pack's, is read through it), and
+the files no map there draws on any more are removed. Maps of one MCC
+Workshop item that were named alike (Tinkered, Tinkered 2) no longer share
+one map card, and so no longer split off into a pack of their own (before
+1.179).
 
 A batch takes each map's work folder away once the map is done (its scratch
 copy of the tags, hundreds of MB each), keeping only the latest one, which

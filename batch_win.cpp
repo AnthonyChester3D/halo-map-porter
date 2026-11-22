@@ -92,7 +92,11 @@ void load() {
         if (c != std::string::npos) {   // (then its size)
             size_t d = l.find('\t', c + 1);
             it.status = W(l.substr(c + 1, d == std::string::npos ? std::string::npos : d - c - 1));
-            if (d != std::string::npos) it.size = W(l.substr(d + 1));
+            if (d != std::string::npos) {   // (then its pack)
+                size_t e = l.find('\t', d + 1);
+                it.size = W(l.substr(d + 1, e == std::string::npos ? std::string::npos : e - d - 1));
+                if (e != std::string::npos) it.pack = W(l.substr(e + 1));
+            }
         }
         St->items.push_back(it);
     }
@@ -105,7 +109,9 @@ void save() {
         std::string st = N(it.status);
         for (auto &ch : st)
             if (ch == '\t' || ch == '\n' || ch == '\r') ch = ' ';
-        f << (it.on ? "1" : "0") << '\t' << N(it.in) << '\t' << N(it.out) << '\t' << st << '\t' << N(it.size) << '\n';
+        f << (it.on ? "1" : "0") << '\t' << N(it.in) << '\t' << N(it.out) << '\t' << st << '\t' << N(it.size);
+        if (!it.pack.empty()) f << '\t' << N(it.pack);
+        f << '\n';
     }
 }
 
@@ -203,6 +209,105 @@ void fill() {
 }
 // The item a row shows (-1 none).
 int item_at(int row) { return row >= 0 && row < (int)St->rows.size() ? St->rows[(size_t)row] : -1; }
+
+// "Add to new pack...": the pack's name asked for, in a small window of its own (modal). "" cancelled.
+struct Ask { HWND wnd = nullptr, edit = nullptr, why = nullptr, ok = nullptr; std::wstring result; bool done = false; };
+Ask *g_ask = nullptr;
+enum { IDA_EDIT = 900, IDA_OK, IDA_CANCEL, IDA_WHY, IDA_LABEL };
+std::wstring ask_problem(const std::wstring &name) {
+    std::wstring t = name;
+    while (!t.empty() && t.back() == L' ') t.pop_back();
+    while (!t.empty() && t.front() == L' ') t.erase(t.begin());
+    if (t.empty()) return L"Name the pack.";
+    return St->hooks.pack_problem ? St->hooks.pack_problem(t) : L"";
+}
+LRESULT CALLBACK ask_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_COMMAND:
+        if (LOWORD(wp) == IDA_EDIT && HIWORD(wp) == EN_CHANGE && g_ask) {
+            wchar_t b[256] = {};
+            GetWindowTextW(g_ask->edit, b, 255);
+            const std::wstring why = ask_problem(b);
+            SetWindowTextW(g_ask->why, why.c_str());
+            EnableWindow(g_ask->ok, why.empty());
+            return 0;
+        }
+        if ((LOWORD(wp) == IDA_OK || LOWORD(wp) == IDOK) && g_ask) {
+            wchar_t b[256] = {};
+            GetWindowTextW(g_ask->edit, b, 255);
+            if (!ask_problem(b).empty()) return 0;
+            std::wstring t = b;
+            while (!t.empty() && t.back() == L' ') t.pop_back();
+            while (!t.empty() && t.front() == L' ') t.erase(t.begin());
+            g_ask->result = t;
+            g_ask->done = true;
+            return 0;
+        }
+        if ((LOWORD(wp) == IDA_CANCEL || LOWORD(wp) == IDCANCEL) && g_ask) { g_ask->done = true; return 0; }
+        break;
+    case WM_CTLCOLORSTATIC:
+        SetBkMode((HDC)wp, TRANSPARENT);
+        return (LRESULT)dark::sysbrush(COLOR_WINDOW);
+    case WM_CLOSE:
+        if (g_ask) g_ask->done = true;
+        return 0;
+    }
+    return DefWindowProcW(h, msg, wp, lp);
+}
+std::wstring ask_pack_name(HWND owner, const std::wstring &what) {
+    static bool registered = false;
+    HINSTANCE inst = GetModuleHandleW(nullptr);
+    if (!registered) {
+        WNDCLASSEXW wc{sizeof(wc)};
+        wc.hInstance = inst;
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.lpfnWndProc = ask_proc;
+        wc.hbrBackground = dark::sysbrush(COLOR_WINDOW);
+        wc.lpszClassName = L"HMPBatchAsk";
+        RegisterClassExW(&wc);
+        registered = true;
+    }
+    Ask a;
+    g_ask = &a;
+    const DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU;
+    RECT r{0, 0, S(420), S(150)};
+    AdjustWindowRect(&r, style, FALSE);
+    RECT orc;
+    GetWindowRect(owner, &orc);
+    const int w = r.right - r.left, hgt = r.bottom - r.top;
+    a.wnd = CreateWindowExW(WS_EX_DLGMODALFRAME, L"HMPBatchAsk", L"New pack", style, orc.left + ((orc.right - orc.left) - w) / 2,
+                            orc.top + ((orc.bottom - orc.top) - hgt) / 2, w, hgt, owner, nullptr, inst, nullptr);
+    auto ctl = [&](const wchar_t *cls, const wchar_t *text, DWORD st, int x, int y, int cw, int ch, int id, DWORD ex = 0) {
+        HWND c = CreateWindowExW(ex, cls, text, WS_CHILD | WS_VISIBLE | st, S(x), S(y), S(cw), S(ch), a.wnd, (HMENU)(INT_PTR)id, inst, nullptr);
+        SendMessageW(c, WM_SETFONT, (WPARAM)St->font, TRUE);
+        return c;
+    };
+    ctl(L"STATIC", (L"A name for the pack " + what + L" go in (its folder in Copy to Xbox maps, and its shared file):").c_str(),
+        SS_NOPREFIX, 14, 12, 392, 36, IDA_LABEL);
+    a.edit = ctl(L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL, 14, 52, 392, 24, IDA_EDIT, WS_EX_CLIENTEDGE);
+    SendMessageW(a.edit, EM_LIMITTEXT, 40, 0);
+    a.why = ctl(L"STATIC", L"Name the pack.", SS_NOPREFIX | SS_ENDELLIPSIS, 14, 82, 392, 20, IDA_WHY);
+    a.ok = ctl(L"BUTTON", L"OK", WS_TABSTOP | BS_DEFPUSHBUTTON, 230, 110, 84, 28, IDA_OK);
+    ctl(L"BUTTON", L"Cancel", WS_TABSTOP, 322, 110, 84, 28, IDA_CANCEL);
+    EnableWindow(a.ok, FALSE);
+    EnableWindow(owner, FALSE);
+    ShowWindow(a.wnd, SW_SHOW);
+    SetFocus(a.edit);
+    MSG m;
+    while (!a.done) {
+        BOOL got = GetMessageW(&m, nullptr, 0, 0);
+        if (got <= 0) { PostQuitMessage(got == 0 ? (int)m.wParam : 0); break; }
+        if (!IsDialogMessageW(a.wnd, &m)) {
+            TranslateMessage(&m);
+            DispatchMessageW(&m);
+        }
+    }
+    EnableWindow(owner, TRUE);
+    DestroyWindow(a.wnd);
+    SetActiveWindow(owner);
+    g_ask = nullptr;
+    return a.result;
+}
 
 // A name's key with its numbers padded, so map2 comes before map10 (and a10, a30, b30... in order).
 std::wstring natural(const std::wstring &s) {
@@ -403,7 +508,36 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                     AppendMenuW(m, MF_STRING | (St->running ? MF_GRAYED : 0), 3,
                                 (L"Tick only " + pack + L"'s " + std::to_wstring(pn) + L" maps").c_str());
                     AppendMenuW(m, MF_STRING | (St->running ? MF_GRAYED : 0), 4, (L"Tick " + pack + L"'s maps too").c_str());
+                    if (St->hooks.reshare)
+                        AppendMenuW(m, MF_STRING | (St->running ? MF_GRAYED : 0), 7,
+                                    (L"Store " + pack + L"'s shared file again (its maps as they are, none converted)").c_str());
                 }
+                // (packs you name: the maps selected, when this one is; else this one)
+                std::vector<size_t> targets;
+                if (ListView_GetItemState(St->list, row, LVIS_SELECTED) & LVIS_SELECTED) {
+                    for (int sr = -1; (sr = ListView_GetNextItem(St->list, sr, LVNI_SELECTED)) >= 0;)
+                        if (item_at(sr) >= 0) targets.push_back((size_t)item_at(sr));
+                } else
+                    targets.push_back((size_t)r);
+                const std::wstring these = targets.size() == 1 ? L"this map" : L"these " + std::to_wstring(targets.size()) + L" maps";
+                std::vector<std::wstring> names;   // (every pack in the list, to add to)
+                {
+                    std::set<std::wstring> seen;
+                    for (size_t i = 0; i < St->items.size(); i++) {
+                        const std::wstring p = !St->items[i].pack.empty() ? St->items[i].pack : i < St->packs.size() ? St->packs[i] : L"";
+                        if (!p.empty() && seen.insert(lower(p)).second) names.push_back(p);
+                    }
+                    std::sort(names.begin(), names.end(), [](const std::wstring &a, const std::wstring &b) { return lower(a) < lower(b); });
+                }
+                bool any_named = false;
+                for (size_t t : targets) any_named = any_named || !St->items[t].pack.empty();
+                AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+                const UINT gray = St->running ? MF_GRAYED : 0;
+                AppendMenuW(m, MF_STRING | gray, 5, (L"Add " + these + L" to a new pack...").c_str());
+                HMENU sub = CreatePopupMenu();
+                for (size_t k = 0; k < names.size() && k < 200; k++) AppendMenuW(sub, MF_STRING, 100 + (UINT)k, names[k].c_str());
+                AppendMenuW(m, MF_POPUP | (names.empty() || St->running ? MF_GRAYED : 0), (UINT_PTR)sub, (L"Add " + these + L" to a pack").c_str());
+                if (any_named) AppendMenuW(m, MF_STRING | gray, 6, (L"Take " + these + L" out of the pack you put " + (targets.size() == 1 ? L"it" : L"them") + L" in").c_str());
                 POINT pt;
                 GetCursorPos(&pt);
                 int pick = (int)TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, h, nullptr);
@@ -415,6 +549,26 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 } else if (pick == 2 && !St->running) {
                     St->hooks.use(it);
                     St->closing = true;
+                } else if ((pick == 5 || pick == 6 || (pick >= 100 && pick < 100 + (int)names.size())) && !St->running) {
+                    std::wstring to;
+                    if (pick == 5) to = ask_pack_name(h, these);
+                    else if (pick >= 100) to = names[(size_t)pick - 100];
+                    if (pick == 6 || !to.empty()) {
+                        for (size_t t : targets) St->items[t].pack = to;
+                        save();
+                        fill();
+                        SetWindowTextW(item(IDC_STATUS), pick == 6 ? (these + L": out of the pack (an MCC item's maps go back in its own).").c_str()
+                                                       : (these + L" in the pack " + to + L": converted into Copy to Xbox maps\\" + to +
+                                                          L", sharing its file with the maps there (converting one later adds it).").c_str());
+                    }
+                } else if (pick == 7 && !St->running && St->hooks.reshare) {
+                    St->running = true;
+                    update_buttons();
+                    SetWindowTextW(item(IDC_STATUS), (L"Storing " + pack + L"'s shared file again...").c_str());
+                    if (!St->hooks.reshare(pack)) {
+                        St->running = false;
+                        update_buttons();
+                    }
                 } else if ((pick == 3 || pick == 4) && !St->running) {
                     filling = true;
                     for (size_t i = 0; i < St->items.size(); i++) {
@@ -666,7 +820,8 @@ void create_controls() {
         L"Conversion included) and each map's own picks. With a \"Save to\" folder, everything for the Xbox goes in its "
         L"\"Copy to Xbox maps\" (copy what's in it into the Xbox's maps folder): maps on their own in the Crossplay pack (linked) "
         L"or the Xbox one, each pack (a campaign, an MCC item's maps) in its own; the PC maps they're linked to in \"PC side\". "
-        L"A pack fails whole. Protected maps' originals move into \"Map Protected (Fail)\"; \"Batch report.csv\" lists them all.",
+        L"Right-click maps to put them in a pack of your own. A campaign fails whole; any other pack keeps the maps that "
+        L"converted. Protected maps' originals move into \"Map Protected (Fail)\"; \"Batch report.csv\" lists them all.",
         SS_NOPREFIX, 16, 12, 948, 52, IDC_INTRO);
     St->list = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS,
                                S(16), S(102), S(948), S(368), St->wnd, (HMENU)(INT_PTR)IDC_LIST, GetModuleHandleW(nullptr), nullptr);

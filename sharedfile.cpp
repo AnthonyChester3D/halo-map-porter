@@ -1063,13 +1063,38 @@ Result make(const fs::path &folder, const std::string &base_name, const std::vec
             if (n) relinked += (relinked.empty() ? "" : ", ") + name_of(m->path);
             if (!why.empty()) log("Link file not updated for " + name_of(m->path) + ": " + why);
         }
-        // ---- the pack's earlier versions in its folder (<pack>-<8 hex>.shared, or <pack>.shared) that no map draws on now
+        // ---- shared files in its folder that no map draws on now: the pack's earlier versions (<pack>-<8 hex>.shared, or
+        // <pack>.shared), and ones these maps drew on before (another pack's, when they've come into this one). What
+        // every map in the folder and its folders draws on stays (one that isn't one of these too).
         std::string removed;
         {
             std::set<std::string> needed;
             for (auto &m : maps)
                 if ((!m->skipped.empty() || stuck.count(m->path)) && !m->ref_name.empty()) needed.insert(m->ref_name + ".shared");
             if (has_pack) needed.insert(name + ".shared");
+            {
+                std::error_code e3;
+                auto look = [&](const fs::path &p) {
+                    std::string head(kHeader, '\0');
+                    std::ifstream f(p, std::ios::binary);
+                    if (!f || !f.read(&head[0], (std::streamsize)kHeader) || head.compare(kRef, 4, "drhs") != 0) return;
+                    const std::string n = cstr(head, kRef + 8, 32);
+                    if (!n.empty()) needed.insert(n + ".shared");
+                };
+                for (auto &e : fs::directory_iterator(folder, e3)) {
+                    if (e.is_regular_file(e3) && e.path().extension() == ".map") look(e.path());
+                    else if (e.is_directory(e3))
+                        for (auto &f : fs::directory_iterator(e.path(), e3))
+                            if (f.is_regular_file(e3) && f.path().extension() == ".map") look(f.path());
+                }
+            }
+            std::set<std::string> former;   // (the pack files in this folder these maps drew on before)
+            for (auto &src : sources) {
+                std::error_code e4;
+                const std::string f = src.first.filename().u8string();
+                const fs::path dir = src.first.parent_path().empty() ? fs::path(".") : src.first.parent_path();
+                if (f != "stock.shared" && fs::equivalent(dir, folder.empty() ? fs::path(".") : folder, e4)) former.insert(f);
+            }
             auto earlier = [&](const std::string &f) {
                 if (f == base + ".shared") return true;
                 if (f.size() != base.size() + 16 || f.compare(0, base.size() + 1, base + "-") != 0 || f.compare(base.size() + 9, 7, ".shared") != 0) return false;
@@ -1081,7 +1106,7 @@ Result make(const fs::path &folder, const std::string &base_name, const std::vec
             std::vector<fs::path> gone;
             for (auto &e : fs::directory_iterator(folder, ec)) {
                 const std::string f = e.path().filename().u8string();
-                if (earlier(f) && !needed.count(f) && e.is_regular_file(ec)) gone.push_back(e.path());
+                if ((earlier(f) || former.count(f)) && !needed.count(f) && e.is_regular_file(ec)) gone.push_back(e.path());
             }
             for (auto &g : gone) {
                 fs::remove(g, ec);
@@ -1123,7 +1148,7 @@ Result make(const fs::path &folder, const std::string &base_name, const std::vec
         if (stock_used)
             rep += "stock.shared: " + mb(stock.file.data.size()) + ", in " + stock_dir.u8string() + ": the same file Halo 1 Unlimited's "
                    "installer builds on every Xbox (checksum a7fe2f70), so it isn't counted or sent\n";
-        if (!removed.empty()) rep += "Removed the pack's earlier shared file" + std::string(removed.find(',') != std::string::npos ? "s" : "") +
+        if (!removed.empty()) rep += "Removed the shared file" + std::string(removed.find(',') != std::string::npos ? "s" : "") +
                                      " (no map draws on " + (removed.find(',') != std::string::npos ? "them" : "it") + " now): " + removed + "\n";
         for (auto &p : promoted) rep += shown(p) + ": its new copy an earlier run left beside it (" + name_of(p) + ".new) put in place\n";
         for (auto &p : padded) rep += shown(p) + ": padded to whole 512-byte sectors (the Xbox reads a folder map by them)\n";

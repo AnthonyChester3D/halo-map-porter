@@ -117,7 +117,7 @@ enum {
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
 // The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new175.exe is 1.175).
-#define HMP_VERSION L"1.178"
+#define HMP_VERSION L"1.179"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -2245,6 +2245,26 @@ static std::wstring shared_name_for(const std::wstring &pack) {
     return o.empty() ? pack : o;
 }
 
+// A pack's maps converted now, with the ones already in its folder (Copy to Xbox maps\<pack>\<map>\<map>.map, converted
+// before): what they share is stored once for all of them, so a map converted into a pack later joins its file.
+static std::vector<fs::path> with_pack_folder(std::vector<fs::path> maps) {
+    if (maps.empty()) return maps;
+    std::set<std::wstring> have;
+    for (auto &m : maps) have.insert(lower(m.wstring()));
+    std::error_code ec;
+    const fs::path pack = maps.front().parent_path().parent_path();
+    std::vector<fs::path> more;
+    for (auto &d : fs::directory_iterator(pack, ec)) {
+        if (!d.is_directory(ec)) continue;
+        for (auto &f : fs::directory_iterator(d.path(), ec))
+            if (f.is_regular_file(ec) && lower(f.path().extension().wstring()) == L".map" && have.insert(lower(f.path().wstring())).second)
+                more.push_back(f.path());
+    }
+    std::sort(more.begin(), more.end());
+    maps.insert(maps.end(), more.begin(), more.end());
+    return maps;
+}
+static bool gr_bad_one(const std::string &list) { return list.find(", ") == std::string::npos; }
 // A campaign's chapters converted in a batch (each in its own folder, a pack's way): what two or more of them use
 // stored once, in the pack's file <campaign>-<version>.shared in the folder above theirs, the one Halo 1 Unlimited
 // looks in after a map's own; drawing on stock.shared under it. Chapters that ended up in different pack folders
@@ -3053,8 +3073,12 @@ static void open_batch() {
     // (each map's card: the one last written beside its Xbox map, else its own; every card read once, again after an edit)
     auto by_out = std::make_shared<std::map<std::string, fs::path>>(mapcard::cards_by_output(cards_root()));
     auto dir_of = [by_out](const batchui::Item &it) {
+        // (its own card first, as the batch converts it: another map's card can name the same folder)
+        const fs::path own = mapcard::card_dir(cards_root(), fs::path(it.in));
+        std::error_code ec;
+        if (fs::exists(own / "card.txt", ec)) return own;
         auto c = by_out->find(mapcard::output_key(fs::path(it.out)));
-        return c != by_out->end() ? c->second : mapcard::card_dir(cards_root(), fs::path(it.in));
+        return c != by_out->end() ? c->second : own;
     };
     auto name_of = [](const batchui::Item &it) { return N(lower(fs::path(it.in).stem().wstring())); };
     // (the batch's packs: an MCC Workshop item with two or more Halo 1 maps; or maps whose cards name the same folder,
@@ -3065,6 +3089,7 @@ static void open_batch() {
         std::vector<std::wstring> folder(items.size());
         for (size_t i = 0; i < items.size(); i++) {
             const fs::path in(items[i].in);
+            if (!items[i].pack.empty()) { out[i] = items[i].pack; continue; }   // (a pack you put it in)
             const fs::path root = mapcard::mcc_mod_root(in);
             if (!root.empty()) {
                 const MccItem m = mcc_item(root);
@@ -3116,6 +3141,57 @@ static void open_batch() {
         sync_conv_name_from_out();
         update_conv_hint();
         save_settings();
+    };
+    // A pack you name in the list: its folder in Copy to Xbox maps is its name, so it has to fit one.
+    h.pack_problem = [](const std::wstring &name) -> std::wstring {
+        if (name.size() > kPackChars)
+            return L"Keep it to " + std::to_wstring(kPackChars) + L" characters (the Xbox's map list fits a pack's name and a map's in " +
+                   std::to_wstring(kMapListChars) + L").";
+        if (W(mapcard::sanitize_folder(N(name))) != name) return L"The Xbox drive can't store some of these characters.";
+        const PackLayout l = pack_layout();
+        if (lower(name) == lower(l.xbox) || lower(name) == lower(l.crossplay)) return L"That's the folder for maps on their own.";
+        for (auto *st : mappack::kStockSlots)
+            if (lower(name) == W(st)) return L"That's a stock map's name.";
+        return L"";
+    };
+    // "Store <pack>'s shared file again": every map in the pack's folder, as it is (one drawing on an earlier file of
+    // the pack's, or another pack's, is read through it), what they share stored once in a new file.
+    h.reshare = [](const std::wstring &pack) -> bool {
+        const PackLayout l = pack_layout();
+        if (l.root.empty()) {
+            MessageBoxW(g_wnd, L"Pick the batch's \"Save to\" folder first: a pack's folder is in its Copy to Xbox maps.", L"Halo Map Porter", MB_ICONINFORMATION);
+            return false;
+        }
+        const fs::path folder = l.maps() / pack_folder_for(pack);
+        std::vector<fs::path> maps;
+        std::error_code ec;
+        for (auto &d : fs::directory_iterator(folder, ec)) {
+            if (!d.is_directory(ec)) continue;
+            for (auto &f : fs::directory_iterator(d.path(), ec))
+                if (f.is_regular_file(ec) && lower(f.path().extension().wstring()) == L".map") maps.push_back(f.path());
+        }
+        std::sort(maps.begin(), maps.end());
+        if (maps.size() < 2) {
+            MessageBoxW(g_wnd, (folder.wstring() + L" has " + (maps.empty() ? L"no maps" : L"one map") +
+                                L" converted yet: a pack's shared file is what two or more of its maps use.").c_str(),
+                        L"Halo Map Porter", MB_ICONINFORMATION);
+            return false;
+        }
+        Config cfg = make_config();
+        apply_xbox_options(cfg);
+        const bool stock = checked(ID_X_STOCK_SHARED);
+        std::thread([pack, folder, maps, cfg, stock] {
+            post_log("");
+            post_log("==== " + N(pack) + ": storing what its " + std::to_string(maps.size()) + " maps share once again, in " +
+                     N(folder.wstring()) + " (none converted)");
+            const fs::path cache = cfg.cache_dir / "shared";
+            sharedfile::Result r = sharedfile::make(folder, N(shared_name_for(pack)), maps, stock ? cfg.xbox_maps_dir : fs::path(), cache, cache, post_log);
+            post_log(r.ok ? r.report : "Not stored once (the maps are as they were): " + r.error);
+            batchui::done(r.ok ? L"Stored " + pack + L"'s shared file again, for its " + std::to_wstring(maps.size()) + L" maps" +
+                                     (r.pack_file.empty() ? L"" : L": " + W(r.pack_file)) + L" (the log has the sizes)."
+                               : L"Not stored again: " + W(r.error.substr(0, r.error.find('\n'))));
+        }).detach();
+        return true;
     };
     h.open_card = [dir_of, name_of, by_out](HWND owner, const batchui::Item &it) {
         fs::path d = dir_of(it), out(it.out);
@@ -3317,6 +3393,7 @@ static void open_batch() {
         if (base.xbox_max_mb <= 0) base.xbox_overflow_mb = 115;   // (make_config's too)
         bool share = checked(ID_SHARE), stock_shared = checked(ID_X_STOCK_SHARED);
         const PackLayout layout = pack_layout();
+        std::map<std::wstring, std::wstring> folder_group;   // (a pack folder: the pack going in it, so two never share one)
         for (int i : which) {
             const auto &it = items[(size_t)i];
             Job1 j;
@@ -3332,8 +3409,11 @@ static void open_batch() {
             j.cfg.work_tag = "b" + std::to_string(i);   // (its own work folders: maps converted at once)
             // A map folder (Halo Universal XBE): its card, written again beside the map (its next version when it changed).
             if (folder_mode()) {
-                j.card_dir = mapcard::find_card_by_output(cards_root(), j.out);
-                if (j.card_dir.empty()) j.card_dir = mapcard::card_dir(cards_root(), j.in);
+                // (its own card, the one made for this map, first: another map's card can name the same folder)
+                const fs::path own = mapcard::card_dir(cards_root(), j.in);
+                std::error_code ce;
+                j.card_dir = fs::exists(own / "card.txt", ce) ? own : mapcard::find_card_by_output(cards_root(), j.out);
+                if (j.card_dir.empty()) j.card_dir = own;
                 j.card_name = N(lower(j.in.stem().wstring()));
                 // (started from a downloaded maps catalog near the map and its screenshot, when you haven't filled it in)
                 std::string what;
@@ -3346,6 +3426,7 @@ static void open_batch() {
             fs::path rel;
             const bool mcc = mcc_place(j.in, j.card_dir.empty() ? mapcard::card_dir(cards_root(), j.in) : j.card_dir, pack, rel);
             if (mcc && !pack.empty()) j.group = pack;
+            if (!it.pack.empty()) j.group = it.pack;   // (a pack you named in the list)
             // A campaign the Campaign tab names (its levels' folder's, or the one picked): its levels share one file; and a
             // level with its choices saved there converted as its pieces.
             j.picks = campaign_picks_for(j.in, ca_defaults, campaigns);
@@ -3365,15 +3446,15 @@ static void open_batch() {
                     if (auto c = mapcard::load_card(j.card_dir, j.card_name); !c.folder.empty()) folder = W(c.folder);
                 }
                 const std::wstring pack = j.campaign ? pack_folder_for(j.group) : !j.group.empty() ? pack_folder_for(j.group) : std::wstring();
+                if (!pack.empty()) {
+                    auto fg = folder_group.emplace(lower(pack), j.group).first;
+                    if (fg->second != j.group && !j.campaign) j.group = fg->second;
+                }
                 if (pack.empty()) {
                     j.out = layout.xbox_dir() / fit_name(folder, loose_folder_chars(layout)) / file;
                 } else {
                     j.out = layout.maps() / pack / fit_name(folder, kMapListChars - pack.size() - (j.campaign ? kPieceChars : 0)) / file;
                 }
-            }
-            if (folder_mode()) {
-                std::wstring note;
-                if (!write_card(j.card_dir, W(j.card_name), j.out, note)) j.card_dir.clear();
             }
             jobs->push_back(std::move(j));
         }
@@ -3400,8 +3481,9 @@ static void open_batch() {
                 auto it = first_at.find(key);
                 if (it == first_at.end()) { first_at[key] = a; continue; }
                 if (same_bytes((*jobs)[it->second].in, j.in)) { j.same_as = (*jobs)[it->second].in; continue; }
-                // (a campaign when they came from one map card: its chapters share a pack file at the end)
-                if (!j.card_dir.empty() && j.card_dir == (*jobs)[it->second].card_dir)
+                // (a campaign when they came from one map card: its chapters share a pack file at the end; not maps
+                // already in a pack, an MCC item's or yours)
+                if (!j.card_dir.empty() && j.card_dir == (*jobs)[it->second].card_dir && j.group.empty() && (*jobs)[it->second].group.empty())
                     j.group = (*jobs)[it->second].group = (*jobs)[it->second].out.parent_path().filename().wstring();
                 // (named for the map: a campaign's chapters share one map card's name, "Wintersmith Campain (wintersmith4)")
                 const fs::path above = j.out.parent_path().parent_path();
@@ -3418,12 +3500,20 @@ static void open_batch() {
                 }
             }
         }
+        // (each map's card written beside it, once its folder is settled: the card says where its map went)
+        if (folder_mode())
+            for (auto &j : *jobs) {
+                std::wstring note;
+                if (!j.card_dir.empty() && !write_card(j.card_dir, W(j.card_name), j.out, note)) j.card_dir.clear();
+            }
         const bool keep_logs = checked(ID_S_KEEP_FAILED);
         // A campaign's chapters (Job1::group): what two or more of them use stored once, in the pack's file
         // (<campaign>-<version>.shared) in the folder above theirs, once the last of them is done; with stock.shared
         // under it, so on when the Xbox tab draws maps on stock.shared.
-        // A pack is one: when one of its maps fails, none of them is kept; a campaign is linked only when all of it is
-        // (a level in gameplay parts can't be, so then none of it is built to be).
+        // A campaign is one: when one of its levels fails, none of them is kept; and it's linked only when all of it is
+        // (a level in gameplay parts can't be, so then none of it is built to be). Any other pack keeps the maps that
+        // converted, and they share what they have in common with the maps already in its folder (one converted later
+        // joins them).
         struct Group { int left = 0; std::vector<fs::path> maps, pc_copies; bool finished = false, campaign = false, failed = false,
                        unlinked = false; std::vector<std::string> bad, not_linked; std::set<std::wstring> inputs; };
         auto groups = std::make_shared<std::map<std::wstring, Group>>();
@@ -3490,7 +3580,7 @@ static void open_batch() {
                     pc_copies = gr.pc_copies;
                     for (auto &b : gr.bad) bad += (bad.empty() ? "" : ", ") + b;
                     for (auto &b : gr.not_linked) not_linked += (not_linked.empty() ? "" : ", ") + b;
-                    pack_failed = gr.failed = !gr.bad.empty();
+                    pack_failed = gr.failed = gr.campaign && !gr.bad.empty();
                     unlink = gr.unlinked = !pack_failed && gr.campaign && !gr.pc_copies.empty() && !gr.not_linked.empty();
                 }
                 std::error_code ec;
@@ -3517,7 +3607,10 @@ static void open_batch() {
                                           j.cfg.cache_dir / "shared", log);
                     return;
                 }
-                if (stock_shared) finish_campaign(j.cfg, shared_name_for(j.group), maps, log);
+                if (!bad.empty())
+                    log("[pack] " + N(j.group) + ": " + bad + " didn't convert; the pack's other maps are kept (convert " +
+                        (gr_bad_one(bad) ? "it" : "them") + " again and " + (gr_bad_one(bad) ? "it joins" : "they join") + " the pack's shared file).");
+                if (stock_shared && !maps.empty()) finish_campaign(j.cfg, shared_name_for(j.group), with_pack_folder(maps), log);
             };
             clear_batch_work(cache);   // (earlier batches' work folders: none in use; here, as it can take a while)
             std::atomic<int> ok{0}, linked{0}, failed{0}, done{0};
@@ -3653,8 +3746,8 @@ static void open_batch() {
                         if (have.insert(lower(m.wstring())).second) maps.push_back(m);
                     const Config &c0 = jobs->front().cfg;
                     store_campaign_shared(name, maps, ca_stock || stock_shared ? c0.xbox_maps_dir : fs::path(), c0.cache_dir / "shared", post_log);
-                } else if (!gr.campaign && stock_shared && gr.maps.size() >= 2) {
-                    finish_campaign(jobs->front().cfg, name, gr.maps, post_log);
+                } else if (!gr.campaign && stock_shared && !gr.maps.empty()) {
+                    finish_campaign(jobs->front().cfg, shared_name_for(name), with_pack_folder(gr.maps), post_log);
                 }
             }
             // (a pack that failed: each of its maps failed with it, in the list and the report; a campaign not linked whole)
