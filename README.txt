@@ -2393,13 +2393,15 @@ name and a map folder's 30 characters together at most):
 Names are cut to fit: a pack's to 12 characters (without words like
 "Campaign" or "Pack" when it's longer), a map folder's to what the pack's
 leaves of the 30 (a campaign's level folders leave 5 more for their
-pieces' " Open", " End", " P2"). A map that fails leaves nothing behind
-(and an earlier run's output of it is taken away), and a protected map's
-original moves into "Map Protected (Fail)" beside it. A campaign is one:
-when one of its levels fails, none of them is kept. Any other pack keeps
-the maps that converted, and they share one file with every map already in
-its folder, so a map converted into the pack later (the one that failed,
-or a new one) joins it. A campaign is linked only when
+pieces' " Open", " End", " P2"). A map that fails leaves nothing behind:
+its folder and its pieces' and parts' folders are taken away, unless they
+hold the map an earlier run converted (then that's kept as it was, linked
+or not); a protected map's original moves into "Map Protected (Fail)"
+beside it. A pack or a campaign keeps the maps that converted when one
+fails, and they share one file with every map already in its folder, so a
+map converted into it later (the one that failed, or a new one) joins it:
+a campaign's shared file grows a level at a time. A campaign is linked
+only when
 all of it is: a level in gameplay parts can't be, so then none of its
 levels is converted to be, and when one level doesn't link the others'
 links are taken away. stock.shared isn't written here (every Xbox's

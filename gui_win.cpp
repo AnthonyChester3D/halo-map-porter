@@ -117,7 +117,7 @@ enum {
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
 // The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new175.exe is 1.175).
-#define HMP_VERSION L"1.179"
+#define HMP_VERSION L"1.180"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -869,6 +869,7 @@ static fs::path xbox_pack_dir(const fs::path &dir);
 static std::wstring fit_loose_folder(const std::wstring &folder);
 static std::array<fs::path, 3> campaign_outputs(const fs::path &out);
 static std::vector<fs::path> campaign_part_outputs(const fs::path &out, int parts);
+static const int kMostParts = 12;   // (gameplay parts a level can be split into)
 
 // Convert tab, Xbox output: the file name is the map's name on the Xbox.
 static std::wstring conv_xbox_name() {
@@ -2045,8 +2046,33 @@ static bool move_folder(const fs::path &from, const fs::path &to) {
 // the three), and a protected map's original moves into "Map Protected (Fail)" beside it (not one in Steam's or the
 // Xbox app's folders, which the game reads it from). Returns where the map is
 // now (`built` when it isn't under the layout). `where` says which, for the report.
+// A map that failed, at <folder>\<map>.map: its folder and its pieces' and parts' beside it (<folder> Open, <folder>
+// End, <folder> P2...) taken away, unless they hold its map from before this conversion (an earlier run's, every map
+// in them older than `started`: kept as it was). True if they were kept.
+static bool clear_failed(const fs::path &out, fs::file_time_type started) {
+    std::vector<fs::path> folders;
+    {
+        std::set<std::wstring> seen;
+        auto add = [&](const fs::path &m) { if (seen.insert(lower(m.parent_path().wstring())).second) folders.push_back(m.parent_path()); };
+        for (auto &m : campaign_outputs(out)) add(m);
+        for (auto &m : campaign_part_outputs(out, kMostParts)) add(m);
+    }
+    std::error_code ec;
+    bool earlier = false, newer = false;
+    for (auto &f : folders)
+        for (auto &e : fs::directory_iterator(f, ec)) {
+            if (!e.is_regular_file(ec) || lower(e.path().extension().wstring()) != L".map") continue;
+            if (fs::last_write_time(e.path(), ec) < started) earlier = true;
+            else newer = true;
+        }
+    std::error_code e2;
+    if (earlier && !newer && fs::exists(out, e2)) return true;   // (the earlier run's map, whole)
+    for (auto &f : folders) fs::remove_all(f, ec);
+    return false;
+}
+
 static fs::path place_conversion(const PackLayout &l, const fs::path &in, const fs::path &built, Result &r, std::string &where,
-                                 const Log &log) {
+                                 const Log &log, fs::file_time_type started = fs::file_time_type::min()) {
     where.clear();
     // (its folder under the Xbox pack, a pack's map folder too: CE Digsite Multiplayer\Albatross)
     if (l.root.empty()) return built;
@@ -2067,8 +2093,8 @@ static fs::path place_conversion(const PackLayout &l, const fs::path &in, const 
                 fs::create_directories(ce.parent_path(), ec);
                 fs::copy_file(r.linked_ce.empty() ? in : r.linked_ce, ce, fs::copy_options::overwrite_existing, ec);
                 log("Linked: in the pack " + N(pack) + ", with the PC map in " + N(ce.parent_path().wstring()));
-            } else if (!r.ok) {
-                fs::remove_all(built.parent_path(), ec);
+            } else if (!r.ok && clear_failed(built, started)) {
+                log("Kept the map converted before in " + N(built.parent_path().wstring()) + " (this conversion failed)");
             }
             where = N(pack);
             return built;
@@ -2114,13 +2140,23 @@ static fs::path place_conversion(const PackLayout &l, const fs::path &in, const 
         where = N(l.xbox);
         return built;
     }
-    fs::remove_all(cross, ec);   // (an earlier run's, linked then)
-    fs::remove(ce, ec);
     if (r.ok) {
+        fs::remove_all(cross, ec);   // (an earlier run's, linked then)
+        fs::remove(ce, ec);
         where = N(l.xbox);
         return built;
     }
-    fs::remove_all(xbox, ec);
+    // (failed: what an earlier run made of it kept as it was, linked or not; else its folders taken away)
+    const bool kept_x = clear_failed(built, started);
+    fs::path linked_before;
+    for (auto &f : fs::directory_iterator(cross, ec))
+        if (lower(f.path().extension().wstring()) == L".map") linked_before = f.path();
+    const bool kept_c = !linked_before.empty() && clear_failed(linked_before, started);
+    if (!kept_c) {
+        fs::remove_all(cross, ec);
+        fs::remove(ce, ec);
+    }
+    if (kept_x || kept_c) log("Kept the map converted before in " + N((kept_c ? cross : xbox).wstring()) + " (this conversion failed)");
     // (not a map in a game's install or the Workshop's folder, which the game reads it from: Steam's, the Xbox app's)
     bool installed = false;
     for (auto &part : in) {
@@ -2342,6 +2378,7 @@ static void start_convert(bool again = false) {
         auto m = to == Game::Xbox && prepared.empty() ? std::make_shared<ContentAnalysis>() : nullptr;
         std::error_code ec;
         const bool existed = fs::exists(out.parent_path(), ec);
+        const auto started = fs::file_time_type::clock::now();
         Result r = !prepared.empty() ? build_prepared(cfg, prepared, post_log) : convert_map(cfg, in, from, to, out, share, post_log, m.get());
         if (layout.root.empty() || !same_path(out.parent_path().parent_path(), layout.xbox_dir()))
             drop_folder_if_protected(r, out.parent_path(), existed);
@@ -2354,7 +2391,7 @@ static void start_convert(bool again = false) {
         fs::path placed = out;
         if (to == Game::Xbox && prepared.empty()) {
             std::string where;
-            placed = place_conversion(layout, in, out, r, where, post_log);
+            placed = place_conversion(layout, in, out, r, where, post_log, started);
         }
         if (r.ok && to == Game::Xbox) remember_conversion(in, placed);
         finish(r, std::string("Converted to ") + game_name(to), keys);
@@ -2365,7 +2402,6 @@ static void start_convert(bool again = false) {
 // "<map>\t<campaign>\t<opening>\t<closing>\t<parts>", a line each, the last one for a map counting). A map with none
 // saved takes the tab's last choices, and a campaign map (by its header) the campaign of the maps beside it, else
 // its folder's name: a campaign's levels sit together in one folder (Lumoria_Full_Campaign). "-": in none.
-static const int kMostParts = 12;   // (gameplay parts a level can be split into)
 struct CampaignPicks { bool saved = false; std::wstring name; bool open = true, close = true; int parts = 1;
                        std::vector<int> part_of; };   // ("Estimate parts"' plan: each BSP's part, for `parts`)
 static fs::path campaigns_file() { return appdata_dir(CSIDL_LOCAL_APPDATA) / L"campaigns.txt"; }
@@ -2915,14 +2951,15 @@ static void start_campaign_convert() {
             auto it = all.find(lower(in.wstring()));
             if (it != all.end() && it->second.parts == parts) pk.part_of = it->second.part_of;
         }
+        const auto started = fs::file_time_type::clock::now();
         Result r = convert_level_pieces(cfg_in, in, from, out, pk, share, title, card_dir, card_name, failed);
         if (!failed.empty()) {
             r.ok = false;
             r.error = "Pieces that didn't build:\n" + failed + (r.error.empty() ? "" : "the level: " + r.error);
         }
-        if (r.ok && !layout.root.empty() && !campaign_name.empty()) {   // (linked: its PC map copied beside the others)
-            std::string where;
-            place_conversion(layout, in, out, r, where, post_log);
+        if (!layout.root.empty() && (r.ok ? !campaign_name.empty() : true)) {   // (linked: its PC map copied beside the others;
+            std::string where;                                                 // failed: its folders taken away, but an earlier run's)
+            place_conversion(layout, in, out, r, where, post_log, started);
         }
         // What the pieces have in common stored once (sharedfile.hpp), in <level folder>-<version>.shared beside their
         // folders: every piece there, converted now or before (one drawing on it is read through it, and draws on the new
@@ -3510,10 +3547,10 @@ static void open_batch() {
         // A campaign's chapters (Job1::group): what two or more of them use stored once, in the pack's file
         // (<campaign>-<version>.shared) in the folder above theirs, once the last of them is done; with stock.shared
         // under it, so on when the Xbox tab draws maps on stock.shared.
-        // A campaign is one: when one of its levels fails, none of them is kept; and it's linked only when all of it is
-        // (a level in gameplay parts can't be, so then none of it is built to be). Any other pack keeps the maps that
-        // converted, and they share what they have in common with the maps already in its folder (one converted later
-        // joins them).
+        // A pack or a campaign keeps the maps that converted when one fails, and they share what they have in common
+        // with the maps already in its folder (one converted later joins them: a campaign's levels converted before
+        // too). A campaign is linked only when all of it is (a level in gameplay parts can't be, so then none of it is
+        // built to be).
         struct Group { int left = 0; std::vector<fs::path> maps, pc_copies; bool finished = false, campaign = false, failed = false,
                        unlinked = false; std::vector<std::string> bad, not_linked; std::set<std::wstring> inputs; };
         auto groups = std::make_shared<std::map<std::wstring, Group>>();
@@ -3548,21 +3585,14 @@ static void open_batch() {
                 if (j.group.empty()) return;
                 const bool ok = r.ok;
                 std::vector<fs::path> maps, pc_copies;
-                bool pack_failed = false, unlink = false;
+                bool unlink = false;
                 std::string bad, not_linked;
                 {
                     std::lock_guard<std::mutex> g(group_lock);
                     Group &gr = (*groups)[j.group];
                     if (ok)
                         for (auto &m : j.pieces ? level_and_pieces(j.out, j.picks) : std::vector<fs::path>{j.out}) gr.maps.push_back(m);
-                    if (!ok) {
-                        gr.bad.push_back(N(j.in.stem().wstring()));
-                        std::error_code e0;
-                        if (j.pieces) {   // (the pieces it made before one didn't build)
-                            for (auto &m : campaign_outputs(j.out)) fs::remove_all(m.parent_path(), e0);
-                            for (auto &m : campaign_part_outputs(j.out, kMostParts)) fs::remove_all(m.parent_path(), e0);
-                        }
-                    }
+                    if (!ok) gr.bad.push_back(N(j.in.stem().wstring()));   // (its folders: place_conversion)
                     if (ok && !r.link.empty()) {
                         const std::string mcc_prefix = "mcc_maps\\";
                         fs::path ce = layout.ce_dir() / j.in.filename();
@@ -3580,16 +3610,13 @@ static void open_batch() {
                     pc_copies = gr.pc_copies;
                     for (auto &b : gr.bad) bad += (bad.empty() ? "" : ", ") + b;
                     for (auto &b : gr.not_linked) not_linked += (not_linked.empty() ? "" : ", ") + b;
-                    pack_failed = gr.failed = gr.campaign && !gr.bad.empty();
-                    unlink = gr.unlinked = !pack_failed && gr.campaign && !gr.pc_copies.empty() && !gr.not_linked.empty();
+                    unlink = gr.unlinked = gr.campaign && !gr.pc_copies.empty() && !gr.not_linked.empty();
                 }
                 std::error_code ec;
-                if (pack_failed) {   // (none of the pack kept: its maps' folders, their PC maps)
-                    for (auto &m : maps) fs::remove_all(m.parent_path(), ec);
-                    for (auto &c : pc_copies) fs::remove(c, ec);
-                    log("[pack] " + N(j.group) + ": " + bad + " didn't convert, so none of the pack's maps were kept (a pack is one).");
-                    return;
-                }
+                if (!bad.empty())
+                    log("[pack] " + N(j.group) + ": " + bad + " didn't convert; the " + (j.campaign ? "campaign's" : "pack's") +
+                        " other maps are kept (convert " + (gr_bad_one(bad) ? "it" : "them") + " again and " +
+                        (gr_bad_one(bad) ? "it joins" : "they join") + " the shared file).");
                 if (unlink) {   // (a campaign some of whose levels didn't link: none of it is, a campaign is played whole)
                     for (auto &m : maps)
                         for (auto &e : fs::directory_iterator(m.parent_path(), ec))
@@ -3607,9 +3634,6 @@ static void open_batch() {
                                           j.cfg.cache_dir / "shared", log);
                     return;
                 }
-                if (!bad.empty())
-                    log("[pack] " + N(j.group) + ": " + bad + " didn't convert; the pack's other maps are kept (convert " +
-                        (gr_bad_one(bad) ? "it" : "them") + " again and " + (gr_bad_one(bad) ? "it joins" : "they join") + " the pack's shared file).");
                 if (stock_shared && !maps.empty()) finish_campaign(j.cfg, shared_name_for(j.group), with_pack_folder(maps), log);
             };
             clear_batch_work(cache);   // (earlier batches' work folders: none in use; here, as it can take a while)
@@ -3640,6 +3664,7 @@ static void open_batch() {
                 log("==== " + N(j.in.filename().wstring()) + " -> " + N(j.out.wstring()));
                 Result r;
                 std::error_code ex;
+                fs::file_time_type started = fs::file_time_type::clock::now();   // (what it writes is newer: a failure keeps only what's older)
                 if (!fs::exists(j.in, ex)) {   // (gone since it was listed: a protected one an earlier batch moved, say)
                     const bool jailed = fs::exists(j.in.parent_path() / L"Map Protected (Fail)" / j.in.filename(), ex);
                     r.error = jailed ? "Found protected by an earlier batch: it's in \"Map Protected (Fail)\" beside where it was."
@@ -3650,6 +3675,7 @@ static void open_batch() {
                     std::error_code ec;
                     const bool existed = fs::exists(j.out.parent_path(), ec);
                     fs::create_directories(j.out.parent_path(), ec);
+                    started = fs::file_time_type::clock::now();
                     // (a map that runs the app out of memory, or hits an error nothing else caught, fails on its own)
                     try {
                         if (j.pieces) {
@@ -3709,7 +3735,7 @@ static void open_batch() {
                     }
                     st = L"Failed: " + W(e) + (tag.empty() ? L"" : L" (" + W(tag) + L")");
                     log("FAILED: " + r.error);
-                    place_conversion(layout, j.in, j.out, r, where, log);
+                    place_conversion(layout, j.in, j.out, r, where, log, started);
                     if (where == "Map Protected (Fail)") st = L"Protected: moved to Map Protected (Fail)";
                 }
                 batchui::progress(j.index, st, r.ok ? size : std::wstring(), r.ok ? j.out.wstring() : std::wstring(L"\x01"));

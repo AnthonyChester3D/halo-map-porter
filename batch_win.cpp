@@ -820,8 +820,9 @@ void create_controls() {
         L"Conversion included) and each map's own picks. With a \"Save to\" folder, everything for the Xbox goes in its "
         L"\"Copy to Xbox maps\" (copy what's in it into the Xbox's maps folder): maps on their own in the Crossplay pack (linked) "
         L"or the Xbox one, each pack (a campaign, an MCC item's maps) in its own; the PC maps they're linked to in \"PC side\". "
-        L"Right-click maps to put them in a pack of your own. A campaign fails whole; any other pack keeps the maps that "
-        L"converted. Protected maps' originals move into \"Map Protected (Fail)\"; \"Batch report.csv\" lists them all.",
+        L"Right-click maps to put them in a pack of your own. A pack or campaign keeps the maps that converted, and one "
+        L"converted later joins its shared file. Protected maps' originals move into \"Map Protected (Fail)\"; "
+        L"\"Batch report.csv\" lists them all.",
         SS_NOPREFIX, 16, 12, 948, 52, IDC_INTRO);
     St->list = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS,
                                S(16), S(102), S(948), S(368), St->wnd, (HMENU)(INT_PTR)IDC_LIST, GetModuleHandleW(nullptr), nullptr);
