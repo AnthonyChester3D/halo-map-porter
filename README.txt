@@ -2446,6 +2446,17 @@ reads it where it is. Every map folder in <Pack> is included, even one
 written before; a map that can't be read is left as it is; the pack's
 earlier shared files no map draws on any more are removed. Everything is
 read back through the new files and compared before anything is written.
+Each map is written beside the one it replaces (<map>.new) and then put in
+its place; one Windows holds open for longer than 10 seconds stays as it
+was, its new copy removed, so only the maps are ever in their folders. A
+<map>.new an earlier version left behind is put in place on the next run
+when it's the newer one and the shared files it draws on are there (else
+it's removed). A map left as it is that isn't whole 512-byte sectors (made
+before the app padded them) is padded with zeros: Halo 1 Unlimited copies a
+folder map into the Xbox's cache by sectors. The link files (.h1ulink) of
+every map written, put in place or padded get its xbox line's size and
+hash again (before 1.178, a map whose folder name has spaces kept its
+link's old size and hash).
 The log says if a multiplayer map is still over the 47 MB a multiplayer
 cache file holds unpacked. Untick it for a pack an older Halo 1 Unlimited
 plays.

@@ -699,6 +699,48 @@ Result make(const fs::path &folder, const std::string &base_name, const std::vec
             }
             if (!use_stock) stock = StockLayout();
         }
+        // ---- a map's new copy an earlier run wrote but couldn't put in place (Windows held the map open), <map>.new:
+        // put in place now when it's the newer one and the shared files it draws on are still there; else taken away
+        // (only the maps themselves belong in the folder: a map library zips it as it is)
+        std::vector<fs::path> promoted;
+        for (auto &p : paths) {
+            fs::path t = p;
+            t += ".new";
+            std::error_code ec;
+            if (!fs::is_regular_file(t, ec)) continue;
+            std::string head(kHeader, '\0');
+            {
+                std::ifstream f(t, std::ios::binary);
+                if (!f || !f.read(&head[0], (std::streamsize)kHeader)) head.clear();
+            }
+            bool ok = head.size() == kHeader && head.compare(0, 4, "daeh") == 0 && head.compare(0x7FC, 4, "toof") == 0;
+            if (ok && head.compare(kRef, 4, "drhs") == 0) {
+                auto there = [&](const std::string &n) {
+                    std::error_code e2;
+                    return n.empty() || fs::exists(p.parent_path() / (n + ".shared"), e2) || fs::exists(p.parent_path().parent_path() / (n + ".shared"), e2) ||
+                           (n == "stock" && (fs::exists(stock_dir / "stock.shared", e2) || (!stock_maps.empty() && fs::exists(stock_maps / "stock.shared", e2))));
+                };
+                ok = there(cstr(head, kRef + 8, 32)) && (get32(head, kRef + 4) != 2 || there(cstr(head, kRef + 0x38, 32)));
+            }
+            std::error_code e1, e2;
+            const bool newer = !fs::exists(p, e1) || fs::last_write_time(t, e1) >= fs::last_write_time(p, e2);
+            bool placed = false;
+            if (ok && newer)
+                for (int attempt = 0; attempt < 20 && !placed; attempt++) {
+                    ec.clear();
+                    fs::rename(t, p, ec);   // (over the map: Windows replaces it)
+                    if (!ec) placed = true;
+                    else std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                }
+            if (placed) {
+                promoted.push_back(p);
+                log("  " + name_of(p) + ": put in place its new copy an earlier run left beside it (" + name_of(t) + ")");
+            } else {
+                fs::remove(t, ec);
+                log("  " + name_of(p) + ": removed " + name_of(t) + ", an earlier run's copy " +
+                    (!ok ? "that draws on shared files no longer here" : newer ? "that still couldn't be put in place" : "older than the map"));
+            }
+        }
         // ---- the maps, and the shared files they already draw on (one that can't be read is left as it is)
         log("Reading the maps...");
         std::vector<std::unique_ptr<Map>> maps;
@@ -979,14 +1021,43 @@ Result make(const fs::path &folder, const std::string &base_name, const std::vec
             if (ec) {
                 stuck.insert(o.path);
                 r.error += (r.error.empty() ? "" : " ") + std::string("Couldn't put ") + o.path.u8string() + " in place (" + ec.message() +
-                           ", tried for 10 seconds: is it open in another program?): its new copy is " + temp(o.path).u8string() + ".";
+                           ", tried for 10 seconds: is it open in another program?): it's kept as it was.";
+                std::error_code e2;
+                fs::remove(temp(o.path), e2);   // (only the maps belong in the folder: no copy left beside one)
             }
         }
         if (!r.error.empty() && (stuck.count(pack_path) || stuck.count(stock_path))) return r;   // (the maps need them)
-        // ---- the link files beside a map rewritten: its xbox line (size and hash) and Xbox tag IDs are for the file as it is now
+        // ---- a map left as it is that isn't whole 512-byte sectors (made before the app padded them): padded with
+        // zeros after its zlib stream, as Halo 1 Unlimited copies a folder map into the Xbox's cache by sectors
+        std::set<fs::path> padded;
+        for (auto &m : maps) {
+            if (m->rewrite && !stuck.count(m->path)) continue;
+            std::error_code ec;
+            const uintmax_t size = fs::file_size(m->path, ec);
+            if (ec || size % 512 == 0 || size < kHeader) continue;
+            std::string head(kHeader, '\0');
+            {
+                std::ifstream f(m->path, std::ios::binary);
+                if (!f || !f.read(&head[0], (std::streamsize)kHeader) || head.compare(0, 4, "daeh") != 0) continue;
+            }
+            std::ofstream f(m->path, std::ios::binary | std::ios::app);
+            if (f && f.write(std::string(512 - size % 512, '\0').data(), (std::streamsize)(512 - size % 512)) && f.flush()) {
+                padded.insert(m->path);
+                m->disk_size = (size_t)(size + 512 - size % 512);
+            }
+        }
+        if (!padded.empty()) {
+            std::string list;
+            for (auto &p : padded) list += (list.empty() ? "" : ", ") + name_of(p);
+            log("  padded to whole 512-byte sectors (the Xbox reads a folder map by them): " + list);
+        }
+        // ---- the link files beside a map rewritten (or put in place, or padded): its xbox line (size and hash) and
+        // Xbox tag IDs are for the file as it is now
         std::string relinked;
         for (auto &m : maps) {
-            if (!m->rewrite || stuck.count(m->path)) continue;
+            const bool changed = (m->rewrite && !stuck.count(m->path)) || padded.count(m->path) ||
+                                 std::find(promoted.begin(), promoted.end(), m->path) != promoted.end();
+            if (!changed) continue;
             std::string why;
             const int n = h1ulink::refresh_xbox(m->path, why);
             if (n) relinked += (relinked.empty() ? "" : ", ") + name_of(m->path);
@@ -997,7 +1068,7 @@ Result make(const fs::path &folder, const std::string &base_name, const std::vec
         {
             std::set<std::string> needed;
             for (auto &m : maps)
-                if (!m->skipped.empty() && !m->ref_name.empty()) needed.insert(m->ref_name + ".shared");
+                if ((!m->skipped.empty() || stuck.count(m->path)) && !m->ref_name.empty()) needed.insert(m->ref_name + ".shared");
             if (has_pack) needed.insert(name + ".shared");
             auto earlier = [&](const std::string &f) {
                 if (f == base + ".shared") return true;
@@ -1054,7 +1125,9 @@ Result make(const fs::path &folder, const std::string &base_name, const std::vec
                    "installer builds on every Xbox (checksum a7fe2f70), so it isn't counted or sent\n";
         if (!removed.empty()) rep += "Removed the pack's earlier shared file" + std::string(removed.find(',') != std::string::npos ? "s" : "") +
                                      " (no map draws on " + (removed.find(',') != std::string::npos ? "them" : "it") + " now): " + removed + "\n";
-        if (!relinked.empty()) rep += "Link files updated for the rewritten maps (their Xbox size and hash): " + relinked + "\n";
+        for (auto &p : promoted) rep += shown(p) + ": its new copy an earlier run left beside it (" + name_of(p) + ".new) put in place\n";
+        for (auto &p : padded) rep += shown(p) + ": padded to whole 512-byte sectors (the Xbox reads a folder map by them)\n";
+        if (!relinked.empty()) rep += "Link files updated for the maps written (their Xbox size and hash): " + relinked + "\n";
         r.used_stock = stock_used;
         if (!stuck.empty()) rep += r.error + " Those stay as they were (whole maps, not drawing on the shared files), with their link files.\n";
         if (!any) rep += "Nothing in these maps is in two of them" + std::string(use_stock ? " or in stock.shared" : "") + ".\n";

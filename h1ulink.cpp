@@ -9,6 +9,8 @@
 #include <iterator>
 #include <set>
 #include <sstream>
+#include <thread>
+#include <chrono>
 
 namespace h1ulink {
 namespace fs = std::filesystem;
@@ -386,6 +388,25 @@ bool mcc_ids(const fs::path &map, const std::vector<Resource> &resources, std::s
     return true;
 }
 
+// An xbox line's map ("xbox <path, spaces and all>   <size>   <hash>"): what's before its size and hash.
+static std::string xbox_line_name(const std::string &line) {
+    std::string s = line.substr(5);
+    auto trim = [&] { while (!s.empty() && s.back() == ' ') s.pop_back(); };
+    trim();
+    const std::string whole = s;
+    for (int k = 0; k < 2; k++) {
+        const size_t sp = s.find_last_of(' ');
+        if (sp == std::string::npos) return whole;
+        const std::string w = s.substr(sp + 1);
+        const bool ok = k == 0 ? w.size() == 64 && w.find_first_not_of("0123456789abcdefABCDEF") == std::string::npos
+                               : !w.empty() && w.find_first_not_of("0123456789") == std::string::npos;
+        if (!ok) return whole;
+        s.erase(sp);
+        trim();
+    }
+    return s;
+}
+
 int refresh_xbox(const fs::path &map, std::string &why) {
     std::error_code ec;
     const fs::path dir = map.parent_path();
@@ -413,9 +434,7 @@ int refresh_xbox(const fs::path &map, std::string &why) {
         bool ours = false;
         for (auto &l : lines)
             if (l.rfind("xbox ", 0) == 0) {
-                std::istringstream ws(l.substr(5));
-                std::string name;
-                ws >> name;
+                const std::string name = xbox_line_name(l);   // (a folder's name has spaces: "BC Raceway mp - Final\\...")
                 const size_t slash = name.find_last_of("\\/");
                 ours = lower(slash == std::string::npos ? name : name.substr(slash + 1)) == file;
             }
@@ -436,9 +455,7 @@ int refresh_xbox(const fs::path &map, std::string &why) {
         size_t xb_only_at = std::string::npos, checks_at = std::string::npos;
         for (auto &l : lines) {
             if (l.rfind("xbox ", 0) == 0) {
-                std::istringstream ws(l.substr(5));
-                std::string name;
-                ws >> name;
+                const std::string name = xbox_line_name(l);
                 out += "xbox " + name + "   " + std::to_string(xb_size) + "   " + xb_hash + "\n";
             } else if (l.rfind("level xbox ", 0) == 0) {
                 out += "level xbox " + xb_scen + "\n";
@@ -479,9 +496,20 @@ int refresh_xbox(const fs::path &map, std::string &why) {
             std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
             if (!(f << out)) { why = "couldn't write " + tmp.u8string(); continue; }
         }
-        fs::remove(e.path(), ec);
-        fs::rename(tmp, e.path(), ec);
-        if (ec) { why = "couldn't put " + e.path().u8string() + " in place"; continue; }
+        // (over the old one, which Windows replaces; a moment while another program holds it is waited out, and one
+        // still held keeps the old link file: no copy left beside it)
+        for (int attempt = 0; attempt < 20; attempt++) {
+            ec.clear();
+            fs::rename(tmp, e.path(), ec);
+            if (!ec) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
+        if (ec) {
+            std::error_code e2;
+            fs::remove(tmp, e2);
+            why = "couldn't put " + e.path().u8string() + " in place";
+            continue;
+        }
         n++;
     }
     return n;
