@@ -180,7 +180,8 @@ bool read_file(const fs::path &p, std::string &s) {
 // nodes weren't as expected (left as they were).
 static int h1u_calls(std::string &d, size_t nodes, uint32_t count, size_t strings, uint32_t strings_size, int &failed, int &repaired) {
     struct Fn { const char *name; uint16_t index; std::vector<int> params; int ret; };
-    // (the parameters' types: 5 boolean, 6 real, 7 short, 8 long, 10 script, 12 cutscene flag, 23 object list, 37 object)
+    // (the parameters' types: 5 boolean, 6 real, 7 short, 8 long, 10 script, 12 cutscene flag, 14 cutscene title, 23 object list,
+    // 37 object)
     static const Fn fns[] = {
         {"bit_test", 422, {8, 7}, 5}, {"bit_toggle", 423, {8, 7, 5}, 8}, {"bitwise_flags_toggle", 424, {8, 8, 5}, 8},
         {"bitwise_and", 425, {8, 8}, 8}, {"bitwise_or", 426, {8, 8}, 8}, {"bitwise_xor", 427, {8, 8}, 8},
@@ -190,6 +191,9 @@ static int h1u_calls(std::string &d, size_t nodes, uint32_t count, size_t string
         {"players_on_multiplayer_team", 435, {7}, 23}, {"game_is_authoritative", 436, {}, 5}, {"physics_set_gravity", 437, {6}, 4},
         {"physics_get_gravity", 438, {}, 6}, {"physics_constants_reset", 439, {}, 4}, {"script_started", 440, {10}, 5},
         {"script_finished", 441, {10}, 5},
+        // (v1.167: a number in a cutscene title's "%d", and the campaign's own counts of each player's)
+        {"cinematic_set_title_number", 442, {14, 7}, 4}, {"player_kills", 443, {7}, 7}, {"player_deaths", 444, {7}, 7},
+        {"player_headshots", 445, {7}, 7},
     };
     // (the call each type's argument is wrapped in, its function index on the Xbox, and which of its arguments it is)
     auto wrapper = [](int type, uint16_t &fn, int &pos) {
@@ -202,6 +206,7 @@ static int h1u_calls(std::string &d, size_t nodes, uint32_t count, size_t string
         case 37: fn = 23; pos = 0; return true;   // unit (object)
         case 12: fn = 52; pos = 1; return true;   // objects_can_see_flag (object list, cutscene flag, real)
         case 10: fn = 19; pos = 1; return true;   // sleep (short, script)
+        case 14: fn = 299; pos = 0; return true;  // cinematic_set_title (cutscene title)
         }
         return false;
     };
@@ -273,7 +278,7 @@ static int h1u_calls(std::string &d, size_t nodes, uint32_t count, size_t string
         if (get16(d, w + 6) & 3 || get16(d, w) == 0 || (wi != 7 && wi != 5 && wi != 62)) continue;
         const size_t wname = at(get32(d, w + 16));
         const size_t c = wname ? at(get32(d, wname + 8)) : 0;
-        if (!c || get16(d, c + 6) & 3 || get16(d, c + 2) < 422 || get16(d, c + 2) > 441 || get32(d, c + 8) != 0xFFFFFFFFu) continue;
+        if (!c || get16(d, c + 6) & 3 || get16(d, c + 2) < 422 || get16(d, c + 2) > 445 || get32(d, c + 8) != 0xFFFFFFFFu) continue;
         put16(d, w + 2, get16(d, c + 2));
         put32(d, w + 16, get32(d, c + 16));
         put32(d, wname + 8, 0xFFFFFFFFu);   // (the call's node let go of: its name is the wrapper's now)
@@ -286,7 +291,7 @@ static int h1u_calls(std::string &d, size_t nodes, uint32_t count, size_t string
     for (uint32_t i = 0; i < count; i++) {
         const size_t c = nodes + (size_t)i * kNodeSize;
         const uint16_t fi = get16(d, c + 2);
-        if (get16(d, c + 6) & 1 || get16(d, c) == 0 || fi < 422 || fi > 441) continue;
+        if (get16(d, c + 6) & 1 || get16(d, c) == 0 || fi < 422 || fi > 445) continue;
         const size_t name = at(get32(d, c + 16));
         if (!name || get16(d, name + 2) != fi) continue;
         size_t prev = name;
