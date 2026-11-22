@@ -3003,6 +3003,7 @@ static bool scenario_is_campaign(const Job &job) {
 // is built in a folder of its own (its scenario and scripts read first), several at once; the conversion's tags stay
 // as they were.
 static void drop_unplaced_palette(Job &job, const fs::path &xsrc);
+static int trim_part_graphs(Job &job, const fs::path &part_tags, const std::string &scen, size_t &bytes);
 static std::string campaign_halves(Job &job, std::vector<std::string> cmd, bool no_scripts = false) {
     std::error_code ec;
     const std::string scen = job.scenario + ".scenario";
@@ -3088,6 +3089,8 @@ static std::string campaign_halves(Job &job, std::vector<std::string> cmd, bool 
         double mb = 0;
         std::string err;
         int encounters = 0, scripts_dropped = 0;
+        int anims_gone = 0;     // animations only the other parts' seats and weapons use, left out of this one
+        size_t anim_bytes = 0;
     };
     const fs::path root = job.work / "halves";
     fs::remove_all(root, ec);
@@ -3148,6 +3151,8 @@ static std::string campaign_halves(Job &job, std::vector<std::string> cmd, bool 
             if (!campaign::strip_scenario(own, st, out)) { x.mb = -1; x.err = out.why; return x; }
         }
         x.encounters = out.encounters;
+        // (its characters' animations for seats and weapons only the other parts have left out, as its own conversion does)
+        if (!job.cfg.xbox_perfect) x.anims_gone = trim_part_graphs(job, dir / "tags", scen, x.anim_bytes);
         std::set<std::string> bsp_names;
         for (auto &t : texts) for (auto &nm : campaign::bsp_index_names(t.second)) bsp_names.insert(nm);
         for (auto &[path, text] : texts) {
@@ -3356,8 +3361,8 @@ static std::string campaign_halves(Job &job, std::vector<std::string> cmd, bool 
             const Run &x = checked[k];
             if (x.mb < 0) size = "couldn't be built: " + x.err;
             else {
-                snprintf(buf, sizeof buf, "%.1f MB%s (%d encounters and %d scripts left to other parts)", x.mb, x.mb > limit ? ", over" : "",
-                         x.encounters, x.scripts_dropped);
+                snprintf(buf, sizeof buf, "%.1f MB%s (%d encounters and %d scripts left to other parts; %d animations only their seats and weapons use, %.1f MB)",
+                         x.mb, x.mb > limit ? ", over" : "", x.encounters, x.scripts_dropped, x.anims_gone, x.anim_bytes / 1048576.0);
                 size = buf;
             }
         } else {
@@ -4194,11 +4199,14 @@ Result run_build(Job &job, const std::string &scenario, const fs::path &output, 
         }
         // More script nodes than the target takes: the code the scripts repeat gathered into static scripts, once.
         // ("Estimate parts": each part keeps only its share of them, so the parts are measured without the scripts)
-        if (f.nodes > f.node_limit && f.node_limit > 0 && halves && !halves_no_scripts) {
+        // (The weapons & vehicles window's measurement too: what each weapon and vehicle takes doesn't depend on the
+        // scripts, and a level converted in parts keeps only its share of them in each.)
+        if (f.nodes > f.node_limit && f.node_limit > 0 && (halves || job.analysis) && !halves_no_scripts) {
             // (built on with a script that does nothing in their place, so the fixes the rest of the level needs are made
             // before the parts are measured: b30_evolved's contrail and lightning, behind its scripts)
             job.log("The level's scripts are over the Xbox's " + thousands(f.node_limit) + " script nodes as one map (" + thousands(f.nodes) +
-                    "): the parts are measured without them (each part keeps only its share); built on with a stand-in script for its other fixes");
+                    (job.analysis ? "): measured without them (the level in parts keeps only its share in each); built with a stand-in script"
+                                  : "): the parts are measured without them (each part keeps only its share); built on with a stand-in script for its other fixes"));
             halves_no_scripts = true;
             const fs::path sd = job.work / "estimate_data";
             fs::remove_all(sd, ec);
@@ -8008,6 +8016,52 @@ static int trim_graph(tagfile::TagNode &root, const AnimNeeds &need, size_t &byt
                 if (auto *types = tagfile::block(wc, "weapon types")) for (auto &wt : *types) remap_all(tagfile::block(wt, "animations"));
             }
     });
+    return gone;
+}
+
+// A part of a level converted in parts: its characters' graphs without what only the other parts' seats and weapons
+// use, saved in the part's own tags (`part_tags`, read before the level's). Its weapons, vehicles and characters
+// are those its own scenario (there) leads to; the scripts' names, the whole level's (they're kept as the level has
+// them). The part's own conversion trims them the same way; the estimate that plans the parts measures them so.
+// Returns the animations left out; `bytes` gets their data.
+static int trim_part_graphs(Job &job, const fs::path &part_tags, const std::string &scen, size_t &bytes) {
+    std::vector<fs::path> dirs{part_tags};
+    for (auto &d : job.dirs()) dirs.push_back(d);
+    std::set<std::string> seen;
+    std::vector<std::string> todo{scen}, deps;
+    while (!todo.empty()) {
+        std::string rel = todo.back();
+        todo.pop_back();
+        if (!seen.insert(rel).second) continue;
+        const std::string ext = fs::path(from_u8(rel)).extension().u8string();
+        // (what can't lead to a weapon, vehicle or character)
+        if (ext == ".bitmap" || ext == ".sound" || ext == ".model" || ext == ".gbxmodel" || ext == ".model_animations" ||
+            ext == ".model_collision_geometry" || ext == ".physics" || ext == ".scenario_structure_bsp" ||
+            ext.rfind(".shader", 0) == 0 || ext == ".sound_looping" || ext == ".particle" || ext == ".decal")
+            continue;
+        for (auto &d : dirs) {
+            std::ifstream f(d / from_u8(rel), std::ios::binary);
+            if (!f) continue;
+            std::string data((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+            if (rel != scen) deps.push_back(rel);
+            for (auto &r : tag_file_references(data)) if (!seen.count(r)) todo.push_back(r);
+            break;
+        }
+    }
+    const AnimNeeds need = anim_needs(job, deps);
+    if (!need.ok) return 0;
+    int gone = 0;
+    for (auto &g : need.graphs) {
+        const std::string dep = g;   // (lowercase, as the tags are named)
+        fs::path own = job.owner(dep);
+        tagfile::EditTag ed;
+        if (own.empty() || !ed.load(own / from_u8(dep))) continue;
+        int n = trim_graph(ed.root(), need, bytes);
+        if (!n) continue;
+        std::error_code ec;
+        fs::create_directories((part_tags / from_u8(dep)).parent_path(), ec);
+        if (ed.save(part_tags / from_u8(dep))) gone += n;
+    }
     return gone;
 }
 
@@ -21385,7 +21439,9 @@ bool measure_prepared(const Config &cfg_in, const fs::path &update, ContentAnaly
     // to its palettes to be measured as replacements).
     job.analysis = &out;
     fs::path dummy = job.work / "measure" / (fs::path(from_u8(u.scenario)).filename().u8string() + ".map");
+    const std::vector<std::string> extra = job.extra;   // (a stand-in script measures a level over the script nodes)
     Result r = run_build(job, u.scenario, dummy, u.share);
+    job.extra = extra;
     std::error_code ec;
     fs::path bak = job.work / "choices_backup.scenario";
     if (!job.choices_scenario.empty() && fs::exists(bak)) copy_over(bak, job.choices_scenario, ec);

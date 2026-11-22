@@ -1267,6 +1267,10 @@ Weapons & vehicles window (Xbox)
   of ...". Replacing a vehicle with none (or with another vehicle) removes
   its pieces with it, and Keep brings them back; a piece can also go on its
   own (Keep or None).
+  A level whose scripts are over the Xbox's 19,001 script nodes as one map
+  (b30_evolved: 34,957) is measured with a stand-in script in their place:
+  what each weapon and vehicle takes doesn't depend on them, and converted
+  in parts, each part keeps only its share.
   Measuring takes about as long as a conversion (the app prepares the map and
   builds a test copy, then reads back what each part takes), unless the map
   was converted or unpacked with the Xbox
@@ -2529,7 +2533,10 @@ where a little above it is, a point outside a BSP's bounds never in it (a
 BSP whose collision has no outside, b30_evolved's b30r_empty, otherwise
 counts everything as in it), and the command lists of BSPs that go (and
 the AI animations only they used) go too, unless a script or a squad
-names them. The plan is kept for the map, and the parts box set to it: Convert
+names them. Each part is measured with its characters' animation graphs
+as its own conversion makes them: without the animations only the other
+parts' vehicle seats and weapons use (the plan lists how many went). The
+plan is kept for the map, and the parts box set to it: Convert
 the pieces builds those parts; with no plan for the parts picked, Convert
 the pieces estimates first and builds the plan's parts. A level's pieces
 go together: when one fails, the rest aren't built. A level whose BSPs
