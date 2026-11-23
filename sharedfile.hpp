@@ -24,6 +24,13 @@
 namespace sharedfile {
 namespace fs = std::filesystem;
 
+// Format 4 (docs/shared_maps.md, "Shared tag data"): when on, every map made is given a recipe: its tag data rebuilt as
+// it loads from the stock tag pool (stocktags.shared, which Halo 1 Unlimited's installer builds on each Xbox; made here
+// once from the Xbox maps folder's 23 retail maps and kept in `cache`) and from its pack's tag part (in the pack's file),
+// the words they hold zeroed in the map. Off: maps as format 3 (one with a recipe read is made again without it).
+void set_tag_recipes(bool on);
+bool tag_recipes();
+
 struct Result {
     bool ok = false;
     std::string error;

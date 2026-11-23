@@ -11,6 +11,7 @@
 #include <fstream>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <thread>
 #include <tuple>
@@ -27,10 +28,17 @@ const uint32_t kStockSum = 0xA7FE2F70u, kStockLength = 238745600u;
 // The one before (v1.94-1.96: the multiplayer maps alone), whose blocks are where they are in this one.
 const uint32_t kOldStockSum = 0xC028F8BFu, kOldStockLength = 78260224u;
 const uint64_t kMultiplayerCache = 47ull * 1048576;   // (a map drawing on a packed shared file must fit one unpacked)
-const uint32_t kTagBase = 0x803A6000u, kRef = 0x700, kRefSize = 0x68;
+const uint32_t kTagBase = 0x803A6000u, kRef = 0x700, kRefSize = 0x68, kRefSize3 = 0x7C;   // (version 2; 3, with a recipe)
 const size_t kEdge = 65536;   // (a map's identity: its size and the CRC32s of this much at its start and its end)
 const uint32_t kPack = 0x80000000u, kStock = 0xC0000000u, kOffset = 0x3FFFFFFFu, kMaxShared = 0x11600000u;
 const uint32_t kBitmap = 0x6269746Du, kSound = 0x736E6421u;
+// Format 4 (shared tag data): frames, runs, the tag cache, and the canonical stock tag pool (from the 23 NTSC retail maps
+// by the pool's rule: its identity in a map's reference).
+const size_t kFrameWords = 4096;   // (a 16 KB frame of the pool, or slice of a pack's tag part)
+const size_t kMinRun = 16;         // (a run is 16 words or more, for the pool and for packs)
+const uint64_t kTagCache = 22ull * 1048576, kScratch = 65536;
+const uint32_t kPoolCrc = 0xC52152D9u, kPoolSize = 52854036u;
+std::atomic<bool> g_recipes{false};
 const size_t npos = (size_t)-1;
 
 uint32_t crc32_of(const char *d, size_t n) {   // (zlib's CRC32)
@@ -176,6 +184,260 @@ uint64_t hash_bytes(const char *p, size_t n, uint64_t seed = 0x9E3779B97F4A7C15u
     return h ^ (h >> 29);
 }
 
+// ---- Format 4 (docs/shared_maps.md, "Shared tag data"): a map's tag data rebuilt as it loads, by a recipe in the map,
+// from the stock tag pool (stocktags.shared, which every Xbox's installer builds from its own retail maps) and from its
+// pack's tag part (the words two or more of the pack's maps have that the pool doesn't, in its .shared file).
+
+// Each 8-word window of a word sequence, at its earliest position.
+struct Windows {
+    const std::vector<uint32_t> *w = nullptr;
+    std::vector<uint64_t> slot;   // (the hash's top half | the position)
+    size_t mask = 0, used = 0;
+    void init(const std::vector<uint32_t> *src, int bits) { w = src; slot.assign((size_t)1 << bits, 0); mask = slot.size() - 1; used = 0; }
+    static uint64_t hash(const uint32_t *p) {
+        uint64_t h = 0x9E3779B97F4A7C15ull;
+        for (int i = 0; i < 8; i++) { h ^= p[i]; h *= 0xFF51AFD7ED558CCDull; h ^= h >> 29; }
+        return h | (1ull << 63);
+    }
+    void grow() {
+        std::vector<uint64_t> old;
+        old.swap(slot);
+        slot.assign(old.size() * 2, 0);
+        mask = slot.size() - 1;
+        for (uint64_t s : old)
+            if (s) {
+                size_t i = (s >> 32) & mask;
+                while (slot[i]) i = (i + 1) & mask;
+                slot[i] = s;
+            }
+    }
+    void add(size_t pos) {
+        if ((used + 1) * 2 > slot.size()) grow();
+        const uint64_t h = hash(&(*w)[pos]);
+        size_t i = (h >> 32) & mask;
+        while (slot[i]) {
+            if ((slot[i] >> 32) == (h >> 32) && memcmp(&(*w)[(uint32_t)slot[i]], &(*w)[pos], 32) == 0) return;   // (the earlier one stays)
+            i = (i + 1) & mask;
+        }
+        slot[i] = (h & 0xFFFFFFFF00000000ull) | (uint32_t)pos;
+        used++;
+    }
+    long find(const uint32_t *p) const {
+        const uint64_t h = hash(p);
+        size_t i = (h >> 32) & mask;
+        while (slot[i]) {
+            if ((slot[i] >> 32) == (h >> 32) && memcmp(&(*w)[(uint32_t)slot[i]], p, 32) == 0) return (long)(uint32_t)slot[i];
+            i = (i + 1) & mask;
+        }
+        return -1;
+    }
+};
+struct Pool {
+    std::vector<uint32_t> w;
+    Windows idx;
+};
+// The pool by its rule: the 23 maps in kStockMaps' order, each one's tag data as words walked against the pool so far
+// (this map's own new words too): a word's 8-word window at its earliest place in the pool, extended forward; 16 words or
+// more is a copy, else that word is new (appended).
+bool build_pool(const std::vector<fs::path> &paths, std::vector<uint32_t> &pool, std::string &why) {
+    pool.clear();
+    Windows idx;
+    idx.init(&pool, 24);
+    for (auto &p : paths) {
+        std::vector<uint32_t> w;
+        {
+            std::string disk, data;
+            bool c;
+            if (!read_file(p, disk)) { why = name_of(p) + " couldn't be read"; return false; }
+            if (!unpack(disk, data, c, why)) { why = name_of(p) + ": " + why; return false; }
+            const uint32_t to = get32(data, 0x10), ts = get32(data, 0x14);
+            if (ts % 4 || (uint64_t)to + ts > data.size()) { why = name_of(p) + "'s tag data isn't whole words"; return false; }
+            w.resize(ts / 4);
+            memcpy(w.data(), data.data() + to, ts);
+        }
+        for (size_t i = 0; i < w.size();) {
+            size_t k = 0;
+            if (i + 8 <= w.size()) {
+                const long q = idx.find(&w[i]);
+                if (q >= 0) while (i + k < w.size() && (size_t)q + k < pool.size() && w[i + k] == pool[(size_t)q + k]) k++;
+            }
+            if (k >= kMinRun) { i += k; continue; }
+            pool.push_back(w[i++]);
+            if (pool.size() >= 8) idx.add(pool.size() - 8);
+        }
+    }
+    return true;
+}
+// The pool (made once from the Xbox's retail maps, kept in `cache` as stocktags.pool), with its windows. Null (`why`)
+// when it can't be had, or the maps make another one.
+const Pool *stock_pool(const fs::path &cache, const fs::path &stock_maps, const std::function<void(const std::string &)> &log, std::string &why) {
+    static std::mutex mu;
+    static std::unique_ptr<Pool> have;
+    std::lock_guard<std::mutex> lock(mu);
+    if (have) return have.get();
+    const fs::path file = cache / "stocktags.pool";
+    std::string raw;
+    if (!read_file(file, raw) || raw.size() != kPoolSize || crc32_of(raw.data(), raw.size()) != kPoolCrc) {
+        const std::vector<fs::path> paths = stock_maps_in(stock_maps);
+        if (paths.empty()) { why = "the Xbox maps folder needs the 23 retail maps (the stock tag pool is made from them)"; return nullptr; }
+        log("Making the stock tag pool from the Xbox's 23 retail maps (once: it's kept)...");
+        std::vector<uint32_t> w;
+        if (!build_pool(paths, w, why)) return nullptr;
+        raw.assign((const char *)w.data(), w.size() * 4);
+        const uint32_t crc = crc32_of(raw.data(), raw.size());
+        if (raw.size() != kPoolSize || crc != kPoolCrc) {
+            char t[200];
+            snprintf(t, sizeof t, "from these maps the stock tag pool comes out %08x (%zu bytes), not the canonical %08x (%u bytes): the Xbox maps "
+                     "folder's maps aren't the NTSC retail ones", crc, raw.size(), kPoolCrc, kPoolSize);
+            why = t;
+            return nullptr;
+        }
+        std::error_code ec;
+        fs::create_directories(cache, ec);
+        write_file(file, raw);
+    }
+    auto p = std::make_unique<Pool>();
+    p->w.resize(raw.size() / 4);
+    memcpy(p->w.data(), raw.data(), raw.size());
+    p->idx.init(&p->w, 25);
+    for (size_t i = 0; i + 8 <= p->w.size(); i++) p->idx.add(i);
+    have = std::move(p);
+    return have.get();
+}
+void leb(std::string &o, uint64_t v) {
+    do {
+        uint8_t b = v & 0x7F;
+        v >>= 7;
+        if (v) b |= 0x80;
+        o.push_back((char)b);
+    } while (v);
+}
+bool unleb(const std::string &r, size_t &at, uint64_t &v) {
+    v = 0;
+    for (int s = 0; s < 64; s += 7) {
+        if (at >= r.size()) return false;
+        const uint8_t b = (uint8_t)r[at++];
+        v |= (uint64_t)(b & 0x7F) << s;
+        if (!(b & 0x80)) return true;
+    }
+    return false;
+}
+// A map's tag data rebuilt from its recipe (a version 3 reference with one), in place: false (`why`) if the recipe or
+// what it copies from is wrong. `zeros`: the words it writes must be zeros in the map (a map read back).
+bool apply_recipe(std::string &d, const Pool *pool, const std::string *pack, bool zeros, std::string &why) {
+    if (d.compare(kRef, 4, "drhs") != 0 || get32(d, kRef + 4) != 3) return true;
+    const uint32_t ro = get32(d, kRef + 0x68), rs = get32(d, kRef + 0x6C), to = get32(d, 0x10), ts = get32(d, 0x14);
+    if (!rs) return true;
+    if ((uint64_t)ro + rs > d.size() || (uint64_t)to + ts > d.size()) { why = "its recipe isn't in the file"; return false; }
+    const std::string rec = d.substr(ro, rs);
+    const size_t words = ts / 4;
+    std::vector<uint8_t> written(words, 0);
+    const uint32_t *tp = nullptr;
+    size_t tp_words = 0;
+    if (pack) {
+        const uint32_t po = get32(*pack, 0x68), ps = get32(*pack, 0x6C);
+        if (ps && (uint64_t)po + ps <= pack->size() && ps % 4 == 0) { tp = (const uint32_t *)(pack->data() + po); tp_words = ps / 4; }
+    }
+    size_t at = 0;
+    for (int kind = 0; kind < 2; kind++) {   // (the stock groups, then the pack's)
+        const uint32_t *src = kind == 0 ? (pool ? pool->w.data() : nullptr) : tp;
+        const size_t src_words = kind == 0 ? (pool ? pool->w.size() : 0) : tp_words;
+        uint64_t groups, frame = 0;
+        if (!unleb(rec, at, groups)) { why = "its recipe is cut short"; return false; }
+        if (groups && !src) {
+            why = kind == 0 ? "its recipe copies from a stock tag pool that isn't here" : "its recipe copies from its pack's tag part, and its pack's file has none";
+            return false;
+        }
+        if (kind == 0 && groups && (get32(d, kRef + 0x70) != kPoolCrc || get32(d, kRef + 0x74) != kPoolSize)) {
+            why = "it was made against another stock tag pool";
+            return false;
+        }
+        for (uint64_t g = 0; g < groups; g++) {
+            uint64_t f, runs;
+            if (!unleb(rec, at, f) || !unleb(rec, at, runs)) { why = "its recipe is cut short"; return false; }
+            if (g && !f) { why = "its recipe's frames aren't in order"; return false; }
+            frame = g ? frame + f : f;
+            const uint64_t first = frame * kFrameWords;
+            if (first >= src_words || !runs) { why = "its recipe names a frame that isn't there"; return false; }
+            const uint64_t fwords = std::min<uint64_t>(kFrameWords, src_words - first);
+            uint64_t end = 0;
+            for (uint64_t k = 0; k < runs; k++) {
+                uint64_t dd, off, len;
+                if (!unleb(rec, at, dd) || !unleb(rec, at, off) || !unleb(rec, at, len)) { why = "its recipe is cut short"; return false; }
+                const uint64_t dest = end + dd;
+                if (!len || off + len > fwords || dest + len > words) { why = "its recipe has a run outside its tag data or a frame"; return false; }
+                for (uint64_t x = dest; x < dest + len; x++) {
+                    if (written[x]) { why = "its recipe writes a word twice"; return false; }
+                    written[x] = 1;
+                }
+                if (zeros)
+                    for (uint64_t x = dest; x < dest + len; x++)
+                        if (get32(d, to + x * 4) != 0) { why = "a word its recipe writes isn't zero in the map"; return false; }
+                memcpy(&d[to + dest * 4], src + first + off, len * 4);
+                end = dest + len;
+            }
+        }
+    }
+    if (at != rec.size()) { why = "its recipe has more in it than its runs"; return false; }
+    if (crc32_of(d.data() + to, ts) != get32(d, kRef + 0x78)) { why = "its tag data rebuilt isn't what it was made from (CRC32)"; return false; }
+    return true;
+}
+// A run of a recipe: `len` words written at `dest` from `src` (in the pool, or the pack's tag part).
+struct Run {
+    uint32_t dest, src, len;
+    bool pack;
+};
+// The recipe for these runs (format 4): split at frames, maximal, the stock groups by frame then the pack's.
+std::string encode_recipe(std::vector<Run> runs, size_t &count, std::set<uint32_t> &frames) {
+    std::vector<Run> split;
+    for (auto &r : runs)
+        for (uint32_t s = r.src, d = r.dest, left = r.len; left;) {
+            const uint32_t n = std::min<uint32_t>(left, (uint32_t)(kFrameWords - s % kFrameWords));
+            split.push_back({d, s, n, r.pack});
+            s += n, d += n, left -= n;
+        }
+    std::sort(split.begin(), split.end(), [](const Run &a, const Run &b) {
+        const uint32_t fa = a.src / kFrameWords, fb = b.src / kFrameWords;
+        return std::tie(a.pack, fa, a.dest) < std::tie(b.pack, fb, b.dest);
+    });
+    std::vector<Run> m;   // (maximal: one that continues the last in its tag data and its frame joins it)
+    for (auto &r : split) {
+        if (!m.empty() && m.back().pack == r.pack && m.back().src / kFrameWords == r.src / kFrameWords && m.back().dest + m.back().len == r.dest &&
+            m.back().src + m.back().len == r.src)
+            m.back().len += r.len;
+        else m.push_back(r);
+    }
+    count = m.size();
+    std::string out;
+    for (int kind = 0; kind < 2; kind++) {
+        std::vector<std::pair<size_t, size_t>> groups;   // (first, end) in m
+        for (size_t i = 0; i < m.size();) {
+            if (m[i].pack != (kind == 1)) { i++; continue; }
+            size_t j = i;
+            while (j < m.size() && m[j].pack == m[i].pack && m[j].src / kFrameWords == m[i].src / kFrameWords) j++;
+            groups.push_back({i, j});
+            i = j;
+        }
+        leb(out, groups.size());
+        uint32_t last = 0;
+        for (size_t g = 0; g < groups.size(); g++) {
+            const uint32_t f = m[groups[g].first].src / kFrameWords;
+            if (kind == 0) frames.insert(f);
+            leb(out, g ? f - last : f);
+            last = f;
+            leb(out, groups[g].second - groups[g].first);
+            uint32_t end = 0;
+            for (size_t k = groups[g].first; k < groups[g].second; k++) {
+                leb(out, m[k].dest - end);
+                leb(out, m[k].src % kFrameWords);
+                leb(out, m[k].len);
+                end = m[k].dest + m[k].len;
+            }
+        }
+    }
+    return out;
+}
+
 // A texture's or sound's data: where its offset is in the map, and its bytes (in the map, or in the shared file it
 // was in). `bytes` null: left as it is (empty, or not data in the file).
 struct Block {
@@ -298,7 +560,7 @@ struct Table {
 
 // A shared file's header (docs/shared_maps.md), its data laid out after it (a pack's after its list, `list` bytes: the
 // checksum leaves the list out, as the list names each small map's CRC and each small map names this checksum).
-void shared_header(std::string &data, const std::string &name, uint32_t list = 0) {
+void shared_header(std::string &data, const std::string &name, uint32_t list = 0, uint32_t tag_off = 0, uint32_t tag_size = 0) {
     std::string h(kHeader, '\0');
     h.replace(0, 4, "daeh");
     put32(h, 4, 5);
@@ -306,6 +568,8 @@ void shared_header(std::string &data, const std::string &name, uint32_t list = 0
     h.replace(0x20, name.size(), name);
     put32(h, 0x18, list);
     h.replace(0x40, 6, "shared");
+    put32(h, 0x68, tag_off);   // (its tag part: format 4)
+    put32(h, 0x6C, tag_size);
     put32(h, 0x64, crc32_of(data.data() + kHeader + list, data.size() - kHeader - list));
     h.replace(0x7FC, 4, "toof");
     data.replace(0, kHeader, h);
@@ -338,6 +602,12 @@ struct Map {
     std::string error;
     std::string skipped;   // why it's left as it is (it can't be read)
     std::string ref_name;  // the pack's file it drew on
+    // format 4: its recipe (tag data rebuilt from the stock tag pool and the pack's tag part)
+    std::string recipe;
+    uint32_t tag_crc = 0;
+    size_t recipe_runs = 0, from_pool = 0, from_pack = 0;   // (runs; words)
+    std::set<uint32_t> pool_frames;
+    uint32_t recipe_cut = 0;   // (read: where its old recipe was)
 };
 
 // Where each block goes: 0 stays, 1 the pack's file, 2 stock.shared.
@@ -345,6 +615,38 @@ struct Plan {
     std::vector<int> go;
     std::vector<uint32_t> at;   // its offset in that shared file
 };
+
+// The map's reference (its header's 0x700): version 2, or 3 with its recipe (at `recipe_at` in it).
+void write_ref(Map &m, const std::string &pack_name, const Source &pack, const Source &stock, uint32_t recipe_at = 0) {
+    std::string ref(kRefSize3, '\0');
+    const bool recipe = !m.recipe.empty();
+    if (m.pack_ref || m.stock_ref || recipe) {
+        ref.replace(0, 4, "drhs");
+        put32(ref, 4, recipe ? 3 : 2);
+        if (m.pack_ref) {
+            ref.replace(0x08, pack_name.size(), pack_name);
+            put32(ref, 0x28, pack.sum);
+            put32(ref, 0x2C, pack.length);
+        }
+        put32(ref, 0x30, m.ident_size);
+        put32(ref, 0x34, m.ident_sum);
+        if (m.stock_ref) {
+            ref.replace(0x38, 5, "stock");
+            put32(ref, 0x58, stock.sum);
+            put32(ref, 0x5C, stock.length);
+        }
+        put32(ref, 0x60, m.ident_head);
+        put32(ref, 0x64, m.ident_tail);
+        if (recipe) {
+            put32(ref, 0x68, recipe_at);
+            put32(ref, 0x6C, (uint32_t)m.recipe.size());
+            put32(ref, 0x70, kPoolCrc);
+            put32(ref, 0x74, kPoolSize);
+            put32(ref, 0x78, m.tag_crc);
+        }
+    }
+    m.out.replace(kRef, kRefSize3, ref);
+}
 
 // The map laid out again: what moved left out in whole 512-byte units, each kept unit moved down; blocks that stay but
 // weren't in the map (they were in a shared file) placed after the rest. Returns false (`m.error`) if it can't be.
@@ -420,32 +722,88 @@ bool relayout(Map &m, const Plan &plan, const std::string &pack_name, const Sour
     if (bad) { m.error = "something that stays in it lies in a sector of what moved"; return false; }
     out.append((kSector - out.size() % kSector) % kSector, '\0');   // (whole sectors: the game copies a map to its cache in them)
     put32(out, 8, (uint32_t)out.size());
-    std::string ref(kRefSize, '\0');
-    if (m.pack_ref || m.stock_ref) {
-        ref.replace(0, 4, "drhs");
-        put32(ref, 4, 2);
-        if (m.pack_ref) {
-            ref.replace(0x08, pack_name.size(), pack_name);
-            put32(ref, 0x28, pack.sum);
-            put32(ref, 0x2C, pack.length);
-        }
-        put32(ref, 0x30, m.ident_size);
-        put32(ref, 0x34, m.ident_sum);
-        if (m.stock_ref) {
-            ref.replace(0x38, 5, "stock");
-            put32(ref, 0x58, stock.sum);
-            put32(ref, 0x5C, stock.length);
-        }
-        put32(ref, 0x60, m.ident_head);
-        put32(ref, 0x64, m.ident_tail);
-    }
-    out.replace(kRef, kRefSize, ref);
+    write_ref(m, pack_name, pack, stock);
     return true;
+}
+
+// The pack pass (format 4): each map's tag data, in the maps' order, matched against the stock tag pool and the pack's
+// candidates (the words earlier maps kept as their own, in the order they came; a map's join once it's done): at a word,
+// its 8-word window's earliest place in each, extended forward; the longer wins (a tie: the pool); 16 words or more is a
+// run, else that word is the map's own. The pack's tag part is every candidate word a later map's run uses, in candidate
+// order; a map's own words in it are runs from it in its recipe too. Each map's recipe made, the words it writes zeroed.
+// A map whose tag data leaves no room to rebuild it in (64 KB below the 22 MB tag cache's top) has none.
+void tag_pass(const std::vector<Map *> &ms, const Pool &pool, std::vector<uint32_t> &tag_part) {
+    std::vector<uint32_t> cand;
+    Windows cx;
+    cx.init(&cand, 18);
+    std::vector<uint8_t> used;
+    std::vector<size_t> cand_first(ms.size(), 0);
+    std::vector<std::vector<uint32_t>> own(ms.size());   // (each map's own words' places: its candidates, in order)
+    std::vector<std::vector<Run>> runs(ms.size());
+    std::vector<uint8_t> room(ms.size(), 0);
+    const std::vector<uint32_t> &P = pool.w;
+    for (size_t k = 0; k < ms.size(); k++) {
+        Map &m = *ms[k];
+        const uint32_t to = get32(m.out, 0x10), ts = get32(m.out, 0x14);
+        if ((uint64_t)ts + kScratch > kTagCache || (uint64_t)to + ts > m.out.size()) continue;
+        room[k] = 1;
+        const size_t n = ts / 4;
+        std::vector<uint32_t> T(n);
+        memcpy(T.data(), m.out.data() + to, n * 4);
+        for (size_t i = 0; i < n;) {
+            size_t lp = 0, lc = 0;
+            long p = -1, c = -1;
+            if (i + 8 <= n) {
+                p = pool.idx.find(&T[i]);
+                if (p >= 0) while (i + lp < n && (size_t)p + lp < P.size() && T[i + lp] == P[(size_t)p + lp]) lp++;
+                if (!cand.empty()) c = cx.find(&T[i]);
+                if (c >= 0) while (i + lc < n && (size_t)c + lc < cand.size() && T[i + lc] == cand[(size_t)c + lc]) lc++;
+            }
+            const size_t len = std::max(lp, lc);
+            if (len >= kMinRun) {
+                if (lp >= lc) runs[k].push_back({(uint32_t)i, (uint32_t)p, (uint32_t)lp, false});
+                else {
+                    runs[k].push_back({(uint32_t)i, (uint32_t)c, (uint32_t)lc, true});
+                    std::fill(used.begin() + c, used.begin() + c + (long)lc, 1);
+                }
+                i += len;
+            } else own[k].push_back((uint32_t)i++);
+        }
+        const size_t old = cand.size();   // (its own words: the next maps' candidates)
+        cand_first[k] = old;
+        for (uint32_t d : own[k]) cand.push_back(T[d]);
+        used.resize(cand.size(), 0);
+        for (size_t q = old >= 7 ? old - 7 : 0; q + 8 <= cand.size(); q++) cx.add(q);
+    }
+    std::vector<uint32_t> tpos(cand.size(), 0);
+    tag_part.clear();
+    for (size_t q = 0; q < cand.size(); q++)
+        if (used[q]) { tpos[q] = (uint32_t)tag_part.size(); tag_part.push_back(cand[q]); }
+    for (size_t k = 0; k < ms.size(); k++) {
+        if (!room[k]) continue;
+        Map &m = *ms[k];
+        std::vector<Run> rr;
+        for (auto &r : runs[k]) {
+            if (!r.pack) { rr.push_back(r); m.from_pool += r.len; }
+            else { rr.push_back({r.dest, tpos[r.src], r.len, true}); m.from_pack += r.len; }
+        }
+        for (size_t j = 0; j < own[k].size(); j++) {   // (its own words in the tag part)
+            const size_t q = cand_first[k] + j;
+            if (!used[q]) continue;
+            rr.push_back({own[k][j], tpos[q], 1, true});
+            m.from_pack++;
+        }
+        if (rr.empty()) continue;   // (nothing in it from elsewhere: no recipe)
+        const uint32_t to = get32(m.out, 0x10), ts = get32(m.out, 0x14);
+        m.tag_crc = crc32_of(m.out.data() + to, ts);
+        m.recipe = encode_recipe(rr, m.recipe_runs, m.pool_frames);
+        for (auto &r : rr) memset(&m.out[to + (size_t)r.dest * 4], 0, (size_t)r.len * 4);
+    }
 }
 
 // The new map read back: unpacked again, every texture and sound through the new files the same bytes as before, the
 // BSPs and the tag data the same (but for the offsets that changed), the header the same but for what changed.
-bool check(Map &m, const Source &pack, const Source &stock) {
+bool check(Map &m, const Source &pack, const Source &stock, const Pool *pool = nullptr) {
     if (m.compressed) {
         std::string data;
         bool c = false;
@@ -458,7 +816,14 @@ bool check(Map &m, const Source &pack, const Source &stock) {
     };
     Parsed q;
     std::string why;
-    if (!parse(m.out, q, [&](uint32_t v, uint32_t n) { return (v & kStock) == kStock ? from(stock, v, n) : from(pack, v, n); }, why)) {
+    // (a recipe map: its tag data rebuilt first, as the game does, the words it writes zeros in the map, its CRC32 checked)
+    std::string rebuilt;
+    if (!m.recipe.empty()) {
+        rebuilt = m.out;
+        if (!apply_recipe(rebuilt, pool, &pack.data, true, why)) { m.error = "read back, " + why; return false; }
+    }
+    const std::string &o = m.recipe.empty() ? m.out : rebuilt;
+    if (!parse(o, q, [&](uint32_t v, uint32_t n) { return (v & kStock) == kStock ? from(stock, v, n) : from(pack, v, n); }, why)) {
         m.error = "read back, " + why;
         return false;
     }
@@ -474,7 +839,7 @@ bool check(Map &m, const Source &pack, const Source &stock) {
             return false;
         }
     }
-    const std::string &d = m.data, &o = m.out;
+    const std::string &d = m.data;
     for (size_t k = 0; k < p.bsp_fields.size(); k++) {
         const uint32_t a = get32(d, p.bsp_fields[k]), b = get32(o, q.bsp_fields[k]), n = get32(d, p.bsp_fields[k] + 4);
         if (n != get32(o, q.bsp_fields[k] + 4) || (uint64_t)a + n > d.size() || (uint64_t)b + n > o.size() || memcmp(d.data() + a, o.data() + b, n) != 0) {
@@ -488,8 +853,8 @@ bool check(Map &m, const Source &pack, const Source &stock) {
     if (td.compare(0, td.size(), d, p.td_off, p.td_size) != 0) { m.error = "read back, its tag data isn't the same"; return false; }
     std::string h0 = d.substr(0, kHeader), h1 = o.substr(0, kHeader);
     for (size_t f : {8, 0xC, 0x10, 0x64}) { put32(h0, f, 0); put32(h1, f, 0); }
-    h0.replace(kRef, kRefSize, kRefSize, '\0');
-    h1.replace(kRef, kRefSize, kRefSize, '\0');
+    h0.replace(kRef, kRefSize3, kRefSize3, '\0');
+    h1.replace(kRef, kRefSize3, kRefSize3, '\0');
     if (h0 != h1) { m.error = "read back, its header isn't the same"; return false; }
     return true;
 }
@@ -642,6 +1007,9 @@ void write_cached_stock(const fs::path &cache, const StockLayout &s) {
 }
 }   // namespace
 
+void set_tag_recipes(bool on) { g_recipes = on; }
+bool tag_recipes() { return g_recipes; }
+
 std::vector<fs::path> stock_maps_in(const fs::path &folder) {
     std::vector<fs::path> out;
     std::error_code ec;
@@ -720,7 +1088,7 @@ Result make(const fs::path &folder, const std::string &base_name, const std::vec
                     return n.empty() || fs::exists(p.parent_path() / (n + ".shared"), e2) || fs::exists(p.parent_path().parent_path() / (n + ".shared"), e2) ||
                            (n == "stock" && (fs::exists(stock_dir / "stock.shared", e2) || (!stock_maps.empty() && fs::exists(stock_maps / "stock.shared", e2))));
                 };
-                ok = there(cstr(head, kRef + 8, 32)) && (get32(head, kRef + 4) != 2 || there(cstr(head, kRef + 0x38, 32)));
+                ok = there(cstr(head, kRef + 8, 32)) && (get32(head, kRef + 4) < 2 || there(cstr(head, kRef + 0x38, 32)));
             }
             std::error_code e1, e2;
             const bool newer = !fs::exists(p, e1) || fs::last_write_time(t, e1) >= fs::last_write_time(p, e2);
@@ -806,14 +1174,14 @@ Result make(const fs::path &folder, const std::string &base_name, const std::vec
             const Source *pack_src = nullptr, *stock_src = nullptr;
             if (m.data.compare(kRef, 4, "drhs") == 0) {
                 const uint32_t version = get32(m.data, kRef + 4);
-                if (version != 1 && version != 2) { m.skipped = "it draws on shared files of a later format"; continue; }
+                if (version < 1 || version > 3) { m.skipped = "it draws on shared files of a later format"; continue; }
                 m.had_ref = true;
                 m.ident_size = get32(m.data, kRef + 0x30);
                 m.ident_sum = get32(m.data, kRef + 0x34);
                 m.ident_head = get32(m.data, kRef + 0x60);   // (0 from an earlier format: not known)
                 m.ident_tail = get32(m.data, kRef + 0x64);
                 m.ref_name = cstr(m.data, kRef + 8, 32);
-                const std::string sn = version == 2 ? cstr(m.data, kRef + 0x38, 32) : "";
+                const std::string sn = version >= 2 ? cstr(m.data, kRef + 0x38, 32) : "";
                 if (!m.ref_name.empty() && !source(m, m.ref_name, get32(m.data, kRef + 0x28), get32(m.data, kRef + 0x2C), pack_src)) {
                     m.skipped = "it draws on " + m.ref_name + ".shared, and the one it was built with isn't beside it or in the folder above";
                     continue;
@@ -821,6 +1189,19 @@ Result make(const fs::path &folder, const std::string &base_name, const std::vec
                 if (!sn.empty() && !source(m, sn, get32(m.data, kRef + 0x58), get32(m.data, kRef + 0x5C), stock_src)) {
                     m.skipped = "it draws on a stock.shared that isn't here";
                     continue;
+                }
+                // (format 4: its tag data rebuilt from its recipe first; the recipe's bytes zeroed, and cut off when
+                // they're the file's end, as the map is made again)
+                if (version == 3 && get32(m.data, kRef + 0x6C)) {
+                    std::string pwhy, why;
+                    const Pool *pl = stock_pool(cache, stock_maps, log, pwhy);
+                    if (!apply_recipe(m.data, pl, pack_src ? &pack_src->data : nullptr, false, why)) {
+                        m.skipped = "its tag data can't be rebuilt from its recipe: " + why + (pl ? "" : " (" + pwhy + ")");
+                        continue;
+                    }
+                    const uint32_t ro = get32(m.data, kRef + 0x68), rs = get32(m.data, kRef + 0x6C);
+                    memset(&m.data[ro], 0, rs);
+                    m.recipe_cut = ro;
                 }
             }
             auto resolve = [&](uint32_t v, uint32_t n) -> const char * {
@@ -830,6 +1211,16 @@ Result make(const fs::path &folder, const std::string &base_name, const std::vec
             };
             std::string why;
             if (!parse(m.data, m.p, resolve, why)) m.skipped = why;
+            else if (m.recipe_cut) {   // (nothing of it after its old recipe: the file ends there)
+                uint64_t end = (uint64_t)m.p.td_off + m.p.td_size;
+                for (size_t f : m.p.bsp_fields) end = std::max<uint64_t>(end, (uint64_t)get32(m.data, f) + get32(m.data, f + 4));
+                for (auto &b : m.p.blocks)
+                    if (b.own) end = std::max<uint64_t>(end, (uint64_t)b.value + b.size);
+                if (m.recipe_cut >= end && m.recipe_cut < m.data.size()) {
+                    m.data.resize(m.recipe_cut);
+                    if (!parse(m.data, m.p, resolve, why)) m.skipped = why;
+                }
+            }
         }
         for (auto &m : maps)
             if (!m->skipped.empty()) {
@@ -858,9 +1249,9 @@ Result make(const fs::path &folder, const std::string &base_name, const std::vec
         size_t blocks = 0;
         for (const Entry &e : t.e)
             if (e.maps >= 2 && !(use_stock && stock.t.find(e.bytes, e.size, e.rem) >= 0)) blocks++;
-        const bool has_pack = blocks > 0;
+        bool has_pack = blocks > 0;
         const size_t list_bytes = 16 + 20 * order.size() + 40 * blocks;
-        const uint32_t list_room = has_pack ? (uint32_t)((list_bytes + kSector - 1) / kSector * kSector) : 0;
+        uint32_t list_room = has_pack ? (uint32_t)((list_bytes + kSector - 1) / kSector * kSector) : 0;
         Source pack;
         pack.data.assign(kHeader + list_room, '\0');
         std::vector<Plan> plans(maps.size());
@@ -893,6 +1284,14 @@ Result make(const fs::path &folder, const std::string &base_name, const std::vec
             }
             moves = moves || m.to_pack || m.to_stock || m.had_ref;
         }
+        // ---- format 4: tag data stored once (the stock tag pool, and the pack's tag part), when asked for
+        const Pool *pool = nullptr;
+        if (g_recipes && !order.empty()) {
+            std::string why;
+            pool = stock_pool(cache, stock_maps, log, why);
+            if (!pool) log("  Tag data isn't stored once: " + why + ".");
+            else moves = true;
+        }
         // Once anything moves, every map is made again, naming the pack's file and stock.shared (as the installer's
         // pass makes them): each one is in the pack's list.
         bool stock_used = false;
@@ -904,36 +1303,79 @@ Result make(const fs::path &folder, const std::string &base_name, const std::vec
             stock_used = stock_used || m.stock_ref;
         }
         std::string name;
-        if (has_pack) {
+        uint32_t tag_off = 0, tag_size = 0;   // (the pack's tag part)
+        auto finish_pack = [&]() -> bool {   // (its header: its name is its version)
             pack.data.append((kSector - pack.data.size() % kSector) % kSector, '\0');
             if (pack.data.size() > kMaxShared) {
                 r.error = "The pack's shared file would be " + mb(pack.data.size()) + " unpacked: a shared file can be at most 278 MB. Nothing was written.";
-                return r;
+                return false;
             }
-            shared_header(pack.data, "", list_room);
+            shared_header(pack.data, "", list_room, tag_off, tag_size);
             char hex[16];
             snprintf(hex, sizeof hex, "-%08x", get32(pack.data, 0x64));
             name = base + hex;
-            shared_header(pack.data, name, list_room);   // (the name isn't in the checksum: the header isn't)
+            shared_header(pack.data, name, list_room, tag_off, tag_size);   // (the name isn't in the checksum: the header isn't)
             pack.sum = get32(pack.data, 0x64);
             pack.length = (uint32_t)pack.data.size();
-        }
+            return true;
+        };
+        if (!pool && has_pack && !finish_pack()) return r;
         bool any = false;
         for (auto &m : maps) any = any || m->rewrite;
         // ---- each map laid out again, packed and read back (at once)
         if (any) log("Laying the maps out again without what moved, packing and checking them...");
-        {
+        auto each = [&](const std::function<void(Map &, size_t)> &f) {
             std::vector<std::thread> th;
-            for (size_t i = 0; i < maps.size(); i++) {
-                if (!maps[i]->rewrite) continue;
-                th.emplace_back([&, i] {
-                    Map &m = *maps[i];
-                    if (!relayout(m, plans[i], name, pack, stock.file)) return;
-                    m.file = pack_map(m.out, m.compressed);
-                    check(m, pack, stock.file);
-                });
-            }
+            for (size_t i = 0; i < maps.size(); i++)
+                if (maps[i]->rewrite) th.emplace_back([&, i] { f(*maps[i], i); });
             for (auto &x : th) x.join();
+        };
+        if (!pool)
+            each([&](Map &m, size_t i) {
+                if (!relayout(m, plans[i], name, pack, stock.file)) return;
+                m.file = pack_map(m.out, m.compressed);
+                check(m, pack, stock.file);
+            });
+        else {
+            // (the pack's file is finished once its tag part is known: each map's reference written again then)
+            each([&](Map &m, size_t i) { relayout(m, plans[i], "", pack, stock.file); });
+            for (auto &m : maps)
+                if (!m->error.empty()) { r.error = shown(m->path) + ": " + m->error + ". Nothing was written."; return r; }
+            log("Storing the tag data once: each map's against the stock tag pool and the pack's other maps...");
+            std::vector<Map *> ms;
+            for (size_t i : order)
+                if (maps[i]->rewrite) ms.push_back(maps[i].get());
+            std::vector<uint32_t> tag_part;
+            tag_pass(ms, *pool, tag_part);
+            if (!tag_part.empty()) {   // (after the pack's last block, at a sector)
+                if (!has_pack) {
+                    list_room = (uint32_t)((16 + 20 * order.size() + kSector - 1) / kSector * kSector);
+                    pack.data.assign(kHeader + list_room, '\0');
+                    has_pack = true;
+                }
+                pack.data.append((kSector - pack.data.size() % kSector) % kSector, '\0');
+                tag_off = (uint32_t)pack.data.size();
+                tag_size = (uint32_t)(tag_part.size() * 4);
+                pack.data.append((const char *)tag_part.data(), tag_size);
+            }
+            if (has_pack && !finish_pack()) return r;
+            for (size_t i : order) {
+                Map &m = *maps[i];
+                if (!m.rewrite) continue;
+                m.pack_ref = has_pack;
+                uint32_t at = 0;
+                if (!m.recipe.empty()) {   // (its recipe after everything else in it, the map whole sectors again)
+                    at = (uint32_t)m.out.size();
+                    m.out += m.recipe;
+                    m.out.append((kSector - m.out.size() % kSector) % kSector, '\0');
+                    put32(m.out, 8, (uint32_t)m.out.size());
+                }
+                write_ref(m, name, pack, stock.file, at);
+            }
+            each([&](Map &m, size_t) {
+                m.file = pack_map(m.out, m.compressed);
+                check(m, pack, stock.file, pool);
+            });
         }
         for (auto &m : maps)
             if (!m->error.empty()) { r.error = shown(m->path) + ": " + m->error + ". Nothing was written."; return r; }
@@ -1136,13 +1578,19 @@ Result make(const fs::path &folder, const std::string &base_name, const std::vec
                 rep += shown(m->path) + ": " + mb(m->disk_size) + " -> " + mb(m->file.size()) + " (" + mb(m->out.size()) + " unpacked";
                 if (m->to_pack) rep += "; " + mb(m->to_pack) + " of its textures and sounds in " + name + ".shared";
                 if (m->to_stock) rep += "; " + mb(m->to_stock) + " in stock.shared";
+                if (!m->recipe.empty())
+                    rep += "; of its tag data's " + mb(get32(m->out, 0x14)) + ", " + mb(m->from_pool * 4) + " from the stock tag pool" +
+                           (m->from_pack ? " and " + mb(m->from_pack * 4) + " from the pack's tag part" : "") + " (a recipe of " +
+                           std::to_string(m->recipe_runs) + " runs, " + mb(m->recipe.size()) + ")";
                 rep += std::string(too_big(*m, m->out.size())) + ")\n";
             }
         }
         if (has_pack) {
             after += pack_file.size();
             rep += name + ".shared: " + mb(pack_file.size()) + (pack_unpacked ? " stored unpacked, so the game reads it where it is (a map "
-                   "drawing on it is over 47 MB unpacked)" : " (" + mb(pack.data.size()) + " unpacked)") + ", in " + folder.u8string() + "\n";
+                   "drawing on it is over 47 MB unpacked)" : " (" + mb(pack.data.size()) + " unpacked)") +
+                   (tag_size ? "; its tag part (tag data two or more of the maps have, not in the stock tag pool) " + mb(tag_size) : "") +
+                   ", in " + folder.u8string() + "\n";
             r.pack_file = name + ".shared";
         }
         if (stock_used)
@@ -1156,7 +1604,9 @@ Result make(const fs::path &folder, const std::string &base_name, const std::vec
         r.used_stock = stock_used;
         if (!stuck.empty()) rep += r.error + " Those stay as they were (whole maps, not drawing on the shared files), with their link files.\n";
         if (!any) rep += "Nothing in these maps is in two of them" + std::string(use_stock ? " or in stock.shared" : "") + ".\n";
-        else rep += "In all: " + mb(before) + " -> " + mb(after) + ". Every texture, sound, BSP and the tag data were read back through the new files and match.\n";
+        else rep += "In all: " + mb(before) + " -> " + mb(after) + ". Every texture, sound, BSP and the tag data were read back through the new files" +
+                    std::string(pool ? " (the tag data rebuilt from each map's recipe, as the game does)" : "") + " and match.\n";
+        if (pool) rep += "The maps need stocktags.shared on the Xbox (Halo 1 Unlimited's installer builds it from the retail maps; format 4).\n";
         r.ok = true;
     } catch (const std::exception &e) {
         r.error = std::string("Making the shared files failed: ") + e.what() + " (not enough memory?). Nothing was written.";

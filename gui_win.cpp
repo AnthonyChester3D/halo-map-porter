@@ -88,7 +88,7 @@ enum {
     ID_X_OPTIONS_LBL, ID_X_OPTIONS, ID_X_MAKELOD, ID_X_TRIM_LBL, ID_X_TRIM, ID_X_FOLIAGE_LBL, ID_X_FOLIAGE, ID_S_LOD_LBL, ID_S_LOD, ID_S_LOD_BROWSE, ID_S_LOD_HINT, ID_S_TOUR, ID_S_KEEP_FAILED,
     // portals for levels made without them
     ID_X_PORTALS,
-    ID_X_BOTS, ID_X_STOCK_SHARED,
+    ID_X_BOTS, ID_X_STOCK_SHARED, ID_X_TAGS_ONCE,
     // the level shaders window
     ID_X_SHADERS,
     ID_X_LODS,
@@ -117,7 +117,7 @@ enum {
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
 // The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new175.exe is 1.175).
-#define HMP_VERSION L"1.180"
+#define HMP_VERSION L"1.181"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -209,6 +209,7 @@ static void save_settings() {
     ini_set(L"x_makelod", checked(ID_X_MAKELOD) ? L"1" : L"0");
     ini_set(L"x_bots", checked(ID_X_BOTS) ? L"1" : L"0");
     ini_set(L"x_stock_shared", checked(ID_X_STOCK_SHARED) ? L"1" : L"0");
+    ini_set(L"x_tags_once", checked(ID_X_TAGS_ONCE) ? L"1" : L"0");
     ini_set(L"x_trim", std::to_wstring(std::max(0, sel(ID_X_TRIM))));
     ini_set(L"x_foliage", std::to_wstring(std::max(0, sel(ID_X_FOLIAGE))));
     ini_set(L"x_map_options", get_text(ID_X_OPTIONS));
@@ -238,6 +239,7 @@ static void save_settings() {
 
 static Config make_config() {
     Config c;
+    sharedfile::set_tag_recipes(checked(ID_X_TAGS_ONCE));   // (format 4, for every shared-file pass from here)
     c.ce_dir = fs::path(get_text(ID_S_CE));
     c.mcc_maps_dir = fs::path(get_text(ID_S_MCC));
     c.ek_dir = fs::path(get_text(ID_S_EK));
@@ -4675,8 +4677,10 @@ static void create_controls() {
     check(2, L"Add waypoints for Halo 1 Unlimited's bots where they can't find their way (item spawn points that spawn nothing)",
           26, y, 708, ID_X_BOTS);
     y += 26;
-    check(2, L"Save the map drawing on stock.shared: what the stock maps and campaign have is left out of it (needs the Xbox "
-             L"maps folder in Settings)", 26, y, 708, ID_X_STOCK_SHARED);
+    check(2, L"Save maps drawing on stock.shared (needs the Xbox maps folder in Settings)", 26, y, 448, ID_X_STOCK_SHARED);
+    // (format 4: each map's tag data rebuilt as it loads from stocktags.shared and its pack's file: Halo 1 Unlimited
+    // builds that on every Xbox, and only a build that reads it loads these maps)
+    check(2, L"Tag data from stocktags.shared too", 480, y, 254, ID_X_TAGS_ONCE);
 
     // Map packs page
     create_pack_page();
@@ -4789,6 +4793,7 @@ static void create_controls() {
     set_check(ID_X_MAKELOD, ini_get(L"x_makelod", L"1") == L"1");
     set_check(ID_X_BOTS, ini_get(L"x_bots", L"1") == L"1");
     set_check(ID_X_STOCK_SHARED, ini_get(L"x_stock_shared", L"0") == L"1");
+    set_check(ID_X_TAGS_ONCE, ini_get(L"x_tags_once", L"0") == L"1");
     SendDlgItemMessageW(g_wnd, ID_X_TRIM, CB_SETCURSEL, std::clamp(_wtoi(ini_get(L"x_trim", L"1").c_str()), 0, 5), 0);
     SendDlgItemMessageW(g_wnd, ID_X_FOLIAGE, CB_SETCURSEL, std::clamp(_wtoi(ini_get(L"x_foliage", L"0").c_str()), 0, 3), 0);
     set_text(ID_X_OPTIONS, ini_get(L"x_map_options", L""));
@@ -4929,7 +4934,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case ID_X_PERFECT:
             if (code == BN_CLICKED) { update_perfect(); save_settings(); }
             break;
-        case ID_X_LODSTOCK: case ID_X_MAKELOD: case ID_X_BOTS: case ID_X_STOCK_SHARED: case ID_S_KEEP_FAILED: case ID_X_SHRINK_STOCK:
+        case ID_X_LODSTOCK: case ID_X_MAKELOD: case ID_X_BOTS: case ID_X_STOCK_SHARED: case ID_X_TAGS_ONCE: case ID_S_KEEP_FAILED: case ID_X_SHRINK_STOCK:
             if (code == BN_CLICKED) save_settings();
             break;
         case ID_X_PORTALS: case ID_X_TRIM: case ID_X_ANIM: case ID_X_FOLIAGE:

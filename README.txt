@@ -2442,7 +2442,22 @@ converted from where it was, and an Xbox map in a map folder (with its
 info.txt). Bots play multiplayer maps only, so a campaign map gets only a
 showcase.
 
-Drawing on stock.shared one map at a time (Xbox tab, "Save the map drawing
+Tag data stored once (Xbox tab, "Tag data from stocktags.shared too";
+off to start with: Halo 1 Unlimited's shared-file format 4, which only a
+build that reads it loads): each map's tag data is rebuilt as it loads, by
+a recipe in the map, from the stock tag pool (every word of the 23 retail
+maps' tag data once: Halo 1 Unlimited's installer builds it on each Xbox as
+stocktags.shared, and this app makes the same pool once from the Xbox maps
+folder in Settings and keeps it in its data folder as stocktags.pool) and
+from the pack's tag part (what two or more of the pack's maps have that
+the pool doesn't, in the pack's .shared file). The words a recipe writes
+are zeros in the map. Each map is read back with its tag data rebuilt as
+the game does and checked against the CRC32 in its header. Boxfight's 21
+maps: 258 MB -> 155 MB; CE X's 13: 69 MB -> 43 MB. Turned off again, the
+next pass makes the maps without recipes (byte for byte what they'd have
+been).
+
+Drawing on stock.shared one map at a time (Xbox tab, "Save maps drawing
 on stock.shared"): each map converted for the Xbox, on its own or in a
 batch, is laid out again with what stock.shared has left out of it, the
 same as a map pack does. stock.shared isn't written beside it (Halo 1
