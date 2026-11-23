@@ -2442,11 +2442,11 @@ converted from where it was, and an Xbox map in a map folder (with its
 info.txt). Bots play multiplayer maps only, so a campaign map gets only a
 showcase.
 
-Tag data stored once (Xbox tab, "Tag data from stocktags.shared too"; on
-to start with from 1.182: Halo 1 Unlimited's shared-file format 4, locked
-2026-11-23, which only a build that reads it loads, with stocktags.shared
-built on the Xbox by its installer 66 or later; untick it for an Xbox that
-doesn't have those yet): each map's tag data is rebuilt as it loads, by
+Tag data stored once (with stock.shared, the Xbox tab's "Save maps drawing
+on stock.shared and stocktags.shared", from 1.183: Halo 1 Unlimited's
+shared-file format 4, locked 2026-11-23, which only a build that reads it
+loads, with stocktags.shared built on the Xbox by its installer 66 or
+later): each map's tag data is rebuilt as it loads, by
 a recipe in the map, from the stock tag pool (every word of the 23 retail
 maps' tag data once: Halo 1 Unlimited's installer builds it on each Xbox as
 stocktags.shared, and this app makes the same pool once from the Xbox maps
@@ -2460,7 +2460,8 @@ next pass makes the maps without recipes (byte for byte what they'd have
 been).
 
 Drawing on stock.shared one map at a time (Xbox tab, "Save maps drawing
-on stock.shared"): each map converted for the Xbox, on its own or in a
+on stock.shared and stocktags.shared"): each map converted for the Xbox,
+on its own or in a
 batch, is laid out again with what stock.shared has left out of it, the
 same as a map pack does. stock.shared isn't written beside it (Halo 1
 Unlimited's installer builds it on every Xbox); it needs the Xbox maps
