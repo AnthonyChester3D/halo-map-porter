@@ -28,7 +28,7 @@ const uint32_t kStockSum = 0xA7FE2F70u, kStockLength = 238745600u;
 // The one before (v1.94-1.96: the multiplayer maps alone), whose blocks are where they are in this one.
 const uint32_t kOldStockSum = 0xC028F8BFu, kOldStockLength = 78260224u;
 const uint64_t kMultiplayerCache = 47ull * 1048576;   // (a map drawing on a packed shared file must fit one unpacked)
-const uint32_t kTagBase = 0x803A6000u, kRef = 0x700, kRefSize = 0x68, kRefSize3 = 0x7C;   // (version 2; 3, with a recipe)
+const uint32_t kTagBase = 0x803A6000u, kRef = 0x700, kRefSize = 0x68, kRefSize3 = 0x80;   // (version 2; 4 (and 3 before it), with a recipe)
 const size_t kEdge = 65536;   // (a map's identity: its size and the CRC32s of this much at its start and its end)
 const uint32_t kPack = 0x80000000u, kStock = 0xC0000000u, kOffset = 0x3FFFFFFFu, kMaxShared = 0x11600000u;
 const uint32_t kBitmap = 0x6269746Du, kSound = 0x736E6421u;
@@ -322,15 +322,33 @@ bool unleb(const std::string &r, size_t &at, uint64_t &v) {
     }
     return false;
 }
-// A map's tag data rebuilt from its recipe (a version 3 reference with one), in place: false (`why`) if the recipe or
-// what it copies from is wrong. `zeros`: the words it writes must be zeros in the map (a map read back).
-bool apply_recipe(std::string &d, const Pool *pool, const std::string *pack, bool zeros, std::string &why) {
-    if (d.compare(kRef, 4, "drhs") != 0 || get32(d, kRef + 4) != 3) return true;
+// A map's tag data rebuilt from its recipe (a reference of version 3 or 4 with one), in place: false (`why`) if the
+// recipe or what it copies from is wrong. Version 4: the file stops at its tag data, the recipe after it (its own words
+// too); rebuilt, the map is its part before the tag data and the tag data. `check`: a map read back, held to every rule
+// (version 3: the words it writes are zeros in the map; version 4: its recipe where it must be, after zeros, and the
+// map's other parts before its tag data).
+bool apply_recipe(std::string &d, const Pool *pool, const std::string *pack, bool check, std::string &why) {
+    if (d.size() < kHeader || d.compare(kRef, 4, "drhs") != 0) return true;
+    const uint32_t version = get32(d, kRef + 4);
+    if (version != 3 && version != 4) return true;
     const uint32_t ro = get32(d, kRef + 0x68), rs = get32(d, kRef + 0x6C), to = get32(d, 0x10), ts = get32(d, 0x14);
     if (!rs) return true;
-    if ((uint64_t)ro + rs > d.size() || (uint64_t)to + ts > d.size()) { why = "its recipe isn't in the file"; return false; }
+    if ((uint64_t)ro + rs > d.size()) { why = "its recipe isn't in the file"; return false; }
+    if (version == 3 && (uint64_t)to + ts > d.size()) { why = "its tag data isn't in the file"; return false; }
+    if (version == 4) {
+        if (ts % 4) { why = "its tag data isn't whole words"; return false; }
+        if (get32(d, kRef + 0x7C)) { why = "its reference has a flag this doesn't know"; return false; }
+        const uint64_t at = ((uint64_t)to + kSector - 1) / kSector * kSector;
+        if (ro != at || to < kHeader) { why = "its recipe isn't where it must be (its tag data's offset rounded up to a sector)"; return false; }
+        if (check)
+            for (uint64_t x = to; x < ro; x++)
+                if (d[x]) { why = "what's between its tag data's offset and its recipe isn't zeros"; return false; }
+    }
     const std::string rec = d.substr(ro, rs);
     const size_t words = ts / 4;
+    std::string tag;   // (version 4: rebuilt here, then put in place)
+    if (version == 4) tag.assign(ts, '\0');
+    char *dst = version == 4 ? &tag[0] : &d[to];
     std::vector<uint8_t> written(words, 0);
     const uint32_t *tp = nullptr;
     size_t tp_words = 0;
@@ -338,47 +356,98 @@ bool apply_recipe(std::string &d, const Pool *pool, const std::string *pack, boo
         const uint32_t po = get32(*pack, 0x68), ps = get32(*pack, 0x6C);
         if (ps && (uint64_t)po + ps <= pack->size() && ps % 4 == 0) { tp = (const uint32_t *)(pack->data() + po); tp_words = ps / 4; }
     }
-    size_t at = 0;
-    for (int kind = 0; kind < 2; kind++) {   // (the stock groups, then the pack's)
+    // a kind's groups (version 3's parts, version 4's sections 1 and 2), from `at` up to `end`
+    auto groups = [&](size_t &at, size_t end, int kind, bool exact) -> bool {
         const uint32_t *src = kind == 0 ? (pool ? pool->w.data() : nullptr) : tp;
         const size_t src_words = kind == 0 ? (pool ? pool->w.size() : 0) : tp_words;
-        uint64_t groups, frame = 0;
-        if (!unleb(rec, at, groups)) { why = "its recipe is cut short"; return false; }
-        if (groups && !src) {
+        const std::string part = rec.substr(0, end);
+        uint64_t count, frame = 0;
+        if (!unleb(part, at, count)) { why = "its recipe is cut short"; return false; }
+        if (count && !src) {
             why = kind == 0 ? "its recipe copies from a stock tag pool that isn't here" : "its recipe copies from its pack's tag part, and its pack's file has none";
             return false;
         }
-        if (kind == 0 && groups && (get32(d, kRef + 0x70) != kPoolCrc || get32(d, kRef + 0x74) != kPoolSize)) {
+        if (kind == 0 && count && (get32(d, kRef + 0x70) != kPoolCrc || get32(d, kRef + 0x74) != kPoolSize)) {
             why = "it was made against another stock tag pool";
             return false;
         }
-        for (uint64_t g = 0; g < groups; g++) {
+        for (uint64_t g = 0; g < count; g++) {
             uint64_t f, runs;
-            if (!unleb(rec, at, f) || !unleb(rec, at, runs)) { why = "its recipe is cut short"; return false; }
+            if (!unleb(part, at, f) || !unleb(part, at, runs)) { why = "its recipe is cut short"; return false; }
             if (g && !f) { why = "its recipe's frames aren't in order"; return false; }
             frame = g ? frame + f : f;
             const uint64_t first = frame * kFrameWords;
             if (first >= src_words || !runs) { why = "its recipe names a frame that isn't there"; return false; }
             const uint64_t fwords = std::min<uint64_t>(kFrameWords, src_words - first);
-            uint64_t end = 0;
+            uint64_t end_w = 0, last_off = UINT64_MAX;
             for (uint64_t k = 0; k < runs; k++) {
                 uint64_t dd, off, len;
-                if (!unleb(rec, at, dd) || !unleb(rec, at, off) || !unleb(rec, at, len)) { why = "its recipe is cut short"; return false; }
-                const uint64_t dest = end + dd;
+                if (!unleb(part, at, dd) || !unleb(part, at, off) || !unleb(part, at, len)) { why = "its recipe is cut short"; return false; }
+                const uint64_t dest = end_w + dd;
                 if (!len || off + len > fwords || dest + len > words) { why = "its recipe has a run outside its tag data or a frame"; return false; }
+                if (check && k && !dd && off == last_off) { why = "its recipe's runs aren't maximal"; return false; }
                 for (uint64_t x = dest; x < dest + len; x++) {
                     if (written[x]) { why = "its recipe writes a word twice"; return false; }
                     written[x] = 1;
                 }
-                if (zeros)
+                if (check && version == 3)
                     for (uint64_t x = dest; x < dest + len; x++)
                         if (get32(d, to + x * 4) != 0) { why = "a word its recipe writes isn't zero in the map"; return false; }
-                memcpy(&d[to + dest * 4], src + first + off, len * 4);
-                end = dest + len;
+                memcpy(dst + dest * 4, src + first + off, len * 4);
+                end_w = dest + len;
+                last_off = off + len;
             }
         }
+        if (exact && at != end) { why = "a section of its recipe has more in it than its runs"; return false; }
+        return true;
+    };
+    size_t at = 0;
+    if (version == 3) {
+        if (!groups(at, rec.size(), 0, false) || !groups(at, rec.size(), 1, true)) return false;
+    } else {
+        uint64_t sections, last_type = 0;
+        bool seen[4] = {false, false, false, false};
+        if (!unleb(rec, at, sections)) { why = "its recipe is cut short"; return false; }
+        for (uint64_t k = 0; k < sections; k++) {
+            uint64_t type, size;
+            if (!unleb(rec, at, type) || !unleb(rec, at, size) || at + size > rec.size()) { why = "its recipe is cut short"; return false; }
+            if (k && type <= last_type) { why = "its recipe's sections aren't in order"; return false; }
+            last_type = type;
+            const size_t end = at + (size_t)size;
+            if (type == 1 || type == 2) {
+                if (!groups(at, end, (int)type - 1, true)) return false;
+            } else if (type == 3) {   // (the own words)
+                const std::string part = rec.substr(0, end);
+                uint64_t runs, end_w = 0;
+                if (!unleb(part, at, runs)) { why = "its recipe is cut short"; return false; }
+                for (uint64_t r = 0; r < runs; r++) {
+                    uint64_t dd, len;
+                    if (!unleb(part, at, dd) || !unleb(part, at, len)) { why = "its recipe is cut short"; return false; }
+                    const uint64_t dest = end_w + dd;
+                    if (!len || dest + len > words || at + len * 4 > end) { why = "its recipe's own words run outside its tag data"; return false; }
+                    if (r && !dd) { why = "its recipe's own runs aren't maximal"; return false; }
+                    for (uint64_t x = dest; x < dest + len; x++) {
+                        if (written[x]) { why = "its recipe writes a word twice"; return false; }
+                        written[x] = 1;
+                    }
+                    memcpy(dst + dest * 4, rec.data() + at, len * 4);
+                    at += (size_t)len * 4;
+                    end_w = dest + len;
+                }
+                if (at != end) { why = "its recipe's own words section has more in it than its runs"; return false; }
+            } else if (type < 64) { why = "its recipe has a section this doesn't know"; return false; }
+            else at = end;   // (64 and up: skipped)
+            if (type <= 3) seen[type] = true;
+        }
+        if (!seen[1] || !seen[2] || !seen[3]) { why = "its recipe is missing a section"; return false; }
+        for (size_t x = 0; x < words; x++)
+            if (!written[x]) { why = "its recipe leaves a word of its tag data unwritten"; return false; }
     }
-    if (at != rec.size()) { why = "its recipe has more in it than its runs"; return false; }
+    if (at != rec.size()) { why = "its recipe has more in it than its sections"; return false; }
+    if (version == 4) {
+        d.resize(to);
+        d += tag;
+    }
     if (crc32_of(d.data() + to, ts) != get32(d, kRef + 0x78)) { why = "its tag data rebuilt isn't what it was made from (CRC32)"; return false; }
     return true;
 }
@@ -387,8 +456,9 @@ struct Run {
     uint32_t dest, src, len;
     bool pack;
 };
-// The recipe for these runs (format 4): split at frames, maximal, the stock groups by frame then the pack's.
-std::string encode_recipe(std::vector<Run> runs, size_t &count, std::set<uint32_t> &frames) {
+// A recipe's stock and pack groups for these runs (format 4): split at frames, maximal, each kind's groups by frame
+// (version 3's two parts; version 4's sections 1 and 2). `runs` comes back as they're written.
+void encode_groups(std::vector<Run> &runs, std::string part[2], std::set<uint32_t> &frames) {
     std::vector<Run> split;
     for (auto &r : runs)
         for (uint32_t s = r.src, d = r.dest, left = r.len; left;) {
@@ -407,9 +477,9 @@ std::string encode_recipe(std::vector<Run> runs, size_t &count, std::set<uint32_
             m.back().len += r.len;
         else m.push_back(r);
     }
-    count = m.size();
-    std::string out;
     for (int kind = 0; kind < 2; kind++) {
+        std::string &out = part[kind];
+        out.clear();
         std::vector<std::pair<size_t, size_t>> groups;   // (first, end) in m
         for (size_t i = 0; i < m.size();) {
             if (m[i].pack != (kind == 1)) { i++; continue; }
@@ -434,6 +504,42 @@ std::string encode_recipe(std::vector<Run> runs, size_t &count, std::set<uint32_
                 end = m[k].dest + m[k].len;
             }
         }
+    }
+    runs.swap(m);
+}
+// Version 4's recipe: its sections (count; each one's type, size and bytes): 1 the stock groups, 2 the pack's, 3 the own
+// words (run count; each maximal run of words no stock or pack run writes: dest delta from the end of the last own run,
+// length, then the words raw).
+std::string encode_v4(std::vector<Run> runs, const uint32_t *tag, size_t words, size_t &count, std::set<uint32_t> &frames) {
+    std::string part[2];
+    encode_groups(runs, part, frames);
+    std::vector<uint8_t> by(words, 0);
+    for (auto &r : runs) memset(&by[r.dest], 1, r.len);
+    std::string own;
+    std::vector<std::pair<size_t, size_t>> oruns;
+    for (size_t i = 0; i < words;) {
+        if (by[i]) { i++; continue; }
+        size_t j = i;
+        while (j < words && !by[j]) j++;
+        oruns.push_back({i, j - i});
+        i = j;
+    }
+    leb(own, oruns.size());
+    size_t end = 0;
+    for (auto &o : oruns) {
+        leb(own, o.first - end);
+        leb(own, o.second);
+        own.append((const char *)(tag + o.first), o.second * 4);
+        end = o.first + o.second;
+    }
+    count = runs.size() + oruns.size();
+    std::string out;
+    leb(out, 3);
+    const std::string *sec[3] = {&part[0], &part[1], &own};
+    for (int t = 0; t < 3; t++) {
+        leb(out, (uint64_t)t + 1);
+        leb(out, sec[t]->size());
+        out += *sec[t];
     }
     return out;
 }
@@ -605,7 +711,7 @@ struct Map {
     // format 4: its recipe (tag data rebuilt from the stock tag pool and the pack's tag part)
     std::string recipe;
     uint32_t tag_crc = 0;
-    size_t recipe_runs = 0, from_pool = 0, from_pack = 0;   // (runs; words)
+    size_t recipe_runs = 0, from_pool = 0, from_pack = 0, own_words = 0;   // (runs; words)
     std::set<uint32_t> pool_frames;
     uint32_t recipe_cut = 0;   // (read: where its old recipe was)
 };
@@ -622,7 +728,7 @@ void write_ref(Map &m, const std::string &pack_name, const Source &pack, const S
     const bool recipe = !m.recipe.empty();
     if (m.pack_ref || m.stock_ref || recipe) {
         ref.replace(0, 4, "drhs");
-        put32(ref, 4, recipe ? 3 : 2);
+        put32(ref, 4, recipe ? 4 : 2);
         if (m.pack_ref) {
             ref.replace(0x08, pack_name.size(), pack_name);
             put32(ref, 0x28, pack.sum);
@@ -643,6 +749,7 @@ void write_ref(Map &m, const std::string &pack_name, const Source &pack, const S
             put32(ref, 0x70, kPoolCrc);
             put32(ref, 0x74, kPoolSize);
             put32(ref, 0x78, m.tag_crc);
+            put32(ref, 0x7C, 0);   // (flags: none yet)
         }
     }
     m.out.replace(kRef, kRefSize3, ref);
@@ -730,7 +837,8 @@ bool relayout(Map &m, const Plan &plan, const std::string &pack_name, const Sour
 // candidates (the words earlier maps kept as their own, in the order they came; a map's join once it's done): at a word,
 // its 8-word window's earliest place in each, extended forward; the longer wins (a tie: the pool); 16 words or more is a
 // run, else that word is the map's own. The pack's tag part is every candidate word a later map's run uses, in candidate
-// order; a map's own words in it are runs from it in its recipe too. Each map's recipe made, the words it writes zeroed.
+// order; a map's own words in it are runs from it in its recipe too. Each map's recipe made (version 4: the rest of its
+// words, its own, carried in the recipe).
 // A map whose tag data leaves no room to rebuild it in (64 KB below the 22 MB tag cache's top) has none.
 void tag_pass(const std::vector<Map *> &ms, const Pool &pool, std::vector<uint32_t> &tag_part) {
     std::vector<uint32_t> cand;
@@ -745,7 +853,7 @@ void tag_pass(const std::vector<Map *> &ms, const Pool &pool, std::vector<uint32
     for (size_t k = 0; k < ms.size(); k++) {
         Map &m = *ms[k];
         const uint32_t to = get32(m.out, 0x10), ts = get32(m.out, 0x14);
-        if ((uint64_t)ts + kScratch > kTagCache || (uint64_t)to + ts > m.out.size()) continue;
+        if ((uint64_t)ts + kScratch > kTagCache || (uint64_t)to + ts > m.out.size() || ts % 4) continue;   // (and whole words)
         room[k] = 1;
         const size_t n = ts / 4;
         std::vector<uint32_t> T(n);
@@ -796,9 +904,43 @@ void tag_pass(const std::vector<Map *> &ms, const Pool &pool, std::vector<uint32
         if (rr.empty()) continue;   // (nothing in it from elsewhere: no recipe)
         const uint32_t to = get32(m.out, 0x10), ts = get32(m.out, 0x14);
         m.tag_crc = crc32_of(m.out.data() + to, ts);
-        m.recipe = encode_recipe(rr, m.recipe_runs, m.pool_frames);
-        for (auto &r : rr) memset(&m.out[to + (size_t)r.dest * 4], 0, (size_t)r.len * 4);
+        m.own_words = ts / 4 - m.from_pool - m.from_pack;
+        m.recipe = encode_v4(rr, (const uint32_t *)(m.out.data() + to), ts / 4, m.recipe_runs, m.pool_frames);
     }
+}
+
+// Version 4: the tag data the map's last part (nothing else ends after it begins). What a re-share put after it (blocks
+// brought back into the map) or another tool left there is placed again before it, each at its remainder modulo 512,
+// the tag data after them at its own; what points at them pointed again.
+bool tag_data_last(std::string &out, std::string &why) {
+    static const char none = 0;
+    Parsed q;
+    if (!parse(out, q, [](uint32_t, uint32_t) { return &none; }, why)) return false;
+    const uint32_t to = q.td_off, ts = q.td_size;
+    bool any = false;
+    for (auto &b : q.blocks) any = any || (b.own && (uint64_t)b.value + b.size > to);
+    for (size_t f : q.bsp_fields) any = any || (uint64_t)get32(out, f) + get32(out, f + 4) > to;
+    if (!any) return true;
+    std::string n = out.substr(0, to);
+    std::map<uint64_t, uint32_t> placed;   // ((offset, size): where it is now)
+    std::vector<std::pair<size_t, uint32_t>> fields;
+    auto again = [&](size_t field, uint32_t o, uint32_t size) {
+        const uint64_t key = (uint64_t)o << 32 | size;
+        auto it = placed.find(key);
+        if (it == placed.end()) it = placed.insert({key, place(n, out.data() + o, size, o % kUnit)}).first;
+        fields.push_back({field, it->second});
+    };
+    for (auto &b : q.blocks)
+        if (b.own && (uint64_t)b.value + b.size > to) again(b.field, b.value, b.size);
+    for (size_t f : q.bsp_fields)
+        if ((uint64_t)get32(out, f) + get32(out, f + 4) > to) again(f, get32(out, f), get32(out, f + 4));
+    const uint32_t nt = place(n, out.data() + to, ts, to % kUnit);
+    for (auto &f : fields) put32(n, f.first - to + nt, f.second);
+    put32(n, 0x10, nt);
+    n.append((kSector - n.size() % kSector) % kSector, '\0');
+    put32(n, 8, (uint32_t)n.size());
+    out.swap(n);
+    return true;
 }
 
 // The new map read back: unpacked again, every texture and sound through the new files the same bytes as before, the
@@ -816,7 +958,7 @@ bool check(Map &m, const Source &pack, const Source &stock, const Pool *pool = n
     };
     Parsed q;
     std::string why;
-    // (a recipe map: its tag data rebuilt first, as the game does, the words it writes zeros in the map, its CRC32 checked)
+    // (a recipe map: its tag data rebuilt first, as the game does, its CRC32 checked)
     std::string rebuilt;
     if (!m.recipe.empty()) {
         rebuilt = m.out;
@@ -826,6 +968,12 @@ bool check(Map &m, const Source &pack, const Source &stock, const Pool *pool = n
     if (!parse(o, q, [&](uint32_t v, uint32_t n) { return (v & kStock) == kStock ? from(stock, v, n) : from(pack, v, n); }, why)) {
         m.error = "read back, " + why;
         return false;
+    }
+    if (!m.recipe.empty()) {   // (version 4: nothing else ends after its tag data begins)
+        for (auto &b : q.blocks)
+            if (b.own && (uint64_t)b.value + b.size > q.td_off) { m.error = "read back, a texture or sound lies after its tag data"; return false; }
+        for (size_t f : q.bsp_fields)
+            if ((uint64_t)get32(o, f) + get32(o, f + 4) > q.td_off) { m.error = "read back, a BSP lies after its tag data"; return false; }
     }
     const Parsed &p = m.p;
     if (q.blocks.size() != p.blocks.size() || q.bsp_fields.size() != p.bsp_fields.size() || q.td_size != p.td_size) {
@@ -1174,7 +1322,7 @@ Result make(const fs::path &folder, const std::string &base_name, const std::vec
             const Source *pack_src = nullptr, *stock_src = nullptr;
             if (m.data.compare(kRef, 4, "drhs") == 0) {
                 const uint32_t version = get32(m.data, kRef + 4);
-                if (version < 1 || version > 3) { m.skipped = "it draws on shared files of a later format"; continue; }
+                if (version < 1 || version > 4) { m.skipped = "it draws on shared files of a later format"; continue; }
                 m.had_ref = true;
                 m.ident_size = get32(m.data, kRef + 0x30);
                 m.ident_sum = get32(m.data, kRef + 0x34);
@@ -1192,16 +1340,18 @@ Result make(const fs::path &folder, const std::string &base_name, const std::vec
                 }
                 // (format 4: its tag data rebuilt from its recipe first; the recipe's bytes zeroed, and cut off when
                 // they're the file's end, as the map is made again)
-                if (version == 3 && get32(m.data, kRef + 0x6C)) {
+                if ((version == 3 || version == 4) && get32(m.data, kRef + 0x6C)) {
                     std::string pwhy, why;
                     const Pool *pl = stock_pool(cache, stock_maps, log, pwhy);
                     if (!apply_recipe(m.data, pl, pack_src ? &pack_src->data : nullptr, false, why)) {
                         m.skipped = "its tag data can't be rebuilt from its recipe: " + why + (pl ? "" : " (" + pwhy + ")");
                         continue;
                     }
-                    const uint32_t ro = get32(m.data, kRef + 0x68), rs = get32(m.data, kRef + 0x6C);
-                    memset(&m.data[ro], 0, rs);
-                    m.recipe_cut = ro;
+                    if (version == 3) {   // (version 4's is gone already: the map is its parts and its tag data)
+                        const uint32_t ro = get32(m.data, kRef + 0x68), rs = get32(m.data, kRef + 0x6C);
+                        memset(&m.data[ro], 0, rs);
+                        m.recipe_cut = ro;
+                    }
                 }
             }
             auto resolve = [&](uint32_t v, uint32_t n) -> const char * {
@@ -1338,7 +1488,10 @@ Result make(const fs::path &folder, const std::string &base_name, const std::vec
             });
         else {
             // (the pack's file is finished once its tag part is known: each map's reference written again then)
-            each([&](Map &m, size_t i) { relayout(m, plans[i], "", pack, stock.file); });
+            each([&](Map &m, size_t i) {
+                std::string why;
+                if (relayout(m, plans[i], "", pack, stock.file) && !tag_data_last(m.out, why)) m.error = "laid out again, " + why;
+            });
             for (auto &m : maps)
                 if (!m->error.empty()) { r.error = shown(m->path) + ": " + m->error + ". Nothing was written."; return r; }
             log("Storing the tag data once: each map's against the stock tag pool and the pack's other maps...");
@@ -1364,7 +1517,9 @@ Result make(const fs::path &folder, const std::string &base_name, const std::vec
                 if (!m.rewrite) continue;
                 m.pack_ref = has_pack;
                 uint32_t at = 0;
-                if (!m.recipe.empty()) {   // (its recipe after everything else in it, the map whole sectors again)
+                if (!m.recipe.empty()) {   // (version 4: the file stops at its tag data, its recipe at the next sector)
+                    m.out.resize(get32(m.out, 0x10));
+                    m.out.append((kSector - m.out.size() % kSector) % kSector, '\0');
                     at = (uint32_t)m.out.size();
                     m.out += m.recipe;
                     m.out.append((kSector - m.out.size() % kSector) % kSector, '\0');
@@ -1425,12 +1580,17 @@ Result make(const fs::path &folder, const std::string &base_name, const std::vec
         // ---- written: each file beside the one it replaces, then put in its place
         struct Out { fs::path path; const std::string *file; };
         std::vector<Out> outs;
-        auto same = [&](const fs::path &p, const std::string &file) {   // (that very file already there)
-            std::error_code ec;
+        auto same = [&](const fs::path &p, const std::string &file) {   // (that very file already there, every byte: the list
+            std::error_code ec;                                            // is outside the checksum, so the name can match alone)
             if (fs::file_size(p, ec) != file.size() || ec) return false;
             std::ifstream f(p, std::ios::binary);
-            std::string h(kHeader, '\0');
-            return f && f.read(&h[0], (std::streamsize)kHeader) && h.compare(0, kHeader, file, 0, kHeader) == 0;
+            std::string h(1 << 20, '\0');
+            for (size_t at = 0; at < file.size();) {
+                const size_t n = std::min(h.size(), file.size() - at);
+                if (!f.read(&h[0], (std::streamsize)n) || h.compare(0, n, file, at, n) != 0) return false;
+                at += n;
+            }
+            return true;
         };
         auto temp = [](const fs::path &p) { fs::path t = p; t += ".new"; return t; };
         const fs::path pack_path = folder / (name + ".shared"), stock_path = stock_dir / "stock.shared";
@@ -1580,8 +1740,8 @@ Result make(const fs::path &folder, const std::string &base_name, const std::vec
                 if (m->to_stock) rep += "; " + mb(m->to_stock) + " in stock.shared";
                 if (!m->recipe.empty())
                     rep += "; of its tag data's " + mb(get32(m->out, 0x14)) + ", " + mb(m->from_pool * 4) + " from the stock tag pool" +
-                           (m->from_pack ? " and " + mb(m->from_pack * 4) + " from the pack's tag part" : "") + " (a recipe of " +
-                           std::to_string(m->recipe_runs) + " runs, " + mb(m->recipe.size()) + ")";
+                           (m->from_pack ? " and " + mb(m->from_pack * 4) + " from the pack's tag part" : "") + ", " + mb(m->own_words * 4) +
+                           " its own (a recipe of " + std::to_string(m->recipe_runs) + " runs, " + mb(m->recipe.size()) + ", in place of its tag data)";
                 rep += std::string(too_big(*m, m->out.size())) + ")\n";
             }
         }

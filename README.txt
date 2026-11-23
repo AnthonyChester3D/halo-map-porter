@@ -2444,20 +2444,24 @@ showcase.
 
 Tag data stored once (with stock.shared, the Xbox tab's "Save maps drawing
 on stock.shared and stocktags.shared", from 1.183: Halo 1 Unlimited's
-shared-file format 4, locked 2026-11-23, which only a build that reads it
-loads, with stocktags.shared built on the Xbox by its installer 66 or
-later): each map's tag data is rebuilt as it loads, by
-a recipe in the map, from the stock tag pool (every word of the 23 retail
+shared-file format 4, revision 2 (reference version 4, from 1.184), which
+only a build that reads it loads, with stocktags.shared built on the Xbox
+by its installer): each map's tag data is rebuilt as it loads, by a
+recipe in the map, from the stock tag pool (every word of the 23 retail
 maps' tag data once: Halo 1 Unlimited's installer builds it on each Xbox as
 stocktags.shared, and this app makes the same pool once from the Xbox maps
-folder in Settings and keeps it in its data folder as stocktags.pool) and
-from the pack's tag part (what two or more of the pack's maps have that
-the pool doesn't, in the pack's .shared file). The words a recipe writes
-are zeros in the map. Each map is read back with its tag data rebuilt as
-the game does and checked against the CRC32 in its header. Boxfight's 21
-maps: 258 MB -> 155 MB; CE X's 13: 69 MB -> 43 MB. Turned off again, the
-next pass makes the maps without recipes (byte for byte what they'd have
-been).
+folder in Settings and keeps it in its data folder as stocktags.pool), from
+the pack's tag part (what two or more of the pack's maps have that the pool
+doesn't, in the pack's .shared file) and from the map's own words, which
+the recipe carries. The tag data is the map's last part (anything that
+came after it is laid out before it); the map stops where its tag data
+starts, and the recipe follows at the next 2048 bytes. Each map is read
+back with its tag data rebuilt as the game does and checked against the
+CRC32 in its header. Boxfight's 21 maps: 258 MB -> 154 MB; CE X's 13:
+69 MB -> 43 MB. A map made by 1.181-1.183 (reference version 3) is still
+read, and shared again it becomes the version 4 map a fresh pass makes.
+Turned off again, the next pass makes the maps without recipes (byte for
+byte what they'd have been).
 
 Drawing on stock.shared one map at a time (Xbox tab, "Save maps drawing
 on stock.shared and stocktags.shared"): each map converted for the Xbox,
