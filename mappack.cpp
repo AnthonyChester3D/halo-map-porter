@@ -8,6 +8,8 @@
 #include <fstream>
 #include <map>
 #include <set>
+#include <sstream>
+#include <functional>
 
 #include "bcdec.h"        // implementation in core.cpp
 #include "inflate.hpp"
@@ -463,6 +465,7 @@ bool read_pack(const fs::path &folder, Pack &out, std::string &err) {
     out.maps_dir = maps;
     fs::path named = lower(maps.filename().u8string()) == "maps" ? maps.parent_path() : maps;
     out.suggested_name = clean_name(named.filename().u8string(), 12);
+    out.folder = named;
     Cache c;
     if (!load_cache(ui, c, err)) return false;
 
@@ -597,6 +600,129 @@ std::string clean_name(const std::string &name, size_t max) {
     if (o.size() > max) o.resize(max);
     while (!o.empty() && (o.back() == ' ' || o.back() == '.')) o.pop_back();
     while (!o.empty() && (o[0] == ' ' || o[0] == '.')) o.erase(0, 1);
+    return o;
+}
+// A retro pack's own name made short (12 characters): the part of "HMP7 - Halo Mappack v7" before the dash (or after it,
+// when that's only "Halo"), without a leading "Halo" / "Halo 1", then (only while it's too long) the usual long words
+// shortened, the words that only say it's a pack left out, and cut at a space keeping its last word when that's what
+// tells it from its other versions (v7, 2, Extended). Apart from `taken` (any case): " 2", " 3"...
+std::string short_pack_name(const std::string &folder_name, const std::vector<std::string> &taken) {
+    std::string s = folder_name;
+    for (auto &c : s) if (c == '_') c = ' ';
+    auto words = [](const std::string &t) {
+        std::vector<std::string> w;
+        std::istringstream in(t);
+        for (std::string x; in >> x;) w.push_back(x);
+        return w;
+    };
+    auto join = [](const std::vector<std::string> &w, size_t from = 0) {
+        std::string o;
+        for (size_t i = from; i < w.size(); i++) o += (o.empty() ? "" : " ") + w[i];
+        return o;
+    };
+    auto generic = [&](const std::string &t) { const std::string l = lower(join(words(t))); return l == "halo" || l == "halo 1" || l == "halo ce"; };
+    if (size_t d = s.find(" - "); d != std::string::npos) {
+        const std::string a = s.substr(0, d), b = s.substr(d + 3);
+        if (generic(a)) s = b;
+        else if (clean_name(a, 64).size() <= 12) s = a;
+    }
+    std::vector<std::string> w = words(s);
+    if (w.size() > 1 && lower(w[0]) == "halo") {
+        if (w.size() > 2 && w[1] == "1") w.erase(w.begin(), w.begin() + 2);
+        else if (!isdigit((unsigned char)w[1][0])) w.erase(w.begin());
+    }
+    auto len = [&](const std::vector<std::string> &v) { return clean_name(join(v), 64).size(); };
+    const size_t most = 12;
+    // the long words, shortened while it's too long
+    static const std::vector<std::pair<std::vector<std::string>, std::string>> abbr = {
+        {{"custom", "edition's"}, "CE's"}, {{"custom", "edition"}, "CE"}, {{"major", "league", "gaming"}, "MLG"},
+        {{"map", "conversions"}, "MC"}, {{"multiplayer"}, "MP"}, {{"conversions"}, "Conv"}, {{"extended"}, "Ext"},
+        {{"collection"}, "Coll"}};
+    for (auto &[from, to] : abbr) {
+        if (len(w) <= most) break;
+        for (size_t i = 0; i + from.size() <= w.size(); i++) {
+            bool m = true;
+            for (size_t k = 0; k < from.size() && m; k++) m = lower(w[i + k]) == from[k];
+            if (m) { w.erase(w.begin() + i, w.begin() + i + from.size()); w.insert(w.begin() + i, to); }
+        }
+    }
+    // the words that only say it's a pack (one word, at least, stays)
+    static const std::set<std::string> filler = {"pack", "mappack", "map", "maps", "mod", "mods", "the", "edition", "coll"};
+    for (size_t i = 0; i < w.size() && len(w) > most;) {
+        if (filler.count(lower(w[i])) && w.size() > 1) w.erase(w.begin() + i);
+        else i++;
+    }
+    std::string o = clean_name(join(w), 64);
+    if (o.size() > most) {   // cut at a space, its last word kept when that's what tells it from its other versions
+        auto tail = [](const std::string &t) {
+            const std::string l = lower(t);
+            if (l == "ext" || l == "final" || l == "beta" || l == "plus" || l == "ii" || l == "iii" || l == "v" || l == "x") return true;
+            size_t i = l[0] == 'v' && l.size() > 1 ? 1 : 0;
+            return i < l.size() && std::all_of(l.begin() + (long)i, l.end(), [](char c) { return isdigit((unsigned char)c); });
+        };
+        std::string last = w.size() > 1 && tail(w.back()) ? clean_name(w.back(), 64) : "";
+        std::vector<std::string> base(w.begin(), w.end() - (last.empty() ? 0 : 1));
+        const size_t room = last.empty() ? most : most - last.size() - 1;
+        std::string b = clean_name(join(base), 64);
+        if (std::string run = clean_name(join(base), 64); b.size() > room) {   // (run together, when that fits: GameInspired)
+            run.erase(std::remove(run.begin(), run.end(), ' '), run.end());
+            if (run.size() <= room && base.size() > 1 && b.rfind(' ', room) < room / 2) b = run;
+        }
+        if (b.size() > room) {
+            size_t cut = b.rfind(' ', room);
+            b.resize(cut != std::string::npos && cut >= room / 2 ? cut : room);
+        }
+        while (!b.empty() && (b.back() == ' ' || b.back() == '-' || b.back() == '.')) b.pop_back();
+        o = clean_name(last.empty() ? b : b + " " + last, most);
+    }
+    if (o.empty()) o = "Pack";
+    for (int i = 0; i < 13; i++) if (lower(o) == kStockSlots[i]) o += " Pack";
+    auto used = [&](const std::string &t) {
+        for (auto &x : taken) if (lower(x) == lower(t)) return true;
+        return false;
+    };
+    std::string f = o;
+    for (int n = 2; used(f); n++) {
+        const std::string suffix = " " + std::to_string(n);
+        std::string b = o.substr(0, std::min(o.size(), most - suffix.size()));
+        while (!b.empty() && b.back() == ' ') b.pop_back();
+        f = b + suffix;
+    }
+    return f;
+}
+// Every mod pack in a folder: each folder (a few levels down) with ui.map in it, or in its maps folder; a pack's own
+// folders aren't looked in. In name order.
+std::vector<fs::path> find_packs(const fs::path &root) {
+    std::vector<fs::path> found;
+    std::function<void(const fs::path &, int)> walk = [&](const fs::path &d, int depth) {
+        std::error_code ec;
+        fs::path m = find_file(d, "maps");
+        if (!find_file(d, "ui.map").empty() || (!m.empty() && fs::is_directory(m, ec) && !find_file(m, "ui.map").empty())) {
+            found.push_back(d);
+            return;
+        }
+        if (depth == 0) return;
+        std::vector<fs::path> sub;
+        for (auto &e : fs::directory_iterator(d, ec))
+            if (e.is_directory(ec)) sub.push_back(e.path());
+        std::sort(sub.begin(), sub.end());
+        for (auto &x : sub) walk(x, depth - 1);
+    };
+    walk(root, 4);
+    return found;
+}
+// The pack's own text files (readme, credits, changes, its map list), in its folder: 2 MB at most each.
+std::vector<fs::path> pack_texts(const Pack &p) {
+    std::vector<fs::path> o;
+    std::error_code ec;
+    for (auto &e : fs::directory_iterator(p.folder, ec)) {
+        if (!e.is_regular_file(ec)) continue;
+        const std::string x = lower(e.path().extension().u8string());
+        if ((x == ".txt" || x == ".nfo" || x == ".rtf" || x == ".md" || x == ".htm" || x == ".html" || x == ".diz") &&
+            e.file_size(ec) <= (2u << 20))
+            o.push_back(e.path());
+    }
+    std::sort(o.begin(), o.end());
     return o;
 }
 void assign_folders(Pack &p, const std::string &pack_name) {
@@ -783,7 +909,8 @@ bool write_pack(const Pack &p, const std::string &pack_name, const fs::path &map
     if (ec) { err = "Couldn't create " + root.u8string() + ": " + ec.message(); return false; }
     int total = 0, n = 0;
     for (auto &e : p.maps) total += e.include;
-    std::string order = "# " + pack_name + " - the order its maps appear in the menu (Halo Map Porter wrote this)\r\n";
+    std::string order = "# " + pack_name + " - the order its maps appear in the menu (Halo Map Porter wrote this" +
+                        (p.folder.empty() ? std::string() : "; from the mod pack: " + p.folder.filename().u8string()) + ")\r\n";
     for (auto &e : p.maps) {
         if (!e.include) continue;
         n++;
@@ -807,6 +934,10 @@ bool write_pack(const Pack &p, const std::string &pack_name, const fs::path &map
                 txt += "\r\n" + mapcard::u32_to_utf8(line);
         if (!e.lines.empty()) txt += "\r\n" + e.lines;
         txt += "\r\n";
+        if (!e.vehicles.empty()) {   // (Halo 1 Unlimited's vehicle categories, for its gametype option)
+            txt += "[Vehicles]\r\n";
+            for (auto &v : e.vehicles) txt += v.first + " = " + v.second + "\r\n";
+        }
         if (!write_file(dir / "info.txt", txt, err)) return false;
         if (e.preview.size() == 16384) { if (!write_file(dir / "preview.bin", e.preview, err)) return false; }
         else fs::remove(dir / "preview.bin", ec);
@@ -816,6 +947,17 @@ bool write_pack(const Pack &p, const std::string &pack_name, const fs::path &map
     if (!series.empty()) {
         if (!write_file(root / "series.bin", series, err)) return false;
         if (log) log("Wrote " + pack_name + "\\series.bin (the logo on every picture)");
+    }
+    // the pack's own readme, credits and changes, as they are: <Pack>\About\ (no .map in it, so not a map's folder)
+    if (auto texts = pack_texts(p); !texts.empty()) {
+        fs::path about = root / "About";
+        fs::create_directories(about, ec);
+        int k = 0;
+        for (auto &t : texts) {
+            copy_over(t, about / t.filename(), ec);
+            k += !ec;
+        }
+        if (log) log("Copied the pack's own " + std::to_string(k) + (k == 1 ? " text file" : " text files") + " into " + pack_name + "\\About");
     }
     if (log) log("Done: " + std::to_string(total) + " maps in " + root.u8string());
     return true;

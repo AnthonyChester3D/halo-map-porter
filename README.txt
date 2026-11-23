@@ -2360,15 +2360,49 @@ one go, with the names, descriptions and pictures the pack's menu shows.
        <Pack>\<Map>\info.txt       its menu name and description, and the
                                    map list's Players / Gametypes lines
                                    and genre suggestions (read from each
-                                   map, as for map cards)
+                                   map, as for map cards), and its
+                                   [Vehicles] (Halo 1 Unlimited's vehicle
+                                   categories, from 1.185)
        <Pack>\<Map>\preview.bin    its picture, straight from the pack
-       <Pack>\order.txt            the pack's menu order
+       <Pack>\order.txt            the pack's menu order (its first line
+                                   names the mod pack it came from)
        <Pack>\series.bin           the logo (if you picked one)
+       <Pack>\About\              the pack's own readme, credits, changes
+                                   and map list, as they are (its .txt,
+                                   .nfo, .rtf, .md and .htm files)
        <Pack>\<Pack>-<version>.shared   what two or more of its maps use
        stock.shared                the stock maps' and campaign's data
      Copy the <Pack> folder into maps on the Xbox, next to your other map
      folders (stock.shared, in maps itself, only for an Xbox whose
      installer hasn't built it).
+     With the Xbox tab's "Save maps drawing on stock.shared and
+     stocktags.shared" ticked as well, the maps are format 4 (their tag
+     data rebuilt from stocktags.shared and the pack's file as they load).
+     "Showcase and bots for each map" (off to start with; from 1.185) also
+     writes each map's showcase.txt and bots.txt in its folder, made from
+     the pack's own map, which isn't changed. It's new for Xbox maps: try
+     it on one pack first. The maps themselves are always the pack's, as
+     its makers made them.
+
+Many packs at once (from 1.185): "Many packs..." (beside Browse) and pick a
+folder holding mod packs, a few levels down (each one a folder with ui.map
+in it, or in its maps folder). Each pack is made as Create pack makes one,
+with what the tab has set (Logo size, Corner, Save into, the shared file,
+showcase and bots): its maps ticked as the list would tick them, its own
+menu's logo stamped (none when its menu still has Halo's), and its readme
+and credits in <Pack>\About. Each pack's folder name (12 characters) is in
+packnames.txt in the folder you picked: written the first time with
+suggestions ("HMP7 - Halo Mappack v7" is HMP7, "Halo Zelda Pack v4" Zelda
+v4, "HMP Collection v2" HMP Coll v2), and read from then on, so change a
+name there and run it again. A pack that's a copy of another (the same
+ui.map and maps) is made once. A folder in Save into with a pack's name is
+only replaced when it's that same mod pack's; otherwise that pack isn't
+made and the report says to rename it. stock.shared isn't written (Halo 1
+Unlimited's installer builds it on every Xbox). Mod packs report.csv,
+beside packnames.txt, has each pack's result. Click the button (Stop)
+again to stop after the pack it's on. Packs that changed the game itself
+(their own default.xbe's rules, a co-op or firefight mode) are made like
+any other, but only what the maps carry comes with them.
 
 Where Xbox conversions go. With the Build tab's Xbox folder set (the batch
 window's "Save to"), it's laid out the way Halo 1 Unlimited reads the

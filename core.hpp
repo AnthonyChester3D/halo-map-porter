@@ -297,7 +297,8 @@ bool analyze_level_shaders(const Config &cfg, const fs::path &input, Game in_gam
 // An Xbox map converted before: its showcase flythrough (showcase.txt) and bot file (bots.txt: the waypoints the app
 // adds and the ladders, which Halo 1 Unlimited adds to the map's own) made from `input` (the map it was converted
 // from) and written beside `xbox_map` in its folder, without building or touching the map. A showcase.txt or bots.txt
-// the app didn't write is kept. `report`: what was written (or kept, and why not).
+// the app didn't write is kept. `report`: what was written (or kept, and why not). `input` can be an Xbox map too (a mod
+// pack's own: made from it, the map itself as it was).
 bool write_extras(const Config &cfg, const fs::path &input, Game in_game, const fs::path &xbox_map, std::string &report,
                   std::string &error, const Log &log);
 // A measurement saved to / read from a file (read: false if missing, damaged or from another version). The models

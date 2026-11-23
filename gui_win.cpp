@@ -81,7 +81,7 @@ enum {
     ID_PK_LOGO_NONE, ID_PK_LOGO_MENU, ID_PK_SIZE_LBL, ID_PK_SIZE, ID_PK_CORNER_LBL, ID_PK_CORNER, ID_PK_HINT, ID_PK_LIST, ID_PK_PIC,
     ID_PK_MNAME_LBL, ID_PK_MNAME, ID_PK_DESC, ID_PK_OUT_LBL, ID_PK_OUT, ID_PK_OUT_BROWSE, ID_PK_CREATE,
     // the Halo Universal XBE's map list settings (build 20)
-    ID_PK_MAPLIST, ID_PK_SHARED, ID_PK_STOCK,
+    ID_PK_MAPLIST, ID_PK_SHARED, ID_PK_STOCK, ID_PK_MANY, ID_PK_EXTRAS,
     // stock models' unused levels of detail; storing animations as keyframes
     ID_X_LODSTOCK, ID_X_ANIM_LBL, ID_X_ANIM,
     // making lower-detail versions, and the LOD library's folder (each *_BROWSE directly follows its edit box)
@@ -117,7 +117,7 @@ enum {
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
 // The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new175.exe is 1.175).
-#define HMP_VERSION L"1.184"
+#define HMP_VERSION L"1.185"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -234,6 +234,7 @@ static void save_settings() {
     ini_set(L"pk_corner", std::to_wstring(std::max(0, sel(ID_PK_CORNER))));
     ini_set(L"pk_shared", checked(ID_PK_SHARED) ? L"1" : L"0");
     ini_set(L"pk_stock", checked(ID_PK_STOCK) ? L"1" : L"0");
+    ini_set(L"pk_extras", checked(ID_PK_EXTRAS) ? L"1" : L"0");
 }
 
 static Config make_config() {
@@ -856,7 +857,7 @@ static void set_busy(bool b) {
         KillTimer(g_wnd, kHeartbeat);
         clear_heartbeat();
     }
-    for (int id : {ID_CONVERT, ID_BUILD, ID_S_INV_DL, ID_PK_CREATE, ID_BATCH}) EnableWindow(GetDlgItem(g_wnd, id), !b);
+    for (int id : {ID_CONVERT, ID_BUILD, ID_S_INV_DL, ID_PK_CREATE, ID_PK_MANY, ID_BATCH}) EnableWindow(GetDlgItem(g_wnd, id), !b);
     EnableWindow(GetDlgItem(g_wnd, ID_UNPACK), !b && unpack_allowed());
     if (b) {
         ShowWindow(GetDlgItem(g_wnd, ID_OPEN_FOLDER), SW_HIDE);
@@ -4239,6 +4240,257 @@ static void pk_draw(const DRAWITEMSTRUCT *di) {
     StretchDIBits(dc, r.left, r.top, r.right - r.left, r.bottom - r.top, 0, 0, mapcard::PIC_W, mapcard::PIC_H, bgra.data(), &bi,
                   DIB_RGB_COLORS, SRCCOPY);
 }
+// A pack written (Create pack's work, and Many packs' for each pack; on a worker thread): each map's map list lines
+// (gametypes, a player guess, genres) and its info.txt [Vehicles] (Halo 1 Unlimited's vehicle categories) read from it,
+// the pack written into `out`, then what its maps share stored once (sharedfile.hpp) in <pack>\<pack>-<version>.shared:
+// every map folder there, written now or before (one drawing on it already is read through it). `stock_dir`: where
+// stock.shared is written. False: `err`.
+struct PackDone {
+    std::wstring needs = L"a Halo Universal XBE with map packs";
+    bool used_stock = false;
+    std::string shared;   // the pack's .shared file, "" none
+    int maps = 0, texts = 0, extras = 0;   // (extras: maps with their showcase and bots written)
+};
+static bool pk_write(mappack::Pack &pack, const std::string &name, const fs::path &out, const std::string &series, const Config &cfg,
+                     bool store_shared, bool use_stock, bool extras, const fs::path &stock_dir, PackDone &pd, std::string &err) {
+    int n = 0, v = 0;
+    for (auto &e : pack.maps) {
+        if (!e.include) continue;
+        pd.maps++;
+        porter::MapTraits t;
+        if (!porter::analyze_map_traits(cfg, e.map_file, t)) continue;
+        mapcard::Card c;
+        c.desc = e.desc;
+        mapcard::apply_analysis(c, t.gametypes, t.pmin, t.pmax, t.genres);
+        e.lines = mapcard::info_lines(c);
+        e.vehicles.clear();
+        for (auto &x : t.vehicle_categories) e.vehicles.push_back({x.tag, x.category});
+        v += !e.vehicles.empty();
+        n++;
+    }
+    if (n)
+        post_log("Read each map's gametypes, spawn points and vehicles for the map list's sorts (" + std::to_string(n) + " maps; " +
+                 std::to_string(v) + " with vehicles, in their info.txt's [Vehicles]).");
+    pd.texts = (int)mappack::pack_texts(pack).size();
+    if (!mappack::write_pack(pack, name, out, series, post_log, err)) return false;
+    const fs::path root = out / W(name);
+    // each map's showcase flythrough and bot file, made from the pack's own map (write_extras; the map isn't changed)
+    if (extras)
+        for (auto &e : pack.maps) {
+            if (!e.include) continue;
+            std::string report, why;
+            bool ok = false;
+            try {
+                ok = write_extras(cfg, e.map_file, Game::Xbox, root / W(e.folder) / e.map_file.filename(), report, why, post_log);
+            } catch (const std::exception &x) {
+                why = std::string("the app hit an error: ") + x.what();
+            }
+            post_log(e.folder + ": " + (ok ? "wrote " + report : "no showcase or bots: " + why));
+            pd.extras += ok;
+        }
+    if (!store_shared) return true;
+    std::vector<fs::path> maps;
+    std::error_code ec;
+    for (auto &d : fs::directory_iterator(root, ec)) {
+        if (!d.is_directory(ec)) continue;
+        std::vector<fs::path> found;
+        for (auto &f : fs::directory_iterator(d.path(), ec))
+            if (f.is_regular_file(ec) && _wcsicmp(f.path().extension().c_str(), L".map") == 0) found.push_back(f.path());
+        std::sort(found.begin(), found.end());
+        if (!found.empty()) maps.push_back(found.front());
+    }
+    std::sort(maps.begin(), maps.end());
+    post_log("");
+    post_log("==== Storing what the pack's maps share once, in " + N(root.wstring()));
+    sharedfile::Result s = sharedfile::make(root, name, maps, use_stock ? cfg.xbox_maps_dir : fs::path(), stock_dir, cfg.cache_dir / "shared", post_log);
+    post_log(s.ok ? s.report : "Not stored once (the maps are as they were written): " + s.error);
+    if (s.ok) { pd.needs += L" and Halo 1 Unlimited v1.102"; pd.shared = s.pack_file; pd.used_stock = s.used_stock; }
+    return true;
+}
+
+// Map packs tab, "Many packs...": every mod pack in a folder (a few levels down), each made as Create pack makes one with
+// what the tab has set (Logo size, Corner, Save into, the shared file), its maps as the pack has them (ticked as Create pack
+// would list them), its own menu's logo (none when its menu has none) and its readme and credits in <Pack>\About. Each
+// pack's Xbox folder name is in packnames.txt in that folder: written with suggestions the first time (12 characters:
+// "HMP7 - Halo Mappack v7" is HMP7) and read from then on, so one can be changed there. A pack that's another's copy (the
+// same ui.map and maps) is made once. A folder already in Save into with a pack's name is replaced only when it's that
+// pack's (its order.txt says so). stock.shared stays in the app's cache (Halo 1 Unlimited's installer builds it on every
+// Xbox). "Mod packs report.csv" goes beside packnames.txt. Clicked again while it runs: stops after the pack it's on.
+static std::atomic<bool> g_pk_many_stop{false};
+static bool g_pk_many_running = false;
+static void pk_many() {
+    if (g_pk_many_running) {
+        g_pk_many_stop = true;
+        set_text(ID_PK_MANY, L"Stopping...");
+        return;
+    }
+    if (g_busy) return;
+    std::wstring src = pick_folder(ini_get(L"pk_many"));
+    if (src.empty()) return;
+    ini_set(L"pk_many", src);
+    const fs::path from(src);
+    HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
+    std::vector<fs::path> found = mappack::find_packs(from);
+    SetCursor(old);
+    if (found.empty()) {
+        MessageBoxW(g_wnd, (L"No mod packs in " + src + L": a pack is a folder with ui.map in it, or in its maps folder.").c_str(),
+                    L"Halo Map Porter", MB_ICONINFORMATION);
+        return;
+    }
+    // a pack that's another's copy: the same files in its maps folder (names and sizes)
+    auto ident = [](const fs::path &pack) {
+        std::error_code ec;
+        fs::path m = pack;
+        bool ui = false;
+        for (auto &e : fs::directory_iterator(pack, ec)) ui = ui || lower(e.path().filename().wstring()) == L"ui.map";
+        if (!ui)
+            for (auto &e : fs::directory_iterator(pack, ec))
+                if (e.is_directory(ec) && lower(e.path().filename().wstring()) == L"maps") m = e.path();
+        std::vector<std::wstring> v;
+        for (auto &e : fs::directory_iterator(m, ec))
+            if (e.is_regular_file(ec)) v.push_back(lower(e.path().filename().wstring()) + L"|" + std::to_wstring(e.file_size(ec)));
+        std::sort(v.begin(), v.end());
+        std::wstring o;
+        for (auto &x : v) o += x + L"\n";
+        return o;
+    };
+    auto rel = [&](const fs::path &p) { std::wstring r = p.lexically_relative(from).wstring(); return r.empty() || r == L"." ? p.filename().wstring() : r; };
+    struct One { fs::path path; std::wstring rel; std::string name; };
+    std::vector<One> packs;
+    std::vector<std::wstring> copies;
+    std::map<std::wstring, std::wstring> seen;
+    for (auto &p : found) {
+        std::wstring id = ident(p);
+        if (auto it = seen.find(id); it != seen.end()) { copies.push_back(rel(p) + L" (the same as " + it->second + L")"); continue; }
+        seen[id] = rel(p);
+        packs.push_back({p, rel(p), ""});
+    }
+    // the names: packnames.txt ("<folder> = <name>"), the rest suggested
+    const fs::path names_file = from / L"packnames.txt";
+    std::map<std::wstring, std::string> named;
+    {
+        std::ifstream f(names_file, std::ios::binary);
+        std::string l;
+        while (std::getline(f, l)) {
+            while (!l.empty() && (l.back() == '\r' || l.back() == ' ')) l.pop_back();
+            if (l.size() >= 3 && (unsigned char)l[0] == 0xEF) l.erase(0, 3);
+            size_t eq = l.rfind(" = ");
+            if (l.empty() || l[0] == '#' || eq == std::string::npos) continue;
+            named[lower(W(l.substr(0, eq)))] = l.substr(eq + 3);
+        }
+    }
+    std::vector<std::string> taken;
+    for (auto &o : packs)
+        if (auto it = named.find(lower(o.rel)); it != named.end()) { o.name = it->second; taken.push_back(o.name); }
+    bool added = false;
+    for (auto &o : packs)
+        if (o.name.empty()) {
+            o.name = mappack::short_pack_name(N(o.path.filename().wstring()), taken);
+            taken.push_back(o.name);
+            added = true;
+        }
+    if (added || !fs::exists(names_file)) {
+        std::string t = "# Each mod pack's folder on the Xbox (12 characters at most). Halo Map Porter's \"Many packs...\" wrote this:\r\n"
+                        "# change a name after the = and run it again.\r\n";
+        for (auto &o : packs) t += N(o.rel) + " = " + o.name + "\r\n";
+        std::ofstream(names_file, std::ios::binary | std::ios::trunc) << t;
+    }
+    fs::path out(get_text(ID_PK_OUT));
+    if (out.empty()) {
+        std::wstring f = pick_folder(L"");
+        if (f.empty()) return;
+        set_text(ID_PK_OUT, f);
+        out = f;
+    }
+    std::wstring list;
+    for (size_t i = 0; i < packs.size() && i < 45; i++) list += L"   " + W(packs[i].name) + L"   \x2190 " + packs[i].rel + L"\n";
+    if (packs.size() > 45) list += L"   ... and " + std::to_wstring(packs.size() - 45) + L" more\n";
+    if (!copies.empty()) list += L"\nMade once (copies): " + std::to_wstring(copies.size()) + L"\n";
+    if (MessageBoxW(g_wnd, (L"Make these " + std::to_wstring(packs.size()) + L" mod packs into " + out.wstring() + L"?\n\n" + list +
+                            L"\nEach as the pack has it: its maps, menu names, descriptions and pictures, its own menu logo "
+                            L"(Logo size and Corner as set here), its readme and credits in <Pack>\\About. The names are in " +
+                            names_file.wstring() + L": change one there and click Many packs again.").c_str(),
+                    L"Halo Map Porter", MB_OKCANCEL | MB_ICONQUESTION) != IDOK)
+        return;
+    save_settings();
+    Config cfg = make_config();
+    apply_xbox_options(cfg);   // (the showcase's and the bots' options)
+    const bool store_shared = checked(ID_PK_SHARED), use_stock = checked(ID_PK_STOCK), extras = checked(ID_PK_EXTRAS);
+    const int k = sel(ID_PK_SIZE), c = sel(ID_PK_CORNER);
+    const int size = kLogoSizes[k < 0 ? 1 : k];
+    const mappack::Corner corner = (mappack::Corner)(c < 0 ? 0 : c);
+    set_busy(true);
+    g_pk_many_running = true;
+    g_pk_many_stop = false;
+    set_text(ID_PK_MANY, L"Stop");
+    EnableWindow(GetDlgItem(g_wnd, ID_PK_MANY), TRUE);
+    SetWindowTextW(g_log, L"");
+    append_log(L"Many packs: " + std::to_wstring(packs.size()) + L" mod packs from " + src + L" -> " + out.wstring());
+    for (auto &x : copies) append_log(L"   Made once: " + x);
+    std::thread([packs, copies, from, out, cfg, store_shared, use_stock, extras, size, corner]() mutable {
+        auto csv = [](std::string v) {
+            for (auto &ch : v) if (ch == '\n' || ch == '\r') ch = ' ';
+            if (v.find_first_of(",\"") == std::string::npos) return v;
+            std::string o = "\"";
+            for (char ch : v) { if (ch == '"') o += '"'; o += ch; }
+            return o + "\"";
+        };
+        std::string report = "Pack,Folder,Result,Maps,Logo,Text files,Showcase and bots,Shared file\r\n";
+        int made = 0, failed = 0;
+        size_t at = 0;
+        for (auto &o : packs) {
+            if (g_pk_many_stop) break;
+            at++;
+            post_log("");
+            post_log("==== Pack " + std::to_string(at) + " of " + std::to_string(packs.size()) + ": " + N(o.rel) + " -> " + o.name);
+            mappack::Pack p;
+            std::string err, logo = "none";
+            PackDone pd;
+            bool ok = mappack::read_pack(o.path, p, err);
+            if (ok) for (auto &line : p.info) post_log("   " + line);
+            if (ok && !(err = mappack::pack_name_problem(o.name, p)).empty()) { ok = false; err = "its name (" + o.name + " in packnames.txt): " + err; }
+            const fs::path root = out / W(o.name);
+            std::error_code ec;
+            if (ok && fs::exists(root, ec)) {   // (replaced only when it's this pack's)
+                std::ifstream f(root / L"order.txt", std::ios::binary);
+                std::string t((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+                const std::string mark = "; from the mod pack: ", first = t.substr(0, t.find_first_of("\r\n"));
+                const size_t m = first.find(mark), close = first.rfind(')');
+                std::string was = m == std::string::npos || close == std::string::npos || close < m ? ""
+                                                                                                     : first.substr(m + mark.size(), close - m - mark.size());
+                if (!f || t.empty()) { ok = false; err = N(root.wstring()) + " is there already and isn't a mod pack made here: give this one another name in packnames.txt"; }
+                else if (!was.empty() && lower(W(was)) != lower(p.folder.filename().wstring())) {
+                    ok = false;
+                    err = N(root.wstring()) + " is the mod pack " + was + "'s: give this one another name in packnames.txt";
+                }
+            }
+            if (ok) {
+                mappack::assign_folders(p, o.name);
+                std::string series;
+                if (!p.menu_logos.empty()) {
+                    series = mappack::series_bin(mappack::fit_logo(p.menu_logos[0].image, size, true), corner, 4);
+                    logo = p.menu_logos[0].tag;
+                }
+                post_log(series.empty() ? "No logo: its menu has none of its own (the pictures stay as they are)."
+                                        : "Logo: " + logo + ", from the pack's main menu.");
+                ok = pk_write(p, o.name, out, series, cfg, store_shared, use_stock, extras, cfg.cache_dir / "shared", pd, err);
+            }
+            if (ok) made++; else { failed++; post_log("Not made: " + err); }
+            report += csv(N(o.rel)) + "," + csv(o.name) + "," + csv(ok ? "made" : "failed: " + err) + "," + std::to_string(pd.maps) + "," +
+                      csv(logo) + "," + std::to_string(pd.texts) + "," + (extras ? std::to_string(pd.extras) : std::string("-")) + "," +
+                      csv(pd.shared) + "\r\n";
+        }
+        for (auto &x : copies) report += csv(N(x)) + ",,made once (a copy),,,,,\r\n";
+        std::ofstream(from / L"Mod packs report.csv", std::ios::binary | std::ios::trunc) << report;
+        const bool stopped = g_pk_many_stop;
+        std::wstring msg = std::wstring(failed ? L"DONE, with failures: " : L"DONE: ") + std::to_wstring(made) + L" mod packs made in " +
+                           out.wstring() + (failed ? L", " + std::to_wstring(failed) + L" failed" : L"") + (stopped ? L" (stopped)" : L"") +
+                           L". Each pack's folder goes into the Xbox's maps folder. Mod packs report.csv in " + from.wstring() +
+                           L" has each one.";
+        auto *d = new Done{made > 0, msg, out.wstring(), (from / L"Mod packs report.csv").wstring()};
+        PostMessageW(g_wnd, WM_APP_DONE, 0, (LPARAM)d);
+    }).detach();
+}
 static void pk_create() {
     if (!g_pack_loaded) { MessageBoxW(g_wnd, L"Pick a mod pack first.", L"Halo Map Porter", MB_ICONINFORMATION); return; }
     std::string name = pk_name();
@@ -4276,48 +4528,16 @@ static void pk_create() {
     mappack::Pack pack = g_pack;
     std::string series = g_series;
     Config cfg = make_config();
-    const bool store_shared = checked(ID_PK_SHARED), use_stock = checked(ID_PK_STOCK);
-    std::thread([pack, name, out, series, root, cfg, store_shared, use_stock]() mutable {
+    apply_xbox_options(cfg);   // (the showcase's and the bots' options)
+    const bool store_shared = checked(ID_PK_SHARED), use_stock = checked(ID_PK_STOCK), extras = checked(ID_PK_EXTRAS);
+    std::thread([pack, name, out, series, root, cfg, store_shared, use_stock, extras]() mutable {
         std::string err;
-        // the map browser's lines (Halo Universal XBE build 20): each map's gametypes and a player guess
-        int n = 0;
-        for (auto &e : pack.maps) {
-            if (!e.include) continue;
-            porter::MapTraits t;
-            if (!porter::analyze_map_traits(cfg, e.map_file, t)) continue;
-            mapcard::Card c;
-            c.desc = e.desc;
-            mapcard::apply_analysis(c, t.gametypes, t.pmin, t.pmax, t.genres);
-            e.lines = mapcard::info_lines(c);
-            n++;
-        }
-        if (n) post_log("Read each map's gametypes and spawn points for the map list's sorts (" + std::to_string(n) + " maps).");
-        bool ok = mappack::write_pack(pack, name, out, series, post_log, err);
-        // What the pack's maps have in common stored once (sharedfile.hpp), in <pack>\<pack>-<version>.shared: every map folder
-        // there, written now or before (the XBE plays them all; one drawing on it already is read through it).
-        // stock.shared goes in the folder holding the pack's, the Xbox's maps folder.
-        std::wstring needs = L"a Halo Universal XBE with map packs", stock_too;
-        if (ok && store_shared) {
-            std::vector<fs::path> maps;
-            std::error_code ec;
-            for (auto &d : fs::directory_iterator(root, ec)) {
-                if (!d.is_directory(ec)) continue;
-                std::vector<fs::path> found;
-                for (auto &f : fs::directory_iterator(d.path(), ec))
-                    if (f.is_regular_file(ec) && _wcsicmp(f.path().extension().c_str(), L".map") == 0) found.push_back(f.path());
-                std::sort(found.begin(), found.end());
-                if (!found.empty()) maps.push_back(found.front());
-            }
-            std::sort(maps.begin(), maps.end());
-            post_log("");
-            post_log("==== Storing what the pack's maps share once, in " + N(root.wstring()));
-            sharedfile::Result s = sharedfile::make(root, name, maps, use_stock ? cfg.xbox_maps_dir : fs::path(), out, cfg.cache_dir / "shared", post_log);
-            post_log(s.ok ? s.report : "Not stored once (the maps are as they were written): " + s.error);
-            if (s.ok) needs += L" and Halo 1 Unlimited v1.102";
-            if (s.ok && s.used_stock) stock_too = L", and stock.shared beside it";
-        }
+        PackDone pd;
+        // (stock.shared goes in the folder holding the pack's, the Xbox's maps folder)
+        bool ok = pk_write(pack, name, out, series, cfg, store_shared, use_stock, extras, out, pd, err);
         auto *d = new Done{ok, ok ? L"DONE: Map pack written -> " + root.wstring() + L"\\  (copy the " + W(name) +
-                                        L" folder into the Xbox's maps folder" + stock_too + L"; it needs " + needs + L")"
+                                        L" folder into the Xbox's maps folder" + (pd.used_stock ? L", and stock.shared beside it" : L"") +
+                                        L"; it needs " + pd.needs + L")"
                                   : W("FAILED: " + err),
                            ok ? (root / L"order.txt").wstring() : L"", L""};
         PostMessageW(g_wnd, WM_APP_DONE, 0, (LPARAM)d);
@@ -4327,8 +4547,9 @@ static void create_pack_page() {
     const int P = 3;
     int y = 48;
     label(P, L"Mod pack:", 26, y, 76, ID_PK_IN_LBL);
-    edit(P, 104, y, 526, ID_PK_IN);
-    button(P, L"Browse...", 638, y - 1, 96, ID_PK_IN_BROWSE);
+    edit(P, 104, y, 424, ID_PK_IN);
+    button(P, L"Browse...", 534, y - 1, 96, ID_PK_IN_BROWSE);
+    button(P, L"Many packs...", 638, y - 1, 96, ID_PK_MANY);
     y += 32;
     label(P, L"Pack name:", 26, y, 76, ID_PK_NAME_LBL);
     edit(P, 104, y, 110, ID_PK_NAME);
@@ -4368,8 +4589,9 @@ static void create_pack_page() {
     button(P, L"Map list...", 532, y - 1, 114, ID_PK_MAPLIST);
     button(P, L"Create pack", 652, y - 1, 82, ID_PK_CREATE, true);
     y += 30;
-    check(P, L"Store what the maps share once, in <pack>-<version>.shared (Halo 1 Unlimited v1.102)", 26, y, 520, ID_PK_SHARED);
-    check(P, L"And draw on stock.shared", 562, y, 172, ID_PK_STOCK);
+    check(P, L"Store what the maps share once (<pack>.shared)", 26, y, 300, ID_PK_SHARED);
+    check(P, L"And draw on stock.shared", 332, y, 172, ID_PK_STOCK);
+    check(P, L"Showcase and bots for each map", 510, y, 224, ID_PK_EXTRAS);
 
     set_text(ID_PK_IN, ini_get(L"pk_in"));
     set_text(ID_PK_OUT, ini_get(L"pk_out"));
@@ -4379,6 +4601,7 @@ static void create_pack_page() {
     SendDlgItemMessageW(g_wnd, ID_PK_CORNER, CB_SETCURSEL, std::clamp(_wtoi(ini_get(L"pk_corner", L"0").c_str()), 0, 3), 0);
     set_check(ID_PK_SHARED, ini_get(L"pk_shared", L"1") == L"1");
     set_check(ID_PK_STOCK, ini_get(L"pk_stock", L"1") == L"1");
+    set_check(ID_PK_EXTRAS, ini_get(L"pk_extras", L"0") == L"1");
     pk_load_logo(true);
     pk_select(-1);
     pk_hint();
@@ -4510,6 +4733,9 @@ static bool pk_command(int id, int code) {
     }
     case ID_PK_CREATE:
         if (!g_busy) pk_create();
+        return true;
+    case ID_PK_MANY:
+        pk_many();
         return true;
     }
     return false;
@@ -5136,6 +5362,10 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         append_log(L"");
         append_log(d->msg);
         set_busy(false);
+        if (g_pk_many_running) {   // (Many packs' button back from Stop)
+            g_pk_many_running = false;
+            set_text(ID_PK_MANY, L"Many packs...");
+        }
         close_log_file();
         statuslamp::set(g_lamp, d->ok ? statuslamp::kDone : statuslamp::kFailed);
         if (d->ok && !d->output.empty()) {

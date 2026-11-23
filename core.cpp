@@ -21383,8 +21383,11 @@ bool write_extras(const Config &cfg_in, const fs::path &input, Game in_game, con
         error = "It isn't a folder map (no info.txt beside it): Halo 1 Unlimited reads showcase.txt and bots.txt in a map's folder.";
         return false;
     }
-    const bool pc_map = in_game == Game::CE || in_game == Game::MCC;
-    if (!pc_map) { error = "The map it was converted from isn't a Custom Edition or MCC map."; return false; }
+    // (an Xbox map works too: a retro mod pack's, made from the map itself, which isn't changed)
+    if (in_game != Game::CE && in_game != Game::MCC && in_game != Game::Xbox) {
+        error = "The map it's made from isn't a Custom Edition, MCC or Xbox map.";
+        return false;
+    }
     Config cfg = cfg_in.xbox_perfect ? perfect_config(cfg_in) : cfg_in;
     cfg.level_shaders_only = true;
     cfg.extras_only = true;

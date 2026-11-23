@@ -32,6 +32,7 @@ struct Entry {
     bool include = true;
     std::string note;        // shown next to it ("not in the pack's menu"...)
     std::string lines;       // the map browser's info.txt lines (mapcard::info_lines), "" = none
+    std::vector<std::pair<std::string, std::string>> vehicles;   // info.txt's [Vehicles]: palette tag, category
 };
 
 // A picture from the pack's main menu that looks like its logo (packs usually replace the HALO logo there)
@@ -43,6 +44,7 @@ struct MenuLogo {
 
 struct Pack {
     fs::path maps_dir;                 // the pack's maps folder (has ui.map)
+    fs::path folder;                   // the pack's own folder (its maps folder's, or that itself): its readme...
     std::string suggested_name;        // from the pack's folder name
     std::vector<Entry> maps;
     std::vector<std::string> info;     // what was found where (for the log)
@@ -70,6 +72,14 @@ Logo fit_logo(const mapcard::Image &img, int box, bool keep_strokes = false);
 std::string series_bin(const Logo &logo, Corner corner, int margin);   // placed inside the 140x114 that shows
 // The picture as the XBE will show it: the same decode / blend / encode the XBE does when it loads it.
 std::string stamp_preview(const std::string &preview, const std::string &series);
+
+// A retro pack's folder name made short for its Xbox folder (12 characters), apart from the names in `taken`.
+std::string short_pack_name(const std::string &folder_name, const std::vector<std::string> &taken);
+// Every mod pack in a folder, a few levels down (each folder with ui.map, or a maps folder with it).
+std::vector<fs::path> find_packs(const fs::path &root);
+// The pack's own text files beside its maps folder (readme, credits, changes, map list): write_pack copies them into
+// <Pack>\About\.
+std::vector<fs::path> pack_texts(const Pack &p);
 
 // Write the pack into `maps_dir` (an Xbox maps folder, or anywhere to copy from later).
 bool write_pack(const Pack &p, const std::string &pack_name, const fs::path &maps_dir, const std::string &series,
