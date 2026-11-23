@@ -2442,9 +2442,11 @@ converted from where it was, and an Xbox map in a map folder (with its
 info.txt). Bots play multiplayer maps only, so a campaign map gets only a
 showcase.
 
-Tag data stored once (Xbox tab, "Tag data from stocktags.shared too";
-off to start with: Halo 1 Unlimited's shared-file format 4, which only a
-build that reads it loads): each map's tag data is rebuilt as it loads, by
+Tag data stored once (Xbox tab, "Tag data from stocktags.shared too"; on
+to start with from 1.182: Halo 1 Unlimited's shared-file format 4, locked
+2026-11-23, which only a build that reads it loads, with stocktags.shared
+built on the Xbox by its installer 66 or later; untick it for an Xbox that
+doesn't have those yet): each map's tag data is rebuilt as it loads, by
 a recipe in the map, from the stock tag pool (every word of the 23 retail
 maps' tag data once: Halo 1 Unlimited's installer builds it on each Xbox as
 stocktags.shared, and this app makes the same pool once from the Xbox maps
