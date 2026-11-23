@@ -2371,8 +2371,10 @@ one go, with the names, descriptions and pictures the pack's menu shows.
                                    and map list, as they are (its .txt,
                                    .nfo, .rtf, .md and .htm files)
        <Pack>\info.txt            for Halo 1 Unlimited's map library: the
-                                   mod pack's own name, a line on what it
-                                   is, its maps, "Version: 1"
+                                   mod pack's own name (48 characters), a
+                                   line on what it is, as many of its maps'
+                                   names as fit 250 characters ("and 18
+                                   more"), "Version: 1"
        <Pack>\<Pack>-<version>.shared   what two or more of its maps use
        stock.shared                the stock maps' and campaign's data
      Copy the <Pack> folder into maps on the Xbox, next to your other map
@@ -2410,7 +2412,9 @@ A pack's folder goes into Halo 1 Unlimited's map library as it is (its
 library manager's "Add a pack...", installer 72): one folder level, each
 map's; no name over the game's 30 characters for "<pack>/<map>"; and not
 "Library", the library's own folder for single maps (refused as a pack's
-name from 1.186). The same pack made again is the same files.
+name from 1.186); no file's name over 42 characters (the Xbox drive's
+limit: the About files are cut to fit, from 1.187). The same pack made
+again is the same files.
 
 Where Xbox conversions go. With the Build tab's Xbox folder set (the batch
 window's "Save to"), it's laid out the way Halo 1 Unlimited reads the

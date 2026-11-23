@@ -958,7 +958,9 @@ bool write_pack(const Pack &p, const std::string &pack_name, const fs::path &map
         int k = 0;
         for (auto &t : texts) {
             const std::string x = lower(t.extension().u8string());
-            const size_t room = 84 > pack_name.size() + 1 + 6 + x.size() ? 84 - pack_name.size() - 1 - 6 - x.size() : 1;
+            // (a name is 42 characters at most, the Xbox drive's limit; its path 84)
+            const size_t whole = std::min<size_t>(42, 84 > pack_name.size() + 1 ? 84 - pack_name.size() - 1 : 0);
+            const size_t room = whole > 6 + x.size() + 1 ? whole - 6 - x.size() : 1;
             std::string stem = clean_name(t.stem().u8string(), room);
             if (stem.empty()) stem = "Readme";
             std::string f = "About " + stem + x;
@@ -980,14 +982,27 @@ bool write_pack(const Pack &p, const std::string &pack_name, const fs::path &map
         if (!map) fs::remove_all(old, ec);
     }
     // The pack's info.txt (Halo 1 Unlimited's map library: line 1 the name its list shows, then the description, then
-    // "Version: N"): the mod pack's own name, what it is and its maps.
+    // "Version: N"): the mod pack's own name (48 characters, what the library's catalog keeps), what it is and its maps,
+    // the description within 250 characters (the library cuts it at 300): as many maps' names as fit, then how many more.
     {
-        std::string shown = clean_name(p.folder.empty() ? pack_name : p.folder.filename().u8string(), 64), maps;
+        std::string shown = clean_name(p.folder.empty() ? pack_name : p.folder.filename().u8string(), 48);
         if (shown.empty()) shown = pack_name;
+        const std::string what = "A classic Xbox mod pack: " + std::to_string(total) + (total == 1 ? " map" : " maps") +
+                                 " as its makers made them.";
+        std::vector<std::string> names;
         for (auto &e : p.maps)
-            if (e.include) maps += (maps.empty() ? "" : ", ") + e.name;
-        std::string t = shown + "\r\nA classic Xbox mod pack: " + std::to_string(total) + (total == 1 ? " map" : " maps") +
-                        " as its makers made them.\r\nMaps: " + maps + "\r\nVersion: 1\r\n";
+            if (e.include) names.push_back(e.name);
+        std::string maps;
+        for (size_t i = 0; i < names.size(); i++) {
+            const std::string next = (maps.empty() ? "Maps: " : maps + ", ") + names[i];
+            const std::string rest = i + 1 < names.size() ? ", and " + std::to_string(names.size() - i - 1) + " more" : "";
+            if (what.size() + 1 + next.size() + rest.size() + 1 > 250) {   // (the ones that don't fit, counted)
+                if (!maps.empty()) maps += ", and " + std::to_string(names.size() - i) + " more";
+                break;
+            }
+            maps = next;
+        }
+        std::string t = shown + "\r\n" + what + "\r\n" + (maps.empty() ? "" : maps + ".\r\n") + "Version: 1\r\n";
         if (!write_file(root / "info.txt", t, err)) return false;
     }
     if (log) log("Done: " + std::to_string(total) + " maps in " + root.u8string());
