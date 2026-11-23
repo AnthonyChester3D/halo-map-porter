@@ -677,6 +677,7 @@ std::string short_pack_name(const std::string &folder_name, const std::vector<st
     }
     if (o.empty()) o = "Pack";
     for (int i = 0; i < 13; i++) if (lower(o) == kStockSlots[i]) o += " Pack";
+    if (lower(o) == "library") o += " Pack";   // (Halo 1 Unlimited's map library's own folder)
     auto used = [&](const std::string &t) {
         for (auto &x : taken) if (lower(x) == lower(t)) return true;
         return false;
@@ -747,6 +748,7 @@ std::string pack_name_problem(const std::string &pack_name, const Pack &p) {
     if (clean_name(pack_name, KEY_MAX) != pack_name) return "The Xbox drive can't store some of these characters";
     if (pack_name.size() > 20) return "Too long: keep it to 20 characters so the map names fit";
     for (int i = 0; i < 13; i++) if (lower(pack_name) == kStockSlots[i]) return "That's a stock map's name";
+    if (lower(pack_name) == "library") return "That's the folder Halo 1 Unlimited's map library keeps its single maps in";
     (void)p;
     return "";
 }
@@ -948,16 +950,45 @@ bool write_pack(const Pack &p, const std::string &pack_name, const fs::path &map
         if (!write_file(root / "series.bin", series, err)) return false;
         if (log) log("Wrote " + pack_name + "\\series.bin (the logo on every picture)");
     }
-    // the pack's own readme, credits and changes, as they are: <Pack>\About\ (no .map in it, so not a map's folder)
+    // The pack's own readme, credits and changes, as they are, at the pack folder's top as "About <its name>" (Halo 1
+    // Unlimited's map library zips a pack with one folder level, each map's; 84 characters at most for a file's path in
+    // it, the pack's name and a "/" too). One from an earlier run that's no longer the pack's goes.
+    std::set<std::string> about;
     if (auto texts = pack_texts(p); !texts.empty()) {
-        fs::path about = root / "About";
-        fs::create_directories(about, ec);
         int k = 0;
         for (auto &t : texts) {
-            copy_over(t, about / t.filename(), ec);
+            const std::string x = lower(t.extension().u8string());
+            const size_t room = 84 > pack_name.size() + 1 + 6 + x.size() ? 84 - pack_name.size() - 1 - 6 - x.size() : 1;
+            std::string stem = clean_name(t.stem().u8string(), room);
+            if (stem.empty()) stem = "Readme";
+            std::string f = "About " + stem + x;
+            for (int n = 2; about.count(lower(f)); n++) f = "About " + clean_name(stem, room > 3 ? room - 3 : 1) + " " + std::to_string(n) + x;
+            about.insert(lower(f));
+            copy_over(t, root / fs::u8path(f), ec);
             k += !ec;
         }
-        if (log) log("Copied the pack's own " + std::to_string(k) + (k == 1 ? " text file" : " text files") + " into " + pack_name + "\\About");
+        if (log) log("Copied the pack's own " + std::to_string(k) + (k == 1 ? " text file" : " text files") + " into " + pack_name +
+                     " (\"About ...\")");
+    }
+    for (auto &e : fs::directory_iterator(root, ec)) {
+        const std::string n = e.path().filename().u8string();
+        if (e.is_regular_file() && lower(n).rfind("about ", 0) == 0 && !about.count(lower(n))) fs::remove(e.path(), ec);
+    }
+    if (fs::path old = root / "About"; fs::is_directory(old, ec)) {   // (1.185's place for them, when no map is in it)
+        bool map = false;
+        for (auto &e : fs::directory_iterator(old, ec)) map = map || lower(e.path().extension().u8string()) == ".map";
+        if (!map) fs::remove_all(old, ec);
+    }
+    // The pack's info.txt (Halo 1 Unlimited's map library: line 1 the name its list shows, then the description, then
+    // "Version: N"): the mod pack's own name, what it is and its maps.
+    {
+        std::string shown = clean_name(p.folder.empty() ? pack_name : p.folder.filename().u8string(), 64), maps;
+        if (shown.empty()) shown = pack_name;
+        for (auto &e : p.maps)
+            if (e.include) maps += (maps.empty() ? "" : ", ") + e.name;
+        std::string t = shown + "\r\nA classic Xbox mod pack: " + std::to_string(total) + (total == 1 ? " map" : " maps") +
+                        " as its makers made them.\r\nMaps: " + maps + "\r\nVersion: 1\r\n";
+        if (!write_file(root / "info.txt", t, err)) return false;
     }
     if (log) log("Done: " + std::to_string(total) + " maps in " + root.u8string());
     return true;

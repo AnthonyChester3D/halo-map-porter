@@ -117,7 +117,7 @@ enum {
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
 // The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new175.exe is 1.175).
-#define HMP_VERSION L"1.185"
+#define HMP_VERSION L"1.186"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -2005,6 +2005,7 @@ static std::wstring pack_folder_for(const std::wstring &name) {
         if (!kept.empty()) s = kept;
     }
     std::wstring o = fit_name(W(mapcard::sanitize_folder(N(s))), kPackChars);
+    if (lower(o) == L"library") o = L"Library Pack";   // (Halo 1 Unlimited's map library's own folder)
     return o.empty() ? L"Pack" : o;
 }
 // A campaign pack's level folders leave room for their pieces' (" Open", " End", " P2").
@@ -3189,6 +3190,7 @@ static void open_batch() {
         if (W(mapcard::sanitize_folder(N(name))) != name) return L"The Xbox drive can't store some of these characters.";
         const PackLayout l = pack_layout();
         if (lower(name) == lower(l.xbox) || lower(name) == lower(l.crossplay)) return L"That's the folder for maps on their own.";
+        if (lower(name) == L"library") return L"That's the folder Halo 1 Unlimited's map library keeps its single maps in.";
         for (auto *st : mappack::kStockSlots)
             if (lower(name) == W(st)) return L"That's a stock map's name.";
         return L"";
@@ -4310,7 +4312,7 @@ static bool pk_write(mappack::Pack &pack, const std::string &name, const fs::pat
 
 // Map packs tab, "Many packs...": every mod pack in a folder (a few levels down), each made as Create pack makes one with
 // what the tab has set (Logo size, Corner, Save into, the shared file), its maps as the pack has them (ticked as Create pack
-// would list them), its own menu's logo (none when its menu has none) and its readme and credits in <Pack>\About. Each
+// would list them), its own menu's logo (none when its menu has none) and its readme and credits beside them. Each
 // pack's Xbox folder name is in packnames.txt in that folder: written with suggestions the first time (12 characters:
 // "HMP7 - Halo Mappack v7" is HMP7) and read from then on, so one can be changed there. A pack that's another's copy (the
 // same ui.map and maps) is made once. A folder already in Save into with a pack's name is replaced only when it's that
@@ -4408,7 +4410,7 @@ static void pk_many() {
     if (!copies.empty()) list += L"\nMade once (copies): " + std::to_wstring(copies.size()) + L"\n";
     if (MessageBoxW(g_wnd, (L"Make these " + std::to_wstring(packs.size()) + L" mod packs into " + out.wstring() + L"?\n\n" + list +
                             L"\nEach as the pack has it: its maps, menu names, descriptions and pictures, its own menu logo "
-                            L"(Logo size and Corner as set here), its readme and credits in <Pack>\\About. The names are in " +
+                            L"(Logo size and Corner as set here), its readme and credits beside them (\"About ...\"). The names are in " +
                             names_file.wstring() + L": change one there and click Many packs again.").c_str(),
                     L"Halo Map Porter", MB_OKCANCEL | MB_ICONQUESTION) != IDOK)
         return;

@@ -2367,9 +2367,12 @@ one go, with the names, descriptions and pictures the pack's menu shows.
        <Pack>\order.txt            the pack's menu order (its first line
                                    names the mod pack it came from)
        <Pack>\series.bin           the logo (if you picked one)
-       <Pack>\About\              the pack's own readme, credits, changes
+       <Pack>\About <file>         the pack's own readme, credits, changes
                                    and map list, as they are (its .txt,
                                    .nfo, .rtf, .md and .htm files)
+       <Pack>\info.txt            for Halo 1 Unlimited's map library: the
+                                   mod pack's own name, a line on what it
+                                   is, its maps, "Version: 1"
        <Pack>\<Pack>-<version>.shared   what two or more of its maps use
        stock.shared                the stock maps' and campaign's data
      Copy the <Pack> folder into maps on the Xbox, next to your other map
@@ -2390,7 +2393,7 @@ in it, or in its maps folder). Each pack is made as Create pack makes one,
 with what the tab has set (Logo size, Corner, Save into, the shared file,
 showcase and bots): its maps ticked as the list would tick them, its own
 menu's logo stamped (none when its menu still has Halo's), and its readme
-and credits in <Pack>\About. Each pack's folder name (12 characters) is in
+and credits beside them. Each pack's folder name (12 characters) is in
 packnames.txt in the folder you picked: written the first time with
 suggestions ("HMP7 - Halo Mappack v7" is HMP7, "Halo Zelda Pack v4" Zelda
 v4, "HMP Collection v2" HMP Coll v2), and read from then on, so change a
@@ -2403,6 +2406,11 @@ beside packnames.txt, has each pack's result. Click the button (Stop)
 again to stop after the pack it's on. Packs that changed the game itself
 (their own default.xbe's rules, a co-op or firefight mode) are made like
 any other, but only what the maps carry comes with them.
+A pack's folder goes into Halo 1 Unlimited's map library as it is (its
+library manager's "Add a pack...", installer 72): one folder level, each
+map's; no name over the game's 30 characters for "<pack>/<map>"; and not
+"Library", the library's own folder for single maps (refused as a pack's
+name from 1.186). The same pack made again is the same files.
 
 Where Xbox conversions go. With the Build tab's Xbox folder set (the batch
 window's "Save to"), it's laid out the way Halo 1 Unlimited reads the
