@@ -54,6 +54,10 @@ struct Hooks {
     // A pack's shared file made again from the maps in its folder (converted before, any time), without converting
     // any: in a worker thread, reporting with done(). False (after telling the user) if it can't start.
     std::function<bool(const std::wstring &pack)> reshare;
+    // The maps on their own (in the Xbox and Crossplay folders, converted before, any time) stored again as they are,
+    // each drawing on stock.shared (and stocktags.shared, with the Xbox tab's box), none converted: in a worker thread,
+    // reporting with done(). False (after telling the user) if it can't start.
+    std::function<bool()> restock;
     // A map put on the Convert tab (its map and where it's saved): double-click, or right-click "Use on the Convert
     // tab". The window closes after it (not while converting).
     std::function<void(const Item &)> use;

@@ -538,6 +538,10 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 for (size_t k = 0; k < names.size() && k < 200; k++) AppendMenuW(sub, MF_STRING, 100 + (UINT)k, names[k].c_str());
                 AppendMenuW(m, MF_POPUP | (names.empty() || St->running ? MF_GRAYED : 0), (UINT_PTR)sub, (L"Add " + these + L" to a pack").c_str());
                 if (any_named) AppendMenuW(m, MF_STRING | gray, 6, (L"Take " + these + L" out of the pack you put " + (targets.size() == 1 ? L"it" : L"them") + L" in").c_str());
+                if (St->hooks.restock) {
+                    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+                    AppendMenuW(m, MF_STRING | gray, 8, L"Store every map on its own again (as they are, none converted)...");
+                }
                 POINT pt;
                 GetCursorPos(&pt);
                 int pick = (int)TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, h, nullptr);
@@ -560,6 +564,15 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                         SetWindowTextW(item(IDC_STATUS), pick == 6 ? (these + L": out of the pack (an MCC item's maps go back in its own).").c_str()
                                                        : (these + L" in the pack " + to + L": converted into Copy to Xbox maps\\" + to +
                                                           L", sharing its file with the maps there (converting one later adds it).").c_str());
+                    }
+                } else if (pick == 8 && !St->running && St->hooks.restock) {
+                    St->running = true;
+                    update_buttons();
+                    SetWindowTextW(item(IDC_STATUS), L"Storing the maps on their own again...");
+                    if (!St->hooks.restock()) {
+                        St->running = false;
+                        update_buttons();
+                        SetWindowTextW(item(IDC_STATUS), L"");
                     }
                 } else if (pick == 7 && !St->running && St->hooks.reshare) {
                     St->running = true;

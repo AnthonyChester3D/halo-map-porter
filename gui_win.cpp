@@ -117,7 +117,7 @@ enum {
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
 // The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new175.exe is 1.175).
-#define HMP_VERSION L"1.187"
+#define HMP_VERSION L"1.188"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -3231,6 +3231,74 @@ static void open_batch() {
             batchui::done(r.ok ? L"Stored " + pack + L"'s shared file again, for its " + std::to_wstring(maps.size()) + L" maps" +
                                      (r.pack_file.empty() ? L"" : L": " + W(r.pack_file)) + L" (the log has the sizes)."
                                : L"Not stored again: " + W(r.error.substr(0, r.error.find('\n'))));
+        }).detach();
+        return true;
+    };
+    // "Store every map on its own again": each map in the Xbox and Crossplay folders, as it is (one drawing on stock.shared
+    // already is read through it), drawing on stock.shared again (and on stocktags.shared, format 4, with the Xbox tab's
+    // box ticked): for maps converted with the box off, or before format 4. Their sizes before and after in the log.
+    h.restock = []() -> bool {
+        const PackLayout l = pack_layout();
+        if (l.root.empty()) {
+            MessageBoxW(g_wnd, L"Pick the batch's \"Save to\" folder first: the maps on their own are in its Copy to Xbox maps.", L"Halo Map Porter", MB_ICONINFORMATION);
+            return false;
+        }
+        if (!checked(ID_X_STOCK_SHARED)) {
+            MessageBoxW(g_wnd, L"Tick the Xbox tab's \"Save maps drawing on stock.shared and stocktags.shared\" first: that's what the maps are stored again with.",
+                        L"Halo Map Porter", MB_ICONINFORMATION);
+            return false;
+        }
+        Config cfg = make_config();
+        if (cfg.xbox_maps_dir.empty() || sharedfile::stock_maps_in(cfg.xbox_maps_dir).empty()) {
+            MessageBoxW(g_wnd, L"The Xbox maps folder in Settings needs the 13 stock multiplayer maps and the 10 campaign levels: stock.shared and the stock tag pool are made from them.",
+                        L"Halo Map Porter", MB_ICONINFORMATION);
+            return false;
+        }
+        std::vector<fs::path> maps;
+        std::error_code ec;
+        for (const fs::path &dir : {l.xbox_dir(), l.cross_dir()})
+            for (auto &d : fs::directory_iterator(dir, ec)) {
+                if (!d.is_directory(ec)) continue;
+                std::vector<fs::path> found;
+                for (auto &f : fs::directory_iterator(d.path(), ec))
+                    if (f.is_regular_file(ec) && lower(f.path().extension().wstring()) == L".map") found.push_back(f.path());
+                std::sort(found.begin(), found.end());
+                if (!found.empty()) maps.push_back(found.front());
+            }
+        if (maps.empty()) {
+            MessageBoxW(g_wnd, (L"No maps on their own in " + l.xbox_dir().wstring() + L" or " + l.cross_dir().wstring() + L" yet.").c_str(),
+                        L"Halo Map Porter", MB_ICONINFORMATION);
+            return false;
+        }
+        if (MessageBoxW(g_wnd, (L"Store the " + std::to_wstring(maps.size()) + L" maps on their own again, as they are (none converted)?\n\n"
+                                L"Each is rewritten where it is, drawing on stock.shared and stocktags.shared (format 4). The maps in packs "
+                                L"aren't touched (right-click one of a pack's maps for its pack). The log has each map's size before and after.").c_str(),
+                        L"Halo Map Porter", MB_OKCANCEL | MB_ICONQUESTION) != IDOK)
+            return false;
+        std::thread([maps, cfg] {
+            const fs::path cache = cfg.cache_dir / "shared";
+            uint64_t before = 0, after = 0;
+            int done = 0, failed = 0;
+            for (size_t i = 0; i < maps.size(); i++) {
+                const fs::path &m = maps[i];
+                std::error_code ec;
+                const uint64_t b = fs::file_size(m, ec);
+                post_log("");
+                post_log("==== " + std::to_string(i + 1) + " of " + std::to_string(maps.size()) + ": " + N(m.parent_path().filename().wstring()));
+                sharedfile::Result s = sharedfile::make(m.parent_path(), N(m.stem().wstring()), {m}, cfg.xbox_maps_dir, cache, cache, post_log);
+                post_log(s.ok ? s.report : "Not stored again (the map is as it was): " + s.error);
+                const uint64_t a = fs::file_size(m, ec);
+                before += b;
+                after += ec ? b : a;
+                if (s.ok) done++; else failed++;
+            }
+            auto mb = [](uint64_t v) { wchar_t t[32]; swprintf(t, 32, L"%.1f MB", v / 1048576.0); return std::wstring(t); };
+            std::wstring sum = L"Stored " + std::to_wstring(done) + L" maps on their own again: " + mb(before) + L" -> " + mb(after);
+            if (before) { wchar_t t[32]; swprintf(t, 32, L" (%.0f%% smaller)", 100.0 * (1.0 - (double)after / (double)before)); sum += t; }
+            if (failed) sum += L"; " + std::to_wstring(failed) + L" not (the log says why)";
+            post_log("");
+            post_log(N(sum));
+            batchui::done(sum + L".");
         }).detach();
         return true;
     };

@@ -2468,6 +2468,16 @@ Workshop item that were named alike (Tinkered, Tinkered 2) no longer share
 one map card, and so no longer split off into a pack of their own (before
 1.179).
 
+Maps on their own, stored again (from 1.188): right-click any map in the
+batch list, "Store every map on its own again (as they are, none
+converted)...". Every map in Copy to Xbox maps\Xbox and \Crossplay is
+rewritten where it is, drawing on stock.shared and stocktags.shared (format
+4), so a big pass made with the Xbox tab's box off, or made before format
+4, doesn't have to be converted again. The box must be ticked; maps in
+packs aren't touched (their own right-click item does those). The log has
+each map's sizes and the total before and after. A map stored again is
+byte for byte the map a conversion with the box ticked makes.
+
 A batch takes each map's work folder away once the map is done (its scratch
 copy of the tags, hundreds of MB each), keeping only the latest one, which
 the Xbox tab's "Update the map" and windows build from; earlier batches'
