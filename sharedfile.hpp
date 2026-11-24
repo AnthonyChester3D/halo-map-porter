@@ -37,6 +37,7 @@ struct Result {
     std::string report;        // for people: each map's size before and after, the shared files', in all
     bool used_stock = false;   // a map draws on stock.shared (written, or already there)
     std::string pack_file;     // the pack's file written (<pack>-<8 hex of its checksum>.shared), if any
+    std::vector<std::string> left;   // the maps left as they are, and why (they can't be read): "<folder>/<map>: why"
 };
 // `maps`: finished Xbox maps, rewritten in place (one already drawing on shared files is read through them, so running
 // this again after one is rebuilt works; one that can't be read is left as it is). Data two or more of them use goes in

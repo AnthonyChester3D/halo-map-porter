@@ -719,6 +719,7 @@ std::vector<fs::path> pack_texts(const Pack &p) {
     for (auto &e : fs::directory_iterator(p.folder, ec)) {
         if (!e.is_regular_file(ec)) continue;
         const std::string x = lower(e.path().extension().u8string());
+        if (lower(e.path().filename().u8string()) == "packnames.txt") continue;   // (Many packs' own, when the pack itself was picked)
         if ((x == ".txt" || x == ".nfo" || x == ".rtf" || x == ".md" || x == ".htm" || x == ".html" || x == ".diz") &&
             e.file_size(ec) <= (2u << 20))
             o.push_back(e.path());

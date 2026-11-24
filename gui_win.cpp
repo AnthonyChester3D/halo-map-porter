@@ -117,7 +117,7 @@ enum {
 #define WM_APP_DONE (WM_APP + 2)
 #define WM_APP_CAMPAIGN (WM_APP + 70)   // the Campaign tab's report (a new std::string)
 // The app's version, in the title bar: 1.<the build's number> (HaloMapPorter_new175.exe is 1.175).
-#define HMP_VERSION L"1.188"
+#define HMP_VERSION L"1.189"
 
 static HWND g_wnd, g_tab, g_log;
 static HFONT g_font, g_mono, g_bold;
@@ -4320,6 +4320,8 @@ struct PackDone {
     bool used_stock = false;
     std::string shared;   // the pack's .shared file, "" none
     int maps = 0, texts = 0, extras = 0;   // (extras: maps with their showcase and bots written)
+    size_t left = 0;                        // maps left at their size (they couldn't be read, or nothing was stored)
+    std::string why;                        // (the first one's reason)
 };
 static bool pk_write(mappack::Pack &pack, const std::string &name, const fs::path &out, const std::string &series, const Config &cfg,
                      bool store_shared, bool use_stock, bool extras, const fs::path &stock_dir, PackDone &pd, std::string &err) {
@@ -4375,6 +4377,9 @@ static bool pk_write(mappack::Pack &pack, const std::string &name, const fs::pat
     sharedfile::Result s = sharedfile::make(root, name, maps, use_stock ? cfg.xbox_maps_dir : fs::path(), stock_dir, cfg.cache_dir / "shared", post_log);
     post_log(s.ok ? s.report : "Not stored once (the maps are as they were written): " + s.error);
     if (s.ok) { pd.needs += L" and Halo 1 Unlimited v1.102"; pd.shared = s.pack_file; pd.used_stock = s.used_stock; }
+    pd.left = s.ok ? s.left.size() : (size_t)pd.maps;
+    if (!s.ok) pd.why = "not stored once: " + s.error.substr(0, s.error.find('\n'));
+    else if (!s.left.empty()) pd.why = s.left.front();
     return true;
 }
 
@@ -4505,7 +4510,8 @@ static void pk_many() {
             for (char ch : v) { if (ch == '"') o += '"'; o += ch; }
             return o + "\"";
         };
-        std::string report = "Pack,Folder,Result,Maps,Logo,Text files,Showcase and bots,Shared file\r\n";
+        std::string report = "Pack,Folder,Result,Maps,Left at their size,Logo,Text files,Showcase and bots,Shared file\r\n";
+        int partly = 0;
         int made = 0, failed = 0;
         size_t at = 0;
         for (auto &o : packs) {
@@ -4546,15 +4552,20 @@ static void pk_many() {
                 ok = pk_write(p, o.name, out, series, cfg, store_shared, use_stock, extras, cfg.cache_dir / "shared", pd, err);
             }
             if (ok) made++; else { failed++; post_log("Not made: " + err); }
-            report += csv(N(o.rel)) + "," + csv(o.name) + "," + csv(ok ? "made" : "failed: " + err) + "," + std::to_string(pd.maps) + "," +
+            if (ok && pd.left) partly++;
+            report += csv(N(o.rel)) + "," + csv(o.name) + "," +
+                      csv(!ok ? "failed: " + err : pd.left ? "made, " + std::to_string(pd.left) + " maps at their size (" + pd.why + ")" : "made") + "," +
+                      std::to_string(pd.maps) + "," + std::to_string(pd.left) + "," +
                       csv(logo) + "," + std::to_string(pd.texts) + "," + (extras ? std::to_string(pd.extras) : std::string("-")) + "," +
                       csv(pd.shared) + "\r\n";
         }
-        for (auto &x : copies) report += csv(N(x)) + ",,made once (a copy),,,,,\r\n";
+        for (auto &x : copies) report += csv(N(x)) + ",,made once (a copy),,,,,,\r\n";
         std::ofstream(from / L"Mod packs report.csv", std::ios::binary | std::ios::trunc) << report;
         const bool stopped = g_pk_many_stop;
-        std::wstring msg = std::wstring(failed ? L"DONE, with failures: " : L"DONE: ") + std::to_wstring(made) + L" mod packs made in " +
-                           out.wstring() + (failed ? L", " + std::to_wstring(failed) + L" failed" : L"") + (stopped ? L" (stopped)" : L"") +
+        std::wstring msg = std::wstring(failed || partly ? L"DONE, with failures: " : L"DONE: ") + std::to_wstring(made) + L" mod packs made in " +
+                           out.wstring() + (failed ? L", " + std::to_wstring(failed) + L" failed" : L"") +
+                           (partly ? L", " + std::to_wstring(partly) + L" with maps left at their size (the report says why)" : L"") +
+                           (stopped ? L" (stopped)" : L"") +
                            L". Each pack's folder goes into the Xbox's maps folder. Mod packs report.csv in " + from.wstring() +
                            L" has each one.";
         auto *d = new Done{made > 0, msg, out.wstring(), (from / L"Mod packs report.csv").wstring()};
@@ -4605,9 +4616,10 @@ static void pk_create() {
         PackDone pd;
         // (stock.shared goes in the folder holding the pack's, the Xbox's maps folder)
         bool ok = pk_write(pack, name, out, series, cfg, store_shared, use_stock, extras, out, pd, err);
-        auto *d = new Done{ok, ok ? L"DONE: Map pack written -> " + root.wstring() + L"\\  (copy the " + W(name) +
+        const std::wstring left = ok && pd.left ? L"  BUT " + std::to_wstring(pd.left) + L" of its maps were left at their size: " + W(pd.why) : L"";
+        auto *d = new Done{ok, ok ? (left.empty() ? L"DONE" : L"DONE, with failures") + std::wstring(L": Map pack written -> ") + root.wstring() + L"\\  (copy the " + W(name) +
                                         L" folder into the Xbox's maps folder" + (pd.used_stock ? L", and stock.shared beside it" : L"") +
-                                        L"; it needs " + pd.needs + L")"
+                                        L"; it needs " + pd.needs + L")" + left
                                   : W("FAILED: " + err),
                            ok ? (root / L"order.txt").wstring() : L"", L""};
         PostMessageW(g_wnd, WM_APP_DONE, 0, (LPARAM)d);

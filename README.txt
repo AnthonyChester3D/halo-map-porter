@@ -2408,6 +2408,12 @@ beside packnames.txt, has each pack's result. Click the button (Stop)
 again to stop after the pack it's on. Packs that changed the game itself
 (their own default.xbe's rules, a co-op or firefight mode) are made like
 any other, but only what the maps carry comes with them.
+Some older packs' maps were packed by tools that stop where the tag data
+ends, leaving out the zeros that pad the map to its header's length; from
+1.189 those zeros are put back as the Xbox itself does, so those maps are
+stored once too (before, they were left at their size). A pack whose maps
+are left at their size, for any reason, now says so in the log, in the
+Done line and in Mod packs report.csv ("Left at their size").
 A pack's folder goes into Halo 1 Unlimited's map library as it is (its
 library manager's "Add a pack...", installer 72): one folder level, each
 map's; no name over the game's 30 characters for "<pack>/<map>"; and not

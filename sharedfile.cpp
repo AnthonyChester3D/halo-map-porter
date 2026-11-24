@@ -143,8 +143,16 @@ bool unpack(const std::string &disk, std::string &data, bool &compressed, std::s
     }
     if (length <= kHeader) { why = "its header's length is wrong"; return false; }
     std::string rest;
-    if (!inflate::zlib((const uint8_t *)disk.data() + kHeader, disk.size() - kHeader, rest, length - kHeader) ||
-        rest.size() != length - kHeader) {
+    if (!inflate::zlib((const uint8_t *)disk.data() + kHeader, disk.size() - kHeader, rest, length - kHeader)) {
+        why = "it doesn't unpack (damaged?)";
+        return false;
+    }
+    // (some older tools' packed maps stop where the tag data ends, leaving out the zeros that pad the map to its
+    // header's length: those zeros are put back, as the Xbox's own unpacking leaves them)
+    const uint64_t ends = (uint64_t)get32(disk, 0x10) + get32(disk, 0x14);
+    if (rest.size() < length - kHeader && length - kHeader - rest.size() < 2048 && kHeader + rest.size() >= ends)
+        rest.resize(length - kHeader, '\0');
+    if (rest.size() != length - kHeader) {
         why = "it doesn't unpack (damaged?)";
         return false;
     }
@@ -1375,6 +1383,7 @@ Result make(const fs::path &folder, const std::string &base_name, const std::vec
         for (auto &m : maps)
             if (!m->skipped.empty()) {
                 log("  " + shown(m->path) + " is left as it is: " + m->skipped + ".");
+                r.left.push_back(shown(m->path) + ": " + m->skipped);
                 std::string().swap(m->data);
             }
         // ---- what goes where: stock.shared's data there, data two or more maps use in the pack's file, the rest stays.
