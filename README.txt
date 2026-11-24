@@ -1078,6 +1078,12 @@ Levels of detail (LODs)
                 triangles, 0 for automatic); its most detailed version
                 (auto, as made, or trim and the triangles); a note.
                 Delete a line to go back to automatic.
+  From 1.190 the library is kept within 2 GB: the .lod and .top files
+  used least recently go first (one is made again, the same, when a map
+  needs it, since its name is its model, your choice for it and the
+  simplifier's version). choices.txt and skip.txt, your choices, are
+  never touched; before anything goes they're copied to backups\ in the
+  library (dated, the newest 10 kept).
     skip.txt    Models to leave alone (not trimmed, no lower-detail
                 versions made, no switch distances given), one per line: a
                 tag path (vehicles\jet\jet.model) or a name (jet: the
@@ -2822,7 +2828,11 @@ Converting a map again is quicker than the first time:
   maps packed, the sky drawn in fewer layers, and the Level window's
   measurement of the level (the conversion measures the same level
   again). The same tag (in that map or another one) gets the copy
-  instead. A new version of the app makes them again.
+  instead. From 1.190 the textures and sounds are kept across new
+  versions of the app (each step has its own version, raised only when
+  what it makes changes); the sky and the Level window's measurement are
+  still made again by a new version. Copies left half-stored by a run
+  that was stopped go after an hour.
 - Reading and changing values in tags, listing the tags a tag uses and
   renaming references (what invader-edit, invader-dependency and
   invader-refactor do) happen inside the app instead of starting

@@ -488,6 +488,72 @@ static std::mutex g_library_lock;
 
 // A library file written under another name, then put in place: a map converted at the same time reads either the
 // old file or the whole new one, never half of it.
+// The library kept within kLibraryKeptBytes: the model versions (.lod, .top) used least recently go first, down to
+// three quarters of it (one is made again, the same, when a map needs it: its name is its model, its choice and the
+// simplifier's version). choices.txt and skip.txt, what's chosen in the LODs window, are never touched: they're copied
+// to backups\ (dated, the newest 10 kept) before anything goes. Half-written files over an hour old go too. Looked at
+// once every 10 minutes at most.
+static const uintmax_t kLibraryKeptBytes = 2ull << 30;
+static void keep_library_size(const fs::path &library) {
+    static std::mutex once;
+    static std::chrono::steady_clock::time_point last{};
+    {
+        std::lock_guard<std::mutex> g(once);
+        const auto now = std::chrono::steady_clock::now();
+        if (last != std::chrono::steady_clock::time_point{} && now - last < std::chrono::minutes(10)) return;
+        last = now;
+    }
+    std::error_code ec;
+    std::vector<std::pair<fs::file_time_type, fs::path>> all;
+    uintmax_t total = 0;
+    const auto hour_ago = fs::file_time_type::clock::now() - std::chrono::hours(1);
+    for (auto it = fs::directory_iterator(library, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+        std::error_code e;
+        if (!it->is_regular_file(e)) continue;
+        const std::string x = it->path().extension().u8string();
+        const fs::file_time_type t = it->last_write_time(e);
+        if (x.rfind(".part", 0) == 0) {   // (a write that never finished)
+            if (!e && t < hour_ago) fs::remove(it->path(), e);
+            continue;
+        }
+        if (x != ".lod" && x != ".top") continue;
+        const uintmax_t n = it->file_size(e);
+        if (e) continue;
+        total += n;
+        all.push_back({t, it->path()});
+    }
+    if (total <= kLibraryKeptBytes) return;
+    {   // the choices, backed up first
+        std::time_t now = std::time(nullptr);
+        char date[16];
+        std::strftime(date, sizeof date, "%Y-%m-%d", std::localtime(&now));
+        const fs::path b = library / "backups";
+        fs::create_directories(b, ec);
+        for (const char *f : {"choices", "skip"}) {
+            const fs::path from = library / (std::string(f) + ".txt");
+            if (!fs::exists(from, ec)) continue;
+            fs::copy_file(from, b / (std::string(f) + "-" + date + ".txt"), fs::copy_options::overwrite_existing, ec);
+            std::vector<fs::path> old;
+            for (auto &e : fs::directory_iterator(b, ec))
+                if (e.path().filename().u8string().rfind(std::string(f) + "-", 0) == 0) old.push_back(e.path());
+            std::sort(old.begin(), old.end());
+            for (size_t i = 0; i + 10 < old.size(); i++) fs::remove(old[i], ec);
+        }
+    }
+    std::sort(all.begin(), all.end());
+    for (auto &[t, f] : all) {
+        if (total <= kLibraryKeptBytes / 4 * 3) break;
+        std::error_code e;
+        const uintmax_t n = fs::file_size(f, e);
+        if (!e && fs::remove(f, e)) total -= n;
+    }
+}
+// (a version read from the library: used now, so kept longest)
+static void used_now(const fs::path &file) {
+    std::error_code ec;
+    fs::last_write_time(file, fs::file_time_type::clock::now(), ec);
+}
+
 static void write_whole(const fs::path &file, const std::string &b) {
     std::ostringstream id;
     id << std::this_thread::get_id();
@@ -733,6 +799,7 @@ static std::vector<TagNode> versions(const TagNode &geo, uint32_t checksum, doub
         }
         if (ok && got.size() == 2) {
             from_library = true;
+            used_now(file);
             return got;
         }
     }
@@ -743,6 +810,7 @@ static std::vector<TagNode> versions(const TagNode &geo, uint32_t checksum, doub
         std::string b = "HMPLOD1\n";
         for (auto &g : out) b += tagfile::write_node(g);
         write_whole(file, b);
+        keep_library_size(settings.library);
     }
     return out;
 }
@@ -1307,6 +1375,7 @@ static TagNode trimmed_version(const TagNode &geo, uint32_t checksum, double rat
         TagNode n;
         if (b.compare(0, 8, "HMPTOP1\n") == 0 && tagfile::read_node(b, pos, n) && pos == b.size()) {
             from_library = true;
+            used_now(file);
             if (unseen) *unseen = -1;   // (unknown: from the library)
             return n;
         }
@@ -1316,6 +1385,7 @@ static TagNode trimmed_version(const TagNode &geo, uint32_t checksum, double rat
         std::error_code ec;
         fs::create_directories(settings.library, ec);
         write_whole(file, "HMPTOP1\n" + tagfile::write_node(out));
+        keep_library_size(settings.library);
     }
     return out;
 }

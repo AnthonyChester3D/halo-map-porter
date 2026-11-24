@@ -4513,10 +4513,16 @@ bool write_all(const fs::path &p, const std::string &b) {
 }
 }   // namespace
 
-// What a result made from `input` by step `what` is kept under (32 hex characters). The app's build goes into it, so
-// a new version of the app makes its results again.
+// What a result made from `input` by step `what` is kept under (32 hex characters). Each step's `what` has its own
+// version ("compress color 2"): change what a step makes and its number goes up, so only its results are made again
+// (before 1.190 the app's build went in, and every new version of the app made every result again).
+// kResultsVersion goes up for a change every step's results feel (the tag files' writing, say).
+static const char *kResultsVersion = "results 1";
+// (the measurements whose code changes often, the level's shaders, what of a first-person model shows and a sky's
+// fill, still go with the app's build: kThisBuild in their `what`; textures and sounds are kept across versions)
+static const char *kThisBuild = __DATE__ " " __TIME__;
 static std::string result_key(const std::string &what, const std::string &input) {
-    std::string k = std::string(__DATE__ " " __TIME__ "\n") + what + "\n" + input;
+    std::string k = std::string(kResultsVersion) + "\n" + what + "\n" + input;
     char hex[40];
     snprintf(hex, sizeof hex, "%016llx%016llx", (unsigned long long)hash64(k, 0x243f6a8885a308d3ull),
              (unsigned long long)hash64(k, 0x13198a2e03707344ull));
@@ -4564,7 +4570,20 @@ static void store_blob(const Config &cfg, const std::string &key, const std::str
     // Within the size kept: the least recently used go.
     std::vector<std::pair<fs::file_time_type, fs::path>> all;
     uintmax_t total = 0;
+    const auto hour_ago = fs::file_time_type::clock::now() - std::chrono::hours(1);
     for (auto it = fs::directory_iterator(dir, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+        if (it->path().extension().u8string().rfind(".tmp", 0) == 0) {   // (a copy that was stopped while it stored one)
+            std::error_code e;
+            if (it->last_write_time(e) < hour_ago && !e) fs::remove(it->path(), e);
+            continue;
+        }
+        if (it->path().extension() == ".note") {   // (a note whose result went)
+            fs::path t = it->path();
+            t.replace_extension(".tag");
+            std::error_code e;
+            if (!fs::exists(t, e) && it->last_write_time(e) < hour_ago) fs::remove(it->path(), e);
+            continue;
+        }
         if (it->path().extension() != ".tag") continue;
         std::error_code e;
         uintmax_t s = it->file_size(e);
@@ -8695,7 +8714,7 @@ static std::string make_perf_tour(const lshade::Analysis &a, const lshade::Previ
 // measured once.
 static bool analyze_level_kept(Job &job, const fs::path &bsp, const fs::path &scenario, const lshade::Find &find,
                                lshade::Analysis &a, lshade::Preview &p, std::string *why) {
-    const std::string key = result_key("level shaders 1", read_all(bsp) + "\n" + read_all(scenario));
+    const std::string key = result_key(std::string("level shaders 1 ") + kThisBuild, read_all(bsp) + "\n" + read_all(scenario));
     auto content_key = [&](const fs::path &f) {
         std::error_code ec;
         return f.empty() || !fs::is_regular_file(f, ec) ? std::string("-") : result_key("", read_all(f));
@@ -9578,7 +9597,7 @@ static bool first_person_seen(Job &job, const std::string &model, const std::str
             }
         }
     }
-    const std::string key = result_key("first person seen 1\n" + looks, read_all(mo / from_u8(model)) + "\n" + read_all(ao / from_u8(animations)));
+    const std::string key = result_key(std::string("first person seen 1 ") + kThisBuild + "\n" + looks, read_all(mo / from_u8(model)) + "\n" + read_all(ao / from_u8(animations)));
     std::string b, note;
     if (load_blob(job.cfg, key, b, note) && b.compare(0, 9, "HMPSEEN1\n") == 0) {   // (kept: geometry, parts, triangles' shares)
         std::istringstream in(b.substr(9));
@@ -10564,7 +10583,7 @@ static bool fill_of_text(const std::string &t, sky::Fill &f) {
 }
 static sky::Lightened lighten_kept(Job &job, const std::string &s, const fs::path &file, const sky::Find &find,
                                    const sky::Edit &edit) {
-    const std::string key = result_key("sky lighten 1\n" + s, read_all(file));
+    const std::string key = result_key(std::string("sky lighten 1 ") + kThisBuild + "\n" + s, read_all(file));
     auto content_key = [&](const fs::path &p) {
         std::error_code ec;
         return p.empty() || !fs::is_regular_file(p, ec) ? std::string("-") : result_key("", read_all(p));
